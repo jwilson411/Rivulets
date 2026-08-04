@@ -277,3 +277,23 @@ class VectorClockTracker(Base):
     entity_id: Mapped[str] = mapped_column(primary_key=True)
     node_id: Mapped[str] = mapped_column(primary_key=True)
     clock: Mapped[int] = mapped_column(default=0)
+
+
+class SyncConflict(Base):
+    """A concurrent edit detected via vector-clock comparison (FR-9.6) —
+    neither the local nor the incoming remote version of an entity is a
+    causal descendant of the other, so it isn't safe to last-write-wins
+    resolve automatically. Not synced itself: each node judges conflicts
+    against its own local state, and a conflict on one node isn't
+    necessarily a conflict from another node's point of view."""
+
+    __tablename__ = "sync_conflict"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    entity_type: Mapped[str]
+    entity_id: Mapped[str]
+    local_snapshot: Mapped[str]  # JSON
+    remote_snapshot: Mapped[str]  # JSON
+    remote_node_id: Mapped[str]
+    detected_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    resolved: Mapped[bool] = mapped_column(default=False)

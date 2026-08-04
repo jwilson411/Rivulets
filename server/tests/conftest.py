@@ -20,6 +20,7 @@ from agent_hive.app import create_app  # noqa: E402
 from agent_hive.db.session import init_db, make_engine, override_engine, session_scope  # noqa: E402
 from agent_hive.security import keys  # noqa: E402
 from agent_hive.security.session import get_session_key_store  # noqa: E402
+from agent_hive.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # noqa: ARG001
@@ -27,9 +28,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # n
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """A TestClient wired to a fresh in-memory SQLite DB per test — never
-    touches the real ~/.agent-hive workspace."""
+    touches the real ~/.agent-hive workspace.
+
+    SyncEngine.start()/.stop() are no-op'd here: login (api/auth.py) always
+    tries to start the real sync engine, and the general test suite logs
+    in constantly via the auth_headers fixture below. Actually spinning up
+    a libp2p host (real sockets, real mDNS/zeroconf) on every one of those
+    would make the suite slow and network-dependent for no benefit — the
+    engine's real behavior is covered by tests/test_sync.py, which
+    exercises real SyncEngine instances directly, not through this
+    fixture. sync/apply.py's conflict-resolution logic doesn't touch the
+    network at all and is tested here without patching."""
+    monkeypatch.setattr(SyncEngine, "start", _noop_async)
+    monkeypatch.setattr(SyncEngine, "stop", _noop_async)
+    reset_sync_engine_for_testing()
+
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()
 
@@ -40,6 +55,11 @@ def client() -> Iterator[TestClient]:
     get_session_key_store().clear()
     override_engine(None)
     reset_agentos_for_testing()
+    reset_sync_engine_for_testing()
+
+
+async def _noop_async(*_args: object, **_kwargs: object) -> None:
+    return None
 
 
 @pytest.fixture

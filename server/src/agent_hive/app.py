@@ -15,7 +15,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from agent_hive.agentos import init_agentos, sync_agents
 from agent_hive.api import api_router
+from agent_hive.config import get_settings
 from agent_hive.db.session import init_db, session_scope
+from agent_hive.sync import get_sync_engine, init_sync_engine
+from agent_hive.sync.apply import handle_incoming_state_change
 
 _CSP = "default-src 'self'; script-src 'self'; connect-src 'self' http://localhost:8484"
 
@@ -29,6 +32,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     async with session_scope() as db:
         await sync_agents(db)
     yield
+    # The sync engine only actually starts on login (api/auth.py — it
+    # needs the workspace PSK, not available until then), so stopping here
+    # is a no-op if nobody ever logged in; otherwise it cleanly joins the
+    # engine's background trio thread.
+    await get_sync_engine().stop()
 
 
 async def _add_security_headers(
@@ -47,6 +55,8 @@ def create_app() -> FastAPI:
     # AgentOS is a Python-level agent registry here, not an HTTP mount —
     # see agentos/service.py's module docstring for why.
     init_agentos()
+    engine = init_sync_engine(get_settings().sync_dir)
+    engine.set_state_change_handler(handle_incoming_state_change)
     return app
 
 

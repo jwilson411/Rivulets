@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     def backups_dir(self) -> Path:
         return self.workspace_dir / "backups"
 
+    @property
+    def sync_dir(self) -> Path:
+        """Holds this installation's local libp2p node identity (sync/node_key)
+        — never synced, distinct from the shared workspace key (FR-9.2's
+        credential-exclusion principle extended to per-node identity)."""
+        return self.workspace_dir / "sync"
+
     def ensure_workspace_dirs(self) -> None:
         for d in (
             self.workspace_dir,
@@ -49,6 +56,7 @@ class Settings(BaseSettings):
             self.tools_dir,
             self.logs_dir,
             self.backups_dir,
+            self.sync_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

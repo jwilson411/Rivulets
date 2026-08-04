@@ -4,8 +4,16 @@ NOTE: There is no dedicated install wizard yet (US-001) — until one
 exists, the first successful login bootstraps the single `workspace` row
 using the provided mnemonic, mirroring "generate a workspace key on first
 install". Every login after that verifies against the stored bcrypt hash.
+
+Login also starts the P2P sync engine (FR-9): the workspace PSK it needs
+(FR-9.4) only exists once the workspace key has been derived here, so it
+can't start any earlier (e.g. at app startup, like AgentOS does). If the
+sync engine fails to start, login still succeeds — FR-9.5 says a node
+must be fully functional with sync unreachable, and that includes sync
+itself failing to come up, not just peers being unreachable.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -17,6 +25,9 @@ from agent_hive.api.deps import DbSession
 from agent_hive.db.models import Workspace
 from agent_hive.security import keys
 from agent_hive.security.session import get_session_key_store
+from agent_hive.sync import get_sync_engine
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -53,7 +64,22 @@ async def login(body: LoginRequest, db: DbSession) -> LoginResponse:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect recovery phrase")
 
     jwt_signing_key = keys.derive_jwt_signing_key(workspace_key)
-    get_session_key_store().set_key(jwt_signing_key)
+    p2p_psk = keys.derive_p2p_psk(workspace_key)
+    workspace_fingerprint = keys.derive_workspace_fingerprint(workspace_key)
+    session_store = get_session_key_store()
+    session_store.set_key(jwt_signing_key)
+    session_store.set_p2p_psk(p2p_psk)
+
+    try:
+        # workspace_fingerprint, not workspace.id: the DB row's id is a
+        # fresh random uuid7 minted independently by whichever node
+        # bootstraps it first, so two nodes on the same workspace key
+        # would get different ids — the fingerprint is derived from the
+        # shared key instead, so every node scopes mDNS discovery
+        # identically (see keys.py's derive_workspace_fingerprint).
+        await get_sync_engine().start(workspace_fingerprint.hex(), p2p_psk.hex())
+    except Exception:
+        logger.warning("Sync engine failed to start — continuing offline", exc_info=True)
 
     expires_at = datetime.now(UTC) + _JWT_TTL
     token = jwt.encode(
@@ -67,3 +93,4 @@ async def login(body: LoginRequest, db: DbSession) -> LoginResponse:
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout() -> None:
     get_session_key_store().clear()
+    await get_sync_engine().stop()

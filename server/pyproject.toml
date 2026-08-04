@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28.1",
     "keyring>=25.7.0",
+    "libp2p>=0.7.0",
     "mcp>=1.9.2,<2",
     "mnemonic>=0.21",
     "openai>=2.53.0",
@@ -61,14 +62,23 @@ include = ["src", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 
-# Strict mode is enforced for application code. Two directories get relaxed
-# Unknown-type reporting because the gaps are in third-party stubs we don't
-# control, not in our code: agno.tools.tool's decorator overloads erase
-# type info (tools/builtin), and httpx/starlette's TestClient responses are
-# untyped (tests).
+# Strict mode is enforced for application code. A few directories get
+# relaxed Unknown-type reporting because the gaps are in third-party stubs
+# we don't control, not in our code: agno.tools.tool's decorator overloads
+# erase type info (tools/builtin), httpx/starlette's TestClient responses
+# are untyped (tests), and py-libp2p / multiaddr ship no py.typed stubs at
+# all (sync) — trio itself is typed, but everything from `libp2p` and
+# `multiaddr` comes back as Unknown.
 [[tool.pyright.executionEnvironments]]
 root = "src/agent_hive/tools/builtin"
 reportUnknownVariableType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "src/agent_hive/sync"
+reportMissingTypeStubs = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
@@ -83,4 +93,4 @@ testpaths = ["tests"]
 # CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
 # local runs during early scaffolding aren't blocked before the suite has grown.
 # NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
-# matches real coverage today (~75%) and should ratchet up as tests are added.
+# matches real coverage today (~77%) and should ratchet up as tests are added.

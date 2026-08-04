@@ -6,7 +6,15 @@ docstring for how "registration" works without an HTTP AgentOS API.
 Routing rules are auto-generated via dispatch/rule_generation.py's LLM
 call (FR-3.3, US-017) on create, and regenerated on update when the
 description or instructions change (FR-3.4).
+
+Agents are also the first entity type wired into P2P sync (FR-9.1's thin
+first slice — see sync/apply.py's module docstring): every create/update
+bumps this node's vector-clock component and publishes the new state to
+peers. Publishing is best-effort — a peer being unreachable, or the sync
+engine not running at all, must never fail the request (FR-9.5).
 """
+
+import logging
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -16,6 +24,10 @@ from agent_hive.agentos import get_agentos, sync_agents
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Agent, AgentRoutingRule, AgentTool, TeamAgent
 from agent_hive.dispatch.rule_generation import generate_routing_rules
+from agent_hive.sync import get_sync_engine
+from agent_hive.sync.apply import record_local_change
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -99,6 +111,23 @@ async def _generate_and_store_routing_rules(db: DbSession, agent: Agent) -> None
         await db.commit()
 
 
+async def _publish_agent_change(db: DbSession, agent: Agent) -> None:
+    engine = get_sync_engine()
+    if not engine.running:
+        return
+    try:
+        vector_clock = await record_local_change(db, "agent", agent.id, engine.node_id)
+        payload = {
+            "name": agent.name,
+            "description": agent.description,
+            "instructions": agent.instructions,
+            "model": agent.model,
+        }
+        await engine.publish_state_change("agent", agent.id, payload, vector_clock)
+    except Exception:
+        logger.warning("Failed to publish sync change for agent %s", agent.id, exc_info=True)
+
+
 async def _register_with_agentos(db: DbSession, agent: Agent) -> None:
     """Rebuild AgentOS's agent registry and record whether `agent` made it
     in. It won't have if its provider can't be resolved (NFR-2.4: that
@@ -135,6 +164,7 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
 
     await _generate_and_store_routing_rules(db, agent)
     await _register_with_agentos(db, agent)
+    await _publish_agent_change(db, agent)
     return agent
 
 
@@ -167,6 +197,7 @@ async def update_agent(
         await _generate_and_store_routing_rules(db, agent)
 
     await _register_with_agentos(db, agent)
+    await _publish_agent_change(db, agent)
     return agent
 
 
