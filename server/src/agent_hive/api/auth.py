@@ -10,7 +10,12 @@ Login also starts the P2P sync engine (FR-9): the workspace PSK it needs
 can't start any earlier (e.g. at app startup, like AgentOS does). If the
 sync engine fails to start, login still succeeds — FR-9.5 says a node
 must be fully functional with sync unreachable, and that includes sync
-itself failing to come up, not just peers being unreachable.
+itself failing to come up, not just peers being unreachable. Once it does
+start, this also drains anything queued by a previous session's failed
+publishes (sync/publish.py's SyncPendingOutbound) — this is the other
+half of FR-9.5's "changes sync automatically when connectivity resumes":
+publish_entity_change queues on the way out, this is what actually
+retries the queue.
 """
 
 import logging
@@ -26,6 +31,7 @@ from agent_hive.db.models import Workspace
 from agent_hive.security import keys
 from agent_hive.security.session import get_session_key_store
 from agent_hive.sync import get_sync_engine
+from agent_hive.sync.publish import drain_pending_outbound
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +84,7 @@ async def login(body: LoginRequest, db: DbSession) -> LoginResponse:
         # shared key instead, so every node scopes mDNS discovery
         # identically (see keys.py's derive_workspace_fingerprint).
         await get_sync_engine().start(workspace_fingerprint.hex(), p2p_psk.hex())
+        await drain_pending_outbound(db)
     except Exception:
         logger.warning("Sync engine failed to start — continuing offline", exc_info=True)
 

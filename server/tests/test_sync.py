@@ -611,6 +611,43 @@ async def test_two_engines_sync_agent_state_change(tmp_path: Path) -> None:
     assert payload == {"name": "Synced Agent"}
 
 
+async def test_engine_tracks_inbound_connections_and_detects_disconnect(tmp_path: Path) -> None:
+    """Two real bugs, both from _connected_peers only ever being written
+    by this engine's own outbound connect() calls: (1) a peer connecting
+    TO this host (inbound — B dials A) was never recorded at all, so
+    list_peers() silently missed a real, active connection; (2) once
+    recorded, an entry never left _connected_peers except via this
+    engine's own explicit disconnect()/stop() — a network drop or the
+    peer's process exiting left a phantom "connected: true" forever.
+    _PeerConnectionNotifee fixes both."""
+    psk_hex = hashlib.sha256(b"disconnect-test-workspace").digest().hex()
+
+    engine_a = SyncEngine(tmp_path / "a")
+    engine_b = SyncEngine(tmp_path / "b")
+
+    await engine_a.start("disconnect-test-fingerprint-a", psk_hex)
+    await engine_b.start("disconnect-test-fingerprint-b", psk_hex)
+    try:
+        addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            _get_first_addr, engine_a
+        )
+        await engine_b.connect(addr)  # B dials A -- A never calls connect() itself
+        await asyncio.sleep(1.0)
+
+        peers_a = await engine_a.list_peers()
+        assert len(peers_a) == 1, "inbound connection was never recorded"
+        assert peers_a[0].peer_id == engine_b.node_id
+
+        await engine_b.disconnect(engine_a.node_id)  # B's doing, not A's
+        await asyncio.sleep(1.0)
+
+        peers_a_after = await engine_a.list_peers()
+        assert peers_a_after == [], "phantom peer: A never noticed B disconnecting"
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+
+
 def test_sync_status_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/sync/status", headers=auth_headers)
     assert response.status_code == 200

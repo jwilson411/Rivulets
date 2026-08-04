@@ -12,23 +12,13 @@ from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Channel
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
 
 async def _publish_channel_change(db: DbSession, channel: Channel) -> None:
-    await publish_entity_change(
-        db,
-        "channel",
-        channel.id,
-        {
-            "name": channel.name,
-            "description": channel.description,
-            "position": channel.position,
-            "archived": channel.archived,
-        },
-    )
+    await publish_current_state(db, "channel", channel.id)
 
 
 class ChannelCreate(BaseModel):

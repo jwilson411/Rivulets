@@ -10,15 +10,13 @@ from sqlalchemy import delete, select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Team, TeamAgent
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
 
 async def _publish_team_change(db: DbSession, team: Team) -> None:
-    await publish_entity_change(
-        db, "team", team.id, {"name": team.name, "description": team.description}
-    )
+    await publish_current_state(db, "team", team.id)
 
 
 class TeamCreate(BaseModel):

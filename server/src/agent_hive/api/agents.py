@@ -22,7 +22,7 @@ from agent_hive.agentos import get_agentos, sync_agents
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Agent, AgentRoutingRule, AgentTool, TeamAgent
 from agent_hive.dispatch.rule_generation import generate_routing_rules
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -107,17 +107,7 @@ async def _generate_and_store_routing_rules(db: DbSession, agent: Agent) -> None
 
 
 async def _publish_agent_change(db: DbSession, agent: Agent) -> None:
-    await publish_entity_change(
-        db,
-        "agent",
-        agent.id,
-        {
-            "name": agent.name,
-            "description": agent.description,
-            "instructions": agent.instructions,
-            "model": agent.model,
-        },
-    )
+    await publish_current_state(db, "agent", agent.id)
 
 
 async def _register_with_agentos(db: DbSession, agent: Agent) -> None:

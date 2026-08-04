@@ -297,3 +297,20 @@ class SyncConflict(Base):
     remote_node_id: Mapped[str]
     detected_at: Mapped[str] = mapped_column(default=utcnow_iso)
     resolved: Mapped[bool] = mapped_column(default=False)
+
+
+class SyncPendingOutbound(Base):
+    """An entity whose most recent publish attempt either couldn't be made
+    (sync engine wasn't running) or failed outright — retried the next
+    time the engine starts (FR-9.5: "when connectivity resumes, pending
+    changes sync automatically"). Only entity_type/entity_id are stored,
+    not the payload itself: by the time a retry runs, the entity may have
+    changed again, so the retry always re-reads current state from its own
+    table rather than replaying a payload that could be stale. Not synced
+    itself — purely local bookkeeping."""
+
+    __tablename__ = "sync_pending_outbound"
+
+    entity_type: Mapped[str] = mapped_column(primary_key=True)
+    entity_id: Mapped[str] = mapped_column(primary_key=True)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)

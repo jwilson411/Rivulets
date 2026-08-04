@@ -22,7 +22,7 @@ from agent_hive.agentos.mcp import MCPConnectionError, discover_tools
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.base import utcnow_iso
 from agent_hive.db.models import MCPServer, Tool
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +121,7 @@ async def register_mcp_server(
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)
-    await publish_entity_change(
-        db, "mcp_server", server.id, {"name": server.name, "url": server.url}
-    )
+    await publish_current_state(db, "mcp_server", server.id)
     return await _to_detail(db, server)
 
 

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.config import get_settings
 from agent_hive.db.models import File as FileRow
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -28,18 +28,7 @@ _CHUNK_SIZE = 1024 * 1024
 
 
 async def publish_file_change(db: DbSession, file_row: FileRow) -> None:
-    await publish_entity_change(
-        db,
-        "file",
-        file_row.id,
-        {
-            "content_hash": file_row.content_hash,
-            "filename": file_row.filename,
-            "mime_type": file_row.mime_type,
-            "size_bytes": file_row.size_bytes,
-            "message_id": file_row.message_id,
-        },
-    )
+    await publish_current_state(db, "file", file_row.id)
 
 
 class FileOut(BaseModel):

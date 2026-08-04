@@ -1,0 +1,225 @@
+"""P2P sync reliability hardening (FR-9.5) — split out from test_sync.py
+since it's a distinct concern (retry/recovery mechanisms) from core sync
+mechanics, and test_sync.py was already large.
+
+Covers the outbound retry queue: publish_entity_change queues an entity
+(SyncPendingOutbound) instead of just dropping the change when the sync
+engine isn't running or a publish attempt fails, and drain_pending_outbound
+(called on engine start, api/auth.py's login) retries everything queued.
+"""
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from agent_hive.db.models import Agent, Channel, SyncPendingOutbound
+from agent_hive.sync.apply import record_local_change
+from agent_hive.sync.engine import init_sync_engine, reset_sync_engine_for_testing
+from agent_hive.sync.publish import (
+    build_entity_payload,
+    drain_pending_outbound,
+    publish_current_state,
+    publish_entity_change,
+)
+
+_AGENT_FIELDS = {
+    "description": "A test agent for reliability tests.",
+    "instructions": "Do the thing.",
+    "model": "openai:gpt-4",
+}
+
+
+@pytest.fixture
+def not_running_sync_engine(tmp_path: Path) -> Iterator[None]:
+    reset_sync_engine_for_testing()
+    init_sync_engine(tmp_path / "sync")
+    yield
+    reset_sync_engine_for_testing()
+
+
+class _FakeEngine:
+    def __init__(self, *, running: bool, node_id: str = "node-a", fail: bool = False) -> None:
+        self.running = running
+        self.node_id = node_id
+        self.fail = fail
+        self.published: list[tuple[str, str, dict[str, object], dict[str, int]]] = []
+
+    async def publish_state_change(
+        self,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, object],
+        vector_clock: dict[str, int],
+    ) -> None:
+        if self.fail:
+            raise RuntimeError("simulated publish failure")
+        self.published.append((entity_type, entity_id, payload, vector_clock))
+
+
+async def test_publish_entity_change_queues_when_engine_not_running(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
+
+    pending = await db_session.get(SyncPendingOutbound, ("agent", "agent-1"))
+    assert pending is not None
+
+
+async def test_publish_entity_change_queues_when_publish_fails(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEngine(running=True, fail=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
+
+    pending = await db_session.get(SyncPendingOutbound, ("agent", "agent-1"))
+    assert pending is not None
+
+
+async def test_publish_entity_change_does_not_queue_on_success(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
+
+    assert await db_session.get(SyncPendingOutbound, ("agent", "agent-1")) is None
+    assert fake.published == [("agent", "agent-1", {"name": "x"}, {"node-a": 1})]
+
+
+async def test_build_entity_payload_reconstructs_current_state(db_session: AsyncSession) -> None:
+    db_session.add(Agent(id="agent-1", name="Rebuilt", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    payload = await build_entity_payload(db_session, "agent", "agent-1")
+    assert payload == {
+        "name": "Rebuilt",
+        "description": _AGENT_FIELDS["description"],
+        "instructions": _AGENT_FIELDS["instructions"],
+        "model": _AGENT_FIELDS["model"],
+    }
+
+
+async def test_build_entity_payload_returns_none_for_deleted_entity(
+    db_session: AsyncSession,
+) -> None:
+    assert await build_entity_payload(db_session, "agent", "does-not-exist") is None
+
+
+async def test_publish_current_state_is_noop_for_deleted_entity(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await publish_current_state(db_session, "agent", "does-not-exist")
+
+    assert fake.published == []
+
+
+async def test_drain_pending_outbound_republishes_and_clears_queue(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_session.add(Channel(id="chan-1", name="queued-channel"))
+    db_session.add(SyncPendingOutbound(entity_type="channel", entity_id="chan-1"))
+    await db_session.commit()
+
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await drain_pending_outbound(db_session)
+
+    assert len(fake.published) == 1
+    entity_type, entity_id, payload, _ = fake.published[0]
+    assert entity_type == "channel"
+    assert entity_id == "chan-1"
+    assert payload["name"] == "queued-channel"
+    assert await db_session.get(SyncPendingOutbound, ("channel", "chan-1")) is None
+
+
+async def test_drain_pending_outbound_drops_queue_entry_for_deleted_entity(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entity was deleted before the retry ran -- nothing to publish,
+    but the queue entry must still be cleared, not retried forever."""
+    db_session.add(SyncPendingOutbound(entity_type="channel", entity_id="never-existed"))
+    await db_session.commit()
+
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await drain_pending_outbound(db_session)
+
+    assert fake.published == []
+    assert await db_session.get(SyncPendingOutbound, ("channel", "never-existed")) is None
+
+
+async def test_drain_pending_outbound_requeues_on_repeated_failure(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_session.add(Channel(id="chan-1", name="still-failing"))
+    db_session.add(SyncPendingOutbound(entity_type="channel", entity_id="chan-1"))
+    await db_session.commit()
+
+    fake = _FakeEngine(running=True, fail=True)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    await drain_pending_outbound(db_session)
+
+    # Still queued -- the row was deleted-then-requeued by
+    # publish_entity_change's own failure path, not left dangling.
+    assert await db_session.get(SyncPendingOutbound, ("channel", "chan-1")) is not None
+
+
+async def test_drain_pending_outbound_noop_when_engine_not_running(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    db_session.add(Channel(id="chan-1", name="queued-channel"))
+    db_session.add(SyncPendingOutbound(entity_type="channel", entity_id="chan-1"))
+    await db_session.commit()
+
+    await drain_pending_outbound(db_session)
+
+    # Nothing drained -- still queued for the next time the engine starts.
+    assert await db_session.get(SyncPendingOutbound, ("channel", "chan-1")) is not None
+
+
+async def test_full_offline_then_recover_cycle(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end at the function level: create an agent while the engine
+    isn't running (queued), then simulate the engine coming up and login's
+    drain call -- the agent gets published exactly once, using its
+    current state, and the queue ends up empty."""
+    fake = _FakeEngine(running=False)
+    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+
+    db_session.add(Agent(id="agent-1", name="Created Offline", **_AGENT_FIELDS))
+    await db_session.commit()
+    await publish_entity_change(
+        db_session,
+        "agent",
+        "agent-1",
+        {"name": "Created Offline", **_AGENT_FIELDS},
+    )
+    assert await db_session.get(SyncPendingOutbound, ("agent", "agent-1")) is not None
+    assert fake.published == []
+
+    fake.running = True  # simulate the engine starting on next login
+    await drain_pending_outbound(db_session)
+
+    assert await db_session.get(SyncPendingOutbound, ("agent", "agent-1")) is None
+    assert len(fake.published) == 1
+    assert fake.published[0][0:2] == ("agent", "agent-1")
+
+
+async def test_record_local_change_is_reused_by_generic_apply(db_session: AsyncSession) -> None:
+    """Sanity check that record_local_change (used by both the immediate
+    publish path and drain) still behaves as documented after the
+    publish.py refactor -- unrelated regression risk, cheap to check."""
+    vc = await record_local_change(db_session, "agent", "agent-1", "node-a")
+    assert vc == {"node-a": 1}

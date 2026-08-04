@@ -73,7 +73,7 @@ from typing import Any
 
 import trio
 from libp2p import new_host
-from libp2p.abc import IHost, INetStream
+from libp2p.abc import IHost, INetConn, INetStream, INetwork, INotifee
 from libp2p.custom_types import TProtocol
 from libp2p.peer.id import ID
 from libp2p.peer.peerinfo import PeerInfo as Libp2pPeerInfo
@@ -107,6 +107,9 @@ _FILE_TRANSFER_TIMEOUT_SECONDS = 60
 StateChangeHandler = Callable[
     [str, str, dict[str, int], str, dict[str, Any]], Coroutine[Any, Any, None]
 ]
+PeerConnectedHandler = Callable[[], Coroutine[Any, Any, None]]
+
+_MESH_FORM_DELAY_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +128,63 @@ def _bound_port(host: IHost) -> int:
         if port is not None:
             return int(port)
     raise RuntimeError("Host has no bound TCP port")
+
+
+class _PeerConnectionNotifee(INotifee):
+    """Tracks real connection state for ALL connections on this host, not
+    just ones this engine dialed itself. Two bugs this fixes together:
+
+    1. `_connected_peers` was only ever written by _trio_connect/
+       _trio_auto_connect — both outbound-only. A peer connecting TO this
+       host (inbound — e.g. it dialed us, or mDNS discovery ran on their
+       side first) was never recorded at all, so list_peers() silently
+       missed real, active connections.
+    2. Once recorded, an entry only ever left `_connected_peers` via this
+       engine's own explicit disconnect() or stop() — a network drop or
+       the peer's process exiting left a phantom "connected: true" entry
+       forever.
+
+    Validated against a real two-host test before wiring in:
+    disconnected() fires on the side that did NOT initiate the close
+    (fixes #2), and connected() fires on the accepting side of an
+    inbound connection it never dialed (fixes #1).
+
+    Address extraction on connect is best-effort: conn.get_transport_
+    addresses() returned an empty list with an internal warning when
+    tested immediately at connected()-time (a peerstore-population race,
+    not something worth fighting) — on_connected's caller only uses this
+    to fill in an address string for display, never as something
+    connect()/request_file() depend on, so an empty string here is a
+    cosmetic gap, not a correctness one."""
+
+    def __init__(
+        self, on_connected: Callable[[str, str], None], on_disconnected: Callable[[str], None]
+    ) -> None:
+        self._on_connected = on_connected
+        self._on_disconnected = on_disconnected
+
+    async def opened_stream(self, network: INetwork, stream: INetStream) -> None:
+        pass
+
+    async def closed_stream(self, network: INetwork, stream: INetStream) -> None:
+        pass
+
+    async def connected(self, network: INetwork, conn: INetConn) -> None:
+        try:
+            addrs = conn.get_transport_addresses()
+        except Exception:
+            addrs = []
+        address = str(addrs[0]) if addrs else ""
+        self._on_connected(str(conn.muxed_conn.peer_id), address)
+
+    async def disconnected(self, network: INetwork, conn: INetConn) -> None:
+        self._on_disconnected(str(conn.muxed_conn.peer_id))
+
+    async def listen(self, network: INetwork, multiaddr: Multiaddr) -> None:
+        pass
+
+    async def listen_close(self, network: INetwork, multiaddr: Multiaddr) -> None:
+        pass
 
 
 class SyncEngine:
@@ -153,6 +213,7 @@ class SyncEngine:
         # small mesh, not for a large/churning one.
         self._connect_locks: dict[str, trio.Lock] = {}
         self._on_state_change: StateChangeHandler | None = None
+        self._on_peer_connected_handler: PeerConnectedHandler | None = None
         self._workspace_fingerprint: str | None = None
         self._psk_hex: str | None = None
         self._node_id: str | None = None
@@ -170,6 +231,20 @@ class SyncEngine:
 
     def set_state_change_handler(self, handler: StateChangeHandler) -> None:
         self._on_state_change = handler
+
+    def set_peer_connected_handler(self, handler: PeerConnectedHandler) -> None:
+        """Called (after a short delay — see _on_peer_connected) whenever
+        a *new* peer connects, mDNS-discovered or manually connected.
+        api/auth.py's login wires this to drain_pending_outbound: draining
+        once at login time isn't enough on its own — mDNS discovery +
+        gossipsub mesh formation (heartbeat-driven GRAFT) both take a few
+        seconds after the engine starts, so a drain that runs immediately
+        at login publishes into a mesh with no peers yet and the message
+        is simply never delivered (confirmed by a real two-node test: the
+        pending-outbound row was correctly cleared and record_local_change
+        bumped, but the peer never received anything). Retrying again once
+        an actual peer is connected is what makes the retry meaningful."""
+        self._on_peer_connected_handler = handler
 
     async def start(self, workspace_fingerprint: str, psk_hex: str) -> None:
         """Idempotent: a second call while already running is a no-op —
@@ -211,6 +286,9 @@ class SyncEngine:
         self._host = host
         self._node_id = str(host.get_id())
         host.set_stream_handler(FILE_TRANSFER_PROTOCOL, self._handle_file_transfer_stream)
+        host.get_network().register_notifee(
+            _PeerConnectionNotifee(self._on_peer_connected, self._on_peer_disconnected)
+        )
 
         gossipsub = GossipSub(
             protocols=[_GOSSIPSUB_PROTOCOL],
@@ -367,6 +445,37 @@ class SyncEngine:
         assert self._host is not None
         await self._host.disconnect(ID.from_base58(peer_id))
         self._connected_peers.pop(peer_id, None)
+
+    def _on_peer_connected(self, peer_id: str, address: str) -> None:
+        """_PeerConnectionNotifee's callback for both inbound connections
+        (this is the only place those get recorded) and outbound ones
+        (redundant with _trio_connect/_trio_auto_connect's own recording,
+        which is kept because it has the real dialed address in hand
+        immediately — this only overwrites it if we don't already have a
+        non-empty address, so a good outbound address is never clobbered
+        by an inbound accept's best-effort/empty one). Runs synchronously
+        inside the trio thread's own event handling — plain dict
+        mutation, no bridging needed."""
+        if peer_id == self._node_id:
+            return
+        is_new = peer_id not in self._connected_peers
+        existing = self._connected_peers.get(peer_id)
+        if existing is None or (not existing and address):
+            self._connected_peers[peer_id] = address
+            logger.info("Peer %s connected", peer_id)
+        if is_new:
+            trio.lowlevel.spawn_system_task(self._trigger_peer_connected_handler)
+
+    def _on_peer_disconnected(self, peer_id: str) -> None:
+        if self._connected_peers.pop(peer_id, None) is not None:
+            logger.info("Peer %s disconnected", peer_id)
+
+    async def _trigger_peer_connected_handler(self) -> None:
+        await trio.sleep(_MESH_FORM_DELAY_SECONDS)
+        handler = self._on_peer_connected_handler
+        loop = self._loop
+        if handler is not None and loop is not None:
+            asyncio.run_coroutine_threadsafe(handler(), loop)
 
     async def list_peers(self) -> list[PeerInfo]:
         return [

@@ -19,6 +19,7 @@ from agent_hive.config import get_settings
 from agent_hive.db.session import init_db, session_scope
 from agent_hive.sync import get_sync_engine, init_sync_engine
 from agent_hive.sync.apply import handle_incoming_state_change
+from agent_hive.sync.publish import drain_pending_outbound
 
 _CSP = "default-src 'self'; script-src 'self'; connect-src 'self' http://localhost:8484"
 
@@ -57,7 +58,13 @@ def create_app() -> FastAPI:
     init_agentos()
     engine = init_sync_engine(get_settings().sync_dir)
     engine.set_state_change_handler(handle_incoming_state_change)
+    engine.set_peer_connected_handler(_drain_outbound_on_peer_connected)
     return app
+
+
+async def _drain_outbound_on_peer_connected() -> None:
+    async with session_scope() as db:
+        await drain_pending_outbound(db)
 
 
 app = create_app()

@@ -24,21 +24,13 @@ from sqlalchemy import select
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.config import get_settings
 from agent_hive.db.models import Tool, ToolVersion
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
 async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
-    if tool.tool_type != "custom":
-        return
-    payload: dict[str, str] = {"name": tool.name, "description": tool.description}
-    if tool.source_path:
-        try:
-            payload["source_code"] = Path(tool.source_path).read_text(encoding="utf-8")
-        except OSError:
-            pass  # no file yet (e.g. immediately after create) -- sync metadata only
-    await publish_entity_change(db, "tool", tool.id, payload)
+    await publish_current_state(db, "tool", tool.id)
 
 
 class ToolCreate(BaseModel):

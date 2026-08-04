@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import WorkspaceSetting
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -77,7 +77,5 @@ async def patch_settings(
     await db.commit()
     for key in updates:
         if key not in _NOT_SYNCED_KEYS:
-            row = await db.get(WorkspaceSetting, key)
-            assert row is not None
-            await publish_entity_change(db, "workspace_setting", key, {"value": row.value})
+            await publish_current_state(db, "workspace_setting", key)
     return await _current_settings(db)

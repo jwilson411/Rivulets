@@ -34,7 +34,7 @@ from agent_hive.db.models import Channel, File, Message, Thread
 from agent_hive.dispatch import dispatch_and_respond
 from agent_hive.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from agent_hive.streaming import subscribe, unsubscribe
-from agent_hive.sync.publish import publish_entity_change
+from agent_hive.sync.publish import publish_current_state
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +87,7 @@ async def _get_thread_or_404(db: DbSession, thread_id: str) -> Thread:
 
 
 async def _publish_thread_change(db: DbSession, thread: Thread) -> None:
-    await publish_entity_change(
-        db,
-        "thread",
-        thread.id,
-        {
-            "channel_id": thread.channel_id,
-            "title": thread.title,
-            "status": thread.status,
-            "created_by": thread.created_by,
-        },
-    )
+    await publish_current_state(db, "thread", thread.id)
 
 
 async def _attach_files(db: DbSession, message: Message, file_ids: list[str]) -> list[File]:
@@ -117,20 +107,7 @@ async def _attach_files(db: DbSession, message: Message, file_ids: list[str]) ->
 
 
 async def _publish_message_change(db: DbSession, message: Message) -> None:
-    await publish_entity_change(
-        db,
-        "message",
-        message.id,
-        {
-            "thread_id": message.thread_id,
-            "sender_type": message.sender_type,
-            "sender_id": message.sender_id,
-            "sender_name": message.sender_name,
-            "content": message.content,
-            "content_type": message.content_type,
-            "metadata_json": message.metadata_json,
-        },
-    )
+    await publish_current_state(db, "message", message.id)
 
 
 @router.get("/channels/{channel_id}/threads", response_model=list[ThreadOut])
