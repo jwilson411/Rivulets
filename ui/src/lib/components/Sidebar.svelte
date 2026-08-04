@@ -66,6 +66,14 @@
 		>
 			Providers
 		</a>
+		<a
+			href={resolve('/mcp-servers')}
+			class="rounded-md px-2 py-1.5 text-sm {isActive('/mcp-servers')
+				? 'bg-zinc-200 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
+				: 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900'}"
+		>
+			MCP Servers
+		</a>
 	</div>
 
 	<div class="mt-4 flex items-center justify-between px-4">
