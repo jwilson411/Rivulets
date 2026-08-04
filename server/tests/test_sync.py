@@ -23,6 +23,7 @@ exactly what FR-9.5 says should still work.
 
 import asyncio
 import hashlib
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ from agent_hive.config import get_settings
 from agent_hive.db.models import (
     Agent,
     Channel,
+    File,
     MCPServer,
     Message,
     SyncConflict,
@@ -51,12 +53,13 @@ from agent_hive.sync.apply import (
     THREAD_SPEC,
     ClockComparison,
     apply_remote_change,
+    apply_remote_file_change,
     apply_remote_tool_change,
     compare_vector_clocks,
     merge_vector_clocks,
     record_local_change,
 )
-from agent_hive.sync.engine import SyncEngine
+from agent_hive.sync.engine import SyncEngine, init_sync_engine, reset_sync_engine_for_testing
 
 _AGENT_FIELDS = {
     "description": "A test agent used only in sync tests.",
@@ -327,6 +330,111 @@ async def test_apply_remote_message_change_skips_when_thread_missing(
     assert await db_session.get(Message, "msg-1") is None
 
 
+@pytest.fixture
+def not_running_sync_engine(tmp_path: Path) -> Iterator[None]:
+    """apply_remote_file_change calls get_sync_engine() to (maybe) fetch
+    content — it needs the singleton initialized (unlike db_session-only
+    tests, which never go through create_app()'s init_sync_engine call),
+    but not actually running, so _fetch_file_content's engine.running
+    check cleanly skips without touching the network."""
+    reset_sync_engine_for_testing()
+    init_sync_engine(tmp_path / "sync")
+    yield
+    reset_sync_engine_for_testing()
+
+
+async def test_apply_remote_file_change_creates_file_metadata(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    content_hash = "a" * 64
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 123,
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+
+    file_row = await db_session.get(File, "file-1")
+    assert file_row is not None
+    assert file_row.content_hash == content_hash
+    assert file_row.filename == "notes.txt"
+    # local_path is always recomputed from this node's own files_dir, never
+    # copied verbatim from the sender (mirrors Tool.source_path).
+    assert file_row.local_path == str(get_settings().files_dir / content_hash[:2] / content_hash)
+
+
+async def test_apply_remote_file_change_fetches_content_when_missing_locally(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    content = b"fetched over the wire"
+    content_hash = "b" * 64
+
+    class _FakeEngine:
+        running = True
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            assert peer_id == "node-b"
+            assert requested_hash == content_hash
+            return content
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("agent_hive.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": len(content),
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert local_path.read_bytes() == content
+
+
+async def test_apply_remote_file_change_does_not_fetch_when_engine_not_running(
+    db_session: AsyncSession,
+    not_running_sync_engine: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    content_hash = "c" * 64
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 5,
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert not local_path.exists()  # engine wasn't running, so no fetch was attempted
+
+
 async def test_apply_remote_tool_change_writes_source_code_to_disk(
     db_session: AsyncSession,
 ) -> None:
@@ -589,3 +697,27 @@ def test_thread_and_message_create_do_not_fail_when_sync_engine_not_running(
 
     closed = client.delete(f"/api/v1/threads/{thread_id}", headers=auth_headers)
     assert closed.status_code == 204
+
+
+def test_file_upload_and_attach_do_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    upload = client.post(
+        "/api/v1/files/upload",
+        files={"upload": ("notes.txt", b"hello file sync", "text/plain")},
+        headers=auth_headers,
+    )
+    assert upload.status_code == 201, upload.text
+    file_id = upload.json()["file_id"]
+
+    channel = client.post(
+        "/api/v1/channels", json={"name": "offline-file-channel"}, headers=auth_headers
+    )
+    channel_id = channel.json()["id"]
+
+    thread = client.post(
+        f"/api/v1/channels/{channel_id}/threads",
+        json={"content": "see attached", "files": [file_id]},
+        headers=auth_headers,
+    )
+    assert thread.status_code == 201, thread.text

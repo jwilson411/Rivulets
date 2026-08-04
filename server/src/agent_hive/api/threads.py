@@ -20,6 +20,7 @@ received them from a human dispatches."""
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -28,11 +29,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, CurrentWorkspaceIdForStream, DbSession
-from agent_hive.db.models import Channel, Message, Thread
+from agent_hive.api.files import publish_file_change
+from agent_hive.db.models import Channel, File, Message, Thread
 from agent_hive.dispatch import dispatch_and_respond
 from agent_hive.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from agent_hive.streaming import subscribe, unsubscribe
 from agent_hive.sync.publish import publish_entity_change
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["threads"])
 
@@ -41,7 +45,7 @@ _DISCONNECT_POLL_SECONDS = 15
 
 class MessageCreate(BaseModel):
     content: str
-    files: list[str] = []
+    files: list[str] = []  # file_ids of already-uploaded files (POST /files/upload) to attach
 
 
 class MessageOut(BaseModel):
@@ -96,6 +100,22 @@ async def _publish_thread_change(db: DbSession, thread: Thread) -> None:
     )
 
 
+async def _attach_files(db: DbSession, message: Message, file_ids: list[str]) -> list[File]:
+    """FR-10.1's "into threads" — links already-uploaded files (POST
+    /files/upload) to the message referencing them. Unknown file_ids are
+    skipped with a warning rather than failing the whole post: a stale/
+    bogus id from the client shouldn't block the human's message."""
+    attached: list[File] = []
+    for file_id in file_ids:
+        file_row = await db.get(File, file_id)
+        if file_row is None:
+            logger.warning("Ignoring unknown file_id %r in message attachment", file_id)
+            continue
+        file_row.message_id = message.id
+        attached.append(file_row)
+    return attached
+
+
 async def _publish_message_change(db: DbSession, message: Message) -> None:
     await publish_entity_change(
         db,
@@ -143,6 +163,8 @@ async def create_thread(
         content=body.content,
     )
     db.add(human_message)
+    await db.flush()  # populate human_message.id before attaching files to it
+    attached_files = await _attach_files(db, human_message, body.files)
     agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(thread)
@@ -150,6 +172,8 @@ async def create_thread(
     await _publish_message_change(db, human_message)
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
+    for file_row in attached_files:
+        await publish_file_change(db, file_row)
     return thread
 
 
@@ -181,6 +205,8 @@ async def post_message(
         thread_id=thread_id, sender_type="human", sender_name="You", content=body.content
     )
     db.add(message)
+    await db.flush()  # populate message.id before attaching files to it
+    attached_files = await _attach_files(db, message, body.files)
     # dispatch_and_respond resets ThreadGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
     agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
@@ -193,6 +219,8 @@ async def post_message(
     await _publish_message_change(db, message)
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
+    for file_row in attached_files:
+        await publish_file_change(db, file_row)
     return message
 
 

@@ -32,14 +32,15 @@ runtime" is trio itself, not just a stray CancelledError, so the
 isolation is structural (a whole separate thread + loop) rather than a
 single `asyncio.Task`.
 
-FR-9's full scope (FR-9.1-9.7) is large; this is the first slice: host
-lifecycle, workspace-scoped mDNS discovery, manual connect (FR-9.3),
-PNet pre-shared-key isolation using the workspace key (FR-9.4 — see the
-note below on PNet vs. Noise), gossipsub-based state sync for the `agent`
-entity type with vector-clock conflict detection (FR-9.6, via
-sync/apply.py). Not yet built: the rest of FR-9.1's sync scope (channels,
-threads, tools, MCP servers, settings), file sync (FR-9.7), and UI
-conflict surfacing.
+FR-9's full scope (FR-9.1-9.7) is large; host lifecycle, workspace-scoped
+mDNS discovery, manual connect (FR-9.3), PNet pre-shared-key isolation
+using the workspace key (FR-9.4 — see the note below on PNet vs. Noise),
+gossipsub-based state sync for agent/channel/team/mcp_server/tool/thread/
+message with vector-clock conflict detection (FR-9.6, via sync/apply.py)
+are built. File content transfer (FR-9.7) rides a second, non-gossipsub
+mechanism — see sync/file_transfer.py's module docstring for why a raw
+point-to-point stream protocol is used instead of gossipsub for file
+bytes. Not yet built: workspace settings sync, and UI conflict surfacing.
 
 FR-9.4 note: the architecture doc describes "workspace key as PSK for the
 noise handshake." Reading py-libp2p's actual noise implementation
@@ -63,6 +64,7 @@ below.
 import asyncio
 import json
 import logging
+import struct
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -71,7 +73,7 @@ from typing import Any
 
 import trio
 from libp2p import new_host
-from libp2p.abc import IHost
+from libp2p.abc import IHost, INetStream
 from libp2p.custom_types import TProtocol
 from libp2p.peer.id import ID
 from libp2p.peer.peerinfo import PeerInfo as Libp2pPeerInfo
@@ -82,7 +84,15 @@ from libp2p.tools.anyio_service import background_trio_service
 from libp2p.utils.address_validation import find_free_port, get_available_interfaces
 from multiaddr import Multiaddr
 
+from agent_hive.config import get_settings
 from agent_hive.sync.discovery import WorkspaceMDNS, on_peer_discovered
+from agent_hive.sync.file_transfer import (
+    FILE_TRANSFER_PROTOCOL,
+    HASH_LEN,
+    HIT_PREFIX,
+    MISS_MARKER,
+    read_exactly,
+)
 from agent_hive.sync.identity import load_or_create_node_key
 
 logger = logging.getLogger(__name__)
@@ -92,6 +102,7 @@ _GOSSIPSUB_PROTOCOL = TProtocol("/meshsub/1.0.0")
 _CONNECT_TIMEOUT_SECONDS = 10
 _THREAD_START_TIMEOUT_SECONDS = 10
 _THREAD_STOP_TIMEOUT_SECONDS = 10
+_FILE_TRANSFER_TIMEOUT_SECONDS = 60
 
 StateChangeHandler = Callable[
     [str, str, dict[str, int], str, dict[str, Any]], Coroutine[Any, Any, None]
@@ -199,6 +210,7 @@ class SyncEngine:
         host = new_host(key_pair=key_pair, psk=self._psk_hex)
         self._host = host
         self._node_id = str(host.get_id())
+        host.set_stream_handler(FILE_TRANSFER_PROTOCOL, self._handle_file_transfer_stream)
 
         gossipsub = GossipSub(
             protocols=[_GOSSIPSUB_PROTOCOL],
@@ -390,6 +402,63 @@ class SyncEngine:
     async def _trio_publish(self, envelope: bytes) -> None:
         assert self._pubsub is not None
         await self._pubsub.publish(_STATE_TOPIC, envelope)
+
+    async def _handle_file_transfer_stream(self, stream: INetStream) -> None:
+        """Server side of the file_transfer.py wire protocol — set as this
+        host's handler for FILE_TRANSFER_PROTOCOL at host creation. Errors
+        here (a malformed request, a peer disconnecting mid-read) are
+        logged and swallowed rather than raised: this runs as a background
+        task per incoming stream, with nothing upstream to propagate to."""
+        try:
+            content_hash = (await read_exactly(stream, HASH_LEN)).decode()
+            local_path = get_settings().files_dir / content_hash[:2] / content_hash
+            if not local_path.exists():
+                await stream.write(MISS_MARKER)
+            else:
+                data = local_path.read_bytes()
+                await stream.write(HIT_PREFIX + struct.pack(">Q", len(data)) + data)
+        except Exception:
+            logger.warning("Error handling file-transfer stream request", exc_info=True)
+        finally:
+            await stream.close()
+
+    async def request_file(self, peer_id: str, content_hash: str) -> bytes | None:
+        """Client side: ask `peer_id` for `content_hash`'s bytes. Returns
+        None on a clean MISS (peer doesn't have it either) or on any
+        transport failure (peer unreachable, timeout, protocol error) —
+        callers can't distinguish those cases from this return value alone,
+        but both mean the same thing to a caller: content not available
+        from this peer right now."""
+        try:
+            return await self._call_trio(self._trio_request_file, peer_id, content_hash)
+        except Exception:
+            logger.warning(
+                "Could not fetch file content (hash=%s) from peer %s",
+                content_hash[:12],
+                peer_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _trio_request_file(self, peer_id: str, content_hash: str) -> bytes | None:
+        assert self._host is not None
+        stream = await self._host.new_stream(ID.from_base58(peer_id), [FILE_TRANSFER_PROTOCOL])
+        try:
+            with trio.fail_after(_FILE_TRANSFER_TIMEOUT_SECONDS):
+                await stream.write(content_hash.encode())
+                # close_write() is on the concrete NetStream (verified
+                # against a real stream in scratch testing) but missing
+                # from the INetStream ABC that new_stream()'s return type
+                # is declared as -- a stub-completeness gap, not a real
+                # attribute error.
+                await stream.close_write()  # pyright: ignore[reportAttributeAccessIssue]
+                marker = await read_exactly(stream, 4)
+                if marker == MISS_MARKER:
+                    return None
+                (length,) = struct.unpack(">Q", await read_exactly(stream, 8))
+                return await read_exactly(stream, length)
+        finally:
+            await stream.close()
 
 
 _engine: SyncEngine | None = None

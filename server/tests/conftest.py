@@ -1,7 +1,7 @@
 import os
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 # Must happen before the first `agent_hive.config.get_settings()` call
 # anywhere (it's @lru_cache'd — whatever env var is set on that first call
@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from agent_hive.agentos.service import reset_agentos_for_testing  # noqa: E402
 from agent_hive.app import create_app  # noqa: E402
-from agent_hive.db.session import init_db, make_engine, override_engine, session_scope  # noqa: E402
+from agent_hive.db.session import (  # noqa: E402
+    get_engine,
+    init_db,
+    make_engine,
+    override_engine,
+    session_scope,
+)
 from agent_hive.security import keys  # noqa: E402
 from agent_hive.security.session import get_session_key_store  # noqa: E402
 from agent_hive.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
@@ -28,7 +34,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # n
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     """A TestClient wired to a fresh in-memory SQLite DB per test — never
     touches the real ~/.agent-hive workspace.
 
@@ -53,6 +59,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
         yield test_client
 
     get_session_key_store().clear()
+    # Dispose before dropping the reference — aiosqlite runs each
+    # connection's work on its own background thread that calls back into
+    # this test's event loop; without an explicit dispose() that thread
+    # can still be finishing up after pytest-asyncio closes the loop for
+    # the next test, surfacing as a flaky "Event loop is closed"
+    # PytestUnhandledThreadExceptionWarning attributed to an unrelated,
+    # later test.
+    await get_engine().dispose()
     override_engine(None)
     reset_agentos_for_testing()
     reset_sync_engine_for_testing()
@@ -70,6 +84,7 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     await init_db()
     async with session_scope() as session:
         yield session
+    await get_engine().dispose()  # see client fixture's comment on why
     override_engine(None)
 
 

@@ -3,7 +3,12 @@
 Content-addressed storage at `~/.agent-hive/files/{hash[0:2]}/{full_hash}`
 per docs/infrastructure/compute-and-storage.md — identical uploads share
 one copy on disk.
-"""
+
+Also synced (FR-9.1/FR-9.7) — publish_file_change is exported for
+api/threads.py to reuse too: a file's message_id only gets set once it's
+attached to a message (uploads are a separate, prior step), so the
+message-attach path needs to republish the same File row again with its
+now-current message_id, not just the upload path."""
 
 import hashlib
 
@@ -14,11 +19,27 @@ from pydantic import BaseModel
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.config import get_settings
 from agent_hive.db.models import File as FileRow
+from agent_hive.sync.publish import publish_entity_change
 
 router = APIRouter(prefix="/files", tags=["files"])
 
 _MAX_FILE_BYTES = 100 * 1024 * 1024
 _CHUNK_SIZE = 1024 * 1024
+
+
+async def publish_file_change(db: DbSession, file_row: FileRow) -> None:
+    await publish_entity_change(
+        db,
+        "file",
+        file_row.id,
+        {
+            "content_hash": file_row.content_hash,
+            "filename": file_row.filename,
+            "mime_type": file_row.mime_type,
+            "size_bytes": file_row.size_bytes,
+            "message_id": file_row.message_id,
+        },
+    )
 
 
 class FileOut(BaseModel):
@@ -71,6 +92,7 @@ async def upload_file(upload: UploadFile, db: DbSession, _: CurrentWorkspaceId) 
     db.add(row)
     await db.commit()
     await db.refresh(row)
+    await publish_file_change(db, row)
     return FileOut(
         file_id=row.id,
         content_hash=row.content_hash,

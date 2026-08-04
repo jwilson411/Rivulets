@@ -46,14 +46,17 @@ deliberately don't sync:
     node's own AgentOS instance owns its own session bookkeeping. Same
     reasoning FR-9.2 already applies to provider credentials.
 
-`Tool` doesn't use the generic path at all (apply_remote_tool_change,
-below) — FR-9.1 explicitly includes "tool code" in scope, and getting a
-tool's *source code* onto a peer's disk (not just its DB row) needs
-custom logic the generic field-copying path doesn't do. Only
-`tool_type == "custom"` tools sync: `mcp`-type Tool rows are a per-node
-cache of what a given MCPServer offers (rediscovered independently by
-each node's own reconnect, matching the MCPServer case above), and
-`builtin` tools aren't user-created at all.
+`Tool` and `File` don't use the generic path at all (apply_remote_tool_change
+/apply_remote_file_change, below) — FR-9.1 explicitly includes "tool code"
+and "file attachments" in scope, and getting actual bytes onto a peer's
+disk (not just a DB row) needs custom logic the generic field-copying
+path doesn't do. For Tool, only `tool_type == "custom"` tools sync:
+`mcp`-type Tool rows are a per-node cache of what a given MCPServer
+offers (rediscovered independently by each node's own reconnect, matching
+the MCPServer case above), and `builtin` tools aren't user-created at
+all. For File, content doesn't travel in the gossipsub payload at all
+(files run up to 100MB) — see file_transfer.py for the separate,
+point-to-point mechanism used to actually move bytes between peers.
 """
 
 import json
@@ -72,6 +75,7 @@ from agent_hive.db.base import Base
 from agent_hive.db.models import (
     Agent,
     Channel,
+    File,
     MCPServer,
     Message,
     SyncConflict,
@@ -82,6 +86,7 @@ from agent_hive.db.models import (
     VectorClockTracker,
 )
 from agent_hive.db.session import session_scope
+from agent_hive.sync.engine import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +340,89 @@ async def apply_remote_tool_change(
     return ApplyResult(applied=True, conflict=False)
 
 
+_FILE_SYNCED_FIELDS = ("content_hash", "filename", "mime_type", "size_bytes", "message_id")
+
+
+async def apply_remote_file_change(
+    db: AsyncSession,
+    entity_id: str,
+    remote_vector_clock: dict[str, int],
+    remote_node_id: str,
+    payload: dict[str, Any],
+) -> ApplyResult:
+    """Like apply_remote_change, but for `file`: metadata syncs through the
+    same LWW/conflict machinery as everything else, but content doesn't
+    travel in the gossipsub payload at all — files run up to 100MB, and
+    gossipsub is sized for small state-change messages, not that (see
+    file_transfer.py's module docstring). Once metadata is applied, if
+    this node doesn't already have a local copy of the bytes (by content
+    hash), it fetches them from remote_node_id over the dedicated stream
+    protocol. `local_path` is always recomputed from this node's own
+    files_dir, never copied verbatim from the sender, matching Tool's
+    source_path handling. `File.message_id` has no FK constraint (see
+    db/models.py), so unlike Thread/Message there's no ordering hazard to
+    guard against here."""
+    local_vc = await _load_vector_clock(db, "file", entity_id)
+    comparison = compare_vector_clocks(local_vc, remote_vector_clock)
+
+    if comparison in (ClockComparison.EQUAL, ClockComparison.LOCAL_NEWER):
+        return ApplyResult(applied=False, conflict=False)
+
+    merged = merge_vector_clocks(local_vc, remote_vector_clock)
+
+    if comparison is ClockComparison.CONCURRENT:
+        local_file = await db.get(File, entity_id)
+        db.add(
+            SyncConflict(
+                entity_type="file",
+                entity_id=entity_id,
+                local_snapshot=json.dumps(
+                    _snapshot(local_file, _FILE_SYNCED_FIELDS) if local_file else {}
+                ),
+                remote_snapshot=json.dumps({k: payload.get(k) for k in _FILE_SYNCED_FIELDS}),
+                remote_node_id=remote_node_id,
+            )
+        )
+        await _store_vector_clock(db, "file", entity_id, merged)
+        await db.commit()
+        return ApplyResult(applied=False, conflict=True)
+
+    content_hash = payload["content_hash"]
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+
+    file_row = await db.get(File, entity_id)
+    if file_row is None:
+        file_row = File(id=entity_id, local_path=str(local_path))
+        db.add(file_row)
+    for field in _FILE_SYNCED_FIELDS:
+        if field in payload:
+            setattr(file_row, field, payload[field])
+    file_row.local_path = str(local_path)
+    file_row.vector_clock = max(merged.values())
+    await _store_vector_clock(db, "file", entity_id, merged)
+    await db.commit()
+
+    if not local_path.exists():
+        await _fetch_file_content(remote_node_id, content_hash, local_path)
+
+    return ApplyResult(applied=True, conflict=False)
+
+
+async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path) -> None:
+    engine = get_sync_engine()
+    if not engine.running:
+        return
+    data = await engine.request_file(peer_id, content_hash)
+    if data is None:
+        logger.info(
+            "Peer %s doesn't have file content for hash=%s yet", peer_id, content_hash[:12]
+        )
+        return
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(data)
+    logger.info("Fetched file content (%d bytes) from %s", len(data), peer_id)
+
+
 _DISPATCH: dict[str, EntitySpec] = {
     "agent": AGENT_SPEC,
     "channel": CHANNEL_SPEC,
@@ -357,12 +445,16 @@ async def handle_incoming_state_change(
     from the trio thread whenever a gossipsub message arrives. Opens its
     own DB session since it isn't running inside a FastAPI request.
 
-    Covers FR-9.1's agent/channel/team/mcp_server/tool/thread/message sync
-    scope; file attachments and workspace settings aren't wired up yet and
-    are logged/dropped, matching this module's generalization path."""
+    Covers FR-9.1's agent/channel/team/mcp_server/tool/thread/message/file
+    sync scope; workspace settings aren't wired up yet and are logged/
+    dropped, matching this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":
             result = await apply_remote_tool_change(
+                db, entity_id, vector_clock, origin_node_id, payload
+            )
+        elif entity_type == "file":
+            result = await apply_remote_file_change(
                 db, entity_id, vector_clock, origin_node_id, payload
             )
         elif entity_type in _DISPATCH:
