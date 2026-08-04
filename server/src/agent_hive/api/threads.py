@@ -5,7 +5,18 @@ the channel's team and persists any matched agents' replies in the same
 request, publishing SSE events as it goes (FR-12.3) — a client with the
 stream endpoint open sees agent_token/agent_message/system_alert/error
 events live, in the same request cycle that's doing the dispatching.
-"""
+
+Threads and messages are also synced (FR-9.1). This is the one place
+where getting the sync boundary right actually matters for correctness,
+not just data completeness: dispatch (agent invocation, LLM calls) only
+ever runs as a side effect of *locally* handling a human-posted message
+below. Applying an incoming remote message (sync/apply.py's generic
+apply_remote_change, routed through MESSAGE_SPEC) is pure data
+replication — it inserts a Message row and nothing else. If it also
+re-ran dispatch, every node with the same team config would independently
+answer the same human message, producing duplicate agent replies instead
+of one. Human messages replicate for history; only the node that actually
+received them from a human dispatches."""
 
 import asyncio
 import json
@@ -21,6 +32,7 @@ from agent_hive.db.models import Channel, Message, Thread
 from agent_hive.dispatch import dispatch_and_respond
 from agent_hive.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from agent_hive.streaming import subscribe, unsubscribe
+from agent_hive.sync.publish import publish_entity_change
 
 router = APIRouter(tags=["threads"])
 
@@ -70,6 +82,37 @@ async def _get_thread_or_404(db: DbSession, thread_id: str) -> Thread:
     return thread
 
 
+async def _publish_thread_change(db: DbSession, thread: Thread) -> None:
+    await publish_entity_change(
+        db,
+        "thread",
+        thread.id,
+        {
+            "channel_id": thread.channel_id,
+            "title": thread.title,
+            "status": thread.status,
+            "created_by": thread.created_by,
+        },
+    )
+
+
+async def _publish_message_change(db: DbSession, message: Message) -> None:
+    await publish_entity_change(
+        db,
+        "message",
+        message.id,
+        {
+            "thread_id": message.thread_id,
+            "sender_type": message.sender_type,
+            "sender_id": message.sender_id,
+            "sender_name": message.sender_name,
+            "content": message.content,
+            "content_type": message.content_type,
+            "metadata_json": message.metadata_json,
+        },
+    )
+
+
 @router.get("/channels/{channel_id}/threads", response_model=list[ThreadOut])
 async def list_threads(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Thread]:
     await _get_channel_or_404(db, channel_id)
@@ -93,17 +136,20 @@ async def create_thread(
     thread = Thread(channel_id=channel_id, created_by="human")
     db.add(thread)
     await db.flush()
-    db.add(
-        Message(
-            thread_id=thread.id,
-            sender_type="human",
-            sender_name="You",
-            content=body.content,
-        )
+    human_message = Message(
+        thread_id=thread.id,
+        sender_type="human",
+        sender_name="You",
+        content=body.content,
     )
-    await dispatch_and_respond(db, thread, channel, body.content)
+    db.add(human_message)
+    agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(thread)
+    await _publish_thread_change(db, thread)
+    await _publish_message_change(db, human_message)
+    for agent_message in agent_messages:
+        await _publish_message_change(db, agent_message)
     return thread
 
 
@@ -137,9 +183,16 @@ async def post_message(
     db.add(message)
     # dispatch_and_respond resets ThreadGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
-    await dispatch_and_respond(db, thread, channel, body.content)
+    agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(message)
+    # dispatch can pause the thread (a loop guard tripping) as a side
+    # effect, so its state needs republishing here too, not just from the
+    # explicit resume/close endpoints below.
+    await _publish_thread_change(db, thread)
+    await _publish_message_change(db, message)
+    for agent_message in agent_messages:
+        await _publish_message_change(db, agent_message)
     return message
 
 
@@ -154,6 +207,7 @@ async def resume_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) ->
     reset_guard_state(guard_state)
     await db.commit()
     await db.refresh(thread)
+    await _publish_thread_change(db, thread)
     return thread
 
 
@@ -162,6 +216,7 @@ async def close_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> 
     thread = await _get_thread_or_404(db, thread_id)
     thread.status = "closed"
     await db.commit()
+    await _publish_thread_change(db, thread)
 
 
 @router.get("/threads/{thread_id}/stream")

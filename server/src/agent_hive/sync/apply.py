@@ -16,21 +16,35 @@ Each entity carries two related but distinct clocks:
 
 `apply_remote_change()` is the generic entity-sync path, driven by an
 `EntitySpec` (model class + which fields are synced) — Agent, Channel,
-Team, and MCPServer all go through it. Two things deliberately don't:
+Team, MCPServer, Thread, and Message all go through it. Two things
+deliberately don't sync:
 
-  - Cross-entity foreign keys aren't synced. `Channel.team_id` is
-    excluded from `CHANNEL_SPEC` on purpose: gossipsub doesn't guarantee
-    delivery order across different entity types, so a channel's
-    "assigned to team X" change could arrive before team X's own create
-    message has. With SQLite's foreign_keys=ON, applying that write would
-    raise an IntegrityError. A real fix needs a retry/pending-apply queue
-    keyed on the missing reference; out of scope for this pass — team
-    assignment just doesn't sync yet.
+  - Foreign keys whose target entity type has no natural creation
+    ordering relative to the referencing one aren't synced at all.
+    `Channel.team_id` is excluded from `CHANNEL_SPEC`, and team
+    membership (a join table) isn't synced either: gossipsub doesn't
+    guarantee delivery order across different entity types, so a
+    channel's "assigned to team X" change could arrive before team X's
+    own create message has, and SQLite's foreign_keys=ON would reject
+    the write. A real fix needs a retry/pending-apply queue keyed on the
+    missing reference; out of scope for this pass. `Thread.channel_id`
+    and `Message.thread_id`, by contrast, ARE synced despite having the
+    same theoretical hazard — a thread/message is meaningless without
+    its parent, unlike a channel's *optional* team assignment, so
+    excluding them would make thread/message sync pointless. Instead
+    `apply_remote_change`'s final commit catches IntegrityError: if the
+    parent hasn't arrived yet, the change is dropped with a warning
+    rather than crashing the sync-message handler. In practice channels
+    and threads are created far less often than messages and the
+    dependency chain is one hop, so the race window is real but narrow;
+    there's still no redelivery/retry, so a message that loses this race
+    is simply never applied unless something re-publishes it.
   - Per-node status fields aren't synced: `MCPServer.connected` and
     `last_connected_at` reflect *this node's own* connection attempt, not
     shared state — each node reconnects to a synced MCPServer's url
-    independently. Same reasoning FR-9.2 already applies to provider
-    credentials, extended to connection status.
+    independently. `Thread.agentos_session_id` is the same idea: each
+    node's own AgentOS instance owns its own session bookkeeping. Same
+    reasoning FR-9.2 already applies to provider credentials.
 
 `Tool` doesn't use the generic path at all (apply_remote_tool_change,
 below) — FR-9.1 explicitly includes "tool code" in scope, and getting a
@@ -50,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_hive.config import get_settings
@@ -58,8 +73,10 @@ from agent_hive.db.models import (
     Agent,
     Channel,
     MCPServer,
+    Message,
     SyncConflict,
     Team,
+    Thread,
     Tool,
     ToolVersion,
     VectorClockTracker,
@@ -151,6 +168,20 @@ AGENT_SPEC = EntitySpec("agent", Agent, ("name", "description", "instructions", 
 CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
 MCP_SERVER_SPEC = EntitySpec("mcp_server", MCPServer, ("name", "url"))
+THREAD_SPEC = EntitySpec("thread", Thread, ("channel_id", "title", "status", "created_by"))
+MESSAGE_SPEC = EntitySpec(
+    "message",
+    Message,
+    (
+        "thread_id",
+        "sender_type",
+        "sender_id",
+        "sender_name",
+        "content",
+        "content_type",
+        "metadata_json",
+    ),
+)
 
 
 def _snapshot(instance: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -209,8 +240,26 @@ async def apply_remote_change(
             setattr(instance, field, payload[field])
     if hasattr(instance, "vector_clock"):
         setattr(instance, "vector_clock", max(merged.values()))  # noqa: B010
-    await _store_vector_clock(db, spec.entity_type, entity_id, merged)
-    await db.commit()
+    try:
+        # _store_vector_clock's db.get() calls can trigger an autoflush of
+        # the pending `instance` insert/update above -- a bad FK (a synced
+        # Thread.channel_id/Message.thread_id pointing at a parent that
+        # hasn't synced here yet, see module docstring) can therefore
+        # raise IntegrityError from inside this call, not just from the
+        # commit() below, so both need to be inside the same try.
+        await _store_vector_clock(db, spec.entity_type, entity_id, merged)
+        await db.commit()
+    except IntegrityError:
+        # Rolling back undoes the vector-clock bump too, so a later
+        # message for the same entity_id is judged fresh rather than
+        # silently treated as already-seen.
+        await db.rollback()
+        logger.warning(
+            "Dropping %s/%s: referenced entity not found locally yet",
+            spec.entity_type,
+            entity_id,
+        )
+        return ApplyResult(applied=False, conflict=False)
     return ApplyResult(applied=True, conflict=False)
 
 
@@ -278,9 +327,7 @@ async def apply_remote_tool_change(
             .order_by(ToolVersion.version.desc())
         )
         db.add(
-            ToolVersion(
-                tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code
-            )
+            ToolVersion(tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code)
         )
 
     await _store_vector_clock(db, "tool", entity_id, merged)
@@ -293,6 +340,8 @@ _DISPATCH: dict[str, EntitySpec] = {
     "channel": CHANNEL_SPEC,
     "team": TEAM_SPEC,
     "mcp_server": MCP_SERVER_SPEC,
+    "thread": THREAD_SPEC,
+    "message": MESSAGE_SPEC,
 }
 
 
@@ -308,9 +357,9 @@ async def handle_incoming_state_change(
     from the trio thread whenever a gossipsub message arrives. Opens its
     own DB session since it isn't running inside a FastAPI request.
 
-    Covers FR-9.1's agent/channel/team/mcp_server/tool sync scope; thread
-    history, file attachments, and workspace settings aren't wired up yet
-    and are logged/dropped, matching this module's generalization path."""
+    Covers FR-9.1's agent/channel/team/mcp_server/tool/thread/message sync
+    scope; file attachments and workspace settings aren't wired up yet and
+    are logged/dropped, matching this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":
             result = await apply_remote_tool_change(
