@@ -1,0 +1,64 @@
+#!/usr/bin/env sh
+# Agent Hive install script (curl | sh pattern).
+# docs/infrastructure/deployment-and-networking.md#distribution-channels
+#
+#   curl -fsSL https://get.agent-hive.dev | sh
+#
+# Detects OS/arch, downloads the matching release binary from GitHub
+# Releases, verifies its SHA-256 checksum, and installs it on PATH.
+set -eu
+
+REPO="${AGENT_HIVE_REPO:-REPLACE_ME/agent-hive}" # TODO: set once the repo has a home
+INSTALL_DIR="${AGENT_HIVE_INSTALL_DIR:-$HOME/.local/bin}"
+VERSION="${AGENT_HIVE_VERSION:-latest}"
+
+os() {
+	case "$(uname -s)" in
+	Linux) echo linux ;;
+	Darwin) echo darwin ;;
+	*)
+		echo "Unsupported OS: $(uname -s)" >&2
+		exit 1
+		;;
+	esac
+}
+
+arch() {
+	case "$(uname -m)" in
+	x86_64 | amd64) echo amd64 ;;
+	arm64 | aarch64) echo arm64 ;;
+	*)
+		echo "Unsupported architecture: $(uname -m)" >&2
+		exit 1
+		;;
+	esac
+}
+
+OS="$(os)"
+ARCH="$(arch)"
+ASSET="agent-hive-${OS}-${ARCH}"
+
+if [ "$VERSION" = "latest" ]; then
+	BASE_URL="https://github.com/${REPO}/releases/latest/download"
+else
+	BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+fi
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo "Downloading ${ASSET} (${VERSION})..."
+curl -fsSL "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${ASSET}"
+curl -fsSL "${BASE_URL}/${ASSET}.sha256" -o "${TMP_DIR}/${ASSET}.sha256"
+
+echo "Verifying checksum..."
+(cd "$TMP_DIR" && sha256sum -c "${ASSET}.sha256" 2>/dev/null || shasum -a 256 -c "${ASSET}.sha256")
+
+mkdir -p "$INSTALL_DIR"
+install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/agent-hive"
+
+echo "Installed to ${INSTALL_DIR}/agent-hive"
+case ":$PATH:" in
+*":${INSTALL_DIR}:"*) ;;
+*) echo "Add ${INSTALL_DIR} to your PATH, then run: agent-hive" ;;
+esac

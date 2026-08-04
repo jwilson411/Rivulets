@@ -1,0 +1,83 @@
+[project]
+name = "agent-hive"
+version = "0.1.0"
+description = "Local-first, P2P-synced workspace for humans and AI agent teams, built on AgentOS."
+readme = "README.md"
+authors = [
+    { name = "Justin Wilson", email = "jammin411@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "agno>=2.8,<3.0",
+    "aiosqlite>=0.22.1",
+    "alembic>=1.13",
+    "bcrypt>=5.0.0",
+    "cryptography>=50.0.0",
+    "fastapi>=0.115",
+    "httpx>=0.28.1",
+    "keyring>=25.7.0",
+    "mnemonic>=0.21",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.9",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "sqlalchemy[asyncio]>=2.0",
+    "uvicorn[standard]>=0.34",
+]
+
+[project.scripts]
+agent-hive = "agent_hive:main"
+
+[build-system]
+requires = ["uv_build>=0.8.13,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "pytest-xdist>=3",
+    "ruff>=0.7",
+]
+packaging = [
+    "pyinstaller>=6.21.0",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "S", "UP", "B"]
+ignore = ["S101"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+
+# Strict mode is enforced for application code. Two directories get relaxed
+# Unknown-type reporting because the gaps are in third-party stubs we don't
+# control, not in our code: agno.tools.tool's decorator overloads erase
+# type info (tools/builtin), and httpx/starlette's TestClient responses are
+# untyped (tests).
+[[tool.pyright.executionEnvironments]]
+root = "src/agent_hive/tools/builtin"
+reportUnknownVariableType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+
+[tool.pytest.ini_options]
+addopts = "--cov=agent_hive --cov-report=term-missing"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
+# local runs during early scaffolding aren't blocked before the suite has grown.
+# NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
+# matches real coverage today (~66%) and should ratchet up as tests are added.

@@ -1,0 +1,143 @@
+name: Release
+
+# docs/infrastructure/deployment-and-networking.md#build-matrix and
+# docs/infrastructure/cicd-and-observability.md#on-release-tag-v.
+# Builds all five platform/arch binaries, smoke-tests each, then publishes
+# a GitHub Release with binaries + SHA-256 checksums.
+#
+# No third-party actions here (security-and-dr.md: "no third-party GitHub
+# Actions from untrusted sources") — release creation uses the `gh` CLI,
+# which ships preinstalled on GitHub-hosted runners.
+#
+# scripts/install.sh resolves "latest" via GitHub's own redirect, so
+# there's no version string inside it to bump on release — unlike the
+# doc's pipeline diagram, this workflow has no separate "update install.sh"
+# step.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-24.04
+            spec: packaging/linux.spec
+            binary: agent-hive-linux-amd64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            spec: packaging/linux.spec
+            binary: agent-hive-linux-arm64
+          - name: darwin-amd64
+            os: macos-14
+            spec: packaging/macos.spec
+            binary: agent-hive-darwin-amd64
+          - name: darwin-arm64
+            os: macos-14
+            spec: packaging/macos.spec
+            binary: agent-hive-darwin-arm64
+          - name: windows-amd64
+            os: windows-2025
+            spec: packaging/windows.spec
+            binary: agent-hive-windows-amd64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build binary
+        working-directory: server
+        run: |
+          uv sync --group packaging
+          uv run --group packaging pyinstaller ../${{ matrix.spec }} --distpath ../dist --workpath ../build/pyinstaller --noconfirm
+
+      - name: Smoke test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x dist/${{ matrix.binary }}
+          export AGENT_HIVE_WORKSPACE_DIR="$(mktemp -d)"
+          ./dist/${{ matrix.binary }} &
+          PID=$!
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8484/api/v1/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8484/api/v1/health | grep '"status":"ok"'
+          kill $PID
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:AGENT_HIVE_WORKSPACE_DIR = New-TemporaryFile | %{ rm $_; mkdir $_ }
+          $proc = Start-Process -FilePath "dist\${{ matrix.binary }}" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            try {
+              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/health" -TimeoutSec 2
+              if ($resp.status -eq "ok") { $ok = $true; break }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          Stop-Process -Id $proc.Id
+          if (-not $ok) { exit 1 }
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${{ matrix.binary }}" > "${{ matrix.binary }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.binary }}" > "${{ matrix.binary }}.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: |
+            dist/${{ matrix.binary }}
+            dist/${{ matrix.binary }}.sha256
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
