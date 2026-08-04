@@ -4,6 +4,15 @@ Simple-mode codegen (send a prompt to an LLM, review, approve) and the
 advanced-mode editor handoff both need integrations this scaffold doesn't
 wire up yet (an LLM client, and OS-specific "open in default editor"
 logic) — marked TODO. Listing/registering/versioning tool rows is real.
+
+Custom tools are also synced (FR-9.1's "tool code") via
+sync/apply.py's apply_remote_tool_change — see _publish_tool_change
+below. `mcp`/`builtin` tool rows aren't synced (per-node caches, matching
+MCPServer's own tools list). Publishing always re-reads the file at
+tool.source_path rather than trusting the latest ToolVersion row: rollback
+below writes straight to disk without recording a new version, so the DB's
+"latest version" and what's actually on disk can disagree — the file is
+the source of truth for what this node currently has.
 """
 
 from pathlib import Path
@@ -15,8 +24,21 @@ from sqlalchemy import select
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.config import get_settings
 from agent_hive.db.models import Tool, ToolVersion
+from agent_hive.sync.publish import publish_entity_change
 
 router = APIRouter(prefix="/tools", tags=["tools"])
+
+
+async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
+    if tool.tool_type != "custom":
+        return
+    payload: dict[str, str] = {"name": tool.name, "description": tool.description}
+    if tool.source_path:
+        try:
+            payload["source_code"] = Path(tool.source_path).read_text(encoding="utf-8")
+        except OSError:
+            pass  # no file yet (e.g. immediately after create) -- sync metadata only
+    await publish_entity_change(db, "tool", tool.id, payload)
 
 
 class ToolCreate(BaseModel):
@@ -83,6 +105,7 @@ async def create_tool(body: ToolCreate, db: DbSession, _: CurrentWorkspaceId) ->
     db.add(ToolVersion(tool_id=tool.id, version=1, source_code=""))
     await db.commit()
     await db.refresh(tool)
+    await _publish_tool_change(db, tool)
     return tool
 
 
@@ -99,6 +122,7 @@ async def update_tool(tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentW
     tool.vector_clock += 1
     await db.commit()
     await db.refresh(tool)
+    await _publish_tool_change(db, tool)
     return tool
 
 
@@ -137,6 +161,7 @@ async def rollback_tool_version(
     tool.vector_clock += 1
     await db.commit()
     await db.refresh(tool)
+    await _publish_tool_change(db, tool)
     return tool
 
 

@@ -2,8 +2,9 @@
 
   - Pure vector-clock comparison/merge logic (sync/apply.py) — no network,
     no DB.
-  - record_local_change / apply_remote_agent_change against a real (in-
-    memory) DB via the db_session fixture — no network.
+  - record_local_change / apply_remote_change (the generic entity path)
+    and apply_remote_tool_change (tool's bespoke source-code-aware path)
+    against a real (in-memory) DB via the db_session fixture — no network.
   - One real end-to-end SyncEngine test: two actual libp2p hosts in their
     own trio threads, matching PNet PSK, manual connect (FR-9.3, no mDNS
     involved in the connect path itself — though engine.start() does
@@ -24,14 +25,21 @@ import asyncio
 import hashlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import Agent, SyncConflict
+from agent_hive.config import get_settings
+from agent_hive.db.models import Agent, Channel, MCPServer, SyncConflict, Team, Tool, ToolVersion
 from agent_hive.sync.apply import (
+    AGENT_SPEC,
+    CHANNEL_SPEC,
+    MCP_SERVER_SPEC,
+    TEAM_SPEC,
     ClockComparison,
-    apply_remote_agent_change,
+    apply_remote_change,
+    apply_remote_tool_change,
     compare_vector_clocks,
     merge_vector_clocks,
     record_local_change,
@@ -76,8 +84,9 @@ async def test_record_local_change_bumps_own_component(db_session: AsyncSession)
 
 
 async def test_apply_remote_agent_change_creates_new_agent(db_session: AsyncSession) -> None:
-    result = await apply_remote_agent_change(
+    result = await apply_remote_change(
         db_session,
+        AGENT_SPEC,
         "agent-1",
         {"node-b": 1},
         "node-b",
@@ -95,8 +104,13 @@ async def test_apply_remote_agent_change_creates_new_agent(db_session: AsyncSess
 async def test_apply_remote_agent_change_ignores_stale(db_session: AsyncSession) -> None:
     await record_local_change(db_session, "agent", "agent-1", "node-a")  # local at {node-a: 1}
 
-    result = await apply_remote_agent_change(
-        db_session, "agent-1", {"node-a": 0}, "node-b", {"name": "Stale", **_AGENT_FIELDS}
+    result = await apply_remote_change(
+        db_session,
+        AGENT_SPEC,
+        "agent-1",
+        {"node-a": 0},
+        "node-b",
+        {"name": "Stale", **_AGENT_FIELDS},
     )
 
     assert result.applied is False
@@ -109,8 +123,13 @@ async def test_apply_remote_agent_change_detects_conflict(db_session: AsyncSessi
     await db_session.commit()
     await record_local_change(db_session, "agent", "agent-1", "node-a")  # local at {node-a: 1}
 
-    result = await apply_remote_agent_change(
-        db_session, "agent-1", {"node-b": 1}, "node-b", {"name": "Remote", **_AGENT_FIELDS}
+    result = await apply_remote_change(
+        db_session,
+        AGENT_SPEC,
+        "agent-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Remote", **_AGENT_FIELDS},
     )
 
     assert result.applied is False
@@ -127,6 +146,124 @@ async def test_apply_remote_agent_change_detects_conflict(db_session: AsyncSessi
     assert conflicts[0].resolved is False
 
 
+async def test_apply_remote_channel_change_creates_channel(db_session: AsyncSession) -> None:
+    result = await apply_remote_change(
+        db_session,
+        CHANNEL_SPEC,
+        "chan-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "general", "description": "General chat", "position": 0, "archived": False},
+    )
+    assert result.applied is True
+    channel = await db_session.get(Channel, "chan-1")
+    assert channel is not None
+    assert channel.name == "general"
+
+
+async def test_apply_remote_team_change_creates_team(db_session: AsyncSession) -> None:
+    result = await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Eng", "description": None},
+    )
+    assert result.applied is True
+    team = await db_session.get(Team, "team-1")
+    assert team is not None
+    assert team.name == "Eng"
+
+
+async def test_apply_remote_mcp_server_change_does_not_sync_connection_status(
+    db_session: AsyncSession,
+) -> None:
+    """MCPServer.connected/last_connected_at are per-node status, not
+    synced fields (see apply.py's module docstring) -- a freshly-applied
+    remote server row must come in disconnected regardless of what the
+    sender's own connection state was."""
+    result = await apply_remote_change(
+        db_session,
+        MCP_SERVER_SPEC,
+        "mcp-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Filesystem tools", "url": "http://127.0.0.1:9999/mcp"},
+    )
+    assert result.applied is True
+    server = await db_session.get(MCPServer, "mcp-1")
+    assert server is not None
+    assert server.name == "Filesystem tools"
+    assert server.connected is False
+    assert server.last_connected_at is None
+
+
+async def test_apply_remote_tool_change_writes_source_code_to_disk(
+    db_session: AsyncSession,
+) -> None:
+    # conftest.py points AGENT_HIVE_WORKSPACE_DIR at an isolated temp dir
+    # for the whole test session, so get_settings().tools_dir is already
+    # safe to write into here without redirecting it further per-test.
+    expected_path = get_settings().tools_dir / "add_numbers.py"
+
+    result = await apply_remote_tool_change(
+        db_session,
+        "tool-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "add_numbers",
+            "description": "Adds two numbers.",
+            "source_code": "def add_numbers(a, b):\n    return a + b\n",
+        },
+    )
+    assert result.applied is True
+
+    tool = await db_session.get(Tool, "tool-1")
+    assert tool is not None
+    assert tool.tool_type == "custom"
+    assert tool.source_path == str(expected_path)
+    assert expected_path.read_text() == "def add_numbers(a, b):\n    return a + b\n"
+
+    versions = list(
+        (await db_session.execute(select(ToolVersion).where(ToolVersion.tool_id == "tool-1")))
+        .scalars()
+        .all()
+    )
+    assert len(versions) == 1
+    assert versions[0].version == 1
+
+
+async def test_apply_remote_tool_change_detects_conflict(db_session: AsyncSession) -> None:
+    source_path = get_settings().tools_dir / "add_numbers.py"
+    db_session.add(
+        Tool(
+            id="tool-1",
+            name="add_numbers",
+            description="Local version.",
+            tool_type="custom",
+            source_path=str(source_path),
+        )
+    )
+    await db_session.commit()
+    await record_local_change(db_session, "tool", "tool-1", "node-a")
+
+    result = await apply_remote_tool_change(
+        db_session,
+        "tool-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "add_numbers", "description": "Remote version.", "source_code": "..."},
+    )
+    assert result.applied is False
+    assert result.conflict is True
+
+    tool = await db_session.get(Tool, "tool-1")
+    assert tool is not None
+    assert tool.description == "Local version."  # untouched
+
+
 async def _get_first_addr(engine: SyncEngine) -> str:
     host = engine._host  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     assert host is not None
@@ -134,6 +271,15 @@ async def _get_first_addr(engine: SyncEngine) -> str:
 
 
 async def test_two_engines_sync_agent_state_change(tmp_path: Path) -> None:
+    # Same PSK (required to connect at all -- PNet gates the connection on
+    # it), but deliberately *different* mDNS workspace fingerprints. This
+    # test wants to exercise manual connect (FR-9.3) in isolation: giving
+    # both engines the same fingerprint let real mDNS auto-connect
+    # (engine.py's _on_peer_discovered) race the test's own explicit
+    # connect() call, and the two concurrent connection attempts between
+    # the same pair of hosts reliably broke gossipsub mesh formation
+    # (discovered by this test actually failing after auto-connect was
+    # added -- not a hypothetical).
     psk_hex = hashlib.sha256(b"agent-hive-test-workspace").digest().hex()
 
     engine_a = SyncEngine(tmp_path / "a")
@@ -154,8 +300,8 @@ async def test_two_engines_sync_agent_state_change(tmp_path: Path) -> None:
 
     engine_b.set_state_change_handler(on_change)
 
-    await engine_a.start("agent-hive-test-workspace", psk_hex)
-    await engine_b.start("agent-hive-test-workspace", psk_hex)
+    await engine_a.start("agent-hive-test-workspace-fingerprint-a", psk_hex)
+    await engine_b.start("agent-hive-test-workspace-fingerprint-b", psk_hex)
     try:
         addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             _get_first_addr, engine_a
@@ -238,6 +384,49 @@ def test_agent_create_does_not_fail_when_sync_engine_not_running(
             "instructions": "Be helpful.",
             "model": "openai:gpt-4",
         },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_channel_create_does_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/channels", json={"name": "offline-channel"}, headers=auth_headers
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_team_create_does_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post("/api/v1/teams", json={"name": "Offline Team"}, headers=auth_headers)
+    assert response.status_code == 201, response.text
+
+
+def test_mcp_server_register_does_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _fake_discover_tools(url: str, timeout_seconds: int = 10) -> list[object]:  # noqa: ARG001
+        return []
+
+    monkeypatch.setattr("agent_hive.api.mcp_servers.discover_tools", _fake_discover_tools)
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "offline-server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_tool_create_does_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "offline_tool", "description": "A tool created while sync is not running."},
         headers=auth_headers,
     )
     assert response.status_code == 201, response.text

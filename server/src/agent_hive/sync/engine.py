@@ -132,6 +132,15 @@ class SyncEngine:
         self._pubsub: Pubsub | None = None
         self._mdns: WorkspaceMDNS | None = None
         self._connected_peers: dict[str, str] = {}
+        # Serializes concurrent connect attempts to the same peer_id.
+        # Manual connect() and mDNS auto-connect can both target the same
+        # peer at nearly the same moment; two concurrent host.connect()
+        # calls to the same peer reliably broke gossipsub mesh formation
+        # (found via a real test failure once auto-connect was added, not
+        # hypothetically) rather than just being redundant work. Grows one
+        # entry per ever-seen peer_id and is never pruned -- fine for a
+        # small mesh, not for a large/churning one.
+        self._connect_locks: dict[str, trio.Lock] = {}
         self._on_state_change: StateChangeHandler | None = None
         self._workspace_fingerprint: str | None = None
         self._psk_hex: str | None = None
@@ -274,20 +283,32 @@ class SyncEngine:
         except Exception:
             logger.warning("Auto-connect on mDNS discovery failed", exc_info=True)
 
+    def _lock_for_peer(self, peer_id: str) -> trio.Lock:
+        lock = self._connect_locks.get(peer_id)
+        if lock is None:
+            lock = trio.Lock()
+            self._connect_locks[peer_id] = lock
+        return lock
+
     async def _trio_auto_connect(self, peer_info: Libp2pPeerInfo) -> None:
         assert self._host is not None
         peer_id = str(peer_info.peer_id)
-        if peer_id == self._node_id or peer_id in self._connected_peers:
+        if peer_id == self._node_id:
             return
-        try:
-            with trio.fail_after(_CONNECT_TIMEOUT_SECONDS):
-                await self._host.connect(peer_info)
-        except Exception:
-            logger.warning("Could not auto-connect to discovered peer %s", peer_id, exc_info=True)
-            return
-        address = str(peer_info.addrs[0]) if peer_info.addrs else ""
-        self._connected_peers[peer_id] = address
-        logger.info("Auto-connected to mDNS-discovered peer %s", peer_id)
+        async with self._lock_for_peer(peer_id):
+            if peer_id in self._connected_peers:
+                return
+            try:
+                with trio.fail_after(_CONNECT_TIMEOUT_SECONDS):
+                    await self._host.connect(peer_info)
+            except Exception:
+                logger.warning(
+                    "Could not auto-connect to discovered peer %s", peer_id, exc_info=True
+                )
+                return
+            address = str(peer_info.addrs[0]) if peer_info.addrs else ""
+            self._connected_peers[peer_id] = address
+            logger.info("Auto-connected to mDNS-discovered peer %s", peer_id)
 
     async def stop(self) -> None:
         if self._thread is None:
@@ -319,10 +340,12 @@ class SyncEngine:
     async def _trio_connect(self, address: str) -> PeerInfo:
         assert self._host is not None
         info = info_from_p2p_addr(Multiaddr(address))
-        with trio.fail_after(_CONNECT_TIMEOUT_SECONDS):
-            await self._host.connect(info)
         peer_id = str(info.peer_id)
-        self._connected_peers[peer_id] = address
+        async with self._lock_for_peer(peer_id):
+            if peer_id not in self._connected_peers:
+                with trio.fail_after(_CONNECT_TIMEOUT_SECONDS):
+                    await self._host.connect(info)
+                self._connected_peers[peer_id] = address
         return PeerInfo(peer_id=peer_id, address=address, connected=True)
 
     async def disconnect(self, peer_id: str) -> None:

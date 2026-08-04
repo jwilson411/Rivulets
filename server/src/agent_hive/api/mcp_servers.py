@@ -5,7 +5,12 @@ attempt fails, matching this app's established NFR-2.4 pattern for
 unreachable external services elsewhere (agent providers, dispatcher
 LLM). A server that failed to connect just comes back with
 `connected: false` and no discovered tools; POST .../reconnect retries.
-"""
+
+Also synced (FR-9.1) — name/url only, on registration. `connected` and
+`last_connected_at` are per-node status, not synced (sync/apply.py's
+MCP_SERVER_SPEC and module docstring); reconnect doesn't change name/url
+so it never publishes. Discovered Tool rows aren't synced here either —
+each node discovers its own by connecting to the (synced) url."""
 
 import logging
 
@@ -17,6 +22,7 @@ from agent_hive.agentos.mcp import MCPConnectionError, discover_tools
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.base import utcnow_iso
 from agent_hive.db.models import MCPServer, Tool
+from agent_hive.sync.publish import publish_entity_change
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +121,9 @@ async def register_mcp_server(
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)
+    await publish_entity_change(
+        db, "mcp_server", server.id, {"name": server.name, "url": server.url}
+    )
     return await _to_detail(db, server)
 
 

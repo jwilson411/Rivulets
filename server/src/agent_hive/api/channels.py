@@ -1,4 +1,8 @@
-"""Channel CRUD (FR-2.1, FR-2.4, FR-2.5)."""
+"""Channel CRUD (FR-2.1, FR-2.4, FR-2.5).
+
+Also synced (FR-9.1) — name/description/position/archived, not team_id
+(see sync/apply.py's CHANNEL_SPEC and module docstring for why team
+assignment doesn't sync yet)."""
 
 from datetime import UTC, datetime
 
@@ -8,8 +12,23 @@ from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Channel
+from agent_hive.sync.publish import publish_entity_change
 
 router = APIRouter(prefix="/channels", tags=["channels"])
+
+
+async def _publish_channel_change(db: DbSession, channel: Channel) -> None:
+    await publish_entity_change(
+        db,
+        "channel",
+        channel.id,
+        {
+            "name": channel.name,
+            "description": channel.description,
+            "position": channel.position,
+            "archived": channel.archived,
+        },
+    )
 
 
 class ChannelCreate(BaseModel):
@@ -59,15 +78,18 @@ async def create_channel(body: ChannelCreate, db: DbSession, _: CurrentWorkspace
     db.add(channel)
     await db.commit()
     await db.refresh(channel)
+    await _publish_channel_change(db, channel)
     return channel
 
 
 @router.patch("/reorder", status_code=status.HTTP_204_NO_CONTENT)
 async def reorder_channels(body: ReorderRequest, db: DbSession, _: CurrentWorkspaceId) -> None:
-    for position, channel_id in enumerate(body.order):
-        channel = await _get_or_404(db, channel_id)
+    channels = [await _get_or_404(db, channel_id) for channel_id in body.order]
+    for position, channel in enumerate(channels):
         channel.position = position
     await db.commit()
+    for channel in channels:
+        await _publish_channel_change(db, channel)
 
 
 @router.get("/{channel_id}", response_model=ChannelOut)
@@ -86,6 +108,7 @@ async def update_channel(
     channel.vector_clock += 1
     await db.commit()
     await db.refresh(channel)
+    await _publish_channel_change(db, channel)
     return channel
 
 
@@ -95,6 +118,7 @@ async def archive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId)
     channel = await _get_or_404(db, channel_id)
     channel.archived = True
     await db.commit()
+    await _publish_channel_change(db, channel)
 
 
 @router.post("/{channel_id}/unarchive", response_model=ChannelOut)
@@ -103,4 +127,5 @@ async def unarchive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceI
     channel.archived = False
     await db.commit()
     await db.refresh(channel)
+    await _publish_channel_change(db, channel)
     return channel

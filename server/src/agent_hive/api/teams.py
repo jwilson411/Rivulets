@@ -1,4 +1,8 @@
-"""Team CRUD (FR-2.2)."""
+"""Team CRUD (FR-2.2).
+
+Also synced (FR-9.1) — name/description only; team membership (agent_ids,
+a join table) isn't synced yet for the same foreign-key-ordering reason
+Channel.team_id isn't (see sync/apply.py's module docstring)."""
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -6,8 +10,15 @@ from sqlalchemy import delete, select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Team, TeamAgent
+from agent_hive.sync.publish import publish_entity_change
 
 router = APIRouter(prefix="/teams", tags=["teams"])
+
+
+async def _publish_team_change(db: DbSession, team: Team) -> None:
+    await publish_entity_change(
+        db, "team", team.id, {"name": team.name, "description": team.description}
+    )
 
 
 class TeamCreate(BaseModel):
@@ -59,6 +70,7 @@ async def create_team(body: TeamCreate, db: DbSession, _: CurrentWorkspaceId) ->
     db.add(team)
     await db.commit()
     await db.refresh(team)
+    await _publish_team_change(db, team)
     return team
 
 
@@ -87,6 +99,7 @@ async def update_team(
         for position, agent_id in enumerate(body.agent_ids):
             db.add(TeamAgent(team_id=team_id, agent_id=agent_id, position=position))
     await db.commit()
+    await _publish_team_change(db, team)
     return TeamDetailOut(
         id=team.id,
         name=team.name,

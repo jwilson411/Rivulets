@@ -14,28 +14,59 @@ Each entity carries two related but distinct clocks:
     second sentence: conflicts must be surfaced for inspection, not
     resolved by fiat).
 
-Only the `agent` entity type is wired end-to-end so far — FR-9's thin
-first slice (FR-9.1 lists the full sync scope: agents, channels, threads,
-tools, MCP servers, files, settings). This module's shape generalizes to
-each of those once they get their own apply function; nothing here is
-agent-specific except `apply_remote_agent_change`'s field list.
+`apply_remote_change()` is the generic entity-sync path, driven by an
+`EntitySpec` (model class + which fields are synced) — Agent, Channel,
+Team, and MCPServer all go through it. Two things deliberately don't:
+
+  - Cross-entity foreign keys aren't synced. `Channel.team_id` is
+    excluded from `CHANNEL_SPEC` on purpose: gossipsub doesn't guarantee
+    delivery order across different entity types, so a channel's
+    "assigned to team X" change could arrive before team X's own create
+    message has. With SQLite's foreign_keys=ON, applying that write would
+    raise an IntegrityError. A real fix needs a retry/pending-apply queue
+    keyed on the missing reference; out of scope for this pass — team
+    assignment just doesn't sync yet.
+  - Per-node status fields aren't synced: `MCPServer.connected` and
+    `last_connected_at` reflect *this node's own* connection attempt, not
+    shared state — each node reconnects to a synced MCPServer's url
+    independently. Same reasoning FR-9.2 already applies to provider
+    credentials, extended to connection status.
+
+`Tool` doesn't use the generic path at all (apply_remote_tool_change,
+below) — FR-9.1 explicitly includes "tool code" in scope, and getting a
+tool's *source code* onto a peer's disk (not just its DB row) needs
+custom logic the generic field-copying path doesn't do. Only
+`tool_type == "custom"` tools sync: `mcp`-type Tool rows are a per-node
+cache of what a given MCPServer offers (rediscovered independently by
+each node's own reconnect, matching the MCPServer case above), and
+`builtin` tools aren't user-created at all.
 """
 
 import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import Agent, SyncConflict, VectorClockTracker
+from agent_hive.config import get_settings
+from agent_hive.db.base import Base
+from agent_hive.db.models import (
+    Agent,
+    Channel,
+    MCPServer,
+    SyncConflict,
+    Team,
+    Tool,
+    ToolVersion,
+    VectorClockTracker,
+)
 from agent_hive.db.session import session_scope
 
 logger = logging.getLogger(__name__)
-
-_AGENT_SYNCED_FIELDS = ("name", "description", "instructions", "model")
 
 
 class ClockComparison(Enum):
@@ -109,22 +140,37 @@ class ApplyResult:
     conflict: bool
 
 
-def _agent_snapshot(agent: Agent) -> dict[str, str]:
-    return {field: getattr(agent, field) for field in _AGENT_SYNCED_FIELDS}
+@dataclass(frozen=True, slots=True)
+class EntitySpec:
+    entity_type: str
+    model: type[Base]
+    synced_fields: tuple[str, ...]
 
 
-async def apply_remote_agent_change(
+AGENT_SPEC = EntitySpec("agent", Agent, ("name", "description", "instructions", "model"))
+CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
+TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
+MCP_SERVER_SPEC = EntitySpec("mcp_server", MCPServer, ("name", "url"))
+
+
+def _snapshot(instance: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: getattr(instance, field) for field in fields}
+
+
+async def apply_remote_change(
     db: AsyncSession,
+    spec: EntitySpec,
     entity_id: str,
     remote_vector_clock: dict[str, int],
     remote_node_id: str,
-    payload: dict[str, str],
+    payload: dict[str, Any],
 ) -> ApplyResult:
-    """FR-9.6: apply an incoming agent change if it strictly descends from
-    what this node already knows about that entity; ignore it if this node
-    is already ahead (stale/duplicate message); record a SyncConflict
-    (touching no local data) if the two versions are concurrent."""
-    local_vc = await _load_vector_clock(db, "agent", entity_id)
+    """FR-9.6: apply an incoming change for any entity covered by `spec` if
+    it strictly descends from what this node already knows about that
+    entity; ignore it if this node is already ahead (stale/duplicate
+    message); record a SyncConflict (touching no local data) if the two
+    versions are concurrent."""
+    local_vc = await _load_vector_clock(db, spec.entity_type, entity_id)
     comparison = compare_vector_clocks(local_vc, remote_vector_clock)
 
     if comparison in (ClockComparison.EQUAL, ClockComparison.LOCAL_NEWER):
@@ -133,12 +179,14 @@ async def apply_remote_agent_change(
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
 
     if comparison is ClockComparison.CONCURRENT:
-        local_agent = await db.get(Agent, entity_id)
+        local_instance = await db.get(spec.model, entity_id)
         db.add(
             SyncConflict(
-                entity_type="agent",
+                entity_type=spec.entity_type,
                 entity_id=entity_id,
-                local_snapshot=json.dumps(_agent_snapshot(local_agent) if local_agent else {}),
+                local_snapshot=json.dumps(
+                    _snapshot(local_instance, spec.synced_fields) if local_instance else {}
+                ),
                 remote_snapshot=json.dumps(payload),
                 remote_node_id=remote_node_id,
             )
@@ -147,22 +195,105 @@ async def apply_remote_agent_change(
         # apply the payload: this node is now causally aware of both
         # versions, which is what lets a *future* incoming message be
         # correctly judged against what's already been seen.
-        await _store_vector_clock(db, "agent", entity_id, merged)
+        await _store_vector_clock(db, spec.entity_type, entity_id, merged)
         await db.commit()
         return ApplyResult(applied=False, conflict=True)
 
     # REMOTE_NEWER: a clean, non-conflicting update -- apply it.
-    agent = await db.get(Agent, entity_id)
-    if agent is None:
-        agent = Agent(id=entity_id, name="", description="", instructions="", model="")
-        db.add(agent)
-    for field in _AGENT_SYNCED_FIELDS:
+    instance = await db.get(spec.model, entity_id)
+    if instance is None:
+        instance = spec.model(id=entity_id)
+        db.add(instance)
+    for field in spec.synced_fields:
         if field in payload:
-            setattr(agent, field, payload[field])
-    agent.vector_clock = max(merged.values())
-    await _store_vector_clock(db, "agent", entity_id, merged)
+            setattr(instance, field, payload[field])
+    if hasattr(instance, "vector_clock"):
+        setattr(instance, "vector_clock", max(merged.values()))  # noqa: B010
+    await _store_vector_clock(db, spec.entity_type, entity_id, merged)
     await db.commit()
     return ApplyResult(applied=True, conflict=False)
+
+
+_TOOL_SYNCED_FIELDS = ("name", "description")
+
+
+async def apply_remote_tool_change(
+    db: AsyncSession,
+    entity_id: str,
+    remote_vector_clock: dict[str, int],
+    remote_node_id: str,
+    payload: dict[str, Any],
+) -> ApplyResult:
+    """Like apply_remote_change, but for `tool` specifically: beyond the
+    name/description fields, the payload also carries the tool's current
+    source code (FR-9.1's "tool code"). On a clean apply, writes that code
+    to this node's own `tools_dir` (source_path is recomputed locally,
+    never copied verbatim from the sender — the sender's tools_dir may
+    live at a different filesystem path) and records a new ToolVersion so
+    rollback history stays meaningful on this node too."""
+    local_vc = await _load_vector_clock(db, "tool", entity_id)
+    comparison = compare_vector_clocks(local_vc, remote_vector_clock)
+
+    if comparison in (ClockComparison.EQUAL, ClockComparison.LOCAL_NEWER):
+        return ApplyResult(applied=False, conflict=False)
+
+    merged = merge_vector_clocks(local_vc, remote_vector_clock)
+
+    if comparison is ClockComparison.CONCURRENT:
+        local_tool = await db.get(Tool, entity_id)
+        db.add(
+            SyncConflict(
+                entity_type="tool",
+                entity_id=entity_id,
+                local_snapshot=json.dumps(
+                    _snapshot(local_tool, _TOOL_SYNCED_FIELDS) if local_tool else {}
+                ),
+                remote_snapshot=json.dumps({k: payload[k] for k in _TOOL_SYNCED_FIELDS}),
+                remote_node_id=remote_node_id,
+            )
+        )
+        await _store_vector_clock(db, "tool", entity_id, merged)
+        await db.commit()
+        return ApplyResult(applied=False, conflict=True)
+
+    tool = await db.get(Tool, entity_id)
+    source_path = str(get_settings().tools_dir / f"{payload['name']}.py")
+    if tool is None:
+        tool = Tool(id=entity_id, tool_type="custom", source_path=source_path)
+        db.add(tool)
+    for field in _TOOL_SYNCED_FIELDS:
+        if field in payload:
+            setattr(tool, field, payload[field])
+    tool.source_path = source_path
+    tool.vector_clock = max(merged.values())
+
+    source_code = payload.get("source_code")
+    if source_code is not None:
+        Path(source_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(source_path).write_text(source_code, encoding="utf-8")
+        await db.flush()
+        latest_version = await db.scalar(
+            select(ToolVersion.version)
+            .where(ToolVersion.tool_id == tool.id)
+            .order_by(ToolVersion.version.desc())
+        )
+        db.add(
+            ToolVersion(
+                tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code
+            )
+        )
+
+    await _store_vector_clock(db, "tool", entity_id, merged)
+    await db.commit()
+    return ApplyResult(applied=True, conflict=False)
+
+
+_DISPATCH: dict[str, EntitySpec] = {
+    "agent": AGENT_SPEC,
+    "channel": CHANNEL_SPEC,
+    "team": TEAM_SPEC,
+    "mcp_server": MCP_SERVER_SPEC,
+}
 
 
 async def handle_incoming_state_change(
@@ -177,17 +308,25 @@ async def handle_incoming_state_change(
     from the trio thread whenever a gossipsub message arrives. Opens its
     own DB session since it isn't running inside a FastAPI request.
 
-    Only `agent` is wired up (FR-9's thin first slice); other entity types
-    listed in FR-9.1 are logged and dropped until they get their own apply
-    function, matching this module's stated generalization path."""
-    if entity_type != "agent":
-        logger.info("Dropping sync message for unsupported entity_type=%r", entity_type)
-        return
+    Covers FR-9.1's agent/channel/team/mcp_server/tool sync scope; thread
+    history, file attachments, and workspace settings aren't wired up yet
+    and are logged/dropped, matching this module's generalization path."""
     async with session_scope() as db:
-        result = await apply_remote_agent_change(
-            db, entity_id, vector_clock, origin_node_id, payload
-        )
+        if entity_type == "tool":
+            result = await apply_remote_tool_change(
+                db, entity_id, vector_clock, origin_node_id, payload
+            )
+        elif entity_type in _DISPATCH:
+            result = await apply_remote_change(
+                db, _DISPATCH[entity_type], entity_id, vector_clock, origin_node_id, payload
+            )
+        else:
+            logger.info("Dropping sync message for unsupported entity_type=%r", entity_type)
+            return
+
         if result.conflict:
-            logger.warning("Sync conflict recorded for agent/%s", entity_id)
+            logger.warning("Sync conflict recorded for %s/%s", entity_type, entity_id)
         elif result.applied:
-            logger.info("Applied remote change for agent/%s from %s", entity_id, origin_node_id)
+            logger.info(
+                "Applied remote change for %s/%s from %s", entity_type, entity_id, origin_node_id
+            )
