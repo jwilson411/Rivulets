@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { threads, type Thread, type Message } from '$lib/api/threads';
+	import { auth } from '$lib/api/auth.svelte';
 
 	let thread = $state<Thread | null>(null);
 	let messages = $state<Message[]>([]);
@@ -9,6 +10,14 @@
 	let loadError = $state<string | null>(null);
 	let sending = $state(false);
 	let resuming = $state(false);
+
+	// Filled in token-by-token from the SSE stream below (FR-12.3) while an
+	// agent is mid-run, then cleared once its agent_message event lands —
+	// at which point the message is already in `messages` too, either from
+	// this same event or from the refetch handleReply does once its POST
+	// resolves (dispatch runs synchronously server-side; SSE is what makes
+	// the wait visible incrementally instead of as one silent pause).
+	let liveMessage = $state<{ agentId: string; agentName: string; content: string } | null>(null);
 
 	let pauseNotice = $derived(
 		[...messages].reverse().find((m) => m.content_type === 'system_alert')?.content ?? null
@@ -30,6 +39,51 @@
 
 	$effect(() => {
 		load(page.params.threadId!);
+	});
+
+	$effect(() => {
+		const threadId = page.params.threadId!;
+		const token = auth.token;
+		if (!token) return;
+
+		// EventSource can't set an Authorization header, so the token goes
+		// in the query string for this one endpoint only (api/deps.py's
+		// get_current_workspace_id_for_stream) — everything else keeps
+		// header-only auth.
+		const source = new EventSource(
+			`/api/v1/threads/${threadId}/stream?token=${encodeURIComponent(token)}`
+		);
+
+		source.addEventListener('agent_token', (event) => {
+			const data = JSON.parse((event as MessageEvent).data);
+			if (!liveMessage || liveMessage.agentId !== data.agent_id) {
+				liveMessage = { agentId: data.agent_id, agentName: data.agent_name, content: '' };
+			}
+			liveMessage.content += data.token;
+		});
+
+		source.addEventListener('agent_message', () => {
+			liveMessage = null;
+		});
+
+		source.addEventListener('system_alert', () => {
+			liveMessage = null;
+		});
+
+		// 'error' is both api-design.md's custom event name AND EventSource's
+		// own reserved name for connection-level failures, so this also
+		// fires on plain network hiccups, not just our agent-run-failed
+		// payloads — deliberately not parsing event.data here since its
+		// shape differs between the two cases. Agent failures are already
+		// visible durably via the persisted system_alert message (which
+		// clears liveMessage on its own listener above and shows up on the
+		// next messages refetch), so this listener only needs to stop
+		// showing a stale "still typing" bubble.
+		source.addEventListener('error', () => {
+			liveMessage = null;
+		});
+
+		return () => source.close();
 	});
 
 	async function handleReply(event: SubmitEvent) {
@@ -116,6 +170,16 @@
 					<p class="text-sm whitespace-pre-wrap">{message.content}</p>
 				</div>
 			{/each}
+			{#if liveMessage}
+				<div class="flex max-w-lg flex-col gap-1 rounded-lg bg-blue-50 px-4 py-2 dark:bg-blue-950">
+					<p class="text-xs font-medium text-zinc-900 opacity-70 dark:text-zinc-100">
+						{liveMessage.agentName}
+					</p>
+					<p class="text-sm whitespace-pre-wrap text-zinc-900 dark:text-zinc-100">
+						{liveMessage.content}<span class="animate-pulse">▍</span>
+					</p>
+				</div>
+			{/if}
 		{/if}
 	</div>
 

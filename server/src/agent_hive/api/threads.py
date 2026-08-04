@@ -2,25 +2,29 @@
 
 Posting a message runs the real dispatcher (dispatch/service.py) against
 the channel's team and persists any matched agents' replies in the same
-request. Live token-by-token streaming to the SSE endpoint is still a
-TODO — today an agent's reply lands in the thread only once its full
-run completes, not incrementally.
+request, publishing SSE events as it goes (FR-12.3) — a client with the
+stream endpoint open sees agent_token/agent_message/system_alert/error
+events live, in the same request cycle that's doing the dispatching.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from agent_hive.api.deps import CurrentWorkspaceId, DbSession
+from agent_hive.api.deps import CurrentWorkspaceId, CurrentWorkspaceIdForStream, DbSession
 from agent_hive.db.models import Channel, Message, Thread
 from agent_hive.dispatch import dispatch_and_respond
 from agent_hive.dispatch.guards import get_or_create_guard_state, reset_guard_state
+from agent_hive.streaming import subscribe, unsubscribe
 
 router = APIRouter(tags=["threads"])
+
+_DISCONNECT_POLL_SECONDS = 15
 
 
 class MessageCreate(BaseModel):
@@ -161,17 +165,41 @@ async def close_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> 
 
 
 @router.get("/threads/{thread_id}/stream")
-async def stream_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> StreamingResponse:
-    """SSE endpoint (api-design.md#sse-protocol). Event types: agent_token,
-    agent_message, agent_tool_call, handoff, system_alert, error, done.
+async def stream_thread(
+    thread_id: str, request: Request, db: DbSession, _: CurrentWorkspaceIdForStream
+) -> StreamingResponse:
+    """SSE endpoint (api-design.md#sse-protocol), backed by streaming.py's
+    in-process pub/sub. Stays open for the life of the connection — a
+    client viewing a thread gets every dispatch round's events as they
+    happen, not just the first one, so this never sends a terminal event
+    of its own; the generator only exits on client disconnect.
 
-    TODO: back this with a real per-thread pub/sub fed by AgentOS run
-    events. Today it just confirms the thread exists and closes the stream.
+    Emits agent_token, agent_message, system_alert, error, and done.
+    agent_tool_call and handoff aren't emitted yet — built-in tool calls
+    aren't wired into agent construction (FR-8.2's TODO in agentos/
+    service.py) and the handoff tool (FR-6) doesn't exist yet, so neither
+    has anything to observe.
+
+    The DB session this pulls in via dependency injection stays open for
+    as long as the connection does, same as the subscription — acceptable
+    overhead for a local single-user SQLite-backed app, not worth the
+    added complexity of releasing it early for one existence check.
     """
     await _get_thread_or_404(db, thread_id)
+    queue = subscribe(thread_id)
 
     async def event_source() -> AsyncIterator[bytes]:
-        payload = json.dumps({"thread_id": thread_id})
-        yield f"event: done\ndata: {payload}\n\n".encode()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_DISCONNECT_POLL_SECONDS)
+                except TimeoutError:
+                    continue
+                payload = json.dumps(event["data"])
+                yield f"event: {event['event']}\ndata: {payload}\n\n".encode()
+        finally:
+            unsubscribe(thread_id, queue)
 
     return StreamingResponse(event_source(), media_type="text/event-stream")

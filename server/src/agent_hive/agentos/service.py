@@ -37,11 +37,13 @@ mean fighting its migration tooling for no benefit.
 """
 
 import logging
+from collections.abc import Callable
 
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.os import AgentOS
-from agno.run.agent import RunOutput
+from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
+from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,8 +143,20 @@ async def run_agent(
     message: str,
     session_id: str,
     user_id: str = "human",
+    on_token: Callable[[str], None] | None = None,
 ) -> RunOutput:
-    """Invoke an agent by our DB id and return its full RunOutput."""
+    """Invoke an agent by our DB id and return its final RunOutput.
+
+    Always streams internally (agno's `arun(stream=True)`) so `on_token`
+    can be called with each content delta as it arrives — this is what
+    backs the SSE endpoint's `agent_token` events (FR-12.3,
+    dispatch/service.py). Callers that don't need incremental output
+    (most of dispatch/service.py's own logic — it only checks `.status`
+    and calls `.get_content_as_string()`) can omit `on_token` and use the
+    returned RunOutput exactly as before streaming existed; this function
+    synthesizes one from the terminal stream event since agno's streaming
+    mode doesn't hand back a RunOutput object directly.
+    """
     agent_os = get_agentos()
     agno_agent = next(
         (a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent) and a.id == agent_id),
@@ -153,10 +167,24 @@ async def run_agent(
             f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"
         )
 
-    # arun()'s overloads resolve cleanly at runtime with stream=False, but
-    # pyright can't fully collapse them (some branches carry Unknown type
-    # args from agno's own generics) — reportUnknownMemberType is about that
-    # overload set, not a real issue with this call.
-    return await agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
-        message, stream=False, session_id=session_id, user_id=user_id
-    )
+    final: RunOutput | None = None
+    # arun()'s overloads carry Unknown type args from agno's own generics —
+    # reportUnknownMemberType is about that overload set, not this call.
+    async for event in agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
+        message, stream=True, session_id=session_id, user_id=user_id
+    ):
+        if isinstance(event, RunContentEvent):
+            if on_token is not None and isinstance(event.content, str):
+                on_token(event.content)
+        elif isinstance(event, RunErrorEvent):
+            final = RunOutput(content=event.content, status=RunStatus.error)
+        elif isinstance(event, RunCompletedEvent):
+            final = RunOutput(content=event.content, status=RunStatus.completed)
+
+    if final is None:
+        # Every observed run ends in RunCompletedEvent or RunErrorEvent;
+        # this would mean the stream closed without either, which NFR-2.4's
+        # graceful-degradation contract in dispatch/service.py already
+        # treats as a plain failure via its except-and-skip around this call.
+        raise RuntimeError(f"Agent {agent_id!r}'s run ended without a completion or error event")
+    return final

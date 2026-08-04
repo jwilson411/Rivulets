@@ -13,6 +13,14 @@ each invocation, not by a separate depth counter: worst case is
 ~guard.turn_limit calls deep, comfortably under Python's recursion limit
 for the FR-7.4-documented range (1-100).
 
+Publishes SSE events (FR-12.3, streaming.py) as it goes — `agent_token`
+per streamed content delta, `agent_message` once a reply is persisted,
+`error`/`system_alert` on failure or guard pause, and `done` once per
+external (non-recursive) call. Persisting rows and publishing events both
+happen inline here, in the same request that triggered the dispatch — see
+api/threads.py's SSE endpoint for how a concurrent connection observes
+these live while this coroutine is still running.
+
 No LLM fallback is wired in yet (ADR-005's stage 2) — DispatchEngine is
 constructed without one, so only @mentions and manually-set deterministic
 rules can trigger a response today. Agent-generated rules (FR-3.3) cover
@@ -36,6 +44,7 @@ from agent_hive.dispatch.guards import (
     reset_guard_state,
 )
 from agent_hive.dispatch.rules import Rule, RuleType
+from agent_hive.streaming import publish
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +100,27 @@ async def dispatch_and_respond(
     triggered by another agent's own message — omit them for the normal,
     human-triggered path.
     """
+    is_top_level = from_agent_id is None
+    try:
+        return await _dispatch_and_respond(
+            db, thread, channel, message_content, from_agent_id, from_agent_name
+        )
+    finally:
+        # One "no more events for this trigger" signal per external call,
+        # regardless of which return path fired above (SSE clients need
+        # this even when nothing ended up matching, api-design.md's `done`).
+        if is_top_level:
+            publish(thread.id, "done", {"thread_id": thread.id})
+
+
+async def _dispatch_and_respond(
+    db: AsyncSession,
+    thread: Thread,
+    channel: Channel,
+    message_content: str,
+    from_agent_id: str | None,
+    from_agent_name: str | None,
+) -> list[Message]:
     guard_state = await get_or_create_guard_state(db, thread.id)
     if from_agent_id is None:
         reset_guard_state(guard_state)  # FR-7.5: a human message always resumes
@@ -121,6 +151,17 @@ async def dispatch_and_respond(
             break
 
         agent = agent_by_id[agent_id]
+        seq = 0
+
+        def on_token(delta: str, agent_id: str = agent.id, agent_name: str = agent.name) -> None:
+            nonlocal seq
+            seq += 1
+            publish(
+                thread.id,
+                "agent_token",
+                {"agent_id": agent_id, "agent_name": agent_name, "token": delta, "seq": seq},
+            )
+
         try:
             run_output = await run_agent(
                 db,
@@ -128,8 +169,9 @@ async def dispatch_and_respond(
                 message_content,
                 session_id=thread.agentos_session_id,
                 user_id="human",
+                on_token=on_token,
             )
-        except Exception:
+        except Exception as exc:
             # NFR-2.4: one agent's provider being unreachable doesn't stop
             # others in the same dispatch from responding. Covers failures
             # in our own run_agent() (e.g. "not registered") that happen
@@ -137,6 +179,7 @@ async def dispatch_and_respond(
             logger.warning(
                 "Agent %r failed to respond in thread %r", agent.name, thread.id, exc_info=True
             )
+            publish(thread.id, "error", {"agent_id": agent.id, "error": str(exc)})
             continue
 
         if run_output.status is RunStatus.error:
@@ -149,6 +192,7 @@ async def dispatch_and_respond(
             logger.warning(
                 "Agent %r run failed in thread %r: %s", agent.name, thread.id, run_output.content
             )
+            publish(thread.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
             message = Message(
                 thread_id=thread.id,
                 sender_type="system",
@@ -170,7 +214,19 @@ async def dispatch_and_respond(
             content=content,
         )
         db.add(message)
+        await db.flush()  # populate message.id for the agent_message event below
         new_messages.append(message)
+        publish(
+            thread.id,
+            "agent_message",
+            {
+                "agent_id": agent.id,
+                "agent_name": agent.name,
+                "message_id": message.id,
+                "content": content,
+                "seq": seq,
+            },
+        )
 
         pause_message = await record_agent_message(
             db,
@@ -185,6 +241,15 @@ async def dispatch_and_respond(
             thread.status = "paused"
             db.add(pause_message)
             new_messages.append(pause_message)
+            publish(
+                thread.id,
+                "system_alert",
+                {
+                    "type": "guard_paused",
+                    "reason": guard_state.pause_reason,
+                    "message": pause_message.content,
+                },
+            )
             break
 
         # FR-5.6/AC-014: this agent's own message can itself trigger a
