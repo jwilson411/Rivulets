@@ -3,11 +3,21 @@ and to AgentOS: loads a channel team's agents + routing rules, runs the
 dispatcher, invokes matched agents, and persists their replies as thread
 messages (FR-4.1, FR-5.2, FR-6.1's precursor, FR-12.1).
 
+Also recurses: an agent's own reply is itself re-dispatched (FR-5.6,
+AC-014's "Architect mentions @DBA, DBA responds" scenario), which is what
+gives loop-prevention guards (FR-7, dispatch/guards.py) something to
+actually guard against — without recursion, one human message can only
+ever produce one flat round of replies and a loop is structurally
+impossible. Recursion depth is bounded by the guard checks running before
+each invocation, not by a separate depth counter: worst case is
+~guard.turn_limit calls deep, comfortably under Python's recursion limit
+for the FR-7.4-documented range (1-100).
+
 No LLM fallback is wired in yet (ADR-005's stage 2) — DispatchEngine is
 constructed without one, so only @mentions and manually-set deterministic
-rules can trigger a response today. Agent-generated rules (FR-3.3) aren't
-built yet either, so a freshly created agent has none until someone PATCHes
-`/agents/{id}/routing-rules` by hand.
+rules can trigger a response today. Agent-generated rules (FR-3.3) cover
+the manual-setup gap on creation/edit, but there's still no semantic
+fallback for messages that miss every rule.
 """
 
 import json
@@ -20,6 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_hive.agentos import run_agent
 from agent_hive.db.models import Agent, AgentRoutingRule, Channel, Message, TeamAgent, Thread
 from agent_hive.dispatch.engine import AgentDispatchInfo, DispatchEngine
+from agent_hive.dispatch.guards import (
+    get_or_create_guard_state,
+    record_agent_message,
+    reset_guard_state,
+)
 from agent_hive.dispatch.rules import Rule, RuleType
 
 logger = logging.getLogger(__name__)
@@ -58,14 +73,30 @@ async def _load_team_dispatch_agents(
 
 
 async def dispatch_and_respond(
-    db: AsyncSession, thread: Thread, channel: Channel, message_content: str
+    db: AsyncSession,
+    thread: Thread,
+    channel: Channel,
+    message_content: str,
+    *,
+    from_agent_id: str | None = None,
+    from_agent_name: str | None = None,
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
     agent, appending its reply to `thread` as a Message row. Returns the
     new Message rows (already added to `db`, not yet committed — callers
     own the commit so this composes with whatever else they're persisting
     in the same request).
+
+    `from_agent_id`/`from_agent_name` are set only on recursive calls
+    triggered by another agent's own message — omit them for the normal,
+    human-triggered path.
     """
+    guard_state = await get_or_create_guard_state(db, thread.id)
+    if from_agent_id is None:
+        reset_guard_state(guard_state)  # FR-7.5: a human message always resumes
+    elif guard_state.paused:
+        return []  # FR-7.1/7.2/7.3: silent until a human reactivates
+
     if channel.team_id is None:
         return []
 
@@ -84,6 +115,11 @@ async def dispatch_and_respond(
 
     new_messages: list[Message] = []
     for agent_id in result.agent_ids:
+        if guard_state.paused:
+            # An earlier agent in this same round (or a deeper recursive
+            # call sharing this guard_state) just tripped a guard.
+            break
+
         agent = agent_by_id[agent_id]
         try:
             run_output = await run_agent(
@@ -109,8 +145,7 @@ async def dispatch_and_respond(
             # RunOutput whose `content` is the raw error string. Surfacing
             # that as if the agent said it would be confusing (NFR-5.4:
             # plain-language errors, not raw exception text) and wrong —
-            # it's not something the agent "said". Post it as a system
-            # message instead, same as a loop-guard pause (FR-7.1) does.
+            # it's not something the agent "said".
             logger.warning(
                 "Agent %r run failed in thread %r: %s", agent.name, thread.id, run_output.content
             )
@@ -121,18 +156,42 @@ async def dispatch_and_respond(
                 content=f"{agent.name} couldn't respond — its provider returned an error.",
                 content_type="system_alert",
             )
-        else:
-            # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
-            content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
-            message = Message(
-                thread_id=thread.id,
-                sender_type="agent",
-                sender_id=agent.id,
-                sender_name=agent.name,
-                content=content,
-            )
+            db.add(message)
+            new_messages.append(message)
+            continue  # provider errors don't count toward guard limits or recurse
 
+        # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
+        content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
+        message = Message(
+            thread_id=thread.id,
+            sender_type="agent",
+            sender_id=agent.id,
+            sender_name=agent.name,
+            content=content,
+        )
         db.add(message)
         new_messages.append(message)
+
+        pause_message = await record_agent_message(
+            db,
+            thread.id,
+            guard_state,
+            from_agent_id=from_agent_id,
+            from_agent_name=from_agent_name or "",
+            to_agent_id=agent.id,
+            to_agent_name=agent.name,
+        )
+        if pause_message is not None:
+            thread.status = "paused"
+            db.add(pause_message)
+            new_messages.append(pause_message)
+            break
+
+        # FR-5.6/AC-014: this agent's own message can itself trigger a
+        # teammate (e.g. an @mention in its reply) — recurse.
+        recursive_messages = await dispatch_and_respond(
+            db, thread, channel, content, from_agent_id=agent.id, from_agent_name=agent.name
+        )
+        new_messages.extend(recursive_messages)
 
     return new_messages

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Channel, Message, Thread
 from agent_hive.dispatch import dispatch_and_respond
+from agent_hive.dispatch.guards import get_or_create_guard_state, reset_guard_state
 
 router = APIRouter(tags=["threads"])
 
@@ -130,7 +131,8 @@ async def post_message(
         thread_id=thread_id, sender_type="human", sender_name="You", content=body.content
     )
     db.add(message)
-    # TODO(FR-7.5): a human message resets ThreadGuardState counters.
+    # dispatch_and_respond resets ThreadGuardState on every human-triggered
+    # call (FR-7.5) before dispatching.
     await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(message)
@@ -139,9 +141,13 @@ async def post_message(
 
 @router.post("/threads/{thread_id}/resume", response_model=ThreadOut)
 async def resume_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> Thread:
+    """FR-7.5's explicit "Resume" affordance — equivalent to what posting
+    any message already does, for when a human just wants to clear a
+    pause without saying anything yet."""
     thread = await _get_thread_or_404(db, thread_id)
     thread.status = "active"
-    # TODO(FR-7.5): clear ThreadGuardState (paused, counters, recent_interactions).
+    guard_state = await get_or_create_guard_state(db, thread_id)
+    reset_guard_state(guard_state)
     await db.commit()
     await db.refresh(thread)
     return thread

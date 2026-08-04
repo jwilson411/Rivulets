@@ -8,6 +8,11 @@
 	let reply = $state('');
 	let loadError = $state<string | null>(null);
 	let sending = $state(false);
+	let resuming = $state(false);
+
+	let pauseNotice = $derived(
+		[...messages].reverse().find((m) => m.content_type === 'system_alert')?.content ?? null
+	);
 
 	async function load(threadId: string) {
 		loadError = null;
@@ -47,6 +52,17 @@
 		}
 	}
 
+	async function handleResume() {
+		const threadId = page.params.threadId!;
+		resuming = true;
+		try {
+			thread = await threads.resume(threadId);
+			messages = await threads.listMessages(threadId);
+		} finally {
+			resuming = false;
+		}
+	}
+
 	function bubbleClass(senderType: Message['sender_type']): string {
 		if (senderType === 'human') {
 			return 'self-end bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900';
@@ -70,6 +86,21 @@
 			Thread{thread?.status && thread.status !== 'active' ? ` (${thread.status})` : ''}
 		</h1>
 	</header>
+
+	{#if thread?.status === 'paused'}
+		<div
+			class="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+		>
+			<span>{pauseNotice ?? 'This thread is paused — agent replies are suppressed.'}</span>
+			<button
+				onclick={handleResume}
+				disabled={resuming}
+				class="shrink-0 rounded-md border border-amber-300 px-3 py-1 text-xs font-medium hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:hover:bg-amber-900"
+			>
+				{resuming ? 'Resuming…' : 'Resume'}
+			</button>
+		</div>
+	{/if}
 
 	<div class="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
 		{#if loadError}

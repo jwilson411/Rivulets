@@ -82,4 +82,4 @@ testpaths = ["tests"]
 # CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
 # local runs during early scaffolding aren't blocked before the suite has grown.
 # NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
-# matches real coverage today (~69%) and should ratchet up as tests are added.
+# matches real coverage today (~70%) and should ratchet up as tests are added.

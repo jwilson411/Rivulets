@@ -65,18 +65,37 @@ def _create_channel_with_team(
     return channel_id
 
 
-def test_always_rule_agent_responds_to_new_thread(
+def test_keyword_rule_agent_responds_to_new_thread(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Reply text deliberately doesn't contain "widget" — an "always" rule
+    # would make the agent's own reply re-trigger itself (that scenario is
+    # covered separately, as a turn-limit guard test); a keyword rule that
+    # the *reply* doesn't match keeps this test to a single round-trip.
     monkeypatch.setattr(
         "agent_hive.dispatch.service.run_agent", _fake_run_agent("OK, doing that now.")
     )
-    agent_id = _create_agent_with_always_rule(client, auth_headers, "Always Agent")
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Keyword Agent",
+            "description": "Responds to widget questions.",
+            "instructions": "Say OK.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
+    agent_id = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": '["widget"]', "priority": 10}]},
+        headers=auth_headers,
+    )
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
     thread = client.post(
         f"/api/v1/channels/{channel_id}/threads",
-        json={"content": "anything at all"},
+        json={"content": "tell me about the widget"},
         headers=auth_headers,
     )
     assert thread.status_code == 201, thread.text
@@ -84,7 +103,7 @@ def test_always_rule_agent_responds_to_new_thread(
 
     messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
-    assert messages[1]["sender_name"] == "Always Agent"
+    assert messages[1]["sender_name"] == "Keyword Agent"
     assert messages[1]["content"] == "OK, doing that now."
 
 

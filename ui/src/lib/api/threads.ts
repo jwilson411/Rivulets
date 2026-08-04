@@ -34,5 +34,6 @@ export const threads = {
 	listMessages: (id: string) =>
 		api.get<Message[]>(`/threads/${id}/messages`, auth.token ?? undefined),
 	postMessage: (id: string, content: string) =>
-		api.post<Message>(`/threads/${id}/messages`, { content }, auth.token ?? undefined)
+		api.post<Message>(`/threads/${id}/messages`, { content }, auth.token ?? undefined),
+	resume: (id: string) => api.post<Thread>(`/threads/${id}/resume`, {}, auth.token ?? undefined)
 };
