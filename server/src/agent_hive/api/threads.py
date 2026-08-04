@@ -1,9 +1,10 @@
 """Threads & messages (FR-5), including the SSE stream (api-design.md#sse-protocol).
 
-Creating a thread/message here persists real rows. Triggering the
-dispatcher and streaming live agent output both require the AgentOS
-client and DispatchEngine wiring that isn't connected yet — those steps
-are marked TODO rather than faked with placeholder agent replies.
+Posting a message runs the real dispatcher (dispatch/service.py) against
+the channel's team and persists any matched agents' replies in the same
+request. Live token-by-token streaming to the SSE endpoint is still a
+TODO — today an agent's reply lands in the thread only once its full
+run completes, not incrementally.
 """
 
 import json
@@ -16,6 +17,7 @@ from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Channel, Message, Thread
+from agent_hive.dispatch import dispatch_and_respond
 
 router = APIRouter(tags=["threads"])
 
@@ -81,8 +83,8 @@ async def create_thread(
     channel_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
 ) -> Thread:
     """Posting to the channel creates a thread with the human message as its
-    root (FR-5.1). Dispatching to matching agents is TODO — see module docstring."""
-    await _get_channel_or_404(db, channel_id)
+    root (FR-5.1), then dispatches it to the channel's team (FR-4.1)."""
+    channel = await _get_channel_or_404(db, channel_id)
     thread = Thread(channel_id=channel_id, created_by="human")
     db.add(thread)
     await db.flush()
@@ -94,8 +96,7 @@ async def create_thread(
             content=body.content,
         )
     )
-    # TODO(FR-4.1): run DispatchEngine.dispatch() against the channel's team
-    # and invoke matching agents via the AgentOS client.
+    await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(thread)
     return thread
@@ -123,13 +124,14 @@ async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) ->
 async def post_message(
     thread_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
 ) -> Message:
-    await _get_thread_or_404(db, thread_id)
+    thread = await _get_thread_or_404(db, thread_id)
+    channel = await _get_channel_or_404(db, thread.channel_id)
     message = Message(
         thread_id=thread_id, sender_type="human", sender_name="You", content=body.content
     )
     db.add(message)
     # TODO(FR-7.5): a human message resets ThreadGuardState counters.
-    # TODO(FR-4.1): re-run the dispatcher for this thread.
+    await dispatch_and_respond(db, thread, channel, body.content)
     await db.commit()
     await db.refresh(message)
     return message

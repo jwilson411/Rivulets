@@ -1,16 +1,17 @@
 """Agent CRUD (FR-3) and routing rules (FR-3.3, FR-4.2).
 
-Registering the agent in AgentOS (FR-3.2) and generating routing rules via
-an LLM call (FR-3.3, US-017) both require an AgentOS/LLM client this
-scaffold doesn't wire up yet — those steps are marked TODO below rather
-than faked. The DB-side CRUD, which is what the UI needs to exist at all,
-is real.
+Registering with AgentOS (FR-3.2) happens via agentos/service.py's
+sync_agents() after every create/update/delete commit — see that module's
+docstring for how "registration" works without an HTTP AgentOS API.
+Generating routing rules via an LLM call (FR-3.3, US-017) still needs an
+LLM client this scaffold doesn't wire up yet, so that step stays a TODO.
 """
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
+from agent_hive.agentos import get_agentos, sync_agents
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Agent, AgentRoutingRule, AgentTool, TeamAgent
 
@@ -84,6 +85,19 @@ async def _set_teams(db: DbSession, agent_id: str, team_ids: list[str]) -> None:
         db.add(TeamAgent(team_id=team_id, agent_id=agent_id))
 
 
+async def _register_with_agentos(db: DbSession, agent: Agent) -> None:
+    """Rebuild AgentOS's agent registry and record whether `agent` made it
+    in. It won't have if its provider can't be resolved (NFR-2.4: that
+    only takes the one agent offline, not the whole sync) — agentos_agent_id
+    staying null is this scaffold's stand-in for an "unavailable" signal
+    until the UI grows a real status indicator."""
+    await sync_agents(db)
+    registered = any(a.id == agent.id for a in (get_agentos().agents or []))
+    agent.agentos_agent_id = agent.id if registered else None
+    await db.commit()
+    await db.refresh(agent)
+
+
 @router.get("", response_model=list[AgentOut])
 async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[Agent]:
     result = await db.execute(select(Agent))
@@ -104,13 +118,11 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
     await _set_tools(db, agent.id, body.tool_ids)
     await _set_teams(db, agent.id, body.team_ids)
 
-    # TODO(FR-3.2): register `agent` with AgentOS via the Agno SDK Agent class
-    # and store the returned ID in agent.agentos_agent_id.
     # TODO(FR-3.3, US-017): call the configured dispatcher LLM with
     # name/description/instructions to generate AgentRoutingRule rows.
 
     await db.commit()
-    await db.refresh(agent)
+    await _register_with_agentos(db, agent)
     return agent
 
 
@@ -142,23 +154,27 @@ async def update_agent(
 
     agent.vector_clock += 1
     await db.commit()
-    await db.refresh(agent)
+    await _register_with_agentos(db, agent)
     return agent
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
     agent = await _get_or_404(db, agent_id)
-    # TODO(FR-3.2): unregister from AgentOS (DELETE /agents/{agentos_agent_id}).
     await db.delete(agent)
     await db.commit()
+    # Rebuilds AgentOS's registry from the remaining rows — the deleted
+    # agent simply won't be in it anymore (FR-3.2's "unregister").
+    await sync_agents(db)
 
 
 @router.get("/{agent_id}/runs")
 async def get_agent_runs(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
-    """Proxies AgentOS run history (FR-3.5). Requires the AgentOS client."""
+    """Run history (FR-3.5) — AgentOS agents are wired up and runnable now
+    (see agentos/service.py), but reading run history back out of its
+    SqliteDb (tokens, cost, status per run) hasn't been built yet."""
     await _get_or_404(db, agent_id)
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "AgentOS client not yet wired up")
+    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Run history retrieval not yet wired up")
 
 
 @router.get("/{agent_id}/routing-rules", response_model=list[RoutingRuleOut])

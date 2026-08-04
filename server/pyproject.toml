@@ -11,12 +11,14 @@ dependencies = [
     "agno>=2.8,<3.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.13",
+    "anthropic>=0.120.2",
     "bcrypt>=5.0.0",
     "cryptography>=50.0.0",
     "fastapi>=0.115",
     "httpx>=0.28.1",
     "keyring>=25.7.0",
     "mnemonic>=0.21",
+    "openai>=2.53.0",
     "pydantic-settings>=2.14.2",
     "pyjwt>=2.9",
     "python-multipart>=0.0.32",
@@ -80,4 +82,4 @@ testpaths = ["tests"]
 # CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
 # local runs during early scaffolding aren't blocked before the suite has grown.
 # NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
-# matches real coverage today (~66%) and should ratchet up as tests are added.
+# matches real coverage today (~67%) and should ratchet up as tests are added.
