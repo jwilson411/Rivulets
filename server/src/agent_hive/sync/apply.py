@@ -442,6 +442,25 @@ _DISPATCH: dict[str, EntitySpec] = {
     "workspace_setting": WORKSPACE_SETTING_SPEC,
 }
 
+# Metadata-only views of tool/file for callers that just need "what fields
+# does this entity type's conflict snapshot carry" (api/sync.py's conflict
+# resolution) — NOT for the real incoming-sync path, which is why these
+# aren't in _DISPATCH: applying a tool/file conflict's remote_snapshot
+# this way updates name/description/hash/etc, but doesn't re-fetch source
+# code or file bytes (apply_remote_tool_change/apply_remote_file_change's
+# job, not conflict resolution's).
+TOOL_SPEC = EntitySpec("tool", Tool, _TOOL_SYNCED_FIELDS)
+FILE_SPEC = EntitySpec("file", File, _FILE_SYNCED_FIELDS)
+
+_ALL_SPECS: dict[str, EntitySpec] = {**_DISPATCH, "tool": TOOL_SPEC, "file": FILE_SPEC}
+
+
+def get_entity_spec(entity_type: str) -> EntitySpec | None:
+    """Looks up the field-copying spec for any synced entity type,
+    including tool/file (which use bespoke apply functions for the real
+    sync path but still have a well-defined set of metadata fields)."""
+    return _ALL_SPECS.get(entity_type)
+
 
 async def handle_incoming_state_change(
     entity_type: str,

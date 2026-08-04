@@ -45,6 +45,7 @@ from agent_hive.db.models import (
     ToolVersion,
     WorkspaceSetting,
 )
+from agent_hive.db.session import session_scope
 from agent_hive.sync.apply import (
     AGENT_SPEC,
     CHANNEL_SPEC,
@@ -650,6 +651,53 @@ def test_resolve_conflict_invalid_keep(client: TestClient, auth_headers: dict[st
         "/api/v1/sync/conflicts/nonexistent/resolve", json={"keep": "bogus"}, headers=auth_headers
     )
     assert response.status_code in (400, 404)
+
+
+async def test_resolve_conflict_applies_remote_for_non_agent_entity(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Regression test: resolve_conflict used to only apply the remote
+    snapshot for entity_type == 'agent' — every other synced entity type
+    (channel, team, thread, ...) silently did nothing when a user picked
+    "keep remote". Covered here with 'channel' since it goes through the
+    plain generic apply path (get_entity_spec)."""
+    create = client.post(
+        "/api/v1/channels", json={"name": "local-name-chan"}, headers=auth_headers
+    )
+    channel_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "channel", channel_id, "node-a")
+        result = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-b": 1},
+            "node-b",
+            {
+                "name": "remote-name-chan",
+                "description": "from remote",
+                "position": 0,
+                "archived": False,
+            },
+        )
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    matching = [c for c in conflicts if c["entity_id"] == channel_id]
+    assert len(matching) == 1
+    conflict_id = matching[0]["id"]
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    updated = client.get(f"/api/v1/channels/{channel_id}", headers=auth_headers).json()
+    assert updated["name"] == "remote-name-chan"
+    assert updated["description"] == "from remote"
 
 
 def test_agent_create_does_not_fail_when_sync_engine_not_running(

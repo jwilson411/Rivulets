@@ -13,14 +13,16 @@ FR-9.5's coverage, not a stub answer for something otherwise built.
 
 import json
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
-from agent_hive.db.models import Agent, SyncConflict
+from agent_hive.db.models import SyncConflict
 from agent_hive.sync import get_sync_engine
+from agent_hive.sync.apply import get_entity_spec
 from agent_hive.sync.engine import PeerInfo as EnginePeerInfo
 
 logger = logging.getLogger(__name__)
@@ -38,8 +40,13 @@ class ConflictOut(BaseModel):
     id: str
     entity_type: str
     entity_id: str
-    local_snapshot: dict[str, str]
-    remote_snapshot: dict[str, str]
+    # Snapshot values are whatever JSON a given entity's synced_fields
+    # happen to contain — dict[str, str] only ever worked by coincidence,
+    # back when 'agent' (all-string fields) was the only entity type that
+    # could conflict. Channel/Thread/MCPServer/etc. fields include
+    # int/bool/None too.
+    local_snapshot: dict[str, Any]
+    remote_snapshot: dict[str, Any]
     remote_node_id: str
     detected_at: str
 
@@ -135,13 +142,15 @@ async def resolve_conflict(
     if body.keep not in ("local", "remote"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "keep must be 'local' or 'remote'")
 
-    if body.keep == "remote" and conflict.entity_type == "agent":
-        agent = await db.get(Agent, conflict.entity_id)
-        if agent is not None:
-            remote = json.loads(conflict.remote_snapshot)
-            for field in ("name", "description", "instructions", "model"):
-                if field in remote:
-                    setattr(agent, field, remote[field])
+    if body.keep == "remote":
+        spec = get_entity_spec(conflict.entity_type)
+        if spec is not None:
+            instance = await db.get(spec.model, conflict.entity_id)
+            if instance is not None:
+                remote = json.loads(conflict.remote_snapshot)
+                for field in spec.synced_fields:
+                    if field in remote:
+                        setattr(instance, field, remote[field])
 
     conflict.resolved = True
     await db.commit()
