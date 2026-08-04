@@ -68,7 +68,9 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         if on_token is not None:
             on_token("Hel")
             on_token("lo")
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: "Hello")
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "Hello"
+        )
 
     monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_streaming_run_agent)
 

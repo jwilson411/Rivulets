@@ -60,7 +60,9 @@ def test_turn_limit_pauses_a_self_triggering_agent(
     """
 
     async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: "OK.")
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
+        )
 
     monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
 
@@ -103,7 +105,9 @@ def test_paused_thread_resumes_and_dispatches_again(
     reset_guard_state() actually ran rather than leaving `paused` stuck."""
 
     async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: "OK.")
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
+        )
 
     monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
 
@@ -138,7 +142,9 @@ def test_cycle_detection_pauses_two_agents_mentioning_each_other(
         _db: object, agent_id: str, _message: str, *_args: object, **_kwargs: object
     ) -> Any:
         content = "ping @AgentB" if agent_id == agent_a else "ping @AgentA"
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: content)
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: content
+        )
 
     monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
 
@@ -167,7 +173,9 @@ def test_timeout_pauses_when_configured_to_zero_minutes(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: "OK.")
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
+        )
 
     monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
 

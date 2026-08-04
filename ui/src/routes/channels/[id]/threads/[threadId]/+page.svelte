@@ -70,6 +70,15 @@
 			liveMessage = null;
 		});
 
+		// The handoff message itself is a persisted Message row (content_type
+		// 'handoff', rendered as a divider below), which the post-POST
+		// refetch in handleReply already picks up — this listener only needs
+		// to stop showing a stale "still typing" bubble for the handing-off
+		// agent once the handoff fires.
+		source.addEventListener('handoff', () => {
+			liveMessage = null;
+		});
+
 		// 'error' is both api-design.md's custom event name AND EventSource's
 		// own reserved name for connection-level failures, so this also
 		// fires on plain network hiccups, not just our agent-run-failed
@@ -161,14 +170,28 @@
 			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 		{:else}
 			{#each messages as message (message.id)}
-				<div
-					class="flex max-w-lg flex-col gap-1 rounded-lg px-4 py-2 {bubbleClass(
-						message.sender_type
-					)}"
-				>
-					<p class="text-xs font-medium opacity-70">{message.sender_name}</p>
-					<p class="text-sm whitespace-pre-wrap">{message.content}</p>
-				</div>
+				{#if message.content_type === 'handoff'}
+					<!-- FR-6.3: a distinct divider, not a chat bubble — this didn't
+					come from either party "saying" something, it's an event. -->
+					<div class="my-1 flex items-center gap-3 self-stretch">
+						<div class="h-px flex-1 bg-violet-200 dark:bg-violet-800"></div>
+						<span
+							class="rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+						>
+							{message.content}
+						</span>
+						<div class="h-px flex-1 bg-violet-200 dark:bg-violet-800"></div>
+					</div>
+				{:else}
+					<div
+						class="flex max-w-lg flex-col gap-1 rounded-lg px-4 py-2 {bubbleClass(
+							message.sender_type
+						)}"
+					>
+						<p class="text-xs font-medium opacity-70">{message.sender_name}</p>
+						<p class="text-sm whitespace-pre-wrap">{message.content}</p>
+					</div>
+				{/if}
 			{/each}
 			{#if liveMessage}
 				<div class="flex max-w-lg flex-col gap-1 rounded-lg bg-blue-50 px-4 py-2 dark:bg-blue-950">

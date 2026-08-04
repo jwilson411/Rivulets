@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_hive.agentos.models import resolve_model
 from agent_hive.config import get_settings
 from agent_hive.db.models import Agent
+from agent_hive.tools.builtin import handoff
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,9 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
         instructions=agent_row.instructions,
         model=model,
         db=_agentos_db(),
+        # FR-6.1: unlike the opt-in built-ins above, handoff is available
+        # to every agent unconditionally.
+        tools=[handoff],
     )
 
 
@@ -179,7 +183,10 @@ async def run_agent(
         elif isinstance(event, RunErrorEvent):
             final = RunOutput(content=event.content, status=RunStatus.error)
         elif isinstance(event, RunCompletedEvent):
-            final = RunOutput(content=event.content, status=RunStatus.completed)
+            # `tools` carries any tool calls made during the run (e.g. a
+            # handoff() call — dispatch/service.py inspects this to detect
+            # and act on it after the run completes).
+            final = RunOutput(content=event.content, status=RunStatus.completed, tools=event.tools)
 
     if final is None:
         # Every observed run ends in RunCompletedEvent or RunErrorEvent;

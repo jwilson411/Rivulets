@@ -19,7 +19,9 @@ def _fake_run_agent(content: str) -> Any:
     .get_content_as_string() on a successful run."""
 
     async def fake(*_args: object, **_kwargs: object) -> Any:
-        return SimpleNamespace(status=RunStatus.completed, get_content_as_string=lambda: content)
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: content
+        )
 
     return fake
 
