@@ -43,6 +43,7 @@ from agent_hive.db.models import (
     Thread,
     Tool,
     ToolVersion,
+    WorkspaceSetting,
 )
 from agent_hive.sync.apply import (
     AGENT_SPEC,
@@ -51,6 +52,7 @@ from agent_hive.sync.apply import (
     MESSAGE_SPEC,
     TEAM_SPEC,
     THREAD_SPEC,
+    WORKSPACE_SETTING_SPEC,
     ClockComparison,
     apply_remote_change,
     apply_remote_file_change,
@@ -212,6 +214,50 @@ async def test_apply_remote_mcp_server_change_does_not_sync_connection_status(
     assert server.name == "Filesystem tools"
     assert server.connected is False
     assert server.last_connected_at is None
+
+
+async def test_apply_remote_workspace_setting_change_creates_setting(
+    db_session: AsyncSession,
+) -> None:
+    """WorkspaceSetting's primary key is `key`, not `id` like every other
+    synced entity -- this is the regression test for EntitySpec.pk_field,
+    not just a routine "does sync work" check."""
+    result = await apply_remote_change(
+        db_session,
+        WORKSPACE_SETTING_SPEC,
+        "guard.turn_limit",
+        {"node-b": 1},
+        "node-b",
+        {"value": "15"},
+    )
+    assert result.applied is True
+
+    setting = await db_session.get(WorkspaceSetting, "guard.turn_limit")
+    assert setting is not None
+    assert setting.value == "15"
+
+
+async def test_apply_remote_workspace_setting_change_updates_existing(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(WorkspaceSetting(key="guard.turn_limit", value="10"))
+    await db_session.commit()
+    await record_local_change(db_session, "workspace_setting", "guard.turn_limit", "node-a")
+
+    result = await apply_remote_change(
+        db_session,
+        WORKSPACE_SETTING_SPEC,
+        "guard.turn_limit",
+        # Must dominate local's {node-a: 1} to apply cleanly rather than
+        # being judged concurrent.
+        {"node-a": 1, "node-b": 1},
+        "node-b",
+        {"value": "20"},
+    )
+    assert result.applied is True
+    setting = await db_session.get(WorkspaceSetting, "guard.turn_limit")
+    assert setting is not None
+    assert setting.value == "20"
 
 
 async def test_apply_remote_thread_change_creates_thread(db_session: AsyncSession) -> None:
@@ -721,3 +767,13 @@ def test_file_upload_and_attach_do_not_fail_when_sync_engine_not_running(
         headers=auth_headers,
     )
     assert thread.status_code == 201, thread.text
+
+
+def test_settings_patch_does_not_fail_when_sync_engine_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.patch(
+        "/api/v1/settings", json={"guard.turn_limit": 15}, headers=auth_headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["guard.turn_limit"] == 15

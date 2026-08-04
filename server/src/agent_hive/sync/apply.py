@@ -16,8 +16,8 @@ Each entity carries two related but distinct clocks:
 
 `apply_remote_change()` is the generic entity-sync path, driven by an
 `EntitySpec` (model class + which fields are synced) — Agent, Channel,
-Team, MCPServer, Thread, and Message all go through it. Two things
-deliberately don't sync:
+Team, MCPServer, Thread, Message, and WorkspaceSetting all go through it.
+Two things deliberately don't sync:
 
   - Foreign keys whose target entity type has no natural creation
     ordering relative to the referencing one aren't synced at all.
@@ -84,6 +84,7 @@ from agent_hive.db.models import (
     Tool,
     ToolVersion,
     VectorClockTracker,
+    WorkspaceSetting,
 )
 from agent_hive.db.session import session_scope
 from agent_hive.sync.engine import get_sync_engine
@@ -167,6 +168,11 @@ class EntitySpec:
     entity_type: str
     model: type[Base]
     synced_fields: tuple[str, ...]
+    # Every synced entity so far has an `id` primary key except
+    # WorkspaceSetting, whose primary key is its `key` string — pk_field
+    # lets it stay on this generic path instead of needing a third bespoke
+    # apply function (like Tool/File) just to construct a new row.
+    pk_field: str = "id"
 
 
 AGENT_SPEC = EntitySpec("agent", Agent, ("name", "description", "instructions", "model"))
@@ -186,6 +192,9 @@ MESSAGE_SPEC = EntitySpec(
         "content_type",
         "metadata_json",
     ),
+)
+WORKSPACE_SETTING_SPEC = EntitySpec(
+    "workspace_setting", WorkspaceSetting, ("value",), pk_field="key"
 )
 
 
@@ -238,7 +247,7 @@ async def apply_remote_change(
     # REMOTE_NEWER: a clean, non-conflicting update -- apply it.
     instance = await db.get(spec.model, entity_id)
     if instance is None:
-        instance = spec.model(id=entity_id)
+        instance = spec.model(**{spec.pk_field: entity_id})
         db.add(instance)
     for field in spec.synced_fields:
         if field in payload:
@@ -430,6 +439,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "mcp_server": MCP_SERVER_SPEC,
     "thread": THREAD_SPEC,
     "message": MESSAGE_SPEC,
+    "workspace_setting": WORKSPACE_SETTING_SPEC,
 }
 
 
@@ -445,8 +455,8 @@ async def handle_incoming_state_change(
     from the trio thread whenever a gossipsub message arrives. Opens its
     own DB session since it isn't running inside a FastAPI request.
 
-    Covers FR-9.1's agent/channel/team/mcp_server/tool/thread/message/file
-    sync scope; workspace settings aren't wired up yet and are logged/
+    Covers FR-9.1's full sync scope: agent/channel/team/mcp_server/tool/
+    thread/message/file/workspace_setting. Anything else is logged and
     dropped, matching this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":
