@@ -13,6 +13,7 @@ built yet either, so a freshly created agent has none until someone PATCHes
 import json
 import logging
 
+from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,21 +95,43 @@ async def dispatch_and_respond(
             )
         except Exception:
             # NFR-2.4: one agent's provider being unreachable doesn't stop
-            # others in the same dispatch from responding.
+            # others in the same dispatch from responding. Covers failures
+            # in our own run_agent() (e.g. "not registered") that happen
+            # before agno even gets a chance to run.
             logger.warning(
                 "Agent %r failed to respond in thread %r", agent.name, thread.id, exc_info=True
             )
             continue
 
-        # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
-        content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
-        message = Message(
-            thread_id=thread.id,
-            sender_type="agent",
-            sender_id=agent.id,
-            sender_name=agent.name,
-            content=content,
-        )
+        if run_output.status is RunStatus.error:
+            # Observed in practice: a bad API key doesn't raise — agno
+            # catches the provider's HTTP error and returns a normal-looking
+            # RunOutput whose `content` is the raw error string. Surfacing
+            # that as if the agent said it would be confusing (NFR-5.4:
+            # plain-language errors, not raw exception text) and wrong —
+            # it's not something the agent "said". Post it as a system
+            # message instead, same as a loop-guard pause (FR-7.1) does.
+            logger.warning(
+                "Agent %r run failed in thread %r: %s", agent.name, thread.id, run_output.content
+            )
+            message = Message(
+                thread_id=thread.id,
+                sender_type="system",
+                sender_name="system",
+                content=f"{agent.name} couldn't respond — its provider returned an error.",
+                content_type="system_alert",
+            )
+        else:
+            # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
+            content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
+            message = Message(
+                thread_id=thread.id,
+                sender_type="agent",
+                sender_id=agent.id,
+                sender_name=agent.name,
+                content=content,
+            )
+
         db.add(message)
         new_messages.append(message)
 
