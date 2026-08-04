@@ -3,8 +3,9 @@
 Registering with AgentOS (FR-3.2) happens via agentos/service.py's
 sync_agents() after every create/update/delete commit — see that module's
 docstring for how "registration" works without an HTTP AgentOS API.
-Generating routing rules via an LLM call (FR-3.3, US-017) still needs an
-LLM client this scaffold doesn't wire up yet, so that step stays a TODO.
+Routing rules are auto-generated via dispatch/rule_generation.py's LLM
+call (FR-3.3, US-017) on create, and regenerated on update when the
+description or instructions change (FR-3.4).
 """
 
 from fastapi import APIRouter, HTTPException, status
@@ -14,6 +15,7 @@ from sqlalchemy import delete, select
 from agent_hive.agentos import get_agentos, sync_agents
 from agent_hive.api.deps import CurrentWorkspaceId, DbSession
 from agent_hive.db.models import Agent, AgentRoutingRule, AgentTool, TeamAgent
+from agent_hive.dispatch.rule_generation import generate_routing_rules
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -85,6 +87,18 @@ async def _set_teams(db: DbSession, agent_id: str, team_ids: list[str]) -> None:
         db.add(TeamAgent(team_id=team_id, agent_id=agent_id))
 
 
+async def _generate_and_store_routing_rules(db: DbSession, agent: Agent) -> None:
+    rules = await generate_routing_rules(db, agent.name, agent.description, agent.instructions)
+    if rules:
+        db.add_all(
+            AgentRoutingRule(
+                agent_id=agent.id, rule_type=rule_type, pattern=pattern, priority=priority
+            )
+            for rule_type, pattern, priority in rules
+        )
+        await db.commit()
+
+
 async def _register_with_agentos(db: DbSession, agent: Agent) -> None:
     """Rebuild AgentOS's agent registry and record whether `agent` made it
     in. It won't have if its provider can't be resolved (NFR-2.4: that
@@ -117,11 +131,9 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
 
     await _set_tools(db, agent.id, body.tool_ids)
     await _set_teams(db, agent.id, body.team_ids)
-
-    # TODO(FR-3.3, US-017): call the configured dispatcher LLM with
-    # name/description/instructions to generate AgentRoutingRule rows.
-
     await db.commit()
+
+    await _generate_and_store_routing_rules(db, agent)
     await _register_with_agentos(db, agent)
     return agent
 
@@ -147,13 +159,13 @@ async def update_agent(
     if body.team_ids is not None:
         await _set_teams(db, agent_id, body.team_ids)
 
-    if needs_rule_regen:
-        # TODO(FR-3.4): regenerate routing rules — delete existing
-        # AgentRoutingRule rows for this agent and re-run the FR-3.3 flow.
-        pass
-
     agent.vector_clock += 1
     await db.commit()
+
+    if needs_rule_regen:
+        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
+        await _generate_and_store_routing_rules(db, agent)
+
     await _register_with_agentos(db, agent)
     return agent
 
