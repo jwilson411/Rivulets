@@ -32,13 +32,14 @@ Two things deliberately don't sync:
     same theoretical hazard — a thread/message is meaningless without
     its parent, unlike a channel's *optional* team assignment, so
     excluding them would make thread/message sync pointless. Instead
-    `apply_remote_change`'s final commit catches IntegrityError: if the
-    parent hasn't arrived yet, the change is dropped with a warning
-    rather than crashing the sync-message handler. In practice channels
-    and threads are created far less often than messages and the
-    dependency chain is one hop, so the race window is real but narrow;
-    there's still no redelivery/retry, so a message that loses this race
-    is simply never applied unless something re-publishes it.
+    `apply_remote_change`'s final commit catches IntegrityError and queues
+    the message (SyncPendingInbound) rather than dropping it or crashing
+    the sync-message handler — `handle_incoming_state_change` retries the
+    whole queue after every subsequent successful apply, on the chance the
+    missing dependency just arrived too. In practice channels and threads
+    are created far less often than messages and the dependency chain is
+    one hop, so the race window is real but narrow; this queue is what
+    closes it instead of the message being silently lost forever.
   - Per-node status fields aren't synced: `MCPServer.connected` and
     `last_connected_at` reflect *this node's own* connection attempt, not
     shared state — each node reconnects to a synced MCPServer's url
@@ -79,6 +80,7 @@ from agent_hive.db.models import (
     MCPServer,
     Message,
     SyncConflict,
+    SyncPendingInbound,
     Team,
     Thread,
     Tool,
@@ -264,12 +266,15 @@ async def apply_remote_change(
         await _store_vector_clock(db, spec.entity_type, entity_id, merged)
         await db.commit()
     except IntegrityError:
-        # Rolling back undoes the vector-clock bump too, so a later
-        # message for the same entity_id is judged fresh rather than
-        # silently treated as already-seen.
+        # Rolling back undoes the vector-clock bump too, so a retry (or a
+        # later fresh message for the same entity_id) is judged correctly
+        # against pre-failure state, not silently treated as already-seen.
         await db.rollback()
+        await _record_pending_inbound(
+            db, spec.entity_type, entity_id, remote_vector_clock, remote_node_id, payload
+        )
         logger.warning(
-            "Dropping %s/%s: referenced entity not found locally yet",
+            "Queued %s/%s: referenced entity not found locally yet",
             spec.entity_type,
             entity_id,
         )
@@ -462,6 +467,57 @@ def get_entity_spec(entity_type: str) -> EntitySpec | None:
     return _ALL_SPECS.get(entity_type)
 
 
+async def _record_pending_inbound(
+    db: AsyncSession,
+    entity_type: str,
+    entity_id: str,
+    vector_clock: dict[str, int],
+    origin_node_id: str,
+    payload: dict[str, Any],
+) -> None:
+    db.add(
+        SyncPendingInbound(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            vector_clock_json=json.dumps(vector_clock),
+            origin_node_id=origin_node_id,
+            payload_json=json.dumps(payload),
+        )
+    )
+    await db.commit()
+
+
+async def retry_pending_inbound(db: AsyncSession) -> None:
+    """Called after every successful apply (handle_incoming_state_change,
+    below): the entity that just landed might be exactly what was missing
+    for something queued earlier. Each row is deleted before its retry is
+    attempted, not after — if it fails again (still missing, or a
+    different dependency), apply_remote_change's own IntegrityError path
+    re-queues it via _record_pending_inbound, so there's no window where a
+    row is silently dropped because this function's own bookkeeping
+    (rather than the retry itself) failed. Only entity types on the
+    generic apply path can end up here — Tool/File have no FK-ordering
+    hazard (see module docstring), so get_entity_spec returning None for
+    an unexpected entity_type is treated as "nothing to retry", not an
+    error."""
+    result = await db.execute(select(SyncPendingInbound))
+    pending = list(result.scalars().all())
+    for row in pending:
+        entity_type = row.entity_type
+        entity_id = row.entity_id
+        vector_clock = json.loads(row.vector_clock_json)
+        origin_node_id = row.origin_node_id
+        payload = json.loads(row.payload_json)
+        await db.delete(row)
+        await db.commit()
+        spec = get_entity_spec(entity_type)
+        if spec is None:
+            continue
+        await apply_remote_change(db, spec, entity_id, vector_clock, origin_node_id, payload)
+    if pending:
+        logger.info("Retried %d pending inbound sync message(s)", len(pending))
+
+
 async def handle_incoming_state_change(
     entity_type: str,
     entity_id: str,
@@ -500,3 +556,4 @@ async def handle_incoming_state_change(
             logger.info(
                 "Applied remote change for %s/%s from %s", entity_type, entity_id, origin_node_id
             )
+            await retry_pending_inbound(db)

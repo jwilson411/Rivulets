@@ -314,3 +314,25 @@ class SyncPendingOutbound(Base):
     entity_type: Mapped[str] = mapped_column(primary_key=True)
     entity_id: Mapped[str] = mapped_column(primary_key=True)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class SyncPendingInbound(Base):
+    """An incoming sync message that couldn't be applied because it
+    references an entity that hasn't synced to this node yet
+    (Thread.channel_id, Message.thread_id — the FK-ordering hazard
+    documented in sync/apply.py's module docstring). The full message is
+    stored here (unlike SyncPendingOutbound, which only stores an entity
+    reference and re-reads current state) because there's nothing local
+    to re-read: this is someone else's change, and the only copy of it is
+    what arrived. Retried after every subsequent successful apply, on the
+    chance the missing dependency just arrived too. Not synced itself."""
+
+    __tablename__ = "sync_pending_inbound"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    entity_type: Mapped[str]
+    entity_id: Mapped[str]
+    vector_clock_json: Mapped[str]  # JSON: dict[str, int]
+    origin_node_id: Mapped[str]
+    payload_json: Mapped[str]  # JSON: dict[str, Any]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)

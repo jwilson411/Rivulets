@@ -2,20 +2,35 @@
 since it's a distinct concern (retry/recovery mechanisms) from core sync
 mechanics, and test_sync.py was already large.
 
-Covers the outbound retry queue: publish_entity_change queues an entity
-(SyncPendingOutbound) instead of just dropping the change when the sync
-engine isn't running or a publish attempt fails, and drain_pending_outbound
-(called on engine start, api/auth.py's login) retries everything queued.
+Covers two retry queues:
+  - Outbound: publish_entity_change queues an entity (SyncPendingOutbound)
+    instead of just dropping the change when the sync engine isn't
+    running or a publish attempt fails, and drain_pending_outbound
+    (called on engine start / peer connect, api/auth.py + app.py) retries
+    everything queued.
+  - Inbound: apply_remote_change queues a full incoming message
+    (SyncPendingInbound) instead of dropping it when it references an
+    entity that hasn't synced here yet (Thread.channel_id/Message.thread_id's
+    FK-ordering hazard, see sync/apply.py's module docstring), and
+    retry_pending_inbound (called after every successful apply) retries
+    everything queued, on the chance the missing dependency just arrived.
 """
 
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import Agent, Channel, SyncPendingOutbound
-from agent_hive.sync.apply import record_local_change
+from agent_hive.db.models import Agent, Channel, SyncPendingInbound, SyncPendingOutbound, Thread
+from agent_hive.sync.apply import (
+    CHANNEL_SPEC,
+    THREAD_SPEC,
+    apply_remote_change,
+    record_local_change,
+    retry_pending_inbound,
+)
 from agent_hive.sync.engine import init_sync_engine, reset_sync_engine_for_testing
 from agent_hive.sync.publish import (
     build_entity_payload,
@@ -223,3 +238,89 @@ async def test_record_local_change_is_reused_by_generic_apply(db_session: AsyncS
     publish.py refactor -- unrelated regression risk, cheap to check."""
     vc = await record_local_change(db_session, "agent", "agent-1", "node-a")
     assert vc == {"node-a": 1}
+
+
+async def test_apply_remote_change_queues_on_fk_ordering_failure(
+    db_session: AsyncSession,
+) -> None:
+    """A thread referencing a channel that hasn't synced here yet must be
+    queued (SyncPendingInbound), not silently lost forever."""
+    result = await apply_remote_change(
+        db_session,
+        THREAD_SPEC,
+        "thread-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "channel_id": "does-not-exist-yet",
+            "title": "Hello",
+            "status": "active",
+            "created_by": "human",
+        },
+    )
+    assert result.applied is False
+
+    pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
+    assert len(pending) == 1
+    assert pending[0].entity_type == "thread"
+    assert pending[0].entity_id == "thread-1"
+    assert pending[0].origin_node_id == "node-b"
+
+
+async def test_retry_pending_inbound_applies_once_dependency_exists(
+    db_session: AsyncSession,
+) -> None:
+    """The scenario the whole queue exists for: a thread arrives before
+    its channel, gets queued; the channel arrives later (a normal
+    successful apply); retrying the queue now succeeds."""
+    result = await apply_remote_change(
+        db_session,
+        THREAD_SPEC,
+        "thread-1",
+        {"node-b": 1},
+        "node-b",
+        {"channel_id": "chan-1", "title": "Hello", "status": "active", "created_by": "human"},
+    )
+    assert result.applied is False
+    assert len(list((await db_session.execute(select(SyncPendingInbound))).scalars().all())) == 1
+
+    # The channel "arrives" (a normal, unrelated apply).
+    channel_result = await apply_remote_change(
+        db_session,
+        CHANNEL_SPEC,
+        "chan-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "general", "description": None, "position": 0, "archived": False},
+    )
+    assert channel_result.applied is True
+
+    await retry_pending_inbound(db_session)
+
+    assert await db_session.get(Thread, "thread-1") is not None
+    assert (await db_session.execute(select(SyncPendingInbound))).scalars().all() == []
+
+
+async def test_retry_pending_inbound_requeues_if_still_missing(db_session: AsyncSession) -> None:
+    """Retrying before the dependency actually shows up must re-queue, not
+    drop the message -- a delete-then-reattempt cycle without a
+    correctness gap in either direction."""
+    await apply_remote_change(
+        db_session,
+        THREAD_SPEC,
+        "thread-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "channel_id": "still-does-not-exist",
+            "title": "Hello",
+            "status": "active",
+            "created_by": "human",
+        },
+    )
+
+    await retry_pending_inbound(db_session)
+
+    pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
+    assert len(pending) == 1
+    assert await db_session.get(Thread, "thread-1") is None
