@@ -268,3 +268,57 @@ async def test_resolve_agent_tools_continues_past_one_broken_tool(
 
     assert len(resolved) == 1
     assert resolved[0].name == "read_file"
+
+
+async def test_resolve_agent_tools_skips_custom_tool_that_raises_during_exec(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Distinct from a missing file or a name mismatch (both handled by
+    _load_custom_tool returning None): a file that exists and is
+    syntactically valid but raises while its top-level code actually runs
+    (e.g. an import of something not installed). exec_module doesn't
+    catch this itself -- resolve_agent_tools's per-tool try/except must."""
+    source_file = tmp_path / "broken_at_runtime.py"
+    source_file.write_text("import this_module_does_not_exist\n")
+
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="broken_at_runtime",
+        description="Raises when loaded, not when saved.",
+        tool_type="custom",
+        source_path=str(source_file),
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+
+async def test_resolve_agent_tools_continues_past_a_tool_that_raises_during_exec(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Same NFR-2.4 guarantee as test_resolve_agent_tools_continues_past_one_broken_tool,
+    but for the exec-time-exception path specifically, not a missing file."""
+    source_file = tmp_path / "broken_at_runtime.py"
+    source_file.write_text("import this_module_does_not_exist\n")
+
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+
+    broken = Tool(
+        name="broken_at_runtime",
+        description="Raises when loaded.",
+        tool_type="custom",
+        source_path=str(source_file),
+    )
+    db_session.add(broken)
+    healthy = (await db_session.execute(select(Tool).where(Tool.name == "web_search"))).scalar_one()
+    await db_session.commit()
+    await _assign(db_session, agent.id, broken.id)
+    await _assign(db_session, agent.id, healthy.id)
+
+    resolved = await resolve_agent_tools(db_session, agent)
+
+    assert len(resolved) == 1
+    assert resolved[0].name == "web_search"

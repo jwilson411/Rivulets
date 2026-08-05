@@ -102,12 +102,23 @@ async def _attach_files(db: DbSession, message: Message, file_ids: list[str]) ->
     """FR-10.1's "into threads" — links already-uploaded files (POST
     /files/upload) to the message referencing them. Unknown file_ids are
     skipped with a warning rather than failing the whole post: a stale/
-    bogus id from the client shouldn't block the human's message."""
+    bogus id from the client shouldn't block the human's message.
+
+    message_id is a single nullable column, not a many-to-many join — a
+    file can only ever belong to one message. Re-sending a file_id that's
+    already attached elsewhere is also skipped-with-a-warning rather than
+    reassigning it: silently moving a file from one message to another
+    would make it vanish from the first message's attachment list with no
+    trace of why. (Re-sending the same file_id for the *same* message is a
+    harmless no-op, not an error — an idempotent retry shouldn't fail.)"""
     attached: list[File] = []
     for file_id in file_ids:
         file_row = await db.get(File, file_id)
         if file_row is None:
             logger.warning("Ignoring unknown file_id %r in message attachment", file_id)
+            continue
+        if file_row.message_id is not None and file_row.message_id != message.id:
+            logger.warning("Ignoring file_id %r already attached to a different message", file_id)
             continue
         file_row.message_id = message.id
         attached.append(file_row)

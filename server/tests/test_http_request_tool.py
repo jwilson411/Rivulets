@@ -160,3 +160,69 @@ def test_follows_redirect_to_another_public_address(monkeypatch: pytest.MonkeyPa
     result = _call(url="http://example.com/")
     assert "HTTP 200" in result
     assert "redirected ok" in result
+
+
+def test_blocks_ipv6_loopback_literal() -> None:
+    with pytest.raises(ValueError, match="internal/private network"):
+        _call(url="http://[::1]/")
+
+
+def test_blocks_ipv6_unique_local_literal() -> None:
+    """fc00::/7 -- IPv6's equivalent of the IPv4 private ranges."""
+    with pytest.raises(ValueError, match="internal/private network"):
+        _call(url="http://[fc00::1]/")
+
+
+def test_blocks_ipv6_link_local_literal() -> None:
+    with pytest.raises(ValueError, match="internal/private network"):
+        _call(url="http://[fe80::1]/")
+
+
+def test_blocks_when_any_resolved_address_is_private_even_with_a_public_one_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostname resolving to multiple addresses (multiple DNS records)
+    must be blocked if *any* of them is unsafe, not just the first --
+    otherwise a DNS answer ordered with a public address first would slip
+    a private one past a naive first-result-only check."""
+
+    def getaddrinfo(_host: str, _port: object) -> list[tuple[object, ...]]:
+        return [
+            (None, None, None, None, ("93.184.216.34", 0)),
+            (None, None, None, None, ("10.0.0.5", 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+    with pytest.raises(ValueError, match="internal/private network"):
+        _call(url="http://multi-answer.example/")
+
+
+def test_redirect_loop_raises_instead_of_returning_unfollowed_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceeding the redirect cap must be a clear, distinguishable error --
+    not a silent return of whatever the last (unfollowed) 3xx response
+    happened to contain, which would look like a real server response."""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _fake_getaddrinfo_public("93.184.216.34"),
+    )
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(302, headers={"location": "http://example.com/next"})
+
+    monkeypatch.setattr(
+        http_request_module.httpx,
+        "Client",
+        _mock_client_factory(handler),
+    )
+
+    with pytest.raises(ValueError, match="Too many redirects"):
+        _call(url="http://example.com/")
+    # 1 initial request + 5 followed redirects = 6 calls before giving up.
+    assert call_count == 6

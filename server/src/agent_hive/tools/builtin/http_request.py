@@ -72,11 +72,15 @@ def http_request(
     with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
         response = client.request(method.upper(), str(target), headers=headers, content=body)
         redirects_followed = 0
-        while (
-            response.status_code in _REDIRECT_STATUS_CODES
-            and "location" in response.headers
-            and redirects_followed < _MAX_REDIRECTS
-        ):
+        while response.status_code in _REDIRECT_STATUS_CODES and "location" in response.headers:
+            if redirects_followed >= _MAX_REDIRECTS:
+                # Erroring here (rather than silently returning the last,
+                # unfollowed redirect response as if it were the real
+                # answer) matches httpx/requests' own default behavior for
+                # exceeding a redirect limit -- a 3xx body handed back with
+                # no indication *why* would look like the server's actual
+                # response, not like a safety cutoff.
+                raise _BlockedHostError(f"Too many redirects (exceeded {_MAX_REDIRECTS})")
             target = target.join(response.headers["location"])
             _check_url_is_allowed(target)
             response = client.request(method.upper(), str(target), headers=headers, content=body)
