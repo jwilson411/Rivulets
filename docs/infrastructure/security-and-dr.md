@@ -69,9 +69,9 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 #### Network Hardening
 - App Server binds to `127.0.0.1` only (NFR-3.4). Confirmed at startup — refuses to start if bound to `0.0.0.0`.
 - CORS disabled (same-origin only — UI and API are on the same origin).
-- CSRF protection via FastAPI's CSRF middleware.
+- Auth is bearer-token only (JWT in an `Authorization` header, never a cookie) — no ambient credential exists for a cross-origin request to ride along with, so CSRF (which specifically exploits automatically-attached cookies) doesn't apply to this API's threat model. No CSRF middleware is needed or present.
 - Rate limiting on login endpoint: 5 attempts per minute per IP (mitigates brute force).
-- AgentOS internal port (7777) only accessible from localhost, enforced by AgentOS config.
+- AgentOS has no HTTP surface at all in this implementation (see `agentos/service.py`'s module docstring) — it's used purely as an in-process Python agent registry via direct `Agent.arun()` calls, not mounted as a server, so there is no AgentOS port to isolate.
 - `http_request` builtin tool (FR-8.1) blocks requests to loopback/private/link-local/reserved IP ranges, including on redirect hops — an agent's outbound requests can be driven by synced/untrusted content, so this closes SSRF against the node's own localhost services and LAN.
 
 ### Key Management Hardening

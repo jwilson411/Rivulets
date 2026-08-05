@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     app_server_host: str = "127.0.0.1"
     app_server_port: int = 8484
 
-    agentos_host: str = "127.0.0.1"
-    agentos_port: int = 7777
-
     @property
     def db_path(self) -> Path:
         return self.workspace_dir / "agent-hive.db"
