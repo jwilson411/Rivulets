@@ -7,7 +7,20 @@ lifespan calls seed_builtin_tools() at startup -- the `client` fixture
 triggers that via create_app(), so a builtin row is always present.
 """
 
+from pathlib import Path
+from typing import Any
+
 from fastapi.testclient import TestClient
+
+
+def _create_custom_tool(client: TestClient, auth_headers: dict[str, str]) -> dict[str, Any]:
+    create = client.post(
+        "/api/v1/tools",
+        json={"name": "my_tool", "description": "Does a thing."},
+        headers=auth_headers,
+    )
+    assert create.status_code == 201, create.text
+    return create.json()
 
 
 def _get_builtin_tool_id(client: TestClient, auth_headers: dict[str, str]) -> str:
@@ -70,3 +83,78 @@ def test_delete_builtin_tool_is_rejected(client: TestClient, auth_headers: dict[
 
     assert response.status_code == 400
     assert client.get(f"/api/v1/tools/{builtin_id}", headers=auth_headers).status_code == 200
+
+
+def test_save_tool_version_writes_source_and_records_version(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = _create_custom_tool(client, auth_headers)
+    source = 'from agno.tools import tool\n\n\n@tool\ndef my_tool() -> str:\n    return "hi"\n'
+
+    response = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": source},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["version"] == 2  # version 1 is the empty file created alongside the tool
+    assert body["source_code"] == source
+    assert Path(tool["source_path"]).read_text() == source
+
+
+def test_save_tool_version_increments_across_multiple_saves(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = _create_custom_tool(client, auth_headers)
+
+    first = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "# v2"},
+        headers=auth_headers,
+    )
+    second = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "# v3"},
+        headers=auth_headers,
+    )
+
+    assert first.json()["version"] == 2
+    assert second.json()["version"] == 3
+    versions = client.get(f"/api/v1/tools/{tool['id']}/versions", headers=auth_headers).json()
+    assert [v["version"] for v in versions] == [3, 2, 1]
+
+
+def test_save_tool_version_rejects_invalid_python(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = _create_custom_tool(client, auth_headers)
+    original_source = Path(tool["source_path"]).read_text()
+
+    response = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "def broken(:\n"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400
+    assert "Invalid Python" in response.json()["detail"]
+    # Neither the file nor the version history changed.
+    assert Path(tool["source_path"]).read_text() == original_source
+    versions = client.get(f"/api/v1/tools/{tool['id']}/versions", headers=auth_headers).json()
+    assert len(versions) == 1
+
+
+def test_save_tool_version_rejected_for_builtin_tool(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    builtin_id = _get_builtin_tool_id(client, auth_headers)
+
+    response = client.post(
+        f"/api/v1/tools/{builtin_id}/versions",
+        json={"source_code": "# irrelevant"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400

@@ -1,9 +1,15 @@
 """Tool CRUD (FR-8.2 through FR-8.4).
 
-Simple-mode codegen (send a prompt to an LLM, review, approve) and the
-advanced-mode editor handoff both need integrations this scaffold doesn't
-wire up yet (an LLM client, and OS-specific "open in default editor"
-logic) — marked TODO. Listing/registering/versioning tool rows is real.
+Simple-mode codegen (send a prompt to an LLM, review, approve) still
+needs an LLM client wired up — marked TODO. The advanced-mode editor
+handoff is real on both ends now: open_tool_editor hands the UI a path
+to open in the OS's default editor (FR-8.4), and save_tool_version
+(below) is what a "Save" action in that flow calls — until it existed, a
+tool created via POST /tools had no way to ever get real code onto disk
+short of something writing to source_path directly outside the API, so
+every custom tool a user "wrote" was actually silently unusable
+(tool_resolution.py's _load_custom_tool skips a tool whose source file
+doesn't define a matching function).
 
 Custom tools are also synced (FR-9.1's "tool code") via
 sync/apply.py's apply_remote_tool_change — see _publish_tool_change
@@ -61,6 +67,10 @@ class ToolVersionOut(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+class ToolVersionCreate(BaseModel):
+    source_code: str
 
 
 async def _get_or_404(db: DbSession, tool_id: str) -> Tool:
@@ -140,6 +150,46 @@ async def list_tool_versions(
         .order_by(ToolVersion.version.desc())
     )
     return list(result.scalars().all())
+
+
+@router.post(
+    "/{tool_id}/versions", response_model=ToolVersionOut, status_code=status.HTTP_201_CREATED
+)
+async def save_tool_version(
+    tool_id: str, body: ToolVersionCreate, db: DbSession, _: CurrentWorkspaceId
+) -> ToolVersion:
+    """The "Save" side of the editor handoff (FR-8.4) — writes new source
+    to the tool's file and records it as the next version. Rejects
+    syntactically invalid Python outright (compile-only, not executed —
+    running arbitrary just-submitted code as part of a save request would
+    be its own risk) rather than silently accepting code that would just
+    make the tool unresolvable at agent-build time."""
+    tool = await _get_or_404(db, tool_id)
+    if tool.tool_type != "custom":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only custom tools have editable source")
+    assert tool.source_path is not None  # invariant: every custom tool gets one on create
+
+    try:
+        compile(body.source_code, tool.source_path, "exec")
+    except SyntaxError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid Python: {exc}") from exc
+
+    latest_version = await db.scalar(
+        select(ToolVersion.version)
+        .where(ToolVersion.tool_id == tool_id)
+        .order_by(ToolVersion.version.desc())
+        .limit(1)
+    )
+    next_version = (latest_version or 0) + 1
+
+    Path(tool.source_path).write_text(body.source_code, encoding="utf-8")
+    version_row = ToolVersion(tool_id=tool_id, version=next_version, source_code=body.source_code)
+    db.add(version_row)
+    tool.vector_clock += 1
+    await db.commit()
+    await db.refresh(version_row)
+    await _publish_tool_change(db, tool)
+    return version_row
 
 
 @router.post("/{tool_id}/versions/{version}/rollback", response_model=ToolOut)
