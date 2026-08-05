@@ -48,6 +48,13 @@ class MessageCreate(BaseModel):
     files: list[str] = []  # file_ids of already-uploaded files (POST /files/upload) to attach
 
 
+class AttachmentOut(BaseModel):
+    file_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+
+
 class MessageOut(BaseModel):
     id: str
     thread_id: str
@@ -57,6 +64,7 @@ class MessageOut(BaseModel):
     content: str
     content_type: str
     created_at: str
+    attachments: list[AttachmentOut] = []
 
     model_config = {"from_attributes": True}
 
@@ -110,6 +118,43 @@ async def _publish_message_change(db: DbSession, message: Message) -> None:
     await publish_current_state(db, "message", message.id)
 
 
+def _to_attachment_out(file_row: File) -> AttachmentOut:
+    return AttachmentOut(
+        file_id=file_row.id,
+        filename=file_row.filename,
+        mime_type=file_row.mime_type,
+        size_bytes=file_row.size_bytes,
+    )
+
+
+def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
+    return MessageOut(
+        id=message.id,
+        thread_id=message.thread_id,
+        sender_type=message.sender_type,
+        sender_id=message.sender_id,
+        sender_name=message.sender_name,
+        content=message.content,
+        content_type=message.content_type,
+        created_at=message.created_at,
+        attachments=[_to_attachment_out(f) for f in attachments],
+    )
+
+
+async def _attachments_by_message(db: DbSession, message_ids: list[str]) -> dict[str, list[File]]:
+    """File.message_id has no FK constraint (see this module's own docstring
+    on why threads/messages sync the way they do — File mirrors that same
+    loose-coupling choice), so this is a plain filter, not a join."""
+    if not message_ids:
+        return {}
+    result = await db.execute(select(File).where(File.message_id.in_(message_ids)))
+    grouped: dict[str, list[File]] = {}
+    for file_row in result.scalars().all():
+        assert file_row.message_id is not None  # guaranteed by the IN filter above
+        grouped.setdefault(file_row.message_id, []).append(file_row)
+    return grouped
+
+
 @router.get("/channels/{channel_id}/threads", response_model=list[ThreadOut])
 async def list_threads(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Thread]:
     await _get_channel_or_404(db, channel_id)
@@ -160,12 +205,14 @@ async def get_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> Th
 
 
 @router.get("/threads/{thread_id}/messages", response_model=list[MessageOut])
-async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Message]:
+async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[MessageOut]:
     await _get_thread_or_404(db, thread_id)
     result = await db.execute(
         select(Message).where(Message.thread_id == thread_id).order_by(Message.created_at)
     )
-    return list(result.scalars().all())
+    messages = list(result.scalars().all())
+    attachments_by_message = await _attachments_by_message(db, [m.id for m in messages])
+    return [_to_message_out(m, attachments_by_message.get(m.id, [])) for m in messages]
 
 
 @router.post(
@@ -175,7 +222,7 @@ async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) ->
 )
 async def post_message(
     thread_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
-) -> Message:
+) -> MessageOut:
     thread = await _get_thread_or_404(db, thread_id)
     channel = await _get_channel_or_404(db, thread.channel_id)
     message = Message(
@@ -198,7 +245,7 @@ async def post_message(
         await _publish_message_change(db, agent_message)
     for file_row in attached_files:
         await publish_file_change(db, file_row)
-    return message
+    return _to_message_out(message, attached_files)
 
 
 @router.post("/threads/{thread_id}/resume", response_model=ThreadOut)
@@ -234,11 +281,11 @@ async def stream_thread(
     happen, not just the first one, so this never sends a terminal event
     of its own; the generator only exits on client disconnect.
 
-    Emits agent_token, agent_message, system_alert, error, and done.
-    agent_tool_call and handoff aren't emitted yet — built-in tool calls
-    aren't wired into agent construction (FR-8.2's TODO in agentos/
-    service.py) and the handoff tool (FR-6) doesn't exist yet, so neither
-    has anything to observe.
+    Emits agent_token, agent_message, handoff, system_alert, error, and
+    done (dispatch/service.py). agent_tool_call isn't emitted yet — no
+    code path publishes it for any tool call (builtin, custom, or MCP),
+    only for the handoff tool specifically, which gets its own dedicated
+    event.
 
     The DB session this pulls in via dependency injection stays open for
     as long as the connection does, same as the subscription — acceptable
