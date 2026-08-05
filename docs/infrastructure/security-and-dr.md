@@ -72,6 +72,7 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 - CSRF protection via FastAPI's CSRF middleware.
 - Rate limiting on login endpoint: 5 attempts per minute per IP (mitigates brute force).
 - AgentOS internal port (7777) only accessible from localhost, enforced by AgentOS config.
+- `http_request` builtin tool (FR-8.1) blocks requests to loopback/private/link-local/reserved IP ranges, including on redirect hops — an agent's outbound requests can be driven by synced/untrusted content, so this closes SSRF against the node's own localhost services and LAN.
 
 ### Key Management Hardening
 

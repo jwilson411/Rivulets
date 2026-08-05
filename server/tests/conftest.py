@@ -25,6 +25,7 @@ from agent_hive.db.session import (  # noqa: E402
     session_scope,
 )
 from agent_hive.security import keys  # noqa: E402
+from agent_hive.security.rate_limit import get_login_rate_limiter  # noqa: E402
 from agent_hive.security.session import get_session_key_store  # noqa: E402
 from agent_hive.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
 
@@ -53,6 +54,11 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
 
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()
+    # The login rate limiter (security/rate_limit.py) is a module-level
+    # singleton, not per-app state — without resetting it here, tests
+    # sharing TestClient's fixed client IP would trip each other's 5/min
+    # cap well before the suite finishes.
+    get_login_rate_limiter().reset_for_testing()
 
     app = create_app()
     with TestClient(app) as test_client:
@@ -70,6 +76,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     override_engine(None)
     reset_agentos_for_testing()
     reset_sync_engine_for_testing()
+    get_login_rate_limiter().reset_for_testing()
 
 
 async def _noop_async(*_args: object, **_kwargs: object) -> None:

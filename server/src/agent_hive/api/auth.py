@@ -16,19 +16,25 @@ publishes (sync/publish.py's SyncPendingOutbound) — this is the other
 half of FR-9.5's "changes sync automatically when connectivity resumes":
 publish_entity_change queues on the way out, this is what actually
 retries the queue.
+
+Rate limited per security-and-dr.md's documented "5 attempts per minute
+per IP" (security/rate_limit.py) — checked before any credential work
+happens, so a flood of mnemonic guesses is capped regardless of whether
+any of them happen to be right.
 """
 
 import logging
 from datetime import UTC, datetime, timedelta
 
 import jwt
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from agent_hive.api.deps import DbSession
 from agent_hive.db.models import Workspace
 from agent_hive.security import keys
+from agent_hive.security.rate_limit import get_login_rate_limiter
 from agent_hive.security.session import get_session_key_store
 from agent_hive.sync import get_sync_engine
 from agent_hive.sync.publish import drain_pending_outbound
@@ -51,7 +57,13 @@ class LoginResponse(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(body: LoginRequest, db: DbSession) -> LoginResponse:
+async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    if not get_login_rate_limiter().check(client_ip):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "Too many login attempts — try again shortly"
+        )
+
     if not keys.is_valid_mnemonic(body.key):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid recovery phrase")
 
