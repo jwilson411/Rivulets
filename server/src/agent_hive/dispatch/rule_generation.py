@@ -76,7 +76,7 @@ def _to_stored_rule(generated: GeneratedRule) -> StoredRule:
     return generated.rule_type, json.dumps(generated.keywords), generated.priority
 
 
-async def _pick_dispatcher_model(db: AsyncSession) -> str | None:
+async def pick_dispatcher_model(db: AsyncSession) -> str | None:
     override_row = await db.get(WorkspaceSetting, "dispatcher.model_override")
     if override_row is not None:
         override = json.loads(override_row.value)
@@ -110,7 +110,7 @@ async def _run_generator(model: Model, prompt: str) -> GeneratedRoutingRules | N
 async def generate_routing_rules(
     db: AsyncSession, name: str, description: str, instructions: str
 ) -> list[StoredRule]:
-    provider_model = await _pick_dispatcher_model(db)
+    provider_model = await pick_dispatcher_model(db)
     if provider_model is None:
         return []
 

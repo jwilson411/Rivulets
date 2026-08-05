@@ -32,11 +32,10 @@ and publishing events both happen inline here, in the same request that
 triggered the dispatch — see api/threads.py's SSE endpoint for how a
 concurrent connection observes these live while this coroutine runs.
 
-No LLM fallback is wired in yet (ADR-005's stage 2) — DispatchEngine is
-constructed without one, so only @mentions and manually-set deterministic
-rules can trigger a response today. Agent-generated rules (FR-3.3) cover
-the manual-setup gap on creation/edit, but there's still no semantic
-fallback for messages that miss every rule.
+A message that misses every @mention and deterministic rule falls through
+to dispatch/llm_fallback.py's LLM-based fallback (ADR-005 stage 2) before
+being dropped as unrouted — see that module's docstring for model
+selection and graceful-degradation behavior.
 """
 
 import json
@@ -63,6 +62,7 @@ from agent_hive.dispatch.guards import (
     record_agent_message,
     reset_guard_state,
 )
+from agent_hive.dispatch.llm_fallback import build_llm_fallback
 from agent_hive.dispatch.rules import Rule, RuleType
 from agent_hive.streaming import publish
 
@@ -97,7 +97,14 @@ async def _load_team_dispatch_agents(
             select(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent.id)
         )
         rules = [_row_to_rule(row) for row in rules_result.scalars().all()]
-        pairs.append((agent, AgentDispatchInfo(agent_id=agent.id, name=agent.name, rules=rules)))
+        pairs.append(
+            (
+                agent,
+                AgentDispatchInfo(
+                    agent_id=agent.id, name=agent.name, rules=rules, description=agent.description
+                ),
+            )
+        )
     return pairs
 
 
@@ -174,7 +181,7 @@ async def _dispatch_and_respond(
     agent_by_id = {agent.id: agent for agent, _ in team_agents}
     dispatch_infos = [info for _, info in team_agents]
 
-    engine = DispatchEngine()  # TODO(ADR-005 stage 2): inject an LLM fallback
+    engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
     result = await engine.dispatch(message_content, dispatch_infos)
 
     if thread.agentos_session_id is None:

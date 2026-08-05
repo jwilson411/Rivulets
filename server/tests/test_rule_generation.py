@@ -8,9 +8,9 @@ from agent_hive.db.models import ProviderConfig, WorkspaceSetting
 from agent_hive.dispatch.rule_generation import (
     GeneratedRoutingRules,
     GeneratedRule,
-    _pick_dispatcher_model,  # pyright: ignore[reportPrivateUsage]
     _to_stored_rule,  # pyright: ignore[reportPrivateUsage]
     generate_routing_rules,
+    pick_dispatcher_model,
 )
 
 
@@ -35,7 +35,7 @@ def test_to_stored_rule_regex_stores_raw_string() -> None:
 async def test_pick_dispatcher_model_returns_none_with_no_providers(
     db_session: AsyncSession,
 ) -> None:
-    assert await _pick_dispatcher_model(db_session) is None
+    assert await pick_dispatcher_model(db_session) is None
 
 
 async def test_pick_dispatcher_model_uses_default_provider(db_session: AsyncSession) -> None:
@@ -49,7 +49,7 @@ async def test_pick_dispatcher_model_uses_default_provider(db_session: AsyncSess
     )
     await db_session.commit()
 
-    model = await _pick_dispatcher_model(db_session)
+    model = await pick_dispatcher_model(db_session)
     assert model == "anthropic:claude-haiku-4-5-20251001"
 
 
@@ -59,7 +59,7 @@ async def test_pick_dispatcher_model_falls_back_to_first_when_no_default(
     db_session.add(ProviderConfig(provider="deepseek", label="DeepSeek", api_key_ref="ref-1"))
     await db_session.commit()
 
-    model = await _pick_dispatcher_model(db_session)
+    model = await pick_dispatcher_model(db_session)
     assert model == "deepseek:deepseek-chat"
 
 
@@ -70,7 +70,7 @@ async def test_pick_dispatcher_model_honors_workspace_override(db_session: Async
     )
     await db_session.commit()
 
-    model = await _pick_dispatcher_model(db_session)
+    model = await pick_dispatcher_model(db_session)
     assert model == "openai:o3-mini"
 
 

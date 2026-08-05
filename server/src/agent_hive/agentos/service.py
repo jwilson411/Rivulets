@@ -170,12 +170,15 @@ async def run_agent(
         )
 
     final: RunOutput | None = None
+    accumulated_content = ""
     # arun()'s overloads carry Unknown type args from agno's own generics —
     # reportUnknownMemberType is about that overload set, not this call.
     async for event in agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
         message, stream=True, session_id=session_id, user_id=user_id
     ):
         if isinstance(event, RunContentEvent):
+            if isinstance(event.content, str):
+                accumulated_content += event.content
             if on_token is not None and isinstance(event.content, str):
                 on_token(event.content)
         elif isinstance(event, RunErrorEvent):
@@ -187,9 +190,26 @@ async def run_agent(
             final = RunOutput(content=event.content, status=RunStatus.completed, tools=event.tools)
 
     if final is None:
-        # Every observed run ends in RunCompletedEvent or RunErrorEvent;
-        # this would mean the stream closed without either, which NFR-2.4's
-        # graceful-degradation contract in dispatch/service.py already
-        # treats as a plain failure via its except-and-skip around this call.
-        raise RuntimeError(f"Agent {agent_id!r}'s run ended without a completion or error event")
+        if accumulated_content:
+            # Observed in practice with a local OpenAI-compatible backend
+            # (ollama): the stream ends after its last RunContentEvent
+            # without ever emitting RunCompletedEvent, even though the
+            # model finished normally and produced real content. Treating
+            # that as an outright failure (the prior behavior) silently
+            # discarded a perfectly good reply — synthesize a completed
+            # RunOutput from what streamed instead. `tools` is empty here
+            # since a real RunCompletedEvent is the only source for it;
+            # a handoff call from a provider that hits this path simply
+            # won't be detected, same as it wouldn't have been before this
+            # RunOutput existed at all.
+            final = RunOutput(content=accumulated_content, status=RunStatus.completed)
+        else:
+            # Nothing streamed at all — a genuine failure, not just a
+            # provider that skips the terminal event. NFR-2.4's
+            # graceful-degradation contract in dispatch/service.py already
+            # treats this as a plain failure via its except-and-skip
+            # around this call.
+            raise RuntimeError(
+                f"Agent {agent_id!r}'s run ended without a completion or error event"
+            )
     return final

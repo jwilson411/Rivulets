@@ -29,6 +29,9 @@ class AgentDispatchInfo:
     agent_id: str
     name: str
     rules: list[Rule] = field(default_factory=list[Rule])
+    # Only consumed by the LLM fallback (dispatch/llm_fallback.py) — stage
+    # 1's deterministic/mention matching never looks at it.
+    description: str = ""
 
 
 class DispatchMethod(StrEnum):
