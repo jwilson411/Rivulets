@@ -48,8 +48,7 @@ export default defineConfig({
 						instances: [{ browser: 'chromium', headless: true }]
 					},
 					include: ['src/**/*.svelte.{test,spec}.{js,ts}'],
-					exclude: ['src/lib/server/**'],
-					passWithNoTests: true
+					exclude: ['src/lib/server/**']
 				}
 			},
 
@@ -59,8 +58,7 @@ export default defineConfig({
 					name: 'server',
 					environment: 'node',
 					include: ['src/**/*.{test,spec}.{js,ts}'],
-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}'],
-					passWithNoTests: true
+					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
 				}
 			}
 		]

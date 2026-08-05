@@ -8,6 +8,8 @@
 
 	let newTeamName = $state('');
 	let creating = $state(false);
+	let createError = $state<string | null>(null);
+	let actionError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -26,10 +28,13 @@
 		event.preventDefault();
 		if (!newTeamName.trim()) return;
 		creating = true;
+		createError = null;
 		try {
 			await teams.create(newTeamName.trim());
 			newTeamName = '';
 			await refresh();
+		} catch (err) {
+			createError = err instanceof Error ? err.message : 'Failed to create team';
 		} finally {
 			creating = false;
 		}
@@ -39,13 +44,23 @@
 		const agentIds = checked
 			? [...team.agent_ids, agentId]
 			: team.agent_ids.filter((id) => id !== agentId);
-		await teams.update(team.id, { agent_ids: agentIds });
-		await refresh();
+		actionError = null;
+		try {
+			await teams.update(team.id, { agent_ids: agentIds });
+			await refresh();
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to update team';
+		}
 	}
 
 	async function handleDelete(teamId: string) {
-		await teams.remove(teamId);
-		await refresh();
+		actionError = null;
+		try {
+			await teams.remove(teamId);
+			await refresh();
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to delete team';
+		}
 	}
 </script>
 
@@ -59,26 +74,34 @@
 
 	<form
 		onsubmit={handleCreate}
-		class="flex gap-2 rounded-md border border-zinc-200 p-4 dark:border-zinc-800"
+		class="flex flex-col gap-2 rounded-md border border-zinc-200 p-4 dark:border-zinc-800"
 	>
-		<input
-			type="text"
-			bind:value={newTeamName}
-			placeholder="Team name"
-			class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
-		/>
-		<button
-			type="submit"
-			disabled={creating}
-			class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-		>
-			Create
-		</button>
+		<div class="flex gap-2">
+			<input
+				type="text"
+				bind:value={newTeamName}
+				placeholder="Team name"
+				class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+			/>
+			<button
+				type="submit"
+				disabled={creating}
+				class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+			>
+				Create
+			</button>
+		</div>
+		{#if createError}
+			<p class="text-sm text-red-600 dark:text-red-400">{createError}</p>
+		{/if}
 	</form>
 
 	{#if loadError}
 		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 	{:else}
+		{#if actionError}
+			<p class="text-sm text-red-600 dark:text-red-400">{actionError}</p>
+		{/if}
 		<ul class="flex flex-col gap-3">
 			{#each teamList as team (team.id)}
 				<li class="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">

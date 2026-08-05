@@ -18,6 +18,8 @@
 	let newMessage = $state('');
 	let loadError = $state<string | null>(null);
 	let posting = $state(false);
+	let teamChangeError = $state<string | null>(null);
+	let postError = $state<string | null>(null);
 
 	async function loadPreviews(list: Thread[]) {
 		const entries = await Promise.all(
@@ -59,7 +61,12 @@
 
 	async function handleTeamChange(teamId: string) {
 		const channelId = page.params.id!;
-		channel = await channels.update(channelId, { team_id: teamId || null });
+		teamChangeError = null;
+		try {
+			channel = await channels.update(channelId, { team_id: teamId || null });
+		} catch (err) {
+			teamChangeError = err instanceof Error ? err.message : 'Failed to change team';
+		}
 	}
 
 	async function handlePost(event: SubmitEvent) {
@@ -67,11 +74,14 @@
 		const channelId = page.params.id!;
 		if (!newMessage.trim()) return;
 		posting = true;
+		postError = null;
 		try {
 			await threads.create(channelId, newMessage.trim());
 			newMessage = '';
 			threadList = await threads.listForChannel(channelId);
 			await loadPreviews(threadList);
+		} catch (err) {
+			postError = err instanceof Error ? err.message : 'Failed to send message';
 		} finally {
 			posting = false;
 		}
@@ -91,19 +101,24 @@
 			{/if}
 		</div>
 		{#if channel}
-			<label class="flex items-center gap-2 text-xs text-zinc-500">
-				Team:
-				<select
-					value={channel.team_id ?? ''}
-					onchange={(e) => handleTeamChange((e.target as HTMLSelectElement).value)}
-					class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-				>
-					<option value="">No team</option>
-					{#each teamList as team (team.id)}
-						<option value={team.id}>{team.name}</option>
-					{/each}
-				</select>
-			</label>
+			<div class="flex flex-col items-end gap-1">
+				<label class="flex items-center gap-2 text-xs text-zinc-500">
+					Team:
+					<select
+						value={channel.team_id ?? ''}
+						onchange={(e) => handleTeamChange((e.target as HTMLSelectElement).value)}
+						class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+					>
+						<option value="">No team</option>
+						{#each teamList as team (team.id)}
+							<option value={team.id}>{team.name}</option>
+						{/each}
+					</select>
+				</label>
+				{#if teamChangeError}
+					<p class="text-xs text-red-600 dark:text-red-400">{teamChangeError}</p>
+				{/if}
+			</div>
 		{/if}
 	</header>
 
@@ -142,19 +157,27 @@
 		{/if}
 	</div>
 
-	<form onsubmit={handlePost} class="flex gap-2 border-t border-zinc-200 p-4 dark:border-zinc-800">
-		<input
-			type="text"
-			bind:value={newMessage}
-			placeholder="Message #{channel?.name ?? ''}"
-			class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-		/>
-		<button
-			type="submit"
-			disabled={posting || !newMessage.trim()}
-			class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-		>
-			Send
-		</button>
+	<form
+		onsubmit={handlePost}
+		class="flex flex-col gap-2 border-t border-zinc-200 p-4 dark:border-zinc-800"
+	>
+		{#if postError}
+			<p class="text-sm text-red-600 dark:text-red-400">{postError}</p>
+		{/if}
+		<div class="flex gap-2">
+			<input
+				type="text"
+				bind:value={newMessage}
+				placeholder="Message #{channel?.name ?? ''}"
+				class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+			/>
+			<button
+				type="submit"
+				disabled={posting || !newMessage.trim()}
+				class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+			>
+				Send
+			</button>
+		</div>
 	</form>
 </div>

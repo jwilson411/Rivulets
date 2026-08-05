@@ -7,6 +7,7 @@
 	let channelList = $state<Channel[]>([]);
 	let newChannelName = $state('');
 	let loadError = $state<string | null>(null);
+	let createError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -22,9 +23,14 @@
 	async function handleCreateChannel(event: SubmitEvent) {
 		event.preventDefault();
 		if (!newChannelName.trim()) return;
-		await channels.create(newChannelName.trim());
-		newChannelName = '';
-		await refresh();
+		createError = null;
+		try {
+			await channels.create(newChannelName.trim());
+			newChannelName = '';
+			await refresh();
+		} catch (err) {
+			createError = err instanceof Error ? err.message : 'Failed to create channel';
+		}
 	}
 
 	function isActive(path: string): boolean {
@@ -107,20 +113,25 @@
 
 	<form
 		onsubmit={handleCreateChannel}
-		class="flex gap-1 border-t border-zinc-200 p-2 dark:border-zinc-800"
+		class="flex flex-col gap-1 border-t border-zinc-200 p-2 dark:border-zinc-800"
 	>
-		<input
-			type="text"
-			bind:value={newChannelName}
-			placeholder="new-channel"
-			class="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-xs focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-		/>
-		<button
-			type="submit"
-			class="rounded-md bg-zinc-900 px-2 py-1 text-xs font-medium text-white dark:bg-zinc-100 dark:text-zinc-900"
-		>
-			Add
-		</button>
+		<div class="flex gap-1">
+			<input
+				type="text"
+				bind:value={newChannelName}
+				placeholder="new-channel"
+				class="min-w-0 flex-1 rounded-md border border-zinc-300 px-2 py-1 text-xs focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+			/>
+			<button
+				type="submit"
+				class="rounded-md bg-zinc-900 px-2 py-1 text-xs font-medium text-white dark:bg-zinc-100 dark:text-zinc-900"
+			>
+				Add
+			</button>
+		</div>
+		{#if createError}
+			<p class="px-1 text-xs text-red-600 dark:text-red-400">{createError}</p>
+		{/if}
 	</form>
 
 	<div class="border-t border-zinc-200 p-2 dark:border-zinc-800">

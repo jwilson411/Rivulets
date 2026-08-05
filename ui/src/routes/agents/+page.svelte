@@ -13,6 +13,7 @@
 	let createError = $state<string | null>(null);
 
 	let keywordDrafts = $state<Record<string, string>>({});
+	let actionError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -54,8 +55,13 @@
 	}
 
 	async function setRule(agentId: string, ruleType: RuleType, pattern: string) {
-		await agents.setRoutingRules(agentId, [{ rule_type: ruleType, pattern, priority: 10 }]);
-		rulesByAgent[agentId] = await agents.getRoutingRules(agentId);
+		actionError = null;
+		try {
+			await agents.setRoutingRules(agentId, [{ rule_type: ruleType, pattern, priority: 10 }]);
+			rulesByAgent[agentId] = await agents.getRoutingRules(agentId);
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to update routing rule';
+		}
 	}
 
 	async function setKeywordRule(agentId: string) {
@@ -77,8 +83,13 @@
 	}
 
 	async function handleDelete(agentId: string) {
-		await agents.remove(agentId);
-		await refresh();
+		actionError = null;
+		try {
+			await agents.remove(agentId);
+			await refresh();
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to delete agent';
+		}
 	}
 </script>
 
@@ -138,6 +149,9 @@
 	{#if loadError}
 		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 	{:else}
+		{#if actionError}
+			<p class="text-sm text-red-600 dark:text-red-400">{actionError}</p>
+		{/if}
 		<ul class="flex flex-col gap-3">
 			{#each agentList as agent (agent.id)}
 				<li class="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
