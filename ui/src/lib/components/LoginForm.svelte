@@ -22,11 +22,10 @@
 
 <main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-8 px-6">
 	<header>
-		<h1 class="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-			Agent Hive
-		</h1>
+		<h1 class="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">Rivulets</h1>
 		<p class="mt-1 text-zinc-500 dark:text-zinc-400">
-			A local-first workspace for humans and AI agent teams.
+			A local-first workspace where conversations run like small streams — humans and AI agent
+			teams, side by side.
 		</p>
 	</header>
 

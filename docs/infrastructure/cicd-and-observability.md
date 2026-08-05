@@ -1,4 +1,4 @@
-# Agent Hive — CI/CD Pipeline & Observability
+# Rivulets — CI/CD Pipeline & Observability
 
 ---
 
@@ -7,9 +7,9 @@
 ### Repository Structure
 
 ```
-agent-hive/                      # GitHub repo: github.com/justin/agent-hive (TBD)
+rivulets/                      # GitHub repo: github.com/justin/rivulets (TBD)
 ├── server/                      # Python App Server + AgentOS integration
-│   ├── agent_hive/
+│   ├── rivulets/
 │   │   ├── main.py              # Entry point + process supervisor
 │   │   ├── app.py               # FastAPI app factory
 │   │   ├── api/                 # REST API routes
@@ -149,7 +149,7 @@ main          — stable, protected. Only merges via PR.
 Each platform build runs this smoke test:
 ```bash
 # 1. Start the binary in background
-./agent-hive &
+./rivulets &
 PID=$!
 sleep 5
 
@@ -175,7 +175,7 @@ kill $PID
 
 ### Logging Architecture
 
-All three processes (App Server, AgentOS, Sync Engine) write JSON Lines logs to `~/.agent-hive/logs/`.
+All three processes (App Server, AgentOS, Sync Engine) write JSON Lines logs to `~/.rivulets/logs/`.
 
 **Log levels:**
 | Level | Usage |
@@ -236,7 +236,7 @@ Since this is a desktop app, "alerting" means in-UI notifications, not external 
 | File store approaching limit | Toast: "File storage is 80% full. Manage files in Settings." |
 | Peer disconnected unexpectedly | Toast: "Lost connection to home-desktop. Changes will sync when reconnected." |
 | Conflict detected | Banner: "A conflict was detected. Review in Sync settings." |
-| New version available | Banner: "Agent Hive v0.2.0 is available. Download now." |
+| New version available | Banner: "Rivulets v0.2.0 is available. Download now." |
 
 ### Tracing
 
@@ -269,8 +269,8 @@ Memory        312 MB (OK)
 ### Local Dev Setup (One Command)
 
 ```bash
-git clone https://github.com/justin/agent-hive
-cd agent-hive
+git clone https://github.com/justin/rivulets
+cd rivulets
 uv sync --dev
 cd ui && npm install && cd ..
 ```
@@ -279,7 +279,7 @@ cd ui && npm install && cd ..
 
 ```bash
 # Terminal 1: App Server (hot reload via uvicorn --reload)
-uv run uvicorn agent_hive.app:app --reload --port 8484
+uv run uvicorn rivulets.app:app --reload --port 8484
 
 # Terminal 2: SvelteKit dev server (hot reload, proxies API to :8484)
 cd ui && npm run dev -- --port 5173
@@ -291,7 +291,7 @@ Open `http://localhost:5173` for the UI with hot module replacement. API calls p
 
 ```bash
 # All Python tests
-uv run pytest -n auto --cov=agent_hive --cov-report=html
+uv run pytest -n auto --cov=rivulets --cov-report=html
 
 # Specific test file
 uv run pytest tests/test_dispatcher.py -v

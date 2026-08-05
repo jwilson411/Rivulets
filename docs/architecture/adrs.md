@@ -1,10 +1,10 @@
-# Agent Hive — Architecture Decision Records
+# Rivulets — Architecture Decision Records
 
 ---
 
 ## ADR-001: AgentOS as Runtime (Not a Custom Agent Engine)
 
-**Decision:** Agent Hive uses Agno's AgentOS as its agent execution runtime. We do not build a custom agent runner, session manager, or streaming infrastructure.
+**Decision:** Rivulets uses Agno's AgentOS as its agent execution runtime. We do not build a custom agent runner, session manager, or streaming infrastructure.
 
 **Rationale:**
 - AgentOS already provides: agent runs (POST `/agents/{id}/runs`), session management, SSE streaming, MCP server mounting, tracing, RBAC, scheduler, and background execution.
@@ -13,7 +13,7 @@
 - AgentOS's built-in Slack/Telegram interfaces prove the pattern works.
 
 **Alternatives considered:**
-- **Custom agent engine:** Rejected. Massive scope. We'd be building AgentOS, not Agent Hive.
+- **Custom agent engine:** Rejected. Massive scope. We'd be building AgentOS, not Rivulets.
 - **LangGraph/CrewAI as runtime:** Rejected. These are agent frameworks, not runtimes. They don't provide session management, streaming APIs, MCP mounting, or RBAC out of the box. AgentOS can run LangGraph agents via its Multi-Framework BETA if we ever need it.
 - **Direct LLM API calls from App Server:** Rejected. We'd have to build session persistence, streaming, tool execution, and MCP from scratch.
 
@@ -26,7 +26,7 @@
 
 ## ADR-002: Single Binary, Local-First Deployment
 
-**Decision:** Agent Hive ships as a single binary (Python + deps + UI bundled) that runs entirely on the user's machine. The web UI connects to localhost. No cloud infrastructure.
+**Decision:** Rivulets ships as a single binary (Python + deps + UI bundled) that runs entirely on the user's machine. The web UI connects to localhost. No cloud infrastructure.
 
 **Rationale:**
 - The product vision is explicitly decentralized (OOS-1). No servers, no SaaS.

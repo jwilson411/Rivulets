@@ -11,7 +11,7 @@ import pytest
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
-from agent_hive.streaming import publish, subscribe, unsubscribe
+from rivulets.streaming import publish, subscribe, unsubscribe
 
 
 def test_publish_with_no_subscribers_does_not_raise() -> None:
@@ -72,7 +72,7 @@ def test_dispatch_publishes_documented_sse_event_sequence(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: "Hello"
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_streaming_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_streaming_run_agent)
 
     created = client.post(
         "/api/v1/agents",

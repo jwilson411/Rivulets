@@ -31,8 +31,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.config import get_settings
-from agent_hive.db.models import (
+from rivulets.config import get_settings
+from rivulets.db.models import (
     Agent,
     Channel,
     File,
@@ -45,8 +45,8 @@ from agent_hive.db.models import (
     ToolVersion,
     WorkspaceSetting,
 )
-from agent_hive.db.session import session_scope
-from agent_hive.sync.apply import (
+from rivulets.db.session import session_scope
+from rivulets.sync.apply import (
     AGENT_SPEC,
     CHANNEL_SPEC,
     MCP_SERVER_SPEC,
@@ -62,7 +62,7 @@ from agent_hive.sync.apply import (
     merge_vector_clocks,
     record_local_change,
 )
-from agent_hive.sync.engine import SyncEngine, init_sync_engine, reset_sync_engine_for_testing
+from rivulets.sync.engine import SyncEngine, init_sync_engine, reset_sync_engine_for_testing
 
 _AGENT_FIELDS = {
     "description": "A test agent used only in sync tests.",
@@ -433,7 +433,7 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
             return content
 
     reset_sync_engine_for_testing()
-    monkeypatch.setattr("agent_hive.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
     monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
 
     result = await apply_remote_file_change(
@@ -485,7 +485,7 @@ async def test_apply_remote_file_change_does_not_fetch_when_engine_not_running(
 async def test_apply_remote_tool_change_writes_source_code_to_disk(
     db_session: AsyncSession,
 ) -> None:
-    # conftest.py points AGENT_HIVE_WORKSPACE_DIR at an isolated temp dir
+    # conftest.py points RIVULETS_WORKSPACE_DIR at an isolated temp dir
     # for the whole test session, so get_settings().tools_dir is already
     # safe to write into here without redirecting it further per-test.
     expected_path = get_settings().tools_dir / "add_numbers.py"
@@ -563,7 +563,7 @@ async def test_two_engines_sync_agent_state_change(tmp_path: Path) -> None:
     # the same pair of hosts reliably broke gossipsub mesh formation
     # (discovered by this test actually failing after auto-connect was
     # added -- not a hypothetical).
-    psk_hex = hashlib.sha256(b"agent-hive-test-workspace").digest().hex()
+    psk_hex = hashlib.sha256(b"rivulets-test-workspace").digest().hex()
 
     engine_a = SyncEngine(tmp_path / "a")
     engine_b = SyncEngine(tmp_path / "b")
@@ -583,8 +583,8 @@ async def test_two_engines_sync_agent_state_change(tmp_path: Path) -> None:
 
     engine_b.set_state_change_handler(on_change)
 
-    await engine_a.start("agent-hive-test-workspace-fingerprint-a", psk_hex)
-    await engine_b.start("agent-hive-test-workspace-fingerprint-b", psk_hex)
+    await engine_a.start("rivulets-test-workspace-fingerprint-a", psk_hex)
+    await engine_b.start("rivulets-test-workspace-fingerprint-b", psk_hex)
     try:
         addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             _get_first_addr, engine_a
@@ -778,7 +778,7 @@ def test_mcp_server_register_does_not_fail_when_sync_engine_not_running(
     async def _fake_discover_tools(url: str, timeout_seconds: int = 10) -> list[object]:  # noqa: ARG001
         return []
 
-    monkeypatch.setattr("agent_hive.api.mcp_servers.discover_tools", _fake_discover_tools)
+    monkeypatch.setattr("rivulets.api.mcp_servers.discover_tools", _fake_discover_tools)
 
     response = client.post(
         "/api/v1/mcp-servers",

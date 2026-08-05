@@ -1,4 +1,4 @@
-# Agent Hive — Security Hardening & Disaster Recovery
+# Rivulets — Security Hardening & Disaster Recovery
 
 ---
 
@@ -37,7 +37,7 @@
 - App Server, AgentOS, and Sync Engine run as separate OS processes (per deployment architecture).
 - Agent code execution runs in `firejail` (Linux) with:
   - `--net=none` (no network, configurable)
-  - `--private=~/.agent-hive/sandbox` (isolated filesystem, bind-mounted workspace dir)
+  - `--private=~/.rivulets/sandbox` (isolated filesystem, bind-mounted workspace dir)
   - `--caps.drop=all` (no Linux capabilities)
   - `--seccomp=firejail-default` (restricted syscall filter)
   - `--noprofile` (no Firefox profiles, reduces attack surface)
@@ -46,10 +46,10 @@
 
 #### File Permissions
 ```
-~/.agent-hive/
-├── agent-hive.db         0600  (owner read/write only)
-├── agent-hive.db-wal     0600
-├── agent-hive.db-shm     0600
+~/.rivulets/
+├── rivulets.db         0600  (owner read/write only)
+├── rivulets.db-wal     0600
+├── rivulets.db-shm     0600
 ├── files/                0700  (owner full access)
 ├── tools/                0700
 ├── logs/                 0700
@@ -93,9 +93,9 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 
 | Scenario | Impact | Recovery | RPO | RTO |
 |---|---|---|---|---|
-| **DB corruption** (power loss, disk error) | All workspace data lost | Restore from latest automatic backup (`~/.agent-hive/backups/`) | 24 hours (last daily backup) | 5 minutes (copy backup → restart) |
+| **DB corruption** (power loss, disk error) | All workspace data lost | Restore from latest automatic backup (`~/.rivulets/backups/`) | 24 hours (last daily backup) | 5 minutes (copy backup → restart) |
 | **File store corruption** | Agent can't access files in threads | Files re-synced from peers on next connection. Metadata preserved in sync log. | Variable (last peer sync) | Automatic (on peer reconnect) |
-| **Binary won't start** (bad update) | Agent Hive unavailable | Download previous version from GitHub Releases. Restore pre-upgrade backup. | 0 (pre-upgrade backup taken automatically) | 10 minutes |
+| **Binary won't start** (bad update) | Rivulets unavailable | Download previous version from GitHub Releases. Restore pre-upgrade backup. | 0 (pre-upgrade backup taken automatically) | 10 minutes |
 | **Workspace key lost** | Cannot authenticate to workspace | If mnemonic stored: re-enter. If not: **permanent data loss.** No recovery possible. | — | N/A |
 | **Provider key revoked** | Agents using that provider fail | Update key in Settings > Providers. Agents resume on next run. | 0 (agents don't lose state) | 2 minutes |
 | **Peer node fails** (hardware failure) | Sync unavailable from that node | Other peers continue. Data on failed node lost if no other peer had it synced. | Variable (depends on sync recency) | N/A (node must be replaced) |
@@ -106,13 +106,13 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 
 #### Automatic Daily Backup
 - **Trigger:** First App Server start of each calendar day.
-- **Method:** `VACUUM INTO '~/.agent-hive/backups/agent-hive-{YYYY-MM-DD}.db'`
+- **Method:** `VACUUM INTO '~/.rivulets/backups/rivulets-{YYYY-MM-DD}.db'`
 - **Retention:** Last 7 daily backups. Oldest deleted automatically.
 - **Verification:** After backup, run `PRAGMA integrity_check` on the backup file. Log result. Alert user if check fails.
 
 #### Pre-Upgrade Backup
 - **Trigger:** App Server detects a version change (stored version < binary version).
-- **Method:** `cp agent-hive.db agent-hive.db-wal agent-hive.db-shm → backups/pre-upgrade-v{old_version}/`
+- **Method:** `cp rivulets.db rivulets.db-wal rivulets.db-shm → backups/pre-upgrade-v{old_version}/`
 - **Retention:** Last 5 pre-upgrade backups.
 - **Rollback:** If new version fails to start 3 times, prompt user to restore pre-upgrade backup.
 
@@ -124,13 +124,13 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 ### Restore Procedure
 
 #### From Automatic Backup
-1. Stop Agent Hive.
-2. `cp ~/.agent-hive/backups/agent-hive-2026-08-04.db ~/.agent-hive/agent-hive.db`
-3. Delete WAL/SHM files: `rm ~/.agent-hive/agent-hive.db-wal ~/.agent-hive/agent-hive.db-shm`
-4. Start Agent Hive. Migration check runs. Sync engine pulls any messages created since backup from peers.
+1. Stop Rivulets.
+2. `cp ~/.rivulets/backups/rivulets-2026-08-04.db ~/.rivulets/rivulets.db`
+3. Delete WAL/SHM files: `rm ~/.rivulets/rivulets.db-wal ~/.rivulets/rivulets.db-shm`
+4. Start Rivulets. Migration check runs. Sync engine pulls any messages created since backup from peers.
 
 #### From Peer Sync (New Machine)
-1. Install Agent Hive on new machine.
+1. Install Rivulets on new machine.
 2. Enter workspace key (mnemonic).
 3. App Server creates fresh DB, connects to peers, initiates full state sync.
 4. All agents, channels, threads, messages, files replicated from peers.
@@ -145,10 +145,10 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 
 ### Business Continuity (for the project itself)
 
-Since Agent Hive is open source (BSL → Apache 2.0):
+Since Rivulets is open source (BSL → Apache 2.0):
 - **Source code:** GitHub is the source of truth. CI artifacts are reproducible.
 - **Build infrastructure:** GitHub Actions. If unavailable, builds can run locally via `scripts/build-all.sh`.
 - **Distribution:** GitHub Releases. If GitHub is unavailable, binaries can be distributed via direct download from any web server.
 - **Website:** Static site (SvelteKit adapter-static) hosted on GitHub Pages or any static host.
-- **Domain:** `agent-hive.dev` (TBD). DNS managed separately from hosting.
+- **Domain:** `rivulets.dev` (TBD). DNS managed separately from hosting.
 - **Community:** GitHub Issues + Discussions. No proprietary infrastructure dependency.

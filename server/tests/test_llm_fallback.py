@@ -8,9 +8,9 @@ import json
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import ProviderConfig, WorkspaceSetting
-from agent_hive.dispatch.engine import AgentDispatchInfo
-from agent_hive.dispatch.llm_fallback import (
+from rivulets.db.models import ProviderConfig, WorkspaceSetting
+from rivulets.dispatch.engine import AgentDispatchInfo
+from rivulets.dispatch.llm_fallback import (
     _DispatchDecision,  # pyright: ignore[reportPrivateUsage]
     build_llm_fallback,
 )
@@ -43,7 +43,7 @@ async def test_llm_fallback_disabled_via_workspace_setting_skips_the_llm_call(
         return "anthropic:claude-haiku-4-5-20251001"
 
     monkeypatch.setattr(
-        "agent_hive.dispatch.llm_fallback.pick_dispatcher_model", fake_pick_dispatcher_model
+        "rivulets.dispatch.llm_fallback.pick_dispatcher_model", fake_pick_dispatcher_model
     )
 
     fallback = build_llm_fallback(db_session)
@@ -63,8 +63,8 @@ async def test_llm_fallback_defaults_to_enabled_when_setting_is_unset(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
         return _DispatchDecision(agent_names=["DBA"])
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("query help please", _AGENTS) == ["dba-1"]
@@ -79,7 +79,7 @@ async def test_llm_fallback_returns_empty_when_resolve_model_fails(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("no keychain in CI")
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("How do I optimize this SQL query?", _AGENTS) == []
@@ -97,8 +97,8 @@ async def test_llm_fallback_maps_agent_names_back_to_ids(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
         return _DispatchDecision(agent_names=["DBA"])
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     matched = await fallback("How do I optimize this SQL query?", _AGENTS)
@@ -117,8 +117,8 @@ async def test_llm_fallback_is_case_insensitive_on_agent_name(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
         return _DispatchDecision(agent_names=["dba"])
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("query help please", _AGENTS) == ["dba-1"]
@@ -138,8 +138,8 @@ async def test_llm_fallback_drops_hallucinated_agent_names(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
         return _DispatchDecision(agent_names=["DBA", "NotOnThisTeam"])
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("query help please", _AGENTS) == ["dba-1"]
@@ -157,8 +157,8 @@ async def test_llm_fallback_returns_empty_when_nothing_matches(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
         return _DispatchDecision(agent_names=[])
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("totally unrelated message", _AGENTS) == []
@@ -178,8 +178,8 @@ async def test_llm_fallback_returns_empty_when_decision_is_none(
     async def fake_run_decision(*_args: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.llm_fallback._run_decision", fake_run_decision)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
     assert await fallback("totally unrelated message", _AGENTS) == []

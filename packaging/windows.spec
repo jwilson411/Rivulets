@@ -5,7 +5,7 @@ docs/infrastructure/deployment-and-networking.md#build-matrix.
 Build with:
     uv run --group packaging pyinstaller packaging/windows.spec
 
-Output: dist/agent-hive-windows-amd64.exe (PyInstaller appends .exe itself).
+Output: dist/rivulets-windows-amd64.exe (PyInstaller appends .exe itself).
 
 EV code signing is P2+ per docs/infrastructure/cost-estimate.md — until
 then, Windows SmartScreen will flag the binary and users click "More
@@ -39,7 +39,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     a.binaries,
     a.datas,
-    name="agent-hive-windows-amd64",
+    name="rivulets-windows-amd64",
     console=True,
     strip=False,  # strip isn't meaningful for PE binaries on Windows
     upx=False,

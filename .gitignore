@@ -19,8 +19,8 @@ node_modules/
 /ui/.env.*
 !/ui/.env.example
 
-# Agent Hive runtime data (never commit user workspace data)
-.agent-hive/
+# Rivulets runtime data (never commit user workspace data)
+.rivulets/
 
 # Packaging output
 packaging/dist/

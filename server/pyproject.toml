@@ -1,5 +1,5 @@
 [project]
-name = "agent-hive"
+name = "rivulets"
 version = "0.1.0"
 description = "Local-first, P2P-synced workspace for humans and AI agent teams, built on AgentOS."
 readme = "README.md"
@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agent-hive = "agent_hive:main"
+rivulets = "rivulets:main"
 
 [build-system]
 requires = ["uv_build>=0.8.13,<0.9.0"]
@@ -70,11 +70,11 @@ typeCheckingMode = "strict"
 # all (sync) — trio itself is typed, but everything from `libp2p` and
 # `multiaddr` comes back as Unknown.
 [[tool.pyright.executionEnvironments]]
-root = "src/agent_hive/tools/builtin"
+root = "src/rivulets/tools/builtin"
 reportUnknownVariableType = false
 
 [[tool.pyright.executionEnvironments]]
-root = "src/agent_hive/sync"
+root = "src/rivulets/sync"
 reportMissingTypeStubs = false
 reportUnknownVariableType = false
 reportUnknownMemberType = false
@@ -87,7 +87,7 @@ reportUnknownMemberType = false
 reportUnknownArgumentType = false
 
 [tool.pytest.ini_options]
-addopts = "--cov=agent_hive --cov-report=term-missing"
+addopts = "--cov=rivulets --cov-report=term-missing"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 # CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so

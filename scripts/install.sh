@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
-# Agent Hive install script (curl | sh pattern).
+# Rivulets install script (curl | sh pattern).
 # docs/infrastructure/deployment-and-networking.md#distribution-channels
 #
-#   curl -fsSL https://get.agent-hive.dev | sh
+#   curl -fsSL https://get.rivulets.io | sh
 #
 # Detects OS/arch, downloads the matching release binary from GitHub
 # Releases, verifies its SHA-256 checksum, and installs it on PATH.
 set -eu
 
-REPO="${AGENT_HIVE_REPO:-REPLACE_ME/agent-hive}" # TODO: set once the repo has a home
-INSTALL_DIR="${AGENT_HIVE_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${AGENT_HIVE_VERSION:-latest}"
+REPO="${RIVULETS_REPO:-REPLACE_ME/rivulets}" # TODO: set once the repo has a home
+INSTALL_DIR="${RIVULETS_INSTALL_DIR:-$HOME/.local/bin}"
+VERSION="${RIVULETS_VERSION:-latest}"
 
 os() {
 	case "$(uname -s)" in
@@ -36,7 +36,7 @@ arch() {
 
 OS="$(os)"
 ARCH="$(arch)"
-ASSET="agent-hive-${OS}-${ARCH}"
+ASSET="rivulets-${OS}-${ARCH}"
 
 if [ "$VERSION" = "latest" ]; then
 	BASE_URL="https://github.com/${REPO}/releases/latest/download"
@@ -55,10 +55,10 @@ echo "Verifying checksum..."
 (cd "$TMP_DIR" && sha256sum -c "${ASSET}.sha256" 2>/dev/null || shasum -a 256 -c "${ASSET}.sha256")
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/agent-hive"
+install -m 0755 "${TMP_DIR}/${ASSET}" "${INSTALL_DIR}/rivulets"
 
-echo "Installed to ${INSTALL_DIR}/agent-hive"
+echo "Installed to ${INSTALL_DIR}/rivulets"
 case ":$PATH:" in
 *":${INSTALL_DIR}:"*) ;;
-*) echo "Add ${INSTALL_DIR} to your PATH, then run: agent-hive" ;;
+*) echo "Add ${INSTALL_DIR} to your PATH, then run: rivulets" ;;
 esac

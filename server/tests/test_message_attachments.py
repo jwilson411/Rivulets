@@ -9,8 +9,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.api.threads import _attach_files  # pyright: ignore[reportPrivateUsage]
-from agent_hive.db.models import Channel, File, Message, Thread
+from rivulets.api.threads import _attach_files  # pyright: ignore[reportPrivateUsage]
+from rivulets.db.models import Channel, File, Message, Thread
 
 
 def _create_channel(client: TestClient, headers: dict[str, str]) -> str:

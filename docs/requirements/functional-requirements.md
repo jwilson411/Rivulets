@@ -1,4 +1,4 @@
-# Agent Hive — Functional Requirements
+# Rivulets — Functional Requirements
 
 All requirements are numbered, testable, and scoped to a specific feature area. References in brackets map to user stories (US-###).
 
@@ -7,7 +7,7 @@ All requirements are numbered, testable, and scoped to a specific feature area. 
 ## FR-1: Workspace & Installation
 
 ### FR-1.1 Installation Process
-The system MUST provide an install script or binary that sets up the local Agent Hive runtime including the AgentOS server, the web UI, and a local database. [US-001]
+The system MUST provide an install script or binary that sets up the local Rivulets runtime including the AgentOS server, the web UI, and a local database. [US-001]
 
 ### FR-1.2 Workspace Key Generation
 On first install, the system MUST generate a cryptographically secure workspace key (minimum 256-bit entropy) and present it to the user exactly once with a warning to store it securely. [US-001]

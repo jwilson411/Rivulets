@@ -1,16 +1,16 @@
-# Agent Hive — Deployment Architecture & Packaging
+# Rivulets — Deployment Architecture & Packaging
 
-> **Note:** Agent Hive is a local-first desktop application with zero cloud infrastructure. This document covers binary packaging, distribution, installation, and local runtime architecture — not server deployment.
+> **Note:** Rivulets is a local-first desktop application with zero cloud infrastructure. This document covers binary packaging, distribution, installation, and local runtime architecture — not server deployment.
 
 ---
 
 ## Deployment Architecture
 
-Agent Hive runs entirely on the user's machine. There is no server-side component to deploy. The "deployment" is a single binary that bundles everything.
+Rivulets runs entirely on the user's machine. There is no server-side component to deploy. The "deployment" is a single binary that bundles everything.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│              Agent Hive Binary (single file)          │
+│              Rivulets Binary (single file)          │
 │                                                       │
 │  ┌─────────────────┐  ┌────────────────────────────┐ │
 │  │  Python 3.11     │  │  SvelteKit Build Output    │ │
@@ -24,7 +24,7 @@ Agent Hive runs entirely on the user's machine. There is no server-side componen
 │  └─────────────────┘  └────────────────────────────┘ │
 └──────────────────────────────────────────────────────┘
                            │
-              User runs:   $ ./agent-hive
+              User runs:   $ ./rivulets
                            │
          ┌─────────────────┼─────────────────┐
          ▼                 ▼                  ▼
@@ -36,7 +36,7 @@ Agent Hive runs entirely on the user's machine. There is no server-side componen
          ▼
    ┌──────────┐    ┌──────────────┐
    │ SQLite   │    │ File Store   │
-   │ WAL mode │    │ ~/.agent-hive│
+   │ WAL mode │    │ ~/.rivulets│
    └──────────┘    └──────────────┘
 ```
 
@@ -63,7 +63,7 @@ The supervisor is a lightweight async process manager. It handles:
 2. App Server starts → runs DB migrations → binds to `127.0.0.1:8484`.
 3. AgentOS starts → loads agent configs → binds to `127.0.0.1:7777`.
 4. Sync Engine starts → begins mDNS discovery for LAN peers.
-5. Health check passes → binary prints `Agent Hive ready: http://localhost:8484`.
+5. Health check passes → binary prints `Rivulets ready: http://localhost:8484`.
 6. User opens browser.
 
 ### Shutdown Sequence
@@ -97,16 +97,16 @@ The supervisor is a lightweight async process manager. It handles:
 
 | Platform | Arch | Build Host | Output | Test Target |
 |---|---|---|---|---|
-| Linux | x86_64 | ubuntu-24.04 | `agent-hive-linux-amd64` | Ubuntu 24.04, Fedora 40 |
-| Linux | aarch64 | ubuntu-24.04-arm | `agent-hive-linux-arm64` | Raspberry Pi 5 (Ubuntu) |
-| macOS | x86_64 | macos-14 | `agent-hive-darwin-amd64` | macOS 14 (Intel) |
-| macOS | arm64 | macos-14 | `agent-hive-darwin-arm64` | macOS 14 (Apple Silicon) |
-| Windows | x86_64 | windows-2025 | `agent-hive-windows-amd64.exe` | Windows 11 |
+| Linux | x86_64 | ubuntu-24.04 | `rivulets-linux-amd64` | Ubuntu 24.04, Fedora 40 |
+| Linux | aarch64 | ubuntu-24.04-arm | `rivulets-linux-arm64` | Raspberry Pi 5 (Ubuntu) |
+| macOS | x86_64 | macos-14 | `rivulets-darwin-amd64` | macOS 14 (Intel) |
+| macOS | arm64 | macos-14 | `rivulets-darwin-arm64` | macOS 14 (Apple Silicon) |
+| Windows | x86_64 | windows-2025 | `rivulets-windows-amd64.exe` | Windows 11 |
 
 ### Binary Contents
 
 ```
-agent-hive (single executable)
+rivulets (single executable)
 ├── Python 3.11.x stdlib (stripped)
 ├── Site-packages:
 │   ├── agno (AgentOS SDK)
@@ -119,7 +119,7 @@ agent-hive (single executable)
 ├── SvelteKit build output (static/)
 ├── Built-in tool library (tools/ directory bundled as Python package data)
 ├── Migration scripts (alembic/versions/)
-└── Entry point: agent_hive.main:main
+└── Entry point: rivulets.main:main
 ```
 
 ### Size Budget
@@ -151,7 +151,7 @@ Acceptance threshold: <150 MB uncompressed, <80 MB compressed.
 
 ### Install Script (curl | sh pattern)
 ```bash
-curl -fsSL https://get.agent-hive.dev | sh
+curl -fsSL https://get.rivulets.dev | sh
 ```
 - Detects OS and arch.
 - Downloads the correct binary from GitHub Releases.
@@ -164,10 +164,10 @@ curl -fsSL https://get.agent-hive.dev | sh
 ## Installation Directory Layout
 
 ```
-~/.agent-hive/
-├── agent-hive.db          # SQLite database (WAL mode)
-├── agent-hive.db-wal      # WAL file
-├── agent-hive.db-shm      # Shared memory file
+~/.rivulets/
+├── rivulets.db          # SQLite database (WAL mode)
+├── rivulets.db-wal      # WAL file
+├── rivulets.db-shm      # Shared memory file
 ├── files/                 # File attachments (content-addressed)
 │   ├── ab/
 │   │   └── ab3f9c...     # SHA-256 prefix → full hash filename
@@ -180,7 +180,7 @@ curl -fsSL https://get.agent-hive.dev | sh
 │   └── sync.log           # Sync Engine logs
 ├── config.yaml            # AgentOS configuration (generated, not user-edited)
 └── backups/               # Automatic SQLite backups
-    └── agent-hive-2026-08-04T12:00:00Z.db
+    └── rivulets-2026-08-04T12:00:00Z.db
 ```
 
 ---

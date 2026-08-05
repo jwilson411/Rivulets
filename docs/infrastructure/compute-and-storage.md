@@ -1,6 +1,6 @@
-# Agent Hive — Compute Resources & Storage Strategy
+# Rivulets — Compute Resources & Storage Strategy
 
-> **Note:** Agent Hive runs on the user's hardware. This document defines minimum requirements, resource management, storage layout, and data lifecycle — not cloud provisioning.
+> **Note:** Rivulets runs on the user's hardware. This document defines minimum requirements, resource management, storage layout, and data lifecycle — not cloud provisioning.
 
 ---
 
@@ -50,7 +50,7 @@ The App Server uses Python `asyncio` with FastAPI's async handlers:
 
 ### Database: SQLite
 
-**Location:** `~/.agent-hive/agent-hive.db`
+**Location:** `~/.rivulets/rivulets.db`
 
 **Configuration:**
 ```
@@ -82,7 +82,7 @@ PRAGMA mmap_size=268435456;       -- 256MB memory-mapped I/O
 
 ### File Attachments
 
-**Location:** `~/.agent-hive/files/{hash[0:2]}/{full_hash}`
+**Location:** `~/.rivulets/files/{hash[0:2]}/{full_hash}`
 
 **Content addressing:**
 - SHA-256 hash of file contents is the filename.
@@ -106,7 +106,7 @@ PRAGMA mmap_size=268435456;       -- 256MB memory-mapped I/O
 
 ### Logs
 
-**Location:** `~/.agent-hive/logs/`
+**Location:** `~/.rivulets/logs/`
 
 | Log File | Rotation | Retention | Contents |
 |---|---|---|---|
@@ -121,11 +121,11 @@ Log format: JSON Lines (one JSON object per line) for machine readability.
 
 ### Backups
 
-**Location:** `~/.agent-hive/backups/`
+**Location:** `~/.rivulets/backups/`
 
 | Type | Frequency | Retention | Method |
 |---|---|---|---|
-| Automatic | Daily (on first start of day) | 7 days | `VACUUM INTO 'backups/agent-hive-{date}.db'` |
+| Automatic | Daily (on first start of day) | 7 days | `VACUUM INTO 'backups/rivulets-{date}.db'` |
 | Pre-upgrade | On version upgrade | 30 days | Full file copy of `.db` + `.db-wal` |
 | Manual | User-triggered | User-managed | Export to user-chosen path |
 
@@ -135,7 +135,7 @@ Backups do NOT include file attachments (those are synced to peers and recoverab
 
 Per NFR-8.1, full workspace configuration can be exported/imported as YAML:
 ```yaml
-# agent-hive-export.yaml
+# rivulets-export.yaml
 version: 1
 exported_at: "2026-08-04T12:00:00Z"
 workspace:

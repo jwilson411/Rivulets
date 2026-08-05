@@ -5,7 +5,7 @@ login-endpoint-level integration test).
 
 import pytest
 
-from agent_hive.security.rate_limit import LoginRateLimiter
+from rivulets.security.rate_limit import LoginRateLimiter
 
 
 def test_allows_up_to_five_attempts_within_the_window() -> None:
@@ -32,7 +32,7 @@ def test_different_ips_have_independent_budgets() -> None:
 def test_window_expiry_allows_further_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     limiter = LoginRateLimiter()
     current_time = 1000.0
-    monkeypatch.setattr("agent_hive.security.rate_limit.time.monotonic", lambda: current_time)
+    monkeypatch.setattr("rivulets.security.rate_limit.time.monotonic", lambda: current_time)
 
     for _ in range(5):
         limiter.check("1.2.3.4")

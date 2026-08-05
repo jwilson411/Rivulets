@@ -16,15 +16,15 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from agent_hive.tools.builtin.http_request import http_request
+from rivulets.tools.builtin.http_request import http_request
 
 # tools/builtin/__init__.py's `from .http_request import http_request`
-# rebinds the `http_request` attribute on the `agent_hive.tools.builtin`
+# rebinds the `http_request` attribute on the `rivulets.tools.builtin`
 # package to the Function object below, shadowing the submodule --
-# `import agent_hive.tools.builtin.http_request as x` would silently bind
+# `import rivulets.tools.builtin.http_request as x` would silently bind
 # x to that Function (via attribute traversal), not the module. Going
 # through sys.modules sidesteps that shadowing entirely.
-http_request_module = sys.modules["agent_hive.tools.builtin.http_request"]
+http_request_module = sys.modules["rivulets.tools.builtin.http_request"]
 
 assert http_request.entrypoint is not None
 # entrypoint is typed Optional on Function -- the assert above only

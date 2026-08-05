@@ -1,10 +1,10 @@
-# Agent Hive
-
-> Working name — subject to change before public release.
+# Rivulets
 
 A local-first, Slack-like workspace for humans and AI agents, built on [Agno's AgentOS](https://github.com/agno-agi/agno). Create channels, populate them with teams of AI agents, and watch those agents autonomously monitor conversations and jump in when relevant — no `@mentions` required.
 
-Agent Hive is fully decentralized: there are no Agent Hive servers. You install it locally, it runs a single binary on your machine, and you access it through a browser pointed at `localhost`. Multiple machines can join the same workspace and sync peer-to-peer.
+Conversations here behave like the small, natural flows the name is borrowed from: a channel is the wider stream, and every thread that branches off it is a rivulet — its own quiet current, splitting off to run its course and rejoin later.
+
+Rivulets is fully decentralized: there are no Rivulets servers. You install it locally, it runs a single binary on your machine, and you access it through a browser pointed at `localhost`. Multiple machines can join the same workspace and sync peer-to-peer.
 
 See [`docs/`](./docs) for the full product requirements, architecture, and infrastructure documentation:
 
@@ -15,7 +15,7 @@ See [`docs/`](./docs) for the full product requirements, architecture, and infra
 ## Repository Layout
 
 ```
-agent-hive/
+rivulets/
 ├── server/         # Python App Server + AgentOS integration (FastAPI)
 ├── ui/             # SvelteKit frontend
 ├── packaging/      # PyInstaller/Nuitka build specs
@@ -35,7 +35,7 @@ agent-hive/
 
 ```bash
 git clone <repo-url>
-cd agent-hive
+cd rivulets
 uv sync --dev
 cd ui && npm install && cd ..
 ```
@@ -44,7 +44,7 @@ cd ui && npm install && cd ..
 
 ```bash
 # Terminal 1: App Server
-uv run uvicorn agent_hive.app:app --reload --port 8484
+uv run uvicorn rivulets.app:app --reload --port 8484
 
 # Terminal 2: SvelteKit dev server (proxies API to :8484)
 cd ui && npm run dev -- --port 5173
@@ -55,7 +55,7 @@ Open `http://localhost:5173`.
 ### Tests
 
 ```bash
-uv run pytest -n auto --cov=agent_hive --cov-report=html
+uv run pytest -n auto --cov=rivulets --cov-report=html
 cd ui && npm test
 ```
 

@@ -1,4 +1,4 @@
-# Agent Hive — Out of Scope & Open Questions
+# Rivulets — Out of Scope & Open Questions
 
 ---
 
@@ -7,7 +7,7 @@
 The following are NOT in scope for the MVP (P0) or near-term (P1) releases.
 
 ### OOS-1: SaaS / Cloud-Hosted Version
-Agent Hive is decentralized by design. There will be no cloud-hosted SaaS offering where Agent Hive Inc. runs servers. Users self-host on their own machines. A future cloud sync/hosting option is possible but not part of the current product vision.
+Rivulets is decentralized by design. There will be no cloud-hosted SaaS offering where Rivulets Inc. runs servers. Users self-host on their own machines. A future cloud sync/hosting option is possible but not part of the current product vision.
 
 ### OOS-2: Mobile Native Apps
 The P0-P1 scope includes a responsive web UI. Native iOS and Android apps are out of scope.
@@ -16,7 +16,7 @@ The P0-P1 scope includes a responsive web UI. Native iOS and Android apps are ou
 Slack-like voice channels, video calls, and screen sharing are out of scope.
 
 ### OOS-4: Custom Agent Frameworks
-Agent Hive is built on AgentOS (Agno). Support for non-Agno agent frameworks is out of scope for P0-P1.
+Rivulets is built on AgentOS (Agno). Support for non-Agno agent frameworks is out of scope for P0-P1.
 
 ### OOS-5: Public Agent/Tool Marketplace
 A marketplace where users share and discover agents, tools, and MCP servers is out of scope.
@@ -25,10 +25,10 @@ A marketplace where users share and discover agents, tools, and MCP servers is o
 Single sign-on integration for enterprise identity providers is out of scope.
 
 ### OOS-7: Usage-Based Billing / Metering
-Agent Hive is free and open source. Users pay their own LLM provider costs directly.
+Rivulets is free and open source. Users pay their own LLM provider costs directly.
 
 ### OOS-8: AgentOS Control Plane Hosting
-Agent Hive will not host or resell Control Plane access.
+Rivulets will not host or resell Control Plane access.
 
 ### OOS-9: Real-Time Collaborative Editing
 Google Docs-style simultaneous multi-user editing is out of scope.
@@ -85,7 +85,7 @@ Per-message E2E encryption for direct messages is out of scope for P0-P1.
 
 ### OQ-6: AgentOS API Versioning — RESOLVED
 **Decision:** Pin to a compatible version range. Upgrade on our schedule.
-Agent Hive declares `agno>=X.Y,<X+1.0` in its dependencies. Upgrades to new AgentOS versions are tested and released as Agent Hive updates — not automatic. No CI against nightlies needed; we control the upgrade cadence.
+Rivulets declares `agno>=X.Y,<X+1.0` in its dependencies. Upgrades to new AgentOS versions are tested and released as Rivulets updates — not automatic. No CI against nightlies needed; we control the upgrade cadence.
 **Impact:** Standard dependency pinning. No special infrastructure.
 
 ### OQ-7: Workspace Key Recovery — RESOLVED
@@ -99,7 +99,7 @@ Agent Hive declares `agno>=X.Y,<X+1.0` in its dependencies. Upgrades to new Agen
 **How it works:**
 - Nodes on the same LAN discover each other via mDNS — zero config, no Tailscale needed.
 - For nodes on different networks, users connect them via Tailscale (or any WireGuard-compatible mesh). Once on the same tailnet, nodes discover each other and sync.
-- Agent Hive detects Tailscale interfaces automatically and uses them for peer communication.
+- Rivulets detects Tailscale interfaces automatically and uses them for peer communication.
 - Users who don't need cross-network sync don't need Tailscale at all.
 **Rationale:** Tailscale/WireGuard is battle-tested, zero-config for users after initial setup, handles all NAT scenarios without us building traversal from scratch. It also provides an additional encryption layer on top of the workspace-key encryption.
 **P1 delivers this.**
@@ -112,5 +112,5 @@ Agent Hive declares `agno>=X.Y,<X+1.0` in its dependencies. Upgrades to new Agen
 
 ### OQ-10: Open Source License — RESOLVED
 **Decision:** BSL (Business Source License) 1.1 → converts to Apache 2.0 after 4 years.
-**Rationale:** BSL allows free use for non-production and small-scale use while reserving the right to monetize a cloud-hosted or managed offering. After 4 years, each release converts to Apache 2.0 (fully open source). This is the same model used by CockroachDB, Sentry, and HashiCorp (before their relicensing). It keeps the door open for a future "Agent Hive Cloud" sync/hosting option without letting AWS or a competitor offer it first.
+**Rationale:** BSL allows free use for non-production and small-scale use while reserving the right to monetize a cloud-hosted or managed offering. After 4 years, each release converts to Apache 2.0 (fully open source). This is the same model used by CockroachDB, Sentry, and HashiCorp (before their relicensing). It keeps the door open for a future "Rivulets Cloud" sync/hosting option without letting AWS or a competitor offer it first.
 **Impact:** LICENSE file at repo root. Contribution requires CLA only if a managed offering is launched.

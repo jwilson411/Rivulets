@@ -75,7 +75,7 @@ def test_keyword_rule_agent_responds_to_new_thread(
     # covered separately, as a turn-limit guard test); a keyword rule that
     # the *reply* doesn't match keeps this test to a single round-trip.
     monkeypatch.setattr(
-        "agent_hive.dispatch.service.run_agent", _fake_run_agent("OK, doing that now.")
+        "rivulets.dispatch.service.run_agent", _fake_run_agent("OK, doing that now.")
     )
     created = client.post(
         "/api/v1/agents",
@@ -113,7 +113,7 @@ def test_agent_with_no_rules_does_not_respond(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_hive.dispatch.service.run_agent", _fake_run_agent("should not appear")
+        "rivulets.dispatch.service.run_agent", _fake_run_agent("should not appear")
     )
     created = client.post(
         "/api/v1/agents",
@@ -142,7 +142,7 @@ def test_agent_with_no_rules_does_not_respond(
 def test_mention_invokes_agent_regardless_of_rules(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", _fake_run_agent("You called?"))
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("You called?"))
     created = client.post(
         "/api/v1/agents",
         json={
@@ -182,7 +182,7 @@ def test_agent_run_failure_is_skipped_gracefully(
     def _boom(*_args: object, **_kwargs: object) -> Any:
         raise RuntimeError("provider unreachable")
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", _boom)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _boom)
     agent_id = _create_agent_with_always_rule(client, auth_headers, "Flaky Agent")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
@@ -214,7 +214,7 @@ def test_run_status_error_posts_system_alert_not_raw_error_text(
             get_content_as_string=lambda: "Error code: 401 - invalid x-api-key",
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake)
     agent_id = _create_agent_with_always_rule(client, auth_headers, "Broken Agent")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 

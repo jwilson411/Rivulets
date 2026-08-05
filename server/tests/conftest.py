@@ -3,31 +3,31 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator
 
-# Must happen before the first `agent_hive.config.get_settings()` call
+# Must happen before the first `rivulets.config.get_settings()` call
 # anywhere (it's @lru_cache'd — whatever env var is set on that first call
 # sticks for the whole process). Without this, app startup's
 # ensure_workspace_dirs() and AgentOS's SqliteDb would touch the real
-# ~/.agent-hive on the machine running the tests.
-_TEST_WORKSPACE_DIR = tempfile.mkdtemp(prefix="agent-hive-test-")
-os.environ["AGENT_HIVE_WORKSPACE_DIR"] = _TEST_WORKSPACE_DIR
+# ~/.rivulets on the machine running the tests.
+_TEST_WORKSPACE_DIR = tempfile.mkdtemp(prefix="rivulets-test-")
+os.environ["RIVULETS_WORKSPACE_DIR"] = _TEST_WORKSPACE_DIR
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from agent_hive.agentos.service import reset_agentos_for_testing  # noqa: E402
-from agent_hive.app import create_app  # noqa: E402
-from agent_hive.db.session import (  # noqa: E402
+from rivulets.agentos.service import reset_agentos_for_testing  # noqa: E402
+from rivulets.app import create_app  # noqa: E402
+from rivulets.db.session import (  # noqa: E402
     get_engine,
     init_db,
     make_engine,
     override_engine,
     session_scope,
 )
-from agent_hive.security import keys  # noqa: E402
-from agent_hive.security.rate_limit import get_login_rate_limiter  # noqa: E402
-from agent_hive.security.session import get_session_key_store  # noqa: E402
-from agent_hive.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
+from rivulets.security import keys  # noqa: E402
+from rivulets.security.rate_limit import get_login_rate_limiter  # noqa: E402
+from rivulets.security.session import get_session_key_store  # noqa: E402
+from rivulets.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # noqa: ARG001
@@ -37,7 +37,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # n
 @pytest.fixture
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     """A TestClient wired to a fresh in-memory SQLite DB per test — never
-    touches the real ~/.agent-hive workspace.
+    touches the real ~/.rivulets workspace.
 
     SyncEngine.start()/.stop() are no-op'd here: login (api/auth.py) always
     tries to start the real sync engine, and the general test suite logs

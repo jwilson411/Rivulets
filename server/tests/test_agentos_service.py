@@ -14,7 +14,7 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent
 from agno.run.base import RunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.agentos.service import (
+from rivulets.agentos.service import (
     get_agentos,
     init_agentos,
     reset_agentos_for_testing,

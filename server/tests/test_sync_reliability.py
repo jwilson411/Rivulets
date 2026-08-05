@@ -23,16 +23,16 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import Agent, Channel, SyncPendingInbound, SyncPendingOutbound, Thread
-from agent_hive.sync.apply import (
+from rivulets.db.models import Agent, Channel, SyncPendingInbound, SyncPendingOutbound, Thread
+from rivulets.sync.apply import (
     CHANNEL_SPEC,
     THREAD_SPEC,
     apply_remote_change,
     record_local_change,
     retry_pending_inbound,
 )
-from agent_hive.sync.engine import init_sync_engine, reset_sync_engine_for_testing
-from agent_hive.sync.publish import (
+from rivulets.sync.engine import init_sync_engine, reset_sync_engine_for_testing
+from rivulets.sync.publish import (
     build_entity_payload,
     drain_pending_outbound,
     publish_current_state,
@@ -86,7 +86,7 @@ async def test_publish_entity_change_queues_when_publish_fails(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakeEngine(running=True, fail=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
 
@@ -98,7 +98,7 @@ async def test_publish_entity_change_does_not_queue_on_success(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakeEngine(running=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
 
@@ -129,7 +129,7 @@ async def test_publish_current_state_is_noop_for_deleted_entity(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakeEngine(running=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await publish_current_state(db_session, "agent", "does-not-exist")
 
@@ -144,7 +144,7 @@ async def test_drain_pending_outbound_republishes_and_clears_queue(
     await db_session.commit()
 
     fake = _FakeEngine(running=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await drain_pending_outbound(db_session)
 
@@ -165,7 +165,7 @@ async def test_drain_pending_outbound_drops_queue_entry_for_deleted_entity(
     await db_session.commit()
 
     fake = _FakeEngine(running=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await drain_pending_outbound(db_session)
 
@@ -181,7 +181,7 @@ async def test_drain_pending_outbound_requeues_on_repeated_failure(
     await db_session.commit()
 
     fake = _FakeEngine(running=True, fail=True)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     await drain_pending_outbound(db_session)
 
@@ -211,7 +211,7 @@ async def test_full_offline_then_recover_cycle(
     drain call -- the agent gets published exactly once, using its
     current state, and the queue ends up empty."""
     fake = _FakeEngine(running=False)
-    monkeypatch.setattr("agent_hive.sync.publish.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
 
     db_session.add(Agent(id="agent-1", name="Created Offline", **_AGENT_FIELDS))
     await db_session.commit()

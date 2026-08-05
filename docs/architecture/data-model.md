@@ -1,4 +1,4 @@
-# Agent Hive — Data Model
+# Rivulets — Data Model
 
 All entities are stored in SQLite. Tables use UUIDv7 primary keys for time-sortable, globally unique IDs (critical for P2P sync — no ID collisions across nodes).
 
@@ -281,7 +281,7 @@ CREATE INDEX idx_summary_thread ON thread_summary(thread_id, level);
 ---
 
 ### file
-File metadata for attachments. Actual files stored at `~/.agent-hive/files/{content_hash}`.
+File metadata for attachments. Actual files stored at `~/.rivulets/files/{content_hash}`.
 ```sql
 CREATE TABLE file (
     id          TEXT PRIMARY KEY,

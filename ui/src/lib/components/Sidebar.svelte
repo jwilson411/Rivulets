@@ -43,7 +43,7 @@
 >
 	<div class="px-4 py-4">
 		<a href={resolve('/')} class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-			Agent Hive
+			Rivulets
 		</a>
 	</div>
 

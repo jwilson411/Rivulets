@@ -5,13 +5,13 @@ from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.agentos.models import (
+from rivulets.agentos.models import (
     UnknownProviderError,
     build_model,
     parse_provider_model,
     resolve_model,
 )
-from agent_hive.db.models import ProviderConfig
+from rivulets.db.models import ProviderConfig
 
 
 def test_parse_provider_model_splits_on_first_colon() -> None:
@@ -69,7 +69,7 @@ def _fake_get_provider_key(_ref: str) -> str:
 async def test_resolve_model_looks_up_provider_config(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("agent_hive.agentos.models.get_provider_key", _fake_get_provider_key)
+    monkeypatch.setattr("rivulets.agentos.models.get_provider_key", _fake_get_provider_key)
     db_session.add(
         ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="provider-key:test-id")
     )

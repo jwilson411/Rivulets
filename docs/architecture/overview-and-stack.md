@@ -1,8 +1,8 @@
-# Agent Hive — Architecture Overview & Technology Stack
+# Rivulets — Architecture Overview & Technology Stack
 
 ## Architecture Overview
 
-Agent Hive is a **local-first, P2P-synchronized, single-binary application** consisting of three tightly integrated layers:
+Rivulets is a **local-first, P2P-synchronized, single-binary application** consisting of three tightly integrated layers:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -12,7 +12,7 @@ Agent Hive is a **local-first, P2P-synchronized, single-binary application** con
 └──────────────────────┬──────────────────────────────────┘
                        │ HTTP + SSE (localhost only)
 ┌──────────────────────▼──────────────────────────────────┐
-│               Agent Hive Application Server               │
+│               Rivulets Application Server               │
 │  FastAPI / Starlette (Python 3.11+)                       │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
 │  │ Dispatch  │ │  Thread  │ │   Tool   │ │   Sync   │   │
@@ -47,7 +47,7 @@ Agent Hive is a **local-first, P2P-synchronized, single-binary application** con
 ### Architectural Drivers (What Shaped These Decisions)
 
 1. **Local-first, zero cloud dependency.** Everything runs on the user's machine. No server to manage, no SaaS to trust. The web UI talks to a local API.
-2. **AgentOS is the runtime, not something we build.** We don't reimplement agent execution, session management, streaming, or MCP. AgentOS does that. Agent Hive is the UX and orchestration layer on top.
+2. **AgentOS is the runtime, not something we build.** We don't reimplement agent execution, session management, streaming, or MCP. AgentOS does that. Rivulets is the UX and orchestration layer on top.
 3. **Offline resilience with eventual consistency.** Nodes must work fully offline and reconcile when reconnected. This rules out any architecture where a central server is the source of truth.
 4. **Dispatcher is the critical path.** Every message hits the dispatcher. It must be fast (deterministic path <50ms) and reliable (graceful degradation when LLM is unreachable).
 
@@ -63,7 +63,7 @@ Agent Hive is a **local-first, P2P-synchronized, single-binary application** con
 
 ### Why Not Microservices?
 
-This is a single-user local application. Splitting into microservices adds deployment complexity (orchestration, service discovery, inter-service auth) with zero benefit. The App Server + AgentOS + SQLite trio runs as one process group. If Agent Hive ever becomes a multi-user cloud offering, the Dispatch Engine and Sync Engine are the first candidates to extract into separate services — but that's not the product we're building today.
+This is a single-user local application. Splitting into microservices adds deployment complexity (orchestration, service discovery, inter-service auth) with zero benefit. The App Server + AgentOS + SQLite trio runs as one process group. If Rivulets ever becomes a multi-user cloud offering, the Dispatch Engine and Sync Engine are the first candidates to extract into separate services — but that's not the product we're building today.
 
 ---
 
@@ -83,7 +83,7 @@ This is a single-user local application. Splitting into microservices adds deplo
 | Layer | Choice | Rationale |
 |---|---|---|
 | **Primary DB** | SQLite (via SQLAlchemy + aiosqlite) | Single-file, zero-config, survives reboots. WAL mode + fsync per NFR-2.3. More than sufficient for single-user scale (NFR-4). Embedded — no separate database process. |
-| **File Storage** | Local filesystem (~/.agent-hive/files/) | Files are content-addressed (SHA-256 hash as filename). Metadata in SQLite. Simple, portable, syncable. |
+| **File Storage** | Local filesystem (~/.rivulets/files/) | Files are content-addressed (SHA-256 hash as filename). Metadata in SQLite. Simple, portable, syncable. |
 | **Vector Clocks** | JSON column in SQLite | Per-entity clocks for conflict resolution (FR-9.6). No need for a dedicated CRDT library — last-write-wins with clock comparison is sufficient for single-user multi-machine. |
 
 ### Frontend
@@ -116,6 +116,6 @@ This is a single-user local application. Splitting into microservices adds deplo
 |---|---|---|
 | **Package Management** | uv (pip-compatible, fast resolver) | Faster than pip, better dependency resolution. Single `uv sync` to install everything. |
 | **Packaging** | Single binary via PyInstaller or Nuitka | Users shouldn't need Python installed. Single binary bundles Python runtime + all deps + SvelteKit build output. |
-| **Version Control** | Git + GitHub | Standard. Monorepo: `agent-hive/` with `server/`, `ui/`, `tools/` directories. |
+| **Version Control** | Git + GitHub | Standard. Monorepo: `rivulets/` with `server/`, `ui/`, `tools/` directories. |
 | **CI/CD** | GitHub Actions | Test on push, build binaries for Linux/macOS/Windows on release tags. |
 | **Testing** | pytest (server), Vitest (UI), Playwright (E2E) | Standard tooling. pytest with pytest-asyncio for async FastAPI tests. Playwright for browser-based acceptance tests (maps to AC-001 through AC-031). |

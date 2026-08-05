@@ -1,7 +1,7 @@
 import pytest
 
-from agent_hive.dispatch.engine import AgentDispatchInfo, DispatchEngine, DispatchMethod
-from agent_hive.dispatch.rules import Rule, RuleType
+from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine, DispatchMethod
+from rivulets.dispatch.rules import Rule, RuleType
 
 
 def _dba_agent() -> AgentDispatchInfo:

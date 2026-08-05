@@ -15,9 +15,9 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
-from agent_hive.dispatch.service import _find_handoff_call  # pyright: ignore[reportPrivateUsage]
-from agent_hive.streaming import subscribe, unsubscribe
-from agent_hive.tools.builtin.handoff import handoff
+from rivulets.dispatch.service import _find_handoff_call  # pyright: ignore[reportPrivateUsage]
+from rivulets.streaming import subscribe, unsubscribe
+from rivulets.tools.builtin.handoff import handoff
 
 
 def test_handoff_tool_returns_confirmation_string() -> None:
@@ -124,7 +124,7 @@ def test_handoff_posts_divider_and_invokes_target(
             get_content_as_string=lambda: "Schema looks fine to me.",
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id, dba_id])
     thread = client.post(
@@ -161,7 +161,7 @@ def test_handoff_to_unknown_agent_is_skipped_gracefully(
             get_content_as_string=lambda: "Handing this off.",
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id])
     thread = client.post(
@@ -197,7 +197,7 @@ def test_handoff_publishes_sse_event(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: "ok"
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id, dba_id])
     # A no-match message first, just to obtain a thread_id before subscribing.

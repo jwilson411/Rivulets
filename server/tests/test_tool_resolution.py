@@ -9,8 +9,8 @@ from agno.tools.mcp import MCPTools
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
-from agent_hive.db.models import Agent, AgentTool, MCPServer, Tool
+from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
+from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
 
 _AGENT_FIELDS = {
     "description": "A test agent for tool resolution tests.",

@@ -18,7 +18,7 @@ def repo_root(specpath: str) -> Path:
 
 
 def entry_point(specpath: str) -> str:
-    return str(repo_root(specpath) / "server" / "src" / "agent_hive" / "main.py")
+    return str(repo_root(specpath) / "server" / "src" / "rivulets" / "main.py")
 
 
 def server_src(specpath: str) -> str:
@@ -27,12 +27,12 @@ def server_src(specpath: str) -> str:
 
 def common_datas(specpath: str) -> list[tuple[str, str]]:
     root = repo_root(specpath)
-    tools_dir = root / "server" / "src" / "agent_hive" / "tools" / "builtin"
+    tools_dir = root / "server" / "src" / "rivulets" / "tools" / "builtin"
     ui_build = root / "ui" / "build"
 
-    datas = [(str(tools_dir), "agent_hive/tools/builtin")]
+    datas = [(str(tools_dir), "rivulets/tools/builtin")]
     if ui_build.exists():
-        datas.append((str(ui_build), "agent_hive/static"))
+        datas.append((str(ui_build), "rivulets/static"))
     # else: `npm run build` in ui/ hasn't been run yet — the binary would
     # still work as an API-only server, just without a UI to serve.
     return datas

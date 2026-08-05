@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for Agent Hive
+about: Suggest an idea for Rivulets
 title: ""
 labels: enhancement
 assignees: ""

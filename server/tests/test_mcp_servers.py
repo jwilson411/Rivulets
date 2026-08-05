@@ -10,7 +10,7 @@ see agentos/mcp.py's docstring for the real-world traceback this caused
 graceful "can't reach this server").
 
 The HTTP layer (api/mcp_servers.py) is tested by monkeypatching
-agent_hive.api.mcp_servers.discover_tools directly, mirroring how
+rivulets.api.mcp_servers.discover_tools directly, mirroring how
 test_thread_dispatch.py monkeypatches dispatch.service.run_agent.
 """
 
@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_hive.agentos.mcp import DiscoveredTool, MCPConnectionError, discover_tools
+from rivulets.agentos.mcp import DiscoveredTool, MCPConnectionError, discover_tools
 
 
 class _FakeMCPTools:
@@ -63,7 +63,7 @@ def _patch_mcp_tools(
     def _fake_mcp_tools(**_kwargs: Any) -> _FakeMCPTools:
         return fake
 
-    monkeypatch.setattr("agent_hive.agentos.mcp.MCPTools", _fake_mcp_tools)
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
     return fake
 
 
@@ -120,7 +120,7 @@ def _patch_discover_tools(
             raise result
         return list(result)
 
-    monkeypatch.setattr("agent_hive.api.mcp_servers.discover_tools", _fake)
+    monkeypatch.setattr("rivulets.api.mcp_servers.discover_tools", _fake)
 
 
 def test_register_mcp_server_success(

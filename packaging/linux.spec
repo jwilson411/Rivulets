@@ -5,7 +5,7 @@ docs/infrastructure/deployment-and-networking.md#build-matrix.
 Build with:
     uv run --group packaging pyinstaller packaging/linux.spec
 
-Output: dist/agent-hive-linux-amd64 (or -arm64, per build host).
+Output: dist/rivulets-linux-amd64 (or -arm64, per build host).
 """
 
 import sys
@@ -37,7 +37,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     a.binaries,
     a.datas,
-    name="agent-hive-linux-amd64",
+    name="rivulets-linux-amd64",
     console=True,
     strip=True,
     upx=False,

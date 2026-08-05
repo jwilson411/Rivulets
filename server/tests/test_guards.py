@@ -64,7 +64,7 @@ def test_turn_limit_pauses_a_self_triggering_agent(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     settings = client.patch(
         "/api/v1/settings", json={"guard.cycle_threshold": 20}, headers=auth_headers
@@ -109,7 +109,7 @@ def test_paused_thread_resumes_and_dispatches_again(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     agent_id = _create_agent(client, auth_headers, "Loopy", "always")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
@@ -146,7 +146,7 @@ def test_cycle_detection_pauses_two_agents_mentioning_each_other(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: content
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [agent_a, agent_b])
     thread = client.post(
@@ -177,7 +177,7 @@ def test_timeout_pauses_when_configured_to_zero_minutes(
             status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     settings = client.patch(
         "/api/v1/settings", json={"guard.timeout_minutes": 0}, headers=auth_headers

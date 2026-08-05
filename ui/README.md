@@ -1,42 +1,21 @@
-# sv
+# Rivulets UI
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
-
-## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
-
-```sh
-# create a new project
-npx sv create my-app
-```
-
-To recreate this project with the same configuration:
-
-```sh
-# recreate this project
-npx sv@0.17.0 create --template minimal --types ts --no-install ui
-```
+SvelteKit SPA for [Rivulets](../README.md) — the App Server (`../server`) serves this build as a static bundle, and the UI talks to it exclusively via `/api/v1/*` (see `vite.config.ts`'s dev proxy).
 
 ## Developing
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+Run the App Server first (`../server`), then:
 
 ```sh
+npm install
 npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
 ```
 
-## Building
-
-To create a production version of your app:
+## Checks
 
 ```sh
-npm run build
+npm run lint      # prettier + eslint
+npm run check     # svelte-check (types)
+npm run test:unit # vitest — client project (real Chromium) + server project (node)
+npm run build     # production build, output in build/
 ```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.

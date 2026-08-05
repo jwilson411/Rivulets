@@ -1,4 +1,4 @@
-# Agent Hive — Acceptance Criteria
+# Rivulets — Acceptance Criteria
 
 Each criterion is formatted as **AC-###** and maps to one or more user stories. Criteria are testable: a QA engineer can verify each one without ambiguity.
 
@@ -13,7 +13,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 3. Provide valid credentials.
 4. Observe: system generates and displays a workspace key with a clear warning to save it.
 5. Observe: system starts and prints the localhost URL.
-6. Open browser to the URL. Observe: the Agent Hive chat UI loads.
+6. Open browser to the URL. Observe: the Rivulets chat UI loads.
 7. Enter the workspace key when prompted. Observe: you are authenticated and see an empty workspace.
 **Expected:** Full flow completes without errors. Workspace key is a hex string ≥64 characters.
 
@@ -227,7 +227,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 1. Open Tool Creator in Advanced Mode.
 2. Observe: a tool file opens in the system's default editor (VS Code or equivalent) at a known path.
 3. Edit the file, save.
-4. Observe: Agent Hive detects the file change and re-registers the tool.
+4. Observe: Rivulets detects the file change and re-registers the tool.
 **Expected:** External editor workflow functions. Save triggers re-registration.
 
 ### AC-024: MCP Server Registration
@@ -304,7 +304,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 ### AC-031: Localhost-Only Binding
 **Maps to:** NFR-3.4
 1. After installation, run `netstat` or equivalent.
-2. Verify: Agent Hive web server is bound to 127.0.0.1, not 0.0.0.0.
+2. Verify: Rivulets web server is bound to 127.0.0.1, not 0.0.0.0.
 3. From another machine on the same network, attempt to access `http://<machine-ip>:8484`.
 4. Observe: connection refused.
 **Expected:** UI only accessible from localhost.

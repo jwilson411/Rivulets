@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from agent_hive.security import keys
-from agent_hive.security.rate_limit import get_login_rate_limiter
+from rivulets.security import keys
+from rivulets.security.rate_limit import get_login_rate_limiter
 
 
 def test_login_bootstraps_workspace_on_first_use(client: TestClient) -> None:

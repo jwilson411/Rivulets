@@ -1,4 +1,4 @@
-# Agent Hive — API Design
+# Rivulets — API Design
 
 Two API surfaces: the **App Server API** (what the SvelteKit UI calls) and the **AgentOS API** (what the App Server calls internally). The UI never talks to AgentOS directly — the App Server mediates all communication.
 

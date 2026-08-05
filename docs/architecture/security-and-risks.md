@@ -1,4 +1,4 @@
-# Agent Hive — Security Architecture & Risks
+# Rivulets — Security Architecture & Risks
 
 ---
 
@@ -6,7 +6,7 @@
 
 ### Defense in Depth
 
-Agent Hive's security model assumes the attacker may have network access but NOT local machine access. If the attacker has local machine access, they already own the filesystem and keychain — there is no defense against a root-level attacker on the same machine.
+Rivulets' security model assumes the attacker may have network access but NOT local machine access. If the attacker has local machine access, they already own the filesystem and keychain — there is no defense against a root-level attacker on the same machine.
 
 ```
 Layer 1: Localhost Binding
@@ -75,7 +75,7 @@ All derived keys are computed at login time and held in memory only. They are ne
 ## Risks & Mitigations
 
 ### R-1: AgentOS API Instability
-**Risk:** Agno ships a breaking API change that requires significant Agent Hive rework.
+**Risk:** Agno ships a breaking API change that requires significant Rivulets rework.
 **Likelihood:** Medium (Agno is pre-1.0).
 **Impact:** High (core runtime broken).
 **Mitigation:**

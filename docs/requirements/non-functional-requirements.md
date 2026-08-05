@@ -1,4 +1,4 @@
-# Agent Hive — Non-Functional Requirements
+# Rivulets — Non-Functional Requirements
 
 All NFRs include a measurable target. Vague requirements ("fast," "secure") are rejected in favor of testable thresholds.
 
@@ -30,7 +30,7 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 ## NFR-2: Reliability & Availability
 
 ### NFR-2.1 Local Availability
-- The local Agent Hive instance (AgentOS + web UI) MUST be available as long as the host machine is running.
+- The local Rivulets instance (AgentOS + web UI) MUST be available as long as the host machine is running.
 - AgentOS crashes MUST be automatically restarted by the process supervisor.
 
 ### NFR-2.2 Offline Resilience
@@ -143,8 +143,8 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 - The system MUST support exporting and importing workspace configurations.
 
 ### NFR-8.2 Upgrade Path
-- Agent Hive version upgrades MUST preserve all user data (agents, threads, settings) without manual migration.
+- Rivulets version upgrades MUST preserve all user data (agents, threads, settings) without manual migration.
 - Breaking changes MUST be documented with migration scripts when unavoidable.
 
 ### NFR-8.3 AgentOS Version Compatibility
-- The system MUST declare a minimum and maximum compatible AgentOS/Agno version. Upgrading AgentOS within the compatible range MUST not break Agent Hive.
+- The system MUST declare a minimum and maximum compatible AgentOS/Agno version. Upgrading AgentOS within the compatible range MUST not break Rivulets.

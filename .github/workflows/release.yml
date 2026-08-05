@@ -31,23 +31,23 @@ jobs:
           - name: linux-amd64
             os: ubuntu-24.04
             spec: packaging/linux.spec
-            binary: agent-hive-linux-amd64
+            binary: rivulets-linux-amd64
           - name: linux-arm64
             os: ubuntu-24.04-arm
             spec: packaging/linux.spec
-            binary: agent-hive-linux-arm64
+            binary: rivulets-linux-arm64
           - name: darwin-amd64
             os: macos-14
             spec: packaging/macos.spec
-            binary: agent-hive-darwin-amd64
+            binary: rivulets-darwin-amd64
           - name: darwin-arm64
             os: macos-14
             spec: packaging/macos.spec
-            binary: agent-hive-darwin-arm64
+            binary: rivulets-darwin-arm64
           - name: windows-amd64
             os: windows-2025
             spec: packaging/windows.spec
-            binary: agent-hive-windows-amd64.exe
+            binary: rivulets-windows-amd64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           chmod +x dist/${{ matrix.binary }}
-          export AGENT_HIVE_WORKSPACE_DIR="$(mktemp -d)"
+          export RIVULETS_WORKSPACE_DIR="$(mktemp -d)"
           ./dist/${{ matrix.binary }} &
           PID=$!
           for i in $(seq 1 20); do
@@ -92,7 +92,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:AGENT_HIVE_WORKSPACE_DIR = New-TemporaryFile | %{ rm $_; mkdir $_ }
+          $env:RIVULETS_WORKSPACE_DIR = New-TemporaryFile | %{ rm $_; mkdir $_ }
           $proc = Start-Process -FilePath "dist\${{ matrix.binary }}" -PassThru
           $ok = $false
           for ($i = 0; $i -lt 20; $i++) {

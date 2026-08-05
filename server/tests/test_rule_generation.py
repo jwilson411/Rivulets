@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_hive.db.models import ProviderConfig, WorkspaceSetting
-from agent_hive.dispatch.rule_generation import (
+from rivulets.db.models import ProviderConfig, WorkspaceSetting
+from rivulets.dispatch.rule_generation import (
     GeneratedRoutingRules,
     GeneratedRule,
     _to_stored_rule,  # pyright: ignore[reportPrivateUsage]
@@ -90,7 +90,7 @@ async def test_generate_routing_rules_returns_empty_when_generator_fails(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("no keychain in CI")
 
-    monkeypatch.setattr("agent_hive.dispatch.rule_generation.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.resolve_model", fake_resolve_model)
 
     rules = await generate_routing_rules(db_session, "Agent", "Does agent things", "Be helpful.")
     assert rules == []
@@ -113,8 +113,8 @@ async def test_generate_routing_rules_converts_generator_output(
             ]
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.rule_generation.resolve_model", fake_resolve_model)
-    monkeypatch.setattr("agent_hive.dispatch.rule_generation._run_generator", fake_run_generator)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation._run_generator", fake_run_generator)
 
     rules = await generate_routing_rules(
         db_session, "DBA", "Handles database questions", "You are a DBA."
@@ -136,7 +136,7 @@ def test_agent_creation_stores_generated_rules_end_to_end(
             rules=[GeneratedRule(rule_type="keyword", keywords=["postgres", "schema"], priority=9)]
         )
 
-    monkeypatch.setattr("agent_hive.dispatch.rule_generation._run_generator", fake_run_generator)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation._run_generator", fake_run_generator)
 
     added_provider = client.post(
         "/api/v1/providers",

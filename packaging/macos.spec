@@ -44,7 +44,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     a.binaries,
     a.datas,
-    name=f"agent-hive-darwin-{_arch}",
+    name=f"rivulets-darwin-{_arch}",
     console=True,
     strip=True,
     upx=False,

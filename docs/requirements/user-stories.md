@@ -1,4 +1,4 @@
-# Agent Hive — User Stories
+# Rivulets — User Stories
 
 ## Priority Key
 - **P0** — MVP. Must ship before anything is usable.
@@ -10,10 +10,10 @@
 ## Workspace & Installation
 
 ### US-001: Install and Configure Workspace [P0]
-**As a** new user, **I want to** install Agent Hive on my machine, configure my LLM provider keys, and generate a workspace key, **so that** I have a functioning local instance.
+**As a** new user, **I want to** install Rivulets on my machine, configure my LLM provider keys, and generate a workspace key, **so that** I have a functioning local instance.
 
 ### US-002: Access Web UI via Localhost [P0]
-**As a** user, **I want to** open my browser to `localhost:<port>` and see the Agent Hive chat interface, **so that** I can interact with my workspace without installing a desktop app.
+**As a** user, **I want to** open my browser to `localhost:<port>` and see the Rivulets chat interface, **so that** I can interact with my workspace without installing a desktop app.
 
 ### US-003: Configure Multiple LLM Providers [P0]
 **As a** user, **I want to** provide API keys for one or more LLM providers during setup (OpenAI, Anthropic, DeepSeek, etc.), **so that** my agents can use the models I have access to.
@@ -131,26 +131,26 @@
 **As a** user, **I want to** describe what I want a tool to do in natural language and have the system generate the Python tool code, **so that** I can create custom tools without deep coding.
 
 ### US-032: Create Tool via Advanced Mode [P1]
-**As a** power user, **I want to** open a tool's Python file directly in VS Code from the Agent Hive UI, **so that** I can write complex tools in my preferred editor.
+**As a** power user, **I want to** open a tool's Python file directly in VS Code from the Rivulets UI, **so that** I can write complex tools in my preferred editor.
 
 ### US-033: Register MCP Server [P1]
-**As a** user, **I want to** point Agent Hive at an external MCP server URL and make its tools available to agents, **so that** I can leverage the MCP ecosystem.
+**As a** user, **I want to** point Rivulets at an external MCP server URL and make its tools available to agents, **so that** I can leverage the MCP ecosystem.
 
 ### US-034: Create MCP Server [P2]
-**As a** power user, **I want to** scaffold and deploy a new MCP server from within Agent Hive, **so that** I can build custom tool servers without leaving the platform.
+**As a** power user, **I want to** scaffold and deploy a new MCP server from within Rivulets, **so that** I can build custom tool servers without leaving the platform.
 
 ---
 
 ## Peer-to-Peer Sync
 
 ### US-035: Multi-Machine Workspace Sync [P1]
-**As a** user, **I want to** install Agent Hive on a second machine using the same workspace key and have all agents, channels, teams, threads, tools, and files sync between nodes, **so that** I have the same workspace everywhere.
+**As a** user, **I want to** install Rivulets on a second machine using the same workspace key and have all agents, channels, teams, threads, tools, and files sync between nodes, **so that** I have the same workspace everywhere.
 
 ### US-036: LLM Keys Not Synced [P1]
 **As a** user, **I want to** provide LLM provider keys separately on each machine during installation, **so that** my API keys are never transmitted between nodes.
 
 ### US-037: Offline Resilience [P1]
-**As a** user, **I want to** continue using Agent Hive on my local machine even when other nodes in my mesh are offline, **so that** I'm never blocked by network issues.
+**As a** user, **I want to** continue using Rivulets on my local machine even when other nodes in my mesh are offline, **so that** I'm never blocked by network issues.
 
 ### US-038: Conflict Resolution [P2]
 **As a** user, **I want to** have the system intelligently merge changes made on different nodes (last-write-wins with visibility into conflicts), **so that** I can work on multiple machines without losing data.
