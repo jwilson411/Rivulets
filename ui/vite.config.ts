@@ -32,10 +32,11 @@ export default defineConfig({
 	},
 	test: {
 		expect: { requireAssertions: true },
-		// No real component/unit tests exist yet (the only prior test files
-		// were the `sv create` scaffold's throwaway examples, removed as
-		// dead weight) -- without this, `vitest --run` exits 1 on an empty
-		// suite and breaks CI the moment there's nothing left to collect.
+		// Real tests exist now (src/lib/api/client.test.ts, LoginForm.svelte.test.ts,
+		// Sidebar.svelte.test.ts), but keeping this: a project's test glob
+		// matching nothing shouldn't fail CI on its own, e.g. if the
+		// client/server split above ever ends up with one side temporarily
+		// empty during development.
 		passWithNoTests: true,
 		projects: [
 			{
