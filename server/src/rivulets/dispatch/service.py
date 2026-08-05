@@ -1,6 +1,6 @@
 """Bridges the pure DispatchEngine (dispatch/engine.py, DB-free) to our DB
 and to AgentOS: loads a channel team's agents + routing rules, runs the
-dispatcher, invokes matched agents, and persists their replies as thread
+dispatcher, invokes matched agents, and persists their replies as rivulet
 messages (FR-4.1, FR-5.2, FR-12.1).
 
 Also recurses: an agent's own reply is itself re-dispatched (FR-5.6,
@@ -29,7 +29,7 @@ per streamed content delta, `agent_message` once a reply is persisted,
 `handoff` when one occurs, `error`/`system_alert` on failure or guard
 pause, and `done` once per external (non-recursive) call. Persisting rows
 and publishing events both happen inline here, in the same request that
-triggered the dispatch — see api/threads.py's SSE endpoint for how a
+triggered the dispatch — see api/rivulets.py's SSE endpoint for how a
 concurrent connection observes these live while this coroutine runs.
 
 A message that misses every @mention and deterministic rule falls through
@@ -52,9 +52,9 @@ from rivulets.db.models import (
     AgentRoutingRule,
     Channel,
     Message,
+    Rivulet,
+    RivuletGuardState,
     TeamAgent,
-    Thread,
-    ThreadGuardState,
 )
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
 from rivulets.dispatch.guards import (
@@ -127,7 +127,7 @@ def _find_handoff_call(run_output: RunOutput) -> tuple[str, str] | None:
 
 async def dispatch_and_respond(
     db: AsyncSession,
-    thread: Thread,
+    rivulet: Rivulet,
     channel: Channel,
     message_content: str,
     *,
@@ -135,7 +135,7 @@ async def dispatch_and_respond(
     from_agent_name: str | None = None,
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
-    agent, appending its reply to `thread` as a Message row. Returns the
+    agent, appending its reply to `rivulet` as a Message row. Returns the
     new Message rows (already added to `db`, not yet committed — callers
     own the commit so this composes with whatever else they're persisting
     in the same request).
@@ -147,25 +147,25 @@ async def dispatch_and_respond(
     is_top_level = from_agent_id is None
     try:
         return await _dispatch_and_respond(
-            db, thread, channel, message_content, from_agent_id, from_agent_name
+            db, rivulet, channel, message_content, from_agent_id, from_agent_name
         )
     finally:
         # One "no more events for this trigger" signal per external call,
         # regardless of which return path fired above (SSE clients need
         # this even when nothing ended up matching, api-design.md's `done`).
         if is_top_level:
-            publish(thread.id, "done", {"thread_id": thread.id})
+            publish(rivulet.id, "done", {"rivulet_id": rivulet.id})
 
 
 async def _dispatch_and_respond(
     db: AsyncSession,
-    thread: Thread,
+    rivulet: Rivulet,
     channel: Channel,
     message_content: str,
     from_agent_id: str | None,
     from_agent_name: str | None,
 ) -> list[Message]:
-    guard_state = await get_or_create_guard_state(db, thread.id)
+    guard_state = await get_or_create_guard_state(db, rivulet.id)
     if from_agent_id is None:
         reset_guard_state(guard_state)  # FR-7.5: a human message always resumes
     elif guard_state.paused:
@@ -184,8 +184,8 @@ async def _dispatch_and_respond(
     engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
     result = await engine.dispatch(message_content, dispatch_infos)
 
-    if thread.agentos_session_id is None:
-        thread.agentos_session_id = thread.id  # FR-12.2: one AgentOS session per thread
+    if rivulet.agentos_session_id is None:
+        rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
 
     new_messages: list[Message] = []
     for agent_id in result.agent_ids:
@@ -197,7 +197,7 @@ async def _dispatch_and_respond(
         new_messages.extend(
             await _invoke_agent(
                 db,
-                thread,
+                rivulet,
                 channel,
                 guard_state,
                 agent,
@@ -213,9 +213,9 @@ async def _dispatch_and_respond(
 
 async def _invoke_agent(
     db: AsyncSession,
-    thread: Thread,
+    rivulet: Rivulet,
     channel: Channel,
-    guard_state: ThreadGuardState,
+    guard_state: RivuletGuardState,
     agent: Agent,
     message_content: str,
     team_agents: list[tuple[Agent, AgentDispatchInfo]],
@@ -235,18 +235,18 @@ async def _invoke_agent(
         nonlocal seq
         seq += 1
         publish(
-            thread.id,
+            rivulet.id,
             "agent_token",
             {"agent_id": agent_id, "agent_name": agent_name, "token": delta, "seq": seq},
         )
 
-    assert thread.agentos_session_id is not None  # set by the top-level call before any agent runs
+    assert rivulet.agentos_session_id is not None  # set by the top-level call before any agent runs
     try:
         run_output = await run_agent(
             db,
             agent.id,
             message_content,
-            session_id=thread.agentos_session_id,
+            session_id=rivulet.agentos_session_id,
             user_id="human",
             on_token=on_token,
         )
@@ -256,9 +256,9 @@ async def _invoke_agent(
         # our own run_agent() (e.g. "not registered") that happen before
         # agno even gets a chance to run.
         logger.warning(
-            "Agent %r failed to respond in thread %r", agent.name, thread.id, exc_info=True
+            "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=True
         )
-        publish(thread.id, "error", {"agent_id": agent.id, "error": str(exc)})
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
         return []
 
     if run_output.status is RunStatus.error:
@@ -269,11 +269,11 @@ async def _invoke_agent(
         # errors, not raw exception text) and wrong — it's not something
         # the agent "said".
         logger.warning(
-            "Agent %r run failed in thread %r: %s", agent.name, thread.id, run_output.content
+            "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
-        publish(thread.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
         message = Message(
-            thread_id=thread.id,
+            rivulet_id=rivulet.id,
             sender_type="system",
             sender_name="system",
             content=f"{agent.name} couldn't respond — its provider returned an error.",
@@ -285,7 +285,7 @@ async def _invoke_agent(
     # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
     content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
     message = Message(
-        thread_id=thread.id,
+        rivulet_id=rivulet.id,
         sender_type="agent",
         sender_id=agent.id,
         sender_name=agent.name,
@@ -295,7 +295,7 @@ async def _invoke_agent(
     await db.flush()  # populate message.id for the agent_message event below
     new_messages: list[Message] = [message]
     publish(
-        thread.id,
+        rivulet.id,
         "agent_message",
         {
             "agent_id": agent.id,
@@ -308,7 +308,7 @@ async def _invoke_agent(
 
     pause_message = await record_agent_message(
         db,
-        thread.id,
+        rivulet.id,
         guard_state,
         from_agent_id=from_agent_id,
         from_agent_name=from_agent_name or "",
@@ -316,11 +316,11 @@ async def _invoke_agent(
         to_agent_name=agent.name,
     )
     if pause_message is not None:
-        thread.status = "paused"
+        rivulet.status = "paused"
         db.add(pause_message)
         new_messages.append(pause_message)
         publish(
-            thread.id,
+            rivulet.id,
             "system_alert",
             {
                 "type": "guard_paused",
@@ -335,14 +335,14 @@ async def _invoke_agent(
         target_name, handoff_context = handoff_call
         new_messages.extend(
             await _handle_handoff(
-                db, thread, channel, guard_state, agent, team_agents, target_name, handoff_context
+                db, rivulet, channel, guard_state, agent, team_agents, target_name, handoff_context
             )
         )
 
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
-        db, thread, channel, content, from_agent_id=agent.id, from_agent_name=agent.name
+        db, rivulet, channel, content, from_agent_id=agent.id, from_agent_name=agent.name
     )
     new_messages.extend(recursive_messages)
     return new_messages
@@ -350,9 +350,9 @@ async def _invoke_agent(
 
 async def _handle_handoff(
     db: AsyncSession,
-    thread: Thread,
+    rivulet: Rivulet,
     channel: Channel,
-    guard_state: ThreadGuardState,
+    guard_state: RivuletGuardState,
     from_agent: Agent,
     team_agents: list[tuple[Agent, AgentDispatchInfo]],
     target_agent_name: str,
@@ -362,22 +362,22 @@ async def _handle_handoff(
     target directly — bypassing routing rules entirely, the same way an
     @mention does — via the shared _invoke_agent pipeline (FR-6.2: the
     target gets the handoff framed explicitly as its input, plus full
-    thread history through the shared AgentOS session, FR-12.2)."""
+    rivulet history through the shared AgentOS session, FR-12.2)."""
     target = next(
         (agent for agent, _ in team_agents if agent.name.lower() == target_agent_name.lower()),
         None,
     )
     if target is None:
         logger.warning(
-            "Agent %r tried to hand off to unknown agent %r in thread %r",
+            "Agent %r tried to hand off to unknown agent %r in rivulet %r",
             from_agent.name,
             target_agent_name,
-            thread.id,
+            rivulet.id,
         )
         return []
 
     handoff_message = Message(
-        thread_id=thread.id,
+        rivulet_id=rivulet.id,
         sender_type="system",
         sender_name="system",
         content=f"@{from_agent.name} handed off to @{target.name}: {context}",
@@ -386,7 +386,7 @@ async def _handle_handoff(
     db.add(handoff_message)
     await db.flush()
     publish(
-        thread.id,
+        rivulet.id,
         "handoff",
         {"from_agent_id": from_agent.id, "to_agent_name": target.name, "context": context},
     )
@@ -394,7 +394,7 @@ async def _handle_handoff(
 
     target_messages = await _invoke_agent(
         db,
-        thread,
+        rivulet,
         channel,
         guard_state,
         target,

@@ -97,9 +97,7 @@ def _load_custom_tool(tool_row: Tool) -> Function | None:
     # chance of colliding with a real installed package, and there's no
     # need to register in sys.modules since these are standalone scripts,
     # not part of a package that needs relative imports resolved.
-    spec = importlib.util.spec_from_file_location(
-        f"rivulets_custom_tool_{uuid.uuid4().hex}", path
-    )
+    spec = importlib.util.spec_from_file_location(f"rivulets_custom_tool_{uuid.uuid4().hex}", path)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)

@@ -43,7 +43,7 @@ class ConflictOut(BaseModel):
     # Snapshot values are whatever JSON a given entity's synced_fields
     # happen to contain — dict[str, str] only ever worked by coincidence,
     # back when 'agent' (all-string fields) was the only entity type that
-    # could conflict. Channel/Thread/MCPServer/etc. fields include
+    # could conflict. Channel/Rivulet/MCPServer/etc. fields include
     # int/bool/None too.
     local_snapshot: dict[str, Any]
     remote_snapshot: dict[str, Any]

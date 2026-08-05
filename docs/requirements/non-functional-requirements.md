@@ -16,8 +16,8 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 - Streaming visual updates: at least **10 updates per second** perceived by the user
 
 ### NFR-1.3 UI Responsiveness
-- Channel switching (loading thread list): **<200ms**
-- Thread opening (loading message history): **<500ms for threads with <100 messages**
+- Channel switching (loading rivulet list): **<200ms**
+- Rivulet opening (loading message history): **<500ms for rivulets with <100 messages**
 - Agent creation form submission: **<2s** (including routing rule generation)
 
 ### NFR-1.4 Sync Performance
@@ -34,11 +34,11 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 - AgentOS crashes MUST be automatically restarted by the process supervisor.
 
 ### NFR-2.2 Offline Resilience
-- A node with zero network connectivity MUST be 100% functional for all local operations (agent runs, channel management, thread viewing).
+- A node with zero network connectivity MUST be 100% functional for all local operations (agent runs, channel management, rivulet viewing).
 - No operation may fail or hang because peer nodes are unreachable. Sync is background-only.
 
 ### NFR-2.3 Data Durability
-- Thread messages and agent configurations MUST survive AgentOS restarts, machine reboots, and application crashes without data loss.
+- Rivulet messages and agent configurations MUST survive AgentOS restarts, machine reboots, and application crashes without data loss.
 - Database writes MUST use write-ahead logging (WAL) with fsync on commit.
 
 ### NFR-2.4 Graceful Degradation
@@ -81,8 +81,8 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 ### NFR-4.2 Message Volume
 - The system MUST handle **1,000 messages per day** across all channels without performance degradation.
 
-### NFR-4.3 Thread Depth
-- Threads MUST support at least **500 messages** with full history browsing. Context summarization triggers automatically (FR-5.4).
+### NFR-4.3 Rivulet Depth
+- Rivulets MUST support at least **500 messages** with full history browsing. Context summarization triggers automatically (FR-5.4).
 
 ### NFR-4.4 Node Count
 - The P2P mesh MUST support at least **10 peer nodes** in a single workspace.
@@ -125,7 +125,7 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 
 ### NFR-7.1 Logging
 - The system MUST log all agent invocations, dispatcher decisions, sync operations, and errors to structured log files.
-- Logs MUST include timestamps, correlation IDs (thread ID, agent ID), and severity levels.
+- Logs MUST include timestamps, correlation IDs (rivulet ID, agent ID), and severity levels.
 
 ### NFR-7.2 Cost Tracking
 - Per-agent token consumption and estimated cost MUST be tracked and viewable in the UI.
@@ -143,7 +143,7 @@ All NFRs include a measurable target. Vague requirements ("fast," "secure") are 
 - The system MUST support exporting and importing workspace configurations.
 
 ### NFR-8.2 Upgrade Path
-- Rivulets version upgrades MUST preserve all user data (agents, threads, settings) without manual migration.
+- Rivulets version upgrades MUST preserve all user data (agents, rivulets, settings) without manual migration.
 - Breaking changes MUST be documented with migration scripts when unavoidable.
 
 ### NFR-8.3 AgentOS Version Compatibility

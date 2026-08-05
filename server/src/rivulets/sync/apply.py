@@ -16,7 +16,7 @@ Each entity carries two related but distinct clocks:
 
 `apply_remote_change()` is the generic entity-sync path, driven by an
 `EntitySpec` (model class + which fields are synced) — Agent, Channel,
-Team, MCPServer, Thread, Message, and WorkspaceSetting all go through it.
+Team, MCPServer, Rivulet, Message, and WorkspaceSetting all go through it.
 Two things deliberately don't sync:
 
   - Foreign keys whose target entity type has no natural creation
@@ -27,23 +27,23 @@ Two things deliberately don't sync:
     channel's "assigned to team X" change could arrive before team X's
     own create message has, and SQLite's foreign_keys=ON would reject
     the write. A real fix needs a retry/pending-apply queue keyed on the
-    missing reference; out of scope for this pass. `Thread.channel_id`
-    and `Message.thread_id`, by contrast, ARE synced despite having the
-    same theoretical hazard — a thread/message is meaningless without
+    missing reference; out of scope for this pass. `Rivulet.channel_id`
+    and `Message.rivulet_id`, by contrast, ARE synced despite having the
+    same theoretical hazard — a rivulet/message is meaningless without
     its parent, unlike a channel's *optional* team assignment, so
-    excluding them would make thread/message sync pointless. Instead
+    excluding them would make rivulet/message sync pointless. Instead
     `apply_remote_change`'s final commit catches IntegrityError and queues
     the message (SyncPendingInbound) rather than dropping it or crashing
     the sync-message handler — `handle_incoming_state_change` retries the
     whole queue after every subsequent successful apply, on the chance the
-    missing dependency just arrived too. In practice channels and threads
+    missing dependency just arrived too. In practice channels and rivulets
     are created far less often than messages and the dependency chain is
     one hop, so the race window is real but narrow; this queue is what
     closes it instead of the message being silently lost forever.
   - Per-node status fields aren't synced: `MCPServer.connected` and
     `last_connected_at` reflect *this node's own* connection attempt, not
     shared state — each node reconnects to a synced MCPServer's url
-    independently. `Thread.agentos_session_id` is the same idea: each
+    independently. `Rivulet.agentos_session_id` is the same idea: each
     node's own AgentOS instance owns its own session bookkeeping. Same
     reasoning FR-9.2 already applies to provider credentials.
 
@@ -79,10 +79,10 @@ from rivulets.db.models import (
     File,
     MCPServer,
     Message,
+    Rivulet,
     SyncConflict,
     SyncPendingInbound,
     Team,
-    Thread,
     Tool,
     ToolVersion,
     VectorClockTracker,
@@ -181,12 +181,12 @@ AGENT_SPEC = EntitySpec("agent", Agent, ("name", "description", "instructions", 
 CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
 MCP_SERVER_SPEC = EntitySpec("mcp_server", MCPServer, ("name", "url"))
-THREAD_SPEC = EntitySpec("thread", Thread, ("channel_id", "title", "status", "created_by"))
+RIVULET_SPEC = EntitySpec("rivulet", Rivulet, ("channel_id", "title", "status", "created_by"))
 MESSAGE_SPEC = EntitySpec(
     "message",
     Message,
     (
-        "thread_id",
+        "rivulet_id",
         "sender_type",
         "sender_id",
         "sender_name",
@@ -259,7 +259,7 @@ async def apply_remote_change(
     try:
         # _store_vector_clock's db.get() calls can trigger an autoflush of
         # the pending `instance` insert/update above -- a bad FK (a synced
-        # Thread.channel_id/Message.thread_id pointing at a parent that
+        # Rivulet.channel_id/Message.rivulet_id pointing at a parent that
         # hasn't synced here yet, see module docstring) can therefore
         # raise IntegrityError from inside this call, not just from the
         # commit() below, so both need to be inside the same try.
@@ -374,7 +374,7 @@ async def apply_remote_file_change(
     protocol. `local_path` is always recomputed from this node's own
     files_dir, never copied verbatim from the sender, matching Tool's
     source_path handling. `File.message_id` has no FK constraint (see
-    db/models.py), so unlike Thread/Message there's no ordering hazard to
+    db/models.py), so unlike Rivulet/Message there's no ordering hazard to
     guard against here."""
     local_vc = await _load_vector_clock(db, "file", entity_id)
     comparison = compare_vector_clocks(local_vc, remote_vector_clock)
@@ -428,9 +428,7 @@ async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path)
         return
     data = await engine.request_file(peer_id, content_hash)
     if data is None:
-        logger.info(
-            "Peer %s doesn't have file content for hash=%s yet", peer_id, content_hash[:12]
-        )
+        logger.info("Peer %s doesn't have file content for hash=%s yet", peer_id, content_hash[:12])
         return
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(data)
@@ -442,7 +440,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "channel": CHANNEL_SPEC,
     "team": TEAM_SPEC,
     "mcp_server": MCP_SERVER_SPEC,
-    "thread": THREAD_SPEC,
+    "rivulet": RIVULET_SPEC,
     "message": MESSAGE_SPEC,
     "workspace_setting": WORKSPACE_SETTING_SPEC,
 }
@@ -531,7 +529,7 @@ async def handle_incoming_state_change(
     own DB session since it isn't running inside a FastAPI request.
 
     Covers FR-9.1's full sync scope: agent/channel/team/mcp_server/tool/
-    thread/message/file/workspace_setting. Anything else is logged and
+    rivulet/message/file/workspace_setting. Anything else is logged and
     dropped, matching this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":

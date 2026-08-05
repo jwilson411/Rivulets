@@ -8,9 +8,9 @@ this node's own listen-port preference (deployment-and-networking.md
 lists it as node-configurable), not shared workspace policy, and syncing
 it would mean one node's local port conflict-avoidance change silently
 overwriting every other node's. Every other key here (dispatcher/guard/
-thread/sync.* behavior) is genuinely workspace-wide policy — e.g. the
+rivulet/sync.* behavior) is genuinely workspace-wide policy — e.g. the
 loop-prevention guard thresholds should mean the same thing on every
-node, not vary by which one happened to create a thread.
+node, not vary by which one happened to create a rivulet.
 """
 
 import json
@@ -33,9 +33,9 @@ _DEFAULTS: dict[str, object] = {
     "guard.cycle_window": 8,
     "guard.cycle_threshold": 3,
     "guard.timeout_minutes": 30,
-    "thread.summarization_enabled": True,
-    "thread.context_threshold_pct": 80,
-    "thread.recent_messages_kept": 20,
+    "rivulet.summarization_enabled": True,
+    "rivulet.context_threshold_pct": 80,
+    "rivulet.recent_messages_kept": 20,
     "sync.eager_files_lan": True,
     "sync.eager_files_wan": False,
     "ui.port": 8484,

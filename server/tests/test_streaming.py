@@ -15,43 +15,43 @@ from rivulets.streaming import publish, subscribe, unsubscribe
 
 
 def test_publish_with_no_subscribers_does_not_raise() -> None:
-    publish("no-such-thread", "done", {"thread_id": "no-such-thread"})
+    publish("no-such-rivulet", "done", {"rivulet_id": "no-such-rivulet"})
 
 
 def test_subscriber_receives_published_event() -> None:
-    queue = subscribe("thread-1")
+    queue = subscribe("rivulet-1")
     try:
-        publish("thread-1", "agent_token", {"token": "hi"})
+        publish("rivulet-1", "agent_token", {"token": "hi"})
         event = queue.get_nowait()
         assert event == {"event": "agent_token", "data": {"token": "hi"}}
     finally:
-        unsubscribe("thread-1", queue)
+        unsubscribe("rivulet-1", queue)
 
 
 def test_multiple_subscribers_all_receive_the_same_event() -> None:
-    queue_a = subscribe("thread-2")
-    queue_b = subscribe("thread-2")
+    queue_a = subscribe("rivulet-2")
+    queue_b = subscribe("rivulet-2")
     try:
-        publish("thread-2", "done", {"thread_id": "thread-2"})
+        publish("rivulet-2", "done", {"rivulet_id": "rivulet-2"})
         assert queue_a.get_nowait()["event"] == "done"
         assert queue_b.get_nowait()["event"] == "done"
     finally:
-        unsubscribe("thread-2", queue_a)
-        unsubscribe("thread-2", queue_b)
+        unsubscribe("rivulet-2", queue_a)
+        unsubscribe("rivulet-2", queue_b)
 
 
 def test_unsubscribed_queue_receives_nothing_further() -> None:
-    queue = subscribe("thread-3")
-    unsubscribe("thread-3", queue)
-    publish("thread-3", "done", {"thread_id": "thread-3"})
+    queue = subscribe("rivulet-3")
+    unsubscribe("rivulet-3", queue)
+    publish("rivulet-3", "done", {"rivulet_id": "rivulet-3"})
     with pytest.raises(asyncio.QueueEmpty):
         queue.get_nowait()
 
 
 def test_unsubscribe_is_idempotent() -> None:
-    queue = subscribe("thread-4")
-    unsubscribe("thread-4", queue)
-    unsubscribe("thread-4", queue)  # must not raise
+    queue = subscribe("rivulet-4")
+    unsubscribe("rivulet-4", queue)
+    unsubscribe("rivulet-4", queue)  # must not raise
 
 
 def test_dispatch_publishes_documented_sse_event_sequence(
@@ -98,18 +98,18 @@ def test_dispatch_publishes_documented_sse_event_sequence(
     client.patch(f"/api/v1/channels/{channel_id}", json={"team_id": team_id}, headers=auth_headers)
 
     # First message doesn't match the keyword rule — just here to get a
-    # thread_id to subscribe to before the message that actually dispatches.
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    # rivulet_id to subscribe to before the message that actually dispatches.
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "no match here"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    event_queue = subscribe(thread_id)
+    event_queue = subscribe(rivulet_id)
     try:
         response = client.post(
-            f"/api/v1/threads/{thread_id}/messages",
+            f"/api/v1/rivulets/{rivulet_id}/messages",
             json={"content": "trigger now"},
             headers=auth_headers,
         )
@@ -119,10 +119,10 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         while not event_queue.empty():
             events.append(event_queue.get_nowait())
     finally:
-        unsubscribe(thread_id, event_queue)
+        unsubscribe(rivulet_id, event_queue)
 
     assert [e["event"] for e in events] == ["agent_token", "agent_token", "agent_message", "done"]
     assert [e["data"]["token"] for e in events[:2]] == ["Hel", "lo"]
     assert events[2]["data"]["content"] == "Hello"
     assert events[2]["data"]["agent_id"] == agent_id
-    assert events[3]["data"] == {"thread_id": thread_id}
+    assert events[3]["data"] == {"rivulet_id": rivulet_id}

@@ -62,7 +62,7 @@
 
 **Consequences:**
 - **Gain:** Zero-config, zero-maintenance persistence. Backups are a file copy.
-- **Trade-off:** No built-in vector search. If we later need semantic search over thread history, we'd add sqlite-vec extension or an embedded vector index.
+- **Trade-off:** No built-in vector search. If we later need semantic search over rivulet history, we'd add sqlite-vec extension or an embedded vector index.
 - **Risk:** Database corruption from power loss. Mitigated by WAL + fsync on commit (NFR-2.3). SQLite's ACID guarantees are well-tested.
 
 ---
@@ -86,7 +86,7 @@
 **Consequences:**
 - **Gain:** Simple streaming architecture. Static build served from Python. Reactive UI with minimal boilerplate.
 - **Trade-off:** SSE is HTTP/1.1 only (no HTTP/2 multiplexing). Not a problem on localhost. If we later need bidirectional streaming (e.g., collaborative typing indicators), we'd add WebSockets as a supplement.
-- **Risk:** Browser SSE implementations cap connections per domain (usually 6). With multiple concurrent agent streams in different threads, we could hit this limit. Mitigation: multiplex multiple agent streams over a single SSE endpoint with event types, or raise to HTTP/2.
+- **Risk:** Browser SSE implementations cap connections per domain (usually 6). With multiple concurrent agent streams in different rivulets, we could hit this limit. Mitigation: multiplex multiple agent streams over a single SSE endpoint with event types, or raise to HTTP/2.
 
 ---
 
@@ -114,7 +114,7 @@
 
 ## ADR-006: libp2p + Tailscale for P2P Sync
 
-**Decision:** Structured data (agents, channels, threads, settings) syncs via libp2p's gossipsub pub/sub protocol. Files sync via content-addressed delta transfer over libp2p streams. Cross-network connectivity uses Tailscale/WireGuard.
+**Decision:** Structured data (agents, channels, rivulets, settings) syncs via libp2p's gossipsub pub/sub protocol. Files sync via content-addressed delta transfer over libp2p streams. Cross-network connectivity uses Tailscale/WireGuard.
 
 **Rationale:**
 - libp2p provides: encrypted transport (noise handshake with workspace key as PSK), peer discovery (mDNS for LAN), pub/sub messaging (gossipsub for state change broadcasts), and stream multiplexing.
@@ -134,15 +134,15 @@
 
 ---
 
-## ADR-007: Thread as the Unit of Agent Context
+## ADR-007: Rivulet as the Unit of Agent Context
 
-**Decision:** Each thread is an independent conversation context with its own AgentOS session ID. Agents invoked in a thread receive the full thread history (summarized when needed). The main channel feed shows only human messages + thread previews.
+**Decision:** Each rivulet is an independent conversation context with its own AgentOS session ID. Agents invoked in a rivulet receive the full rivulet history (summarized when needed). The main channel feed shows only human messages + rivulet previews.
 
 **Rationale:**
-- Per FR-5.1 through FR-5.6. This models how Slack threads work — main channel is clean, threads contain the deep work.
-- Tying each thread to a single AgentOS session ID means AgentOS handles session persistence automatically. We don't build session management.
+- Per FR-5.1 through FR-5.6. This models how Slack rivulets work — main channel is clean, rivulets contain the deep work.
+- Tying each rivulet to a single AgentOS session ID means AgentOS handles session persistence automatically. We don't build session management.
 - Hierarchical summarization (OQ-4) keeps agent context within token limits without losing semantic detail.
-- Agents see each other's messages in the thread (FR-5.6) — this is critical for the "agents act like humans" design principle.
+- Agents see each other's messages in the rivulet (FR-5.6) — this is critical for the "agents act like humans" design principle.
 
 **Alternatives considered:**
 - **Single session per channel:** Rejected. Mixes unrelated topics. Context grows unbounded. No natural "reset" point.
@@ -150,8 +150,8 @@
 
 **Consequences:**
 - **Gain:** Clean information architecture. Natural context boundaries. AgentOS session management for free.
-- **Trade-off:** Cross-thread context is not available to agents. An agent can't reference "what we discussed in the other thread." By design — threads are independent topics.
-- **Risk:** Threads with hundreds of messages may hit token limits despite summarization. Mitigation: hierarchical summarization preserves key information. Users can start a new thread to reset context.
+- **Trade-off:** Cross-rivulet context is not available to agents. An agent can't reference "what we discussed in the other rivulet." By design — rivulets are independent topics.
+- **Risk:** Rivulets with hundreds of messages may hit token limits despite summarization. Mitigation: hierarchical summarization preserves key information. Users can start a new rivulet to reset context.
 
 ---
 
@@ -178,19 +178,19 @@
 
 ## ADR-009: Hierarchical Summarization for Context Management
 
-**Decision:** When a thread exceeds 80% of the target model's context window, older messages are chunked into groups of 20, each chunk is summarized by a cheap model, then the summaries are summarized into a single thread-context block. The 20 most recent messages always remain in full.
+**Decision:** When a rivulet exceeds 80% of the target model's context window, older messages are chunked into groups of 20, each chunk is summarized by a cheap model, then the summaries are summarized into a single rivulet-context block. The 20 most recent messages always remain in full.
 
 **Rationale:**
-- Per OQ-4. Hierarchical summarization preserves more semantic detail than a flat "summarize everything" approach. Each chunk summary captures local context; the meta-summary connects themes across the thread.
+- Per OQ-4. Hierarchical summarization preserves more semantic detail than a flat "summarize everything" approach. Each chunk summary captures local context; the meta-summary connects themes across the rivulet.
 - A cheap model (the workspace's dispatcher model — Haiku or GPT-4o-mini) handles the summarization to keep costs low.
 - Summarization is triggered proactively at 80% (not 100%) to prevent a single message from overflowing context mid-agent-run.
 
 **Alternatives considered:**
-- **Sliding window only (last N messages):** Rejected. Older context is lost entirely. An agent invoked late in a long thread has no idea what was discussed earlier.
-- **Flat summarization (one summary of everything older):** Rejected. Loses detail. A 200-message thread summarized in one pass produces vague output.
-- **RAG over thread history:** Considered. Embed all messages, retrieve relevant ones on each agent invocation. Rejected because it adds embedding infrastructure and latency to every agent run. Summarization is a one-time cost per threshold crossing.
+- **Sliding window only (last N messages):** Rejected. Older context is lost entirely. An agent invoked late in a long rivulet has no idea what was discussed earlier.
+- **Flat summarization (one summary of everything older):** Rejected. Loses detail. A 200-message rivulet summarized in one pass produces vague output.
+- **RAG over rivulet history:** Considered. Embed all messages, retrieve relevant ones on each agent invocation. Rejected because it adds embedding infrastructure and latency to every agent run. Summarization is a one-time cost per threshold crossing.
 
 **Consequences:**
-- **Gain:** Agents retain context from the entire thread history, not just recent messages. Summarization cost is amortized (recomputed only when new messages push past the threshold again).
-- **Trade-off:** 2-3 additional LLM calls per summarization event. At ~$0.001 per call, this is negligible (<$0.01 per thread lifecycle).
-- **Risk:** Summarization quality degrades with very long threads (500+ messages). The meta-summary may lose important details. Mitigation: humans can start a new thread. Agents should be instructed to be concise.
+- **Gain:** Agents retain context from the entire rivulet history, not just recent messages. Summarization cost is amortized (recomputed only when new messages push past the threshold again).
+- **Trade-off:** 2-3 additional LLM calls per summarization event. At ~$0.001 per call, this is negligible (<$0.01 per rivulet lifecycle).
+- **Risk:** Summarization quality degrades with very long rivulets (500+ messages). The meta-summary may lose important details. Mitigation: humans can start a new rivulet. Agents should be instructed to be concise.

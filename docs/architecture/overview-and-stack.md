@@ -15,7 +15,7 @@ Rivulets is a **local-first, P2P-synchronized, single-binary application** consi
 │               Rivulets Application Server               │
 │  FastAPI / Starlette (Python 3.11+)                       │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ Dispatch  │ │  Thread  │ │   Tool   │ │   Sync   │   │
+│  │ Dispatch  │ │  Rivulet  │ │   Tool   │ │   Sync   │   │
 │  │  Engine   │ │  Manager │ │ Registry │ │  Engine  │   │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
@@ -33,7 +33,7 @@ Rivulets is a **local-first, P2P-synchronized, single-binary application** consi
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │                 Local SQLite Database                     │
-│  Workspace state, threads, messages, agent configs        │
+│  Workspace state, rivulets, messages, agent configs        │
 │  File metadata, sync state (vector clocks)               │
 └─────────────────────────────────────────────────────────┘
 
@@ -56,7 +56,7 @@ Rivulets is a **local-first, P2P-synchronized, single-binary application** consi
 | Component | Responsibility | Communicates With |
 |---|---|---|
 | **Web UI** | Slack-like chat, agent/tool/channel management, streaming display | App Server via REST + SSE |
-| **App Server** | Dispatch engine, thread management, tool registry, sync coordination, config export/import | AgentOS (API), SQLite (DB), Peer Nodes (libp2p) |
+| **App Server** | Dispatch engine, rivulet management, tool registry, sync coordination, config export/import | AgentOS (API), SQLite (DB), Peer Nodes (libp2p) |
 | **AgentOS** | Agent execution, session state, streaming, MCP, tracing | LLM providers (API), App Server (internal API) |
 | **SQLite DB** | Persistent state for all workspace entities | App Server only (no direct AgentOS access) |
 | **Sync Engine** | P2P state replication, file transfer, conflict resolution | Peer Sync Engines (libp2p), SQLite (to read/write sync state) |

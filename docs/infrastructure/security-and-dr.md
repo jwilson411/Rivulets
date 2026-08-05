@@ -94,7 +94,7 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 | Scenario | Impact | Recovery | RPO | RTO |
 |---|---|---|---|---|
 | **DB corruption** (power loss, disk error) | All workspace data lost | Restore from latest automatic backup (`~/.rivulets/backups/`) | 24 hours (last daily backup) | 5 minutes (copy backup → restart) |
-| **File store corruption** | Agent can't access files in threads | Files re-synced from peers on next connection. Metadata preserved in sync log. | Variable (last peer sync) | Automatic (on peer reconnect) |
+| **File store corruption** | Agent can't access files in rivulets | Files re-synced from peers on next connection. Metadata preserved in sync log. | Variable (last peer sync) | Automatic (on peer reconnect) |
 | **Binary won't start** (bad update) | Rivulets unavailable | Download previous version from GitHub Releases. Restore pre-upgrade backup. | 0 (pre-upgrade backup taken automatically) | 10 minutes |
 | **Workspace key lost** | Cannot authenticate to workspace | If mnemonic stored: re-enter. If not: **permanent data loss.** No recovery possible. | — | N/A |
 | **Provider key revoked** | Agents using that provider fail | Update key in Settings > Providers. Agents resume on next run. | 0 (agents don't lose state) | 2 minutes |
@@ -133,7 +133,7 @@ All directories and files created with `os.umask(0o077)` — group and other hav
 1. Install Rivulets on new machine.
 2. Enter workspace key (mnemonic).
 3. App Server creates fresh DB, connects to peers, initiates full state sync.
-4. All agents, channels, threads, messages, files replicated from peers.
+4. All agents, channels, rivulets, messages, files replicated from peers.
 5. Provider keys must be re-entered (they don't sync).
 
 ### Data Integrity Verification

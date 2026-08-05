@@ -1,8 +1,8 @@
 """File attachment access built-in tool (FR-10.3).
 
-Lets an invoked agent read the content of a file shared in its thread, via
+Lets an invoked agent read the content of a file shared in its rivulet, via
 the same content-addressed local store api/files.py writes uploads to.
-The file reference in a thread message always resolves to a local path
+The file reference in a rivulet message always resolves to a local path
 whether the file was uploaded on this node or replicated from a peer's
 (sync/apply.py's apply_remote_file_change) — this tool doesn't need to
 know or care which.
@@ -22,7 +22,7 @@ _TEXT_MIME_TYPES = ("application/json",)
 
 @tool
 def read_attached_file(file_id: str) -> str:
-    """Read the text content of a file attached to a thread message, given
+    """Read the text content of a file attached to a rivulet message, given
     its file_id (as returned by the file upload API). Binary files and
     files whose content hasn't synced to this node yet return a
     description instead of raw bytes."""

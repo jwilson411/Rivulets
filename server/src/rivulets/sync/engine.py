@@ -35,7 +35,7 @@ single `asyncio.Task`.
 FR-9's full scope (FR-9.1-9.7) is large; host lifecycle, workspace-scoped
 mDNS discovery, manual connect (FR-9.3), PNet pre-shared-key isolation
 using the workspace key (FR-9.4 — see the note below on PNet vs. Noise),
-gossipsub-based state sync for agent/channel/team/mcp_server/tool/thread/
+gossipsub-based state sync for agent/channel/team/mcp_server/tool/rivulet/
 message with vector-clock conflict detection (FR-9.6, via sync/apply.py)
 are built. File content transfer (FR-9.7) rides a second, non-gossipsub
 mechanism — see sync/file_transfer.py's module docstring for why a raw
@@ -260,9 +260,7 @@ class SyncEngine:
         self._loop = asyncio.get_running_loop()
         self._ready.clear()
         self._start_error = None
-        self._thread = threading.Thread(
-            target=self._run_trio, daemon=True, name="rivulets-sync"
-        )
+        self._thread = threading.Thread(target=self._run_trio, daemon=True, name="rivulets-sync")
         self._thread.start()
         ready = await asyncio.to_thread(self._ready.wait, _THREAD_START_TIMEOUT_SECONDS)
         if not ready or self._trio_token is None or self._start_error is not None:

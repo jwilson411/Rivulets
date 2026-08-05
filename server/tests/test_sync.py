@@ -38,9 +38,9 @@ from rivulets.db.models import (
     File,
     MCPServer,
     Message,
+    Rivulet,
     SyncConflict,
     Team,
-    Thread,
     Tool,
     ToolVersion,
     WorkspaceSetting,
@@ -51,8 +51,8 @@ from rivulets.sync.apply import (
     CHANNEL_SPEC,
     MCP_SERVER_SPEC,
     MESSAGE_SPEC,
+    RIVULET_SPEC,
     TEAM_SPEC,
-    THREAD_SPEC,
     WORKSPACE_SETTING_SPEC,
     ClockComparison,
     apply_remote_change,
@@ -261,38 +261,38 @@ async def test_apply_remote_workspace_setting_change_updates_existing(
     assert setting.value == "20"
 
 
-async def test_apply_remote_thread_change_creates_thread(db_session: AsyncSession) -> None:
+async def test_apply_remote_rivulet_change_creates_rivulet(db_session: AsyncSession) -> None:
     db_session.add(Channel(id="chan-1", name="general"))
     await db_session.commit()
 
     result = await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {"channel_id": "chan-1", "title": "Hello", "status": "active", "created_by": "human"},
     )
     assert result.applied is True
 
-    thread = await db_session.get(Thread, "thread-1")
-    assert thread is not None
-    assert thread.channel_id == "chan-1"
-    assert thread.title == "Hello"
-    assert thread.agentos_session_id is None  # never synced
+    rivulet = await db_session.get(Rivulet, "rivulet-1")
+    assert rivulet is not None
+    assert rivulet.channel_id == "chan-1"
+    assert rivulet.title == "Hello"
+    assert rivulet.agentos_session_id is None  # never synced
 
 
-async def test_apply_remote_thread_change_skips_when_channel_missing(
+async def test_apply_remote_rivulet_change_skips_when_channel_missing(
     db_session: AsyncSession,
 ) -> None:
     """Regression test for the FK-ordering hazard apply.py's module
-    docstring describes: a thread arriving before its channel has synced
+    docstring describes: a rivulet arriving before its channel has synced
     must be dropped cleanly (IntegrityError caught), not crash the
     sync-message handler."""
     result = await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {
@@ -304,15 +304,15 @@ async def test_apply_remote_thread_change_skips_when_channel_missing(
     )
     assert result.applied is False
     assert result.conflict is False
-    assert await db_session.get(Thread, "thread-1") is None
+    assert await db_session.get(Rivulet, "rivulet-1") is None
 
     # The vector-clock bump must have rolled back with the failed commit --
     # otherwise a later, valid delivery of the same message would be
     # wrongly judged as already-seen (EQUAL) instead of fresh.
     retry = await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {
@@ -327,7 +327,9 @@ async def test_apply_remote_thread_change_skips_when_channel_missing(
 
 async def test_apply_remote_message_change_creates_message(db_session: AsyncSession) -> None:
     db_session.add(Channel(id="chan-1", name="general"))
-    db_session.add(Thread(id="thread-1", channel_id="chan-1", created_by="human", status="active"))
+    db_session.add(
+        Rivulet(id="rivulet-1", channel_id="chan-1", created_by="human", status="active")
+    )
     await db_session.commit()
 
     result = await apply_remote_change(
@@ -337,7 +339,7 @@ async def test_apply_remote_message_change_creates_message(db_session: AsyncSess
         {"node-b": 1},
         "node-b",
         {
-            "thread_id": "thread-1",
+            "rivulet_id": "rivulet-1",
             "sender_type": "human",
             "sender_id": None,
             "sender_name": "You",
@@ -350,11 +352,11 @@ async def test_apply_remote_message_change_creates_message(db_session: AsyncSess
 
     message = await db_session.get(Message, "msg-1")
     assert message is not None
-    assert message.thread_id == "thread-1"
+    assert message.rivulet_id == "rivulet-1"
     assert message.content == "Hello from node B"
 
 
-async def test_apply_remote_message_change_skips_when_thread_missing(
+async def test_apply_remote_message_change_skips_when_rivulet_missing(
     db_session: AsyncSession,
 ) -> None:
     result = await apply_remote_change(
@@ -364,7 +366,7 @@ async def test_apply_remote_message_change_skips_when_thread_missing(
         {"node-b": 1},
         "node-b",
         {
-            "thread_id": "does-not-exist",
+            "rivulet_id": "does-not-exist",
             "sender_type": "human",
             "sender_id": None,
             "sender_name": "You",
@@ -695,12 +697,10 @@ async def test_resolve_conflict_applies_remote_for_non_agent_entity(
 ) -> None:
     """Regression test: resolve_conflict used to only apply the remote
     snapshot for entity_type == 'agent' — every other synced entity type
-    (channel, team, thread, ...) silently did nothing when a user picked
+    (channel, team, rivulet, ...) silently did nothing when a user picked
     "keep remote". Covered here with 'channel' since it goes through the
     plain generic apply path (get_entity_spec)."""
-    create = client.post(
-        "/api/v1/channels", json={"name": "local-name-chan"}, headers=auth_headers
-    )
+    create = client.post("/api/v1/channels", json={"name": "local-name-chan"}, headers=auth_headers)
     channel_id = create.json()["id"]
 
     async with session_scope() as db:
@@ -799,7 +799,7 @@ def test_tool_create_does_not_fail_when_sync_engine_not_running(
     assert response.status_code == 201, response.text
 
 
-def test_thread_and_message_create_do_not_fail_when_sync_engine_not_running(
+def test_rivulet_and_message_create_do_not_fail_when_sync_engine_not_running(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     channel = client.post(
@@ -808,25 +808,25 @@ def test_thread_and_message_create_do_not_fail_when_sync_engine_not_running(
     assert channel.status_code == 201, channel.text
     channel_id = channel.json()["id"]
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "hello while sync is offline"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
     message = client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "another message while sync is offline"},
         headers=auth_headers,
     )
     assert message.status_code == 201, message.text
 
-    resumed = client.post(f"/api/v1/threads/{thread_id}/resume", headers=auth_headers)
+    resumed = client.post(f"/api/v1/rivulets/{rivulet_id}/resume", headers=auth_headers)
     assert resumed.status_code == 200
 
-    closed = client.delete(f"/api/v1/threads/{thread_id}", headers=auth_headers)
+    closed = client.delete(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers)
     assert closed.status_code == 204
 
 
@@ -846,19 +846,17 @@ def test_file_upload_and_attach_do_not_fail_when_sync_engine_not_running(
     )
     channel_id = channel.json()["id"]
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "see attached", "files": [file_id]},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
+    assert rivulet.status_code == 201, rivulet.text
 
 
 def test_settings_patch_does_not_fail_when_sync_engine_not_running(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    response = client.patch(
-        "/api/v1/settings", json={"guard.turn_limit": 15}, headers=auth_headers
-    )
+    response = client.patch("/api/v1/settings", json={"guard.turn_limit": 15}, headers=auth_headers)
     assert response.status_code == 200, response.text
     assert response.json()["guard.turn_limit"] == 15

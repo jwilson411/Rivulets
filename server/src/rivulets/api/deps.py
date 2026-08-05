@@ -43,7 +43,7 @@ async def get_current_workspace_id_for_stream(
 ) -> str:
     """Same validation as get_current_workspace_id, but also accepts the
     token via a `token` query parameter — needed only for the SSE stream
-    route (api/threads.py), since the browser's native EventSource API
+    route (api/rivulets.py), since the browser's native EventSource API
     can't set custom headers, and SSE (ADR-004) was chosen specifically
     because it works with plain EventSource. Every other route keeps
     header-only auth; a query-string token is more exposure (server logs,

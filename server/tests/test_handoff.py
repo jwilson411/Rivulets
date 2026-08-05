@@ -127,15 +127,15 @@ def test_handoff_posts_divider_and_invokes_target(
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id, dba_id])
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "design the users table"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent", "system", "agent"]
     assert messages[1]["content"] == "Let me bring in the DBA."
     assert messages[2]["content_type"] == "handoff"
@@ -164,15 +164,15 @@ def test_handoff_to_unknown_agent_is_skipped_gracefully(
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id])
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "start"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
     assert messages[1]["content"] == "Handing this off."
 
@@ -200,16 +200,16 @@ def test_handoff_publishes_sse_event(
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [architect_id, dba_id])
-    # A no-match message first, just to obtain a thread_id before subscribing.
+    # A no-match message first, just to obtain a rivulet_id before subscribing.
     first = client.post(
-        f"/api/v1/channels/{channel_id}/threads", json={"content": "hello"}, headers=auth_headers
+        f"/api/v1/channels/{channel_id}/rivulets", json={"content": "hello"}, headers=auth_headers
     )
-    thread_id = first.json()["id"]
+    rivulet_id = first.json()["id"]
 
-    event_queue = subscribe(thread_id)
+    event_queue = subscribe(rivulet_id)
     try:
         client.post(
-            f"/api/v1/threads/{thread_id}/messages",
+            f"/api/v1/rivulets/{rivulet_id}/messages",
             json={"content": "trigger again"},
             headers=auth_headers,
         )
@@ -217,7 +217,7 @@ def test_handoff_publishes_sse_event(
         while not event_queue.empty():
             events.append(event_queue.get_nowait())
     finally:
-        unsubscribe(thread_id, event_queue)
+        unsubscribe(rivulet_id, event_queue)
 
     handoff_events = [e for e in events if e["event"] == "handoff"]
     assert len(handoff_events) == 1

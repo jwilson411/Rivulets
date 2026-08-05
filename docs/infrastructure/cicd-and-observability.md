@@ -191,7 +191,7 @@ All three processes (App Server, AgentOS, Sync Engine) write JSON Lines logs to 
   "ts": "ISO timestamp",
   "level": "ERROR|WARN|INFO|DEBUG",
   "component": "dispatcher|agentos|sync|api",
-  "correlation_id": "thread_id or request_id",
+  "correlation_id": "rivulet_id or request_id",
   "agent_id": "if applicable",
   "msg": "Human-readable message",
   "extra": {}  // component-specific data
@@ -204,10 +204,10 @@ All three processes (App Server, AgentOS, Sync Engine) write JSON Lines logs to 
 |---|---|---|
 | `dispatch.decision` | Dispatcher | deterministic/llm/none, latency, agent matched |
 | `dispatch.fallback_rate` | Dispatcher | % of messages using LLM fallback (rolling 100) |
-| `agent.run.started` | App Server | Agent invoked, thread ID, model |
+| `agent.run.started` | App Server | Agent invoked, rivulet ID, model |
 | `agent.run.completed` | App Server | Run ID, tokens used, cost, duration, status |
 | `agent.run.failed` | App Server | Run ID, error type, error message |
-| `thread.guard.paused` | Guard | Thread ID, reason (turn_limit/cycle/timeout) |
+| `rivulet.guard.paused` | Guard | Rivulet ID, reason (turn_limit/cycle/timeout) |
 | `sync.peer.connected` | Sync Engine | Peer ID, address |
 | `sync.peer.disconnected` | Sync Engine | Peer ID, reason |
 | `sync.state.applied` | Sync Engine | Entity type, entity ID, source peer |

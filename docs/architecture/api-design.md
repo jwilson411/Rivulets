@@ -69,26 +69,26 @@ PATCH  /api/v1/agents/{agent_id}/routing-rules       — manually edit rules
          Body: { "rules": [...] }
 ```
 
-### Threads & Messages
+### Rivulets & Messages
 
 ```
-GET    /api/v1/channels/{channel_id}/threads         — list threads (paginated)
+GET    /api/v1/channels/{channel_id}/rivulets         — list rivulets (paginated)
          Query: ?limit=20&before=<cursor>&status=active
-POST   /api/v1/channels/{channel_id}/threads         — post a new message (creates thread)
+POST   /api/v1/channels/{channel_id}/rivulets         — post a new message (creates rivulet)
          Body: { "content": "...", "files"?: ["file_id", ...] }
          Side effects: triggers dispatcher, invokes matching agents
-GET    /api/v1/threads/{thread_id}                   — get thread metadata
-GET    /api/v1/threads/{thread_id}/messages          — get messages
+GET    /api/v1/rivulets/{rivulet_id}                   — get rivulet metadata
+GET    /api/v1/rivulets/{rivulet_id}/messages          — get messages
          Query: ?limit=50&before=<cursor>
-POST   /api/v1/threads/{thread_id}/messages          — post a message in existing thread
+POST   /api/v1/rivulets/{rivulet_id}/messages          — post a message in existing rivulet
          Body: { "content": "...", "files"?: [...] }
          Side effects: resets guard counters, triggers dispatcher if human message
-POST   /api/v1/threads/{thread_id}/resume            — resume paused thread
-DELETE /api/v1/threads/{thread_id}                   — close thread
+POST   /api/v1/rivulets/{rivulet_id}/resume            — resume paused rivulet
+DELETE /api/v1/rivulets/{rivulet_id}                   — close rivulet
 
-GET    /api/v1/threads/{thread_id}/stream            — SSE endpoint for live messages
+GET    /api/v1/rivulets/{rivulet_id}/stream            — SSE endpoint for live messages
          Event types: agent_token, agent_message, agent_tool_call, system_alert, handoff
-         Notes: Client connects and receives all new messages in this thread as SSE events.
+         Notes: Client connects and receives all new messages in this rivulet as SSE events.
                 Agent responses stream token-by-token as 'agent_token' events,
                 with a final 'agent_message' event containing the complete message.
 ```
@@ -183,7 +183,7 @@ POST   /agents/{agent_id}/runs                       — run an agent
          Body: {
            "message": "<user or system message>",
            "user_id": "human",
-           "session_id": "<thread.agentos_session_id>",
+           "session_id": "<rivulet.agentos_session_id>",
            "stream": true
          }
          Response: SSE stream of RunEvent
@@ -218,9 +218,9 @@ The App Server wraps these calls. The UI never calls AgentOS directly — it onl
 
 ---
 
-## SSE Protocol (Thread Streaming)
+## SSE Protocol (Rivulet Streaming)
 
-The SSE endpoint at `GET /api/v1/threads/{thread_id}/stream` emits these event types:
+The SSE endpoint at `GET /api/v1/rivulets/{rivulet_id}/stream` emits these event types:
 
 ```
 event: agent_token
@@ -242,7 +242,7 @@ event: error
 data: {"agent_id": "...", "error": "AgentOS run failed: ..."}
 
 event: done
-data: {"thread_id": "..."}
+data: {"rivulet_id": "..."}
 ```
 
 The UI uses `agent_token` events to build the streaming response display (character-by-character or chunk-by-chunk). `agent_message` is the final, complete message — the UI replaces the streamed preview with the formatted message. Tool calls render as expandable sections. Handoffs render as distinct message dividers.

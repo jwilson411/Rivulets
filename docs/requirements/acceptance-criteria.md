@@ -32,7 +32,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 2. On machine B, run install and choose "Join existing workspace."
 3. Paste the workspace key from machine A.
 4. Observe: machine B connects to machine A (or discovers it) and begins syncing.
-5. Observe: after sync, machine B shows the same channels, agents, and threads as machine A.
+5. Observe: after sync, machine B shows the same channels, agents, and rivulets as machine A.
 **Expected:** Machine B has identical workspace state after sync.
 
 ---
@@ -71,7 +71,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 3. Submit. Observe: agent appears in agent list.
 4. Inspect generated routing rules (admin view). Observe: rules include keywords like "review," "PR," "pull request," "code quality," "security review."
 5. Post a message in a channel the agent's team monitors: "Can someone review my PR?"
-6. Observe: "Code Reviewer" agent is invoked and responds in the thread.
+6. Observe: "Code Reviewer" agent is invoked and responds in the rivulet.
 **Expected:** Agent created, routing rules auto-generated and effective.
 
 ### AC-007: Agent Model Selection
@@ -129,36 +129,36 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 
 ---
 
-## Threads & Context
+## Rivulets & Context
 
-### AC-013: Thread Creation and Agent Responses
+### AC-013: Rivulet Creation and Agent Responses
 **Maps to:** US-018, US-019
 1. Post message "Help me debug this Python error" in a channel.
-2. Observe: thread is created. Agent responses appear inside the thread.
-3. Observe: main channel shows the human message + thread preview ("Debug Agent replied — 2 messages").
-**Expected:** Clean main channel, agent activity in threads.
+2. Observe: rivulet is created. Agent responses appear inside the rivulet.
+3. Observe: main channel shows the human message + rivulet preview ("Debug Agent replied — 2 messages").
+**Expected:** Clean main channel, agent activity in rivulets.
 
-### AC-014: Multi-Agent Thread Collaboration
+### AC-014: Multi-Agent Rivulet Collaboration
 **Maps to:** US-020, US-022
 1. Post message: "I need to build a user authentication system."
 2. Agent "Architect" responds with a design.
 3. Architect posts: "@DBA what do you think about the users table schema I proposed?"
-4. Observe: DBA agent sees the full thread context including Architect's message and responds with feedback.
-5. Observe: Human sees both agents' messages in the thread.
+4. Observe: DBA agent sees the full rivulet context including Architect's message and responds with feedback.
+5. Observe: Human sees both agents' messages in the rivulet.
 **Expected:** Agents see each other's messages and can @mention each other.
 
 ### AC-015: Context Summarization
 **Maps to:** US-021
-1. Create a thread with 200 messages (scripted test data).
+1. Create a rivulet with 200 messages (scripted test data).
 2. Post a new message that invokes an agent.
 3. Observe: the context sent to the agent includes a summary of messages 1-180 and the full text of messages 181-200.
-4. Observe: the human browsing the thread sees all 200 messages in full.
-**Expected:** Agents receive summarized context when thread exceeds limits. Humans see full history.
+4. Observe: the human browsing the rivulet sees all 200 messages in full.
+**Expected:** Agents receive summarized context when rivulet exceeds limits. Humans see full history.
 
 ### AC-016: Internal Reasoning Hidden
 **Maps to:** US-022
 1. Post a message requiring the agent to use a tool (e.g., "search the web for Python 3.13 release date").
-2. Observe: agent response in thread shows only the final answer. No chain-of-thought, no tool call JSON, no "Let me search..." thinking blocks.
+2. Observe: agent response in rivulet shows only the final answer. No chain-of-thought, no tool call JSON, no "Let me search..." thinking blocks.
 **Expected:** Only final output visible. Internal reasoning suppressed.
 
 ---
@@ -167,10 +167,10 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 
 ### AC-017: Handoff Tool Execution
 **Maps to:** US-024, US-025
-1. Agent A is invoked in a thread.
+1. Agent A is invoked in a rivulet.
 2. Agent A calls `handoff(target_agent_name="DBA", context="Need schema review for users table")`.
-3. Observe: a handoff message appears in the thread: "@Agent A handed off to @DBA: Need schema review for users table."
-4. Observe: DBA agent is invoked with the handoff context and full thread history.
+3. Observe: a handoff message appears in the rivulet: "@Agent A handed off to @DBA: Need schema review for users table."
+4. Observe: DBA agent is invoked with the handoff context and full rivulet history.
 5. DBA responds addressing the schema question.
 **Expected:** Handoff visible, target agent invoked with context.
 
@@ -183,7 +183,7 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 1. Set turn limit to 5 in workspace settings.
 2. Create a scenario where two agents go back and forth.
 3. After the 5th agent message without a human message, observe: system posts "Agent conversation has reached the turn limit."
-4. Observe: further agent messages in that thread are suppressed.
+4. Observe: further agent messages in that rivulet are suppressed.
 5. Human posts "Continue." Observe: counters reset, agents resume.
 **Expected:** Turn limit enforced. Human reactivation works.
 
@@ -246,9 +246,9 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 
 ### AC-025: Full Workspace Sync
 **Maps to:** US-035, US-037
-1. Set up machine A with full workspace (3 channels, 5 agents, 20 threads with messages, 2 tools).
+1. Set up machine A with full workspace (3 channels, 5 agents, 20 rivulets with messages, 2 tools).
 2. Install on machine B with same workspace key.
-3. Observe: after sync, machine B has identical channels, agents, threads, tools.
+3. Observe: after sync, machine B has identical channels, agents, rivulets, tools.
 4. On machine B, create a new agent.
 5. Observe: within 5 seconds, the new agent appears on machine A.
 **Expected:** Bidirectional sync. Changes on any node propagate.
@@ -277,14 +277,14 @@ Each criterion is formatted as **AC-###** and maps to one or more user stories. 
 
 ### AC-028: File Upload and Agent Access
 **Maps to:** US-041, US-042
-1. In a thread, upload a CSV file: "sales_data.csv."
+1. In a rivulet, upload a CSV file: "sales_data.csv."
 2. Post message: "Analyze the sales data in the attached CSV."
 3. Observe: agent receives file reference, reads the CSV via workspace tool, responds with analysis.
 **Expected:** File upload → agent access → meaningful response.
 
 ### AC-029: File Sync Across Nodes
 **Maps to:** US-043
-1. On machine A, upload a file to a thread.
+1. On machine A, upload a file to a rivulet.
 2. Observe: file syncs to machine B.
 3. On machine B, post a message that causes an agent to access the file.
 4. Observe: agent on machine B successfully reads the file from its local copy.

@@ -67,7 +67,7 @@ def _create_channel_with_team(
     return channel_id
 
 
-def test_keyword_rule_agent_responds_to_new_thread(
+def test_keyword_rule_agent_responds_to_new_rivulet(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Reply text deliberately doesn't contain "widget" — an "always" rule
@@ -95,15 +95,15 @@ def test_keyword_rule_agent_responds_to_new_thread(
     )
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "tell me about the widget"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
     assert messages[1]["sender_name"] == "Keyword Agent"
     assert messages[1]["content"] == "OK, doing that now."
@@ -112,9 +112,7 @@ def test_keyword_rule_agent_responds_to_new_thread(
 def test_agent_with_no_rules_does_not_respond(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "rivulets.dispatch.service.run_agent", _fake_run_agent("should not appear")
-    )
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("should not appear"))
     created = client.post(
         "/api/v1/agents",
         json={
@@ -128,14 +126,14 @@ def test_agent_with_no_rules_does_not_respond(
     agent_id = created.json()["id"]
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "anything at all"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human"]
 
 
@@ -161,14 +159,14 @@ def test_mention_invokes_agent_regardless_of_rules(
     )
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "hey @MentionOnly can you help?"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
     assert messages[1]["content"] == "You called?"
 
@@ -186,15 +184,15 @@ def test_agent_run_failure_is_skipped_gracefully(
     agent_id = _create_agent_with_always_rule(client, auth_headers, "Flaky Agent")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "anything at all"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human"]
 
 
@@ -218,15 +216,15 @@ def test_run_status_error_posts_system_alert_not_raw_error_text(
     agent_id = _create_agent_with_always_rule(client, auth_headers, "Broken Agent")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "anything at all"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "system"]
     assert messages[1]["content_type"] == "system_alert"
     assert "401" not in messages[1]["content"]
@@ -239,13 +237,13 @@ def test_channel_with_no_team_gets_no_dispatch(
     channel = client.post("/api/v1/channels", json={"name": "no-team"}, headers=auth_headers)
     channel_id = channel.json()["id"]
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "hello"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human"]

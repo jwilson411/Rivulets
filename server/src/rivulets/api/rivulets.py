@@ -1,4 +1,4 @@
-"""Threads & messages (FR-5), including the SSE stream (api-design.md#sse-protocol).
+"""Rivulets & messages (FR-5), including the SSE stream (api-design.md#sse-protocol).
 
 Posting a message runs the real dispatcher (dispatch/service.py) against
 the channel's team and persists any matched agents' replies in the same
@@ -6,7 +6,7 @@ request, publishing SSE events as it goes (FR-12.3) — a client with the
 stream endpoint open sees agent_token/agent_message/system_alert/error
 events live, in the same request cycle that's doing the dispatching.
 
-Threads and messages are also synced (FR-9.1). This is the one place
+Rivulets and messages are also synced (FR-9.1). This is the one place
 where getting the sync boundary right actually matters for correctness,
 not just data completeness: dispatch (agent invocation, LLM calls) only
 ever runs as a side effect of *locally* handling a human-posted message
@@ -30,7 +30,7 @@ from sqlalchemy import select
 
 from rivulets.api.deps import CurrentWorkspaceId, CurrentWorkspaceIdForStream, DbSession
 from rivulets.api.files import publish_file_change
-from rivulets.db.models import Channel, File, Message, Thread
+from rivulets.db.models import Channel, File, Message, Rivulet
 from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from rivulets.streaming import subscribe, unsubscribe
@@ -38,7 +38,7 @@ from rivulets.sync.publish import publish_current_state
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["threads"])
+router = APIRouter(tags=["rivulets"])
 
 _DISCONNECT_POLL_SECONDS = 15
 
@@ -57,7 +57,7 @@ class AttachmentOut(BaseModel):
 
 class MessageOut(BaseModel):
     id: str
-    thread_id: str
+    rivulet_id: str
     sender_type: str
     sender_id: str | None
     sender_name: str
@@ -69,7 +69,7 @@ class MessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ThreadOut(BaseModel):
+class RivuletOut(BaseModel):
     id: str
     channel_id: str
     title: str | None
@@ -87,19 +87,19 @@ async def _get_channel_or_404(db: DbSession, channel_id: str) -> Channel:
     return channel
 
 
-async def _get_thread_or_404(db: DbSession, thread_id: str) -> Thread:
-    thread = await db.get(Thread, thread_id)
-    if thread is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Thread not found")
-    return thread
+async def _get_rivulet_or_404(db: DbSession, rivulet_id: str) -> Rivulet:
+    rivulet = await db.get(Rivulet, rivulet_id)
+    if rivulet is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rivulet not found")
+    return rivulet
 
 
-async def _publish_thread_change(db: DbSession, thread: Thread) -> None:
-    await publish_current_state(db, "thread", thread.id)
+async def _publish_rivulet_change(db: DbSession, rivulet: Rivulet) -> None:
+    await publish_current_state(db, "rivulet", rivulet.id)
 
 
 async def _attach_files(db: DbSession, message: Message, file_ids: list[str]) -> list[File]:
-    """FR-10.1's "into threads" — links already-uploaded files (POST
+    """FR-10.1's "into rivulets" — links already-uploaded files (POST
     /files/upload) to the message referencing them. Unknown file_ids are
     skipped with a warning rather than failing the whole post: a stale/
     bogus id from the client shouldn't block the human's message.
@@ -141,7 +141,7 @@ def _to_attachment_out(file_row: File) -> AttachmentOut:
 def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
     return MessageOut(
         id=message.id,
-        thread_id=message.thread_id,
+        rivulet_id=message.rivulet_id,
         sender_type=message.sender_type,
         sender_id=message.sender_id,
         sender_name=message.sender_name,
@@ -154,7 +154,7 @@ def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
 
 async def _attachments_by_message(db: DbSession, message_ids: list[str]) -> dict[str, list[File]]:
     """File.message_id has no FK constraint (see this module's own docstring
-    on why threads/messages sync the way they do — File mirrors that same
+    on why rivulets/messages sync the way they do — File mirrors that same
     loose-coupling choice), so this is a plain filter, not a join."""
     if not message_ids:
         return {}
@@ -166,31 +166,31 @@ async def _attachments_by_message(db: DbSession, message_ids: list[str]) -> dict
     return grouped
 
 
-@router.get("/channels/{channel_id}/threads", response_model=list[ThreadOut])
-async def list_threads(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Thread]:
+@router.get("/channels/{channel_id}/rivulets", response_model=list[RivuletOut])
+async def list_rivulets(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Rivulet]:
     await _get_channel_or_404(db, channel_id)
     result = await db.execute(
-        select(Thread).where(Thread.channel_id == channel_id).order_by(Thread.created_at.desc())
+        select(Rivulet).where(Rivulet.channel_id == channel_id).order_by(Rivulet.created_at.desc())
     )
     return list(result.scalars().all())
 
 
 @router.post(
-    "/channels/{channel_id}/threads",
-    response_model=ThreadOut,
+    "/channels/{channel_id}/rivulets",
+    response_model=RivuletOut,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_thread(
+async def create_rivulet(
     channel_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
-) -> Thread:
-    """Posting to the channel creates a thread with the human message as its
+) -> Rivulet:
+    """Posting to the channel creates a rivulet with the human message as its
     root (FR-5.1), then dispatches it to the channel's team (FR-4.1)."""
     channel = await _get_channel_or_404(db, channel_id)
-    thread = Thread(channel_id=channel_id, created_by="human")
-    db.add(thread)
+    rivulet = Rivulet(channel_id=channel_id, created_by="human")
+    db.add(rivulet)
     await db.flush()
     human_message = Message(
-        thread_id=thread.id,
+        rivulet_id=rivulet.id,
         sender_type="human",
         sender_name="You",
         content=body.content,
@@ -198,28 +198,28 @@ async def create_thread(
     db.add(human_message)
     await db.flush()  # populate human_message.id before attaching files to it
     attached_files = await _attach_files(db, human_message, body.files)
-    agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
+    agent_messages = await dispatch_and_respond(db, rivulet, channel, body.content)
     await db.commit()
-    await db.refresh(thread)
-    await _publish_thread_change(db, thread)
+    await db.refresh(rivulet)
+    await _publish_rivulet_change(db, rivulet)
     await _publish_message_change(db, human_message)
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
     for file_row in attached_files:
         await publish_file_change(db, file_row)
-    return thread
+    return rivulet
 
 
-@router.get("/threads/{thread_id}", response_model=ThreadOut)
-async def get_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> Thread:
-    return await _get_thread_or_404(db, thread_id)
+@router.get("/rivulets/{rivulet_id}", response_model=RivuletOut)
+async def get_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> Rivulet:
+    return await _get_rivulet_or_404(db, rivulet_id)
 
 
-@router.get("/threads/{thread_id}/messages", response_model=list[MessageOut])
-async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[MessageOut]:
-    await _get_thread_or_404(db, thread_id)
+@router.get("/rivulets/{rivulet_id}/messages", response_model=list[MessageOut])
+async def list_messages(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[MessageOut]:
+    await _get_rivulet_or_404(db, rivulet_id)
     result = await db.execute(
-        select(Message).where(Message.thread_id == thread_id).order_by(Message.created_at)
+        select(Message).where(Message.rivulet_id == rivulet_id).order_by(Message.created_at)
     )
     messages = list(result.scalars().all())
     attachments_by_message = await _attachments_by_message(db, [m.id for m in messages])
@@ -227,30 +227,30 @@ async def list_messages(thread_id: str, db: DbSession, _: CurrentWorkspaceId) ->
 
 
 @router.post(
-    "/threads/{thread_id}/messages",
+    "/rivulets/{rivulet_id}/messages",
     response_model=MessageOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def post_message(
-    thread_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
+    rivulet_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
 ) -> MessageOut:
-    thread = await _get_thread_or_404(db, thread_id)
-    channel = await _get_channel_or_404(db, thread.channel_id)
+    rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    channel = await _get_channel_or_404(db, rivulet.channel_id)
     message = Message(
-        thread_id=thread_id, sender_type="human", sender_name="You", content=body.content
+        rivulet_id=rivulet_id, sender_type="human", sender_name="You", content=body.content
     )
     db.add(message)
     await db.flush()  # populate message.id before attaching files to it
     attached_files = await _attach_files(db, message, body.files)
-    # dispatch_and_respond resets ThreadGuardState on every human-triggered
+    # dispatch_and_respond resets RivuletGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
-    agent_messages = await dispatch_and_respond(db, thread, channel, body.content)
+    agent_messages = await dispatch_and_respond(db, rivulet, channel, body.content)
     await db.commit()
     await db.refresh(message)
-    # dispatch can pause the thread (a loop guard tripping) as a side
+    # dispatch can pause the rivulet (a loop guard tripping) as a side
     # effect, so its state needs republishing here too, not just from the
     # explicit resume/close endpoints below.
-    await _publish_thread_change(db, thread)
+    await _publish_rivulet_change(db, rivulet)
     await _publish_message_change(db, message)
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
@@ -259,36 +259,36 @@ async def post_message(
     return _to_message_out(message, attached_files)
 
 
-@router.post("/threads/{thread_id}/resume", response_model=ThreadOut)
-async def resume_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> Thread:
+@router.post("/rivulets/{rivulet_id}/resume", response_model=RivuletOut)
+async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> Rivulet:
     """FR-7.5's explicit "Resume" affordance — equivalent to what posting
     any message already does, for when a human just wants to clear a
     pause without saying anything yet."""
-    thread = await _get_thread_or_404(db, thread_id)
-    thread.status = "active"
-    guard_state = await get_or_create_guard_state(db, thread_id)
+    rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    rivulet.status = "active"
+    guard_state = await get_or_create_guard_state(db, rivulet_id)
     reset_guard_state(guard_state)
     await db.commit()
-    await db.refresh(thread)
-    await _publish_thread_change(db, thread)
-    return thread
+    await db.refresh(rivulet)
+    await _publish_rivulet_change(db, rivulet)
+    return rivulet
 
 
-@router.delete("/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def close_thread(thread_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
-    thread = await _get_thread_or_404(db, thread_id)
-    thread.status = "closed"
+@router.delete("/rivulets/{rivulet_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def close_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+    rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    rivulet.status = "closed"
     await db.commit()
-    await _publish_thread_change(db, thread)
+    await _publish_rivulet_change(db, rivulet)
 
 
-@router.get("/threads/{thread_id}/stream")
-async def stream_thread(
-    thread_id: str, request: Request, db: DbSession, _: CurrentWorkspaceIdForStream
+@router.get("/rivulets/{rivulet_id}/stream")
+async def stream_rivulet(
+    rivulet_id: str, request: Request, db: DbSession, _: CurrentWorkspaceIdForStream
 ) -> StreamingResponse:
     """SSE endpoint (api-design.md#sse-protocol), backed by streaming.py's
     in-process pub/sub. Stays open for the life of the connection — a
-    client viewing a thread gets every dispatch round's events as they
+    client viewing a rivulet gets every dispatch round's events as they
     happen, not just the first one, so this never sends a terminal event
     of its own; the generator only exits on client disconnect.
 
@@ -303,8 +303,8 @@ async def stream_thread(
     overhead for a local single-user SQLite-backed app, not worth the
     added complexity of releasing it early for one existence check.
     """
-    await _get_thread_or_404(db, thread_id)
-    queue = subscribe(thread_id)
+    await _get_rivulet_or_404(db, rivulet_id)
+    queue = subscribe(rivulet_id)
 
     async def event_source() -> AsyncIterator[bytes]:
         try:
@@ -318,6 +318,6 @@ async def stream_thread(
                 payload = json.dumps(event["data"])
                 yield f"event: {event['event']}\ndata: {payload}\n\n".encode()
         finally:
-            unsubscribe(thread_id, queue)
+            unsubscribe(rivulet_id, queue)
 
     return StreamingResponse(event_source(), media_type="text/event-stream")

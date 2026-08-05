@@ -74,25 +74,25 @@
 
 ---
 
-## Threads & Conversations
+## Rivulets & Conversations
 
-### US-018: Thread Creation per Message [P0]
-**As a** user, **I want to** have every message I post in the main channel automatically create a thread, **so that** agent responses are organized under my topic rather than cluttering the main feed.
+### US-018: Rivulet Creation per Message [P0]
+**As a** user, **I want to** have every message I post in the main channel automatically create a rivulet, **so that** agent responses are organized under my topic rather than cluttering the main feed.
 
-### US-019: Agents Respond in Threads [P0]
-**As an** agent, **I want to** post my responses inside the thread created by the human's message, **so that** the main channel stays clean and each topic has its own context.
+### US-019: Agents Respond in Rivulets [P0]
+**As an** agent, **I want to** post my responses inside the rivulet created by the human's message, **so that** the main channel stays clean and each topic has its own context.
 
-### US-020: Agents Can Post to Existing Threads [P0]
-**As an** agent, **I want to** read the full thread history and post questions or responses within it, **so that** I can collaborate with other agents and the human organically.
+### US-020: Agents Can Post to Existing Rivulets [P0]
+**As an** agent, **I want to** read the full rivulet history and post questions or responses within it, **so that** I can collaborate with other agents and the human organically.
 
-### US-021: Thread Context Management [P0]
-**As a** system, **I want to** maintain full message history for threads up to a context limit, then switch to a running summary, **so that** agents always have relevant context without exceeding token limits.
+### US-021: Rivulet Context Management [P0]
+**As a** system, **I want to** maintain full message history for rivulets up to a context limit, then switch to a running summary, **so that** agents always have relevant context without exceeding token limits.
 
 ### US-022: Humans See Agent Interactions [P0]
-**As a** user, **I want to** see agent-to-agent questions and responses in the thread (not their internal reasoning), **so that** I can follow the collaboration without noise.
+**As a** user, **I want to** see agent-to-agent questions and responses in the rivulet (not their internal reasoning), **so that** I can follow the collaboration without noise.
 
-### US-023: Thread-Scoped Agent Participation [P1]
-**As an** agent, **I want to** only see messages from threads I've been invoked in, **so that** I don't waste tokens reading irrelevant conversations.
+### US-023: Rivulet-Scoped Agent Participation [P1]
+**As an** agent, **I want to** only see messages from rivulets I've been invoked in, **so that** I don't waste tokens reading irrelevant conversations.
 
 ---
 
@@ -102,23 +102,23 @@
 **As an** agent, **I want to** call a `handoff(target_agent, context)` tool to explicitly pass work to another agent, **so that** I can delegate subtasks cleanly.
 
 ### US-025: Handoff Visibility [P1]
-**As a** user, **I want to** see a message in the thread when one agent hands off to another, **so that** I understand the workflow without guessing.
+**As a** user, **I want to** see a message in the rivulet when one agent hands off to another, **so that** I understand the workflow without guessing.
 
 ---
 
 ## Loop Prevention
 
 ### US-026: Configurable Turn Limit [P0]
-**As a** workspace admin, **I want to** set a maximum number of agent-to-agent exchanges per thread without human intervention, **so that** agents don't loop forever.
+**As a** workspace admin, **I want to** set a maximum number of agent-to-agent exchanges per rivulet without human intervention, **so that** agents don't loop forever.
 
 ### US-027: Cycle Detection [P1]
 **As a** system, **I want to** detect repeating agent interaction patterns (A→B→A→B) and break the loop, **so that** costs don't spiral from infinite conversations.
 
 ### US-028: Timeout-Based Pause [P1]
-**As a** system, **I want to** pause agent participation in a thread if agents have been active for more than a configurable duration without a human message, **so that** runaway threads don't consume resources.
+**As a** system, **I want to** pause agent participation in a rivulet if agents have been active for more than a configurable duration without a human message, **so that** runaway rivulets don't consume resources.
 
 ### US-029: Human Reactivation [P1]
-**As a** user, **I want to** manually resume a paused thread with a single click or message, **so that** I stay in control of agent activity.
+**As a** user, **I want to** manually resume a paused rivulet with a single click or message, **so that** I stay in control of agent activity.
 
 ---
 
@@ -144,7 +144,7 @@
 ## Peer-to-Peer Sync
 
 ### US-035: Multi-Machine Workspace Sync [P1]
-**As a** user, **I want to** install Rivulets on a second machine using the same workspace key and have all agents, channels, teams, threads, tools, and files sync between nodes, **so that** I have the same workspace everywhere.
+**As a** user, **I want to** install Rivulets on a second machine using the same workspace key and have all agents, channels, teams, rivulets, tools, and files sync between nodes, **so that** I have the same workspace everywhere.
 
 ### US-036: LLM Keys Not Synced [P1]
 **As a** user, **I want to** provide LLM provider keys separately on each machine during installation, **so that** my API keys are never transmitted between nodes.
@@ -169,11 +169,11 @@
 
 ## File Sharing
 
-### US-041: Share Files in Threads [P1]
-**As a** user or agent, **I want to** upload and share files (code, images, PDFs, CSVs) in threads, **so that** agents can work with real documents.
+### US-041: Share Files in Rivulets [P1]
+**As a** user or agent, **I want to** upload and share files (code, images, PDFs, CSVs) in rivulets, **so that** agents can work with real documents.
 
 ### US-042: Agent File Access [P1]
 **As an** agent, **I want to** receive shared file contents via workspace tools, **so that** I can process documents as part of my work.
 
 ### US-043: File Sync Across Nodes [P2]
-**As a** user, **I want to** have files shared in threads automatically sync to all my machines, **so that** agents on any node can access them.
+**As a** user, **I want to** have files shared in rivulets automatically sync to all my machines, **so that** agents on any node can access them.

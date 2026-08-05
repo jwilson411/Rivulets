@@ -71,9 +71,9 @@ Per-message E2E encryption for direct messages is out of scope for P0-P1.
 ```
 **Impact:** Simple JSON blobs in SQLite. In-memory index rebuilt on agent rule changes.
 
-### OQ-4: Thread Summarization Strategy — RESOLVED
+### OQ-4: Rivulet Summarization Strategy — RESOLVED
 **Decision:** Hierarchical summarization.
-**Approach:** When a thread exceeds the context limit, the system chunks the older messages into groups of 20, summarizes each chunk with a cheap model, then summarizes the summaries into a single thread-context block. This preserves more semantic detail than a flat "summarize everything older than N" approach. The most recent 20 messages always remain in full.
+**Approach:** When a rivulet exceeds the context limit, the system chunks the older messages into groups of 20, summarizes each chunk with a cheap model, then summarizes the summaries into a single rivulet-context block. This preserves more semantic detail than a flat "summarize everything older than N" approach. The most recent 20 messages always remain in full.
 **Impact:** Two LLM calls per summarization event (cheap model, small payloads).
 
 ### OQ-5: File Sync Trade-offs — RESOLVED

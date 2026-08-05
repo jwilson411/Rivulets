@@ -44,7 +44,7 @@ The system MUST allow exactly one team to be assigned to a channel. Changing the
 The system MUST persist channel display order and allow drag-to-reorder in the UI. [US-007]
 
 ### FR-2.5 Channel Archival
-Archiving a channel MUST hide it from the default view, preserve all thread data, and allow unarchiving. Archived channels MUST NOT trigger agent dispatches. [US-007]
+Archiving a channel MUST hide it from the default view, preserve all rivulet data, and allow unarchiving. Archived channels MUST NOT trigger agent dispatches. [US-007]
 
 ---
 
@@ -101,28 +101,28 @@ Explicit @mentions of an agent by name MUST bypass all routing logic and directl
 
 ---
 
-## FR-5: Threads & Conversation Context
+## FR-5: Rivulets & Conversation Context
 
-### FR-5.1 Automatic Thread Creation
-When a human posts a message in the main channel, the system MUST create a thread container. The human message is the thread root. [US-018]
+### FR-5.1 Automatic Rivulet Creation
+When a human posts a message in the main channel, the system MUST create a rivulet container. The human message is the rivulet root. [US-018]
 
 ### FR-5.2 Agent Response Target
-Agent responses to a message MUST be posted inside the thread, not the main channel feed. The main channel shows only human messages and a thread preview (last agent message + reply count). [US-019]
+Agent responses to a message MUST be posted inside the rivulet, not the main channel feed. The main channel shows only human messages and a rivulet preview (last agent message + reply count). [US-019]
 
-### FR-5.3 Thread Participation
-Any agent on the channel's team that is invoked (by dispatcher or @mention) MUST receive the full thread context as conversation history. Agents MUST be able to post messages within the thread at any point during the thread's lifecycle. [US-020, US-023]
+### FR-5.3 Rivulet Participation
+Any agent on the channel's team that is invoked (by dispatcher or @mention) MUST receive the full rivulet context as conversation history. Agents MUST be able to post messages within the rivulet at any point during the rivulet's lifecycle. [US-020, US-023]
 
 ### FR-5.4 Context Window Management
-The system MUST track token count for each thread. When total thread token count exceeds 80% of the target model's context window, the system MUST:
+The system MUST track token count for each rivulet. When total rivulet token count exceeds 80% of the target model's context window, the system MUST:
 1. Generate a running summary of messages older than the most recent N (configurable, default N=20).
 2. Replace summarized messages with the summary in the context sent to agents.
 3. Preserve the full history in the database for human viewing. [US-021]
 
 ### FR-5.5 Internal Reasoning Suppression
-Agent internal reasoning (chain-of-thought, thinking blocks, tool call details) MUST NOT be displayed to the human or to other agents. Only the agent's final output message is posted to the thread. Tool call results MUST be visible only if the agent explicitly includes them in its response. [US-022]
+Agent internal reasoning (chain-of-thought, thinking blocks, tool call details) MUST NOT be displayed to the human or to other agents. Only the agent's final output message is posted to the rivulet. Tool call results MUST be visible only if the agent explicitly includes them in its response. [US-022]
 
 ### FR-5.6 Agent-to-Agent Visibility
-When an agent posts a message in a thread, that message MUST be visible to all other agents subsequently invoked in that thread. Agents read the thread the same way a human does — they see prior agent messages as part of the conversation history. [US-020]
+When an agent posts a message in a rivulet, that message MUST be visible to all other agents subsequently invoked in that rivulet. Agents read the rivulet the same way a human does — they see prior agent messages as part of the conversation history. [US-020]
 
 ---
 
@@ -133,36 +133,36 @@ The system MUST provide a built-in `handoff` tool available to all agents with t
 ```
 handoff(target_agent_name: str, context: str, urgency: str = "normal")
 ```
-Calling handoff MUST post a visible message in the thread: "@AgentName has been handed off: [context]" and MUST invoke the target agent with the handoff context. [US-024]
+Calling handoff MUST post a visible message in the rivulet: "@AgentName has been handed off: [context]" and MUST invoke the target agent with the handoff context. [US-024]
 
 ### FR-6.2 Handoff Context Injection
-The target agent MUST receive the handoff context as a system-level message indicating it was explicitly handed work by another agent, plus the full thread history. [US-024]
+The target agent MUST receive the handoff context as a system-level message indicating it was explicitly handed work by another agent, plus the full rivulet history. [US-024]
 
 ### FR-6.3 Handoff Visibility
-The human MUST see a distinct visual indicator in the thread when a handoff occurs (e.g., a divider or badge), showing which agent handed off to which, with the context message. [US-025]
+The human MUST see a distinct visual indicator in the rivulet when a handoff occurs (e.g., a divider or badge), showing which agent handed off to which, with the context message. [US-025]
 
 ---
 
 ## FR-7: Loop Prevention & Guardrails
 
 ### FR-7.1 Turn Limit
-Each thread MUST track an "agent exchange count" — incremented each time an agent posts a message in the thread without an intervening human message. When the count reaches the configurable limit (default: 10), the system MUST:
-1. Post a system message in the thread: "Agent conversation has reached the turn limit. Waiting for human input."
-2. Suppress all further agent invocations in the thread until a human posts. [US-026]
+Each rivulet MUST track an "agent exchange count" — incremented each time an agent posts a message in the rivulet without an intervening human message. When the count reaches the configurable limit (default: 10), the system MUST:
+1. Post a system message in the rivulet: "Agent conversation has reached the turn limit. Waiting for human input."
+2. Suppress all further agent invocations in the rivulet until a human posts. [US-026]
 
 ### FR-7.2 Cycle Detection
-The system MUST maintain a sliding window of the last 8 agent-to-agent interactions in each thread. If the pattern repeats (same ordered pair of agents appearing 3+ times in the window), the system MUST:
+The system MUST maintain a sliding window of the last 8 agent-to-agent interactions in each rivulet. If the pattern repeats (same ordered pair of agents appearing 3+ times in the window), the system MUST:
 1. Post a system message identifying the cycle.
-2. Pause both agents in the thread until a human posts. [US-027]
+2. Pause both agents in the rivulet until a human posts. [US-027]
 
 ### FR-7.3 Time-Based Pause
-Each thread MUST track total agent-active time (time since first agent response in the thread without a human message). When this exceeds the configurable limit (default: 30 minutes), further agent invocations are paused. [US-028]
+Each rivulet MUST track total agent-active time (time since first agent response in the rivulet without a human message). When this exceeds the configurable limit (default: 30 minutes), further agent invocations are paused. [US-028]
 
 ### FR-7.4 Guardrail Configuration
 All loop prevention thresholds MUST be configurable in workspace settings: turn limit (1-100), cycle detection window size (4-20), time-based pause (5 min - 24 hours). [US-026, US-027, US-028]
 
 ### FR-7.5 Human Reactivation
-A paused thread MUST display a clear "Resume" affordance. A human posting any message in the thread MUST automatically reset all loop counters and resume normal agent activity. [US-029]
+A paused rivulet MUST display a clear "Resume" affordance. A human posting any message in the rivulet MUST automatically reset all loop counters and resume normal agent activity. [US-029]
 
 ---
 
@@ -196,7 +196,7 @@ The system MUST allow registering an external MCP server by providing a name and
 ## FR-9: Peer-to-Peer Sync
 
 ### FR-9.1 Sync Scope
-The sync system MUST replicate across nodes: agent definitions, channel and team structures, thread history (messages and metadata), tool code, MCP server registrations, file attachments, and workspace settings. [US-035]
+The sync system MUST replicate across nodes: agent definitions, channel and team structures, rivulet history (messages and metadata), tool code, MCP server registrations, file attachments, and workspace settings. [US-035]
 
 ### FR-9.2 Sync Exclusion
 LLM provider keys and API credentials MUST be excluded from all sync payloads. Each node manages its own credentials. [US-036]
@@ -211,23 +211,23 @@ The workspace key MUST be used as the pre-shared key for encrypting all sync tra
 A node MUST be fully functional when other nodes are unreachable: create agents, post messages, manage channels, use tools. When connectivity resumes, pending changes sync automatically. [US-037]
 
 ### FR-9.6 Conflict Resolution
-When the same entity (agent, thread, setting) is modified on two nodes while disconnected, the system MUST apply last-write-wins based on vector clocks. Conflicting changes MUST be surfaced in the UI as a notification with the ability to inspect both versions. [US-038]
+When the same entity (agent, rivulet, setting) is modified on two nodes while disconnected, the system MUST apply last-write-wins based on vector clocks. Conflicting changes MUST be surfaced in the UI as a notification with the ability to inspect both versions. [US-038]
 
 ### FR-9.7 File Sync Strategy
-Files attached to threads MUST be replicated to all peer nodes. The system MUST store a content hash with each file. On sync, only files with differing hashes are transferred. Each node maintains a complete copy for fault tolerance. [US-043]
+Files attached to rivulets MUST be replicated to all peer nodes. The system MUST store a content hash with each file. On sync, only files with differing hashes are transferred. Each node maintains a complete copy for fault tolerance. [US-043]
 
 ---
 
 ## FR-10: File Handling
 
 ### FR-10.1 File Upload
-The system MUST support uploading files (up to 100MB per file) into threads via drag-and-drop or file picker. Supported formats for preview: images (PNG, JPEG, GIF, WebP, SVG), code (any text file with syntax highlighting), PDFs, CSVs (rendered as tables). [US-041]
+The system MUST support uploading files (up to 100MB per file) into rivulets via drag-and-drop or file picker. Supported formats for preview: images (PNG, JPEG, GIF, WebP, SVG), code (any text file with syntax highlighting), PDFs, CSVs (rendered as tables). [US-041]
 
 ### FR-10.2 File Storage
-Uploaded files MUST be stored locally on the node where they were uploaded. File metadata (path, hash, MIME type, upload timestamp) MUST be included in the thread message and synced to peers. [US-041]
+Uploaded files MUST be stored locally on the node where they were uploaded. File metadata (path, hash, MIME type, upload timestamp) MUST be included in the rivulet message and synced to peers. [US-041]
 
 ### FR-10.3 Agent File Access
-When a file is shared in a thread, agents invoked in that thread MUST be able to access the file through a workspace tool that reads from the local file store. The file reference in the thread message MUST resolve to the local path where the file (or its synced copy) resides. [US-042]
+When a file is shared in a rivulet, agents invoked in that rivulet MUST be able to access the file through a workspace tool that reads from the local file store. The file reference in the rivulet message MUST resolve to the local path where the file (or its synced copy) resides. [US-042]
 
 ---
 
@@ -240,17 +240,17 @@ The workspace owner MUST be able to generate time-limited invite codes cryptogra
 A user receiving an invite code MUST be able to enter it during installation to join an existing workspace. The system MUST validate the invite cryptographically against the workspace key. [US-040]
 
 ### FR-11.3 New Node Bootstrap
-On joining, the new node MUST receive a full sync of the workspace state (agents, channels, threads, files) from any reachable peer. [US-040]
+On joining, the new node MUST receive a full sync of the workspace state (agents, channels, rivulets, files) from any reachable peer. [US-040]
 
 ---
 
 ## FR-12: AgentOS API Surface Mapping
 
 ### FR-12.1 Agent Runs
-Posting a message that routes to an agent MUST call `POST /agents/{agent_id}/runs` on the local AgentOS instance, passing the thread context as conversation history and a session ID keyed to the thread. [US-014, US-020]
+Posting a message that routes to an agent MUST call `POST /agents/{agent_id}/runs` on the local AgentOS instance, passing the rivulet context as conversation history and a session ID keyed to the rivulet. [US-014, US-020]
 
 ### FR-12.2 Session Management
-Each thread MUST have a persistent AgentOS session ID. All agent invocations within a thread reuse the same session ID for continuity. [US-020]
+Each rivulet MUST have a persistent AgentOS session ID. All agent invocations within a rivulet reuse the same session ID for continuity. [US-020]
 
 ### FR-12.3 Streaming
 Agent responses MUST stream to the UI via AgentOS SSE endpoints. The human MUST see agent responses appear token-by-token (or chunk-by-chunk) in real time. [US-022]

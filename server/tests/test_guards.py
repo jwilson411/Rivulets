@@ -74,15 +74,15 @@ def test_turn_limit_pauses_a_self_triggering_agent(
     agent_id = _create_agent(client, auth_headers, "Loopy", "always")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "start"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     # Default guard.turn_limit is 10: 1 human + 10 agent replies, then the
     # 10th one trips the limit and appends a system pause message.
     assert len(messages) == 12
@@ -91,11 +91,11 @@ def test_turn_limit_pauses_a_self_triggering_agent(
     assert messages[11]["content_type"] == "system_alert"
     assert "turn limit" in messages[11]["content"].lower()
 
-    thread_state = client.get(f"/api/v1/threads/{thread_id}", headers=auth_headers).json()
-    assert thread_state["status"] == "paused"
+    rivulet_state = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert rivulet_state["status"] == "paused"
 
 
-def test_paused_thread_resumes_and_dispatches_again(
+def test_paused_rivulet_resumes_and_dispatches_again(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """FR-7.5: resuming resets counters and re-enables dispatch. Uses the
@@ -113,20 +113,22 @@ def test_paused_thread_resumes_and_dispatches_again(
 
     agent_id = _create_agent(client, auth_headers, "Loopy", "always")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads", json={"content": "start"}, headers=auth_headers
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets", json={"content": "start"}, headers=auth_headers
     )
-    thread_id = thread.json()["id"]
-    before = len(client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json())
+    rivulet_id = rivulet.json()["id"]
+    before = len(client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json())
 
-    resumed = client.post(f"/api/v1/threads/{thread_id}/resume", headers=auth_headers)
+    resumed = client.post(f"/api/v1/rivulets/{rivulet_id}/resume", headers=auth_headers)
     assert resumed.status_code == 200
     assert resumed.json()["status"] == "active"
 
     client.post(
-        f"/api/v1/threads/{thread_id}/messages", json={"content": "continue"}, headers=auth_headers
+        f"/api/v1/rivulets/{rivulet_id}/messages",
+        json={"content": "continue"},
+        headers=auth_headers,
     )
-    after = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    after = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     new_messages = after[before:]
     assert len(new_messages) > 0
     assert any(m["sender_type"] == "agent" for m in new_messages)
@@ -149,15 +151,15 @@ def test_cycle_detection_pauses_two_agents_mentioning_each_other(
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
 
     channel_id = _create_channel_with_team(client, auth_headers, [agent_a, agent_b])
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "@AgentA kick things off"},
         headers=auth_headers,
     )
-    assert thread.status_code == 201, thread.text
-    thread_id = thread.json()["id"]
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     # A->B->A->B->A->B: the (A,B) pair recurs a 3rd time on the 6th agent
     # message, tripping guard.cycle_threshold's default of 3.
     assert len(messages) == 8
@@ -165,8 +167,8 @@ def test_cycle_detection_pauses_two_agents_mentioning_each_other(
     assert messages[7]["sender_type"] == "system"
     assert "loop" in messages[7]["content"].lower()
 
-    thread_state = client.get(f"/api/v1/threads/{thread_id}", headers=auth_headers).json()
-    assert thread_state["status"] == "paused"
+    rivulet_state = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert rivulet_state["status"] == "paused"
 
 
 def test_timeout_pauses_when_configured_to_zero_minutes(
@@ -187,14 +189,14 @@ def test_timeout_pauses_when_configured_to_zero_minutes(
     agent_id = _create_agent(client, auth_headers, "Slowpoke", "always")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "start"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     # With a 0-minute allowance, any elapsed wall-clock time trips it — the
     # very first agent reply's guard check already exceeds it.
     assert messages[-1]["sender_type"] == "system"

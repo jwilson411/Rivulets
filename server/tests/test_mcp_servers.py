@@ -11,7 +11,7 @@ graceful "can't reach this server").
 
 The HTTP layer (api/mcp_servers.py) is tested by monkeypatching
 rivulets.api.mcp_servers.discover_tools directly, mirroring how
-test_thread_dispatch.py monkeypatches dispatch.service.run_agent.
+test_rivulet_dispatch.py monkeypatches dispatch.service.run_agent.
 """
 
 import asyncio

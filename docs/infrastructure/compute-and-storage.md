@@ -34,7 +34,7 @@ Worst case (5 concurrent agent streams on a machine with 4GB free RAM) leaves ~3
 
 - Dispatcher: single-threaded regex/keyword matching — negligible.
 - Agent runs: I/O bound (waiting on LLM API). CPU usage is minimal during agent execution.
-- Summarization: brief CPU spike when generating thread summaries (cheap model API call, not local inference).
+- Summarization: brief CPU spike when generating rivulet summaries (cheap model API call, not local inference).
 - Sync: CPU usage proportional to sync volume. Typically <5% CPU during incremental sync, 20-30% during initial full sync.
 
 ### Concurrency Model
@@ -65,7 +65,7 @@ PRAGMA mmap_size=268435456;       -- 256MB memory-mapped I/O
 **Growth projections:**
 | Data | Storage per unit | At 1K msgs/day for 1 year |
 |---|---|---|
-| Thread metadata | ~200 bytes/thread | ~5 MB (365 threads) |
+| Rivulet metadata | ~200 bytes/rivulet | ~5 MB (365 rivulets) |
 | Messages | ~2 KB/message (avg) | ~730 MB (365K messages) |
 | Agent configs | ~5 KB/agent | ~500 KB (100 agents) |
 | Routing rules | ~2 KB/agent | ~200 KB |
@@ -102,7 +102,7 @@ PRAGMA mmap_size=268435456;       -- 256MB memory-mapped I/O
 |---|---|---|
 | Per-file max | 100 MB | Client-side validation before upload |
 | Total file storage | Configurable, default 10 GB | Warning at 80%, reject uploads at 100% |
-| Per-thread file count | Unlimited | — |
+| Per-rivulet file count | Unlimited | — |
 
 ### Logs
 
@@ -116,7 +116,7 @@ PRAGMA mmap_size=268435456;       -- 256MB memory-mapped I/O
 
 Log format: JSON Lines (one JSON object per line) for machine readability.
 ```json
-{"ts": "2026-08-04T12:00:00Z", "level": "INFO", "component": "dispatcher", "thread_id": "...", "msg": "Deterministic match: agent=DBA, rule=keyword, matched=postgresql"}
+{"ts": "2026-08-04T12:00:00Z", "level": "INFO", "component": "dispatcher", "rivulet_id": "...", "msg": "Deterministic match: agent=DBA, rule=keyword, matched=postgresql"}
 ```
 
 ### Backups
@@ -162,7 +162,7 @@ tools:
     source_code: "..."
 ```
 
-Export excludes: messages, threads (data, not config), provider keys, sync state. Import creates entities if they don't exist, updates if they do (by name match).
+Export excludes: messages, rivulets (data, not config), provider keys, sync state. Import creates entities if they don't exist, updates if they do (by name match).
 
 ---
 

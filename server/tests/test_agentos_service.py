@@ -1,6 +1,6 @@
 """agentos/service.py's run_agent -- specifically its event-loop-to-
 RunOutput synthesis, which every other test in the suite bypasses by
-monkeypatching run_agent itself (test_streaming.py, test_thread_dispatch.py,
+monkeypatching run_agent itself (test_streaming.py, test_rivulet_dispatch.py,
 etc). Drives a real AgnoAgent's arun() with a scripted async generator so
 these exercise the actual stream-consuming loop, not a stand-in for it.
 """

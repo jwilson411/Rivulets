@@ -2,7 +2,7 @@
 
 Every synced entity carries a `vector_clock` column used by the P2P sync
 engine for last-write-wins conflict resolution (FR-9.6). Tables noted as
-"not synced" in the data model (provider_config, thread_guard_state,
+"not synced" in the data model (provider_config, rivulet_guard_state,
 sync_state) intentionally omit or ignore that column's sync semantics.
 """
 
@@ -63,7 +63,7 @@ class Channel(Base):
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
 
-    threads: Mapped[list["Thread"]] = relationship(back_populates="channel")
+    rivulets: Mapped[list["Rivulet"]] = relationship(back_populates="channel")
 
 
 class Team(Base):
@@ -174,9 +174,9 @@ class MCPServer(Base):
     vector_clock: Mapped[int] = mapped_column(default=0)
 
 
-class Thread(Base):
-    __tablename__ = "thread"
-    __table_args__ = (Index("idx_thread_channel", "channel_id", "created_at"),)
+class Rivulet(Base):
+    __tablename__ = "rivulet"
+    __table_args__ = (Index("idx_rivulet_channel", "channel_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     channel_id: Mapped[str] = mapped_column(ForeignKey("channel.id", ondelete="CASCADE"))
@@ -188,18 +188,18 @@ class Thread(Base):
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
 
-    channel: Mapped["Channel"] = relationship(back_populates="threads")
+    channel: Mapped["Channel"] = relationship(back_populates="rivulets")
     messages: Mapped[list["Message"]] = relationship(
-        back_populates="thread", cascade="all, delete-orphan"
+        back_populates="rivulet", cascade="all, delete-orphan"
     )
 
 
 class Message(Base):
     __tablename__ = "message"
-    __table_args__ = (Index("idx_message_thread", "thread_id", "created_at"),)
+    __table_args__ = (Index("idx_message_rivulet", "rivulet_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
-    thread_id: Mapped[str] = mapped_column(ForeignKey("thread.id", ondelete="CASCADE"))
+    rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
     sender_type: Mapped[str]  # 'human' | 'agent' | 'system'
     sender_id: Mapped[str | None] = mapped_column(default=None)  # agent ID if applicable
     sender_name: Mapped[str]
@@ -209,16 +209,16 @@ class Message(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
 
-    thread: Mapped["Thread"] = relationship(back_populates="messages")
+    rivulet: Mapped["Rivulet"] = relationship(back_populates="messages")
 
 
-class ThreadGuardState(Base):
+class RivuletGuardState(Base):
     """Loop prevention state. Not synced — tracked locally per node."""
 
-    __tablename__ = "thread_guard_state"
+    __tablename__ = "rivulet_guard_state"
 
-    thread_id: Mapped[str] = mapped_column(
-        ForeignKey("thread.id", ondelete="CASCADE"), primary_key=True
+    rivulet_id: Mapped[str] = mapped_column(
+        ForeignKey("rivulet.id", ondelete="CASCADE"), primary_key=True
     )
     agent_exchange_count: Mapped[int] = mapped_column(default=0)
     recent_interactions: Mapped[str | None] = mapped_column(default=None)  # JSON
@@ -228,12 +228,12 @@ class ThreadGuardState(Base):
     pause_reason: Mapped[str | None] = mapped_column(default=None)
 
 
-class ThreadSummary(Base):
-    __tablename__ = "thread_summary"
-    __table_args__ = (Index("idx_summary_thread", "thread_id", "level"),)
+class RivuletSummary(Base):
+    __tablename__ = "rivulet_summary"
+    __table_args__ = (Index("idx_summary_rivulet", "rivulet_id", "level"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
-    thread_id: Mapped[str] = mapped_column(ForeignKey("thread.id", ondelete="CASCADE"))
+    rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
     level: Mapped[int]  # 1 = chunk summary, 2 = meta-summary
     summary: Mapped[str]
     message_range_start: Mapped[str]
@@ -319,7 +319,7 @@ class SyncPendingOutbound(Base):
 class SyncPendingInbound(Base):
     """An incoming sync message that couldn't be applied because it
     references an entity that hasn't synced to this node yet
-    (Thread.channel_id, Message.thread_id — the FK-ordering hazard
+    (Rivulet.channel_id, Message.rivulet_id — the FK-ordering hazard
     documented in sync/apply.py's module docstring). The full message is
     stored here (unlike SyncPendingOutbound, which only stores an entity
     reference and re-reads current state) because there's nothing local

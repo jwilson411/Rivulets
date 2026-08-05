@@ -37,7 +37,7 @@ Users pay their own LLM provider costs directly. Rivulets does not proxy or rese
 |---|---|
 | **Light** (10 messages/day, Haiku/mini dispatcher, cheap agents) | ~$5-15/month |
 | **Moderate** (50 messages/day, GPT-4o agents, moderate tool use) | ~$30-80/month |
-| **Heavy** (200 messages/day, Claude Opus agents, heavy tool use, multi-agent threads) | ~$150-400/month |
+| **Heavy** (200 messages/day, Claude Opus agents, heavy tool use, multi-agent rivulets) | ~$150-400/month |
 | **Dispatcher only** (Haiku/mini, fires on ~20% of messages) | ~$0.50-2/month at any usage level |
 
 These are rough estimates. Actual costs depend on provider, model, context length, and tool usage. Rivulets' built-in cost tracking gives users per-agent and workspace-level visibility.

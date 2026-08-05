@@ -1,7 +1,7 @@
 """App Server REST API (docs/architecture/api-design.md), mounted at /api/v1.
 
 The UI never talks to AgentOS directly — every request here either serves
-App Server state (channels, teams, agents, threads, tools, settings...) or
+App Server state (channels, teams, agents, rivulets, tools, settings...) or
 proxies to the local AgentOS instance. This module just aggregates the
 per-resource routers; each one owns its own path prefix and schemas.
 """
@@ -16,9 +16,9 @@ from rivulets.api import (
     health,
     mcp_servers,
     providers,
+    rivulets,
     sync,
     teams,
-    threads,
     tools,
 )
 from rivulets.api import (
@@ -31,7 +31,7 @@ api_router.include_router(auth.router)
 api_router.include_router(channels.router)
 api_router.include_router(teams.router)
 api_router.include_router(agents.router)
-api_router.include_router(threads.router)
+api_router.include_router(rivulets.router)
 api_router.include_router(tools.router)
 api_router.include_router(mcp_servers.router)
 api_router.include_router(files.router)

@@ -10,7 +10,7 @@ Covers two retry queues:
     everything queued.
   - Inbound: apply_remote_change queues a full incoming message
     (SyncPendingInbound) instead of dropping it when it references an
-    entity that hasn't synced here yet (Thread.channel_id/Message.thread_id's
+    entity that hasn't synced here yet (Rivulet.channel_id/Message.rivulet_id's
     FK-ordering hazard, see sync/apply.py's module docstring), and
     retry_pending_inbound (called after every successful apply) retries
     everything queued, on the chance the missing dependency just arrived.
@@ -23,10 +23,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.db.models import Agent, Channel, SyncPendingInbound, SyncPendingOutbound, Thread
+from rivulets.db.models import Agent, Channel, Rivulet, SyncPendingInbound, SyncPendingOutbound
 from rivulets.sync.apply import (
     CHANNEL_SPEC,
-    THREAD_SPEC,
+    RIVULET_SPEC,
     apply_remote_change,
     record_local_change,
     retry_pending_inbound,
@@ -243,12 +243,12 @@ async def test_record_local_change_is_reused_by_generic_apply(db_session: AsyncS
 async def test_apply_remote_change_queues_on_fk_ordering_failure(
     db_session: AsyncSession,
 ) -> None:
-    """A thread referencing a channel that hasn't synced here yet must be
+    """A rivulet referencing a channel that hasn't synced here yet must be
     queued (SyncPendingInbound), not silently lost forever."""
     result = await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {
@@ -262,21 +262,21 @@ async def test_apply_remote_change_queues_on_fk_ordering_failure(
 
     pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
     assert len(pending) == 1
-    assert pending[0].entity_type == "thread"
-    assert pending[0].entity_id == "thread-1"
+    assert pending[0].entity_type == "rivulet"
+    assert pending[0].entity_id == "rivulet-1"
     assert pending[0].origin_node_id == "node-b"
 
 
 async def test_retry_pending_inbound_applies_once_dependency_exists(
     db_session: AsyncSession,
 ) -> None:
-    """The scenario the whole queue exists for: a thread arrives before
+    """The scenario the whole queue exists for: a rivulet arrives before
     its channel, gets queued; the channel arrives later (a normal
     successful apply); retrying the queue now succeeds."""
     result = await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {"channel_id": "chan-1", "title": "Hello", "status": "active", "created_by": "human"},
@@ -297,7 +297,7 @@ async def test_retry_pending_inbound_applies_once_dependency_exists(
 
     await retry_pending_inbound(db_session)
 
-    assert await db_session.get(Thread, "thread-1") is not None
+    assert await db_session.get(Rivulet, "rivulet-1") is not None
     assert (await db_session.execute(select(SyncPendingInbound))).scalars().all() == []
 
 
@@ -307,8 +307,8 @@ async def test_retry_pending_inbound_requeues_if_still_missing(db_session: Async
     correctness gap in either direction."""
     await apply_remote_change(
         db_session,
-        THREAD_SPEC,
-        "thread-1",
+        RIVULET_SPEC,
+        "rivulet-1",
         {"node-b": 1},
         "node-b",
         {
@@ -323,4 +323,4 @@ async def test_retry_pending_inbound_requeues_if_still_missing(db_session: Async
 
     pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
     assert len(pending) == 1
-    assert await db_session.get(Thread, "thread-1") is None
+    assert await db_session.get(Rivulet, "rivulet-1") is None

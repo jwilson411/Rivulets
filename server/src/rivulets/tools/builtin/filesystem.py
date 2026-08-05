@@ -1,7 +1,7 @@
 """File System built-in tool (FR-8.1).
 
 Confined to a dedicated sandbox directory under the workspace root — not
-the SQLite DB, logs, or thread file store — so a tool call can never read
+the SQLite DB, logs, or rivulet file store — so a tool call can never read
 or clobber Rivulets' own state. Every path is resolved and checked to
 stay inside that root before touching disk (a naive f-string join would
 let `..` escape it).

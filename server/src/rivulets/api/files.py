@@ -5,7 +5,7 @@ per docs/infrastructure/compute-and-storage.md — identical uploads share
 one copy on disk.
 
 Also synced (FR-9.1/FR-9.7) — publish_file_change is exported for
-api/threads.py to reuse too: a file's message_id only gets set once it's
+api/rivulets.py to reuse too: a file's message_id only gets set once it's
 attached to a message (uploads are a separate, prior step), so the
 message-attach path needs to republish the same File row again with its
 now-current message_id, not just the upload path."""

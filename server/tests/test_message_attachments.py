@@ -1,4 +1,4 @@
-"""Message attachment visibility (FR-10.1's "into threads" -- the read
+"""Message attachment visibility (FR-10.1's "into rivulets" -- the read
 side). Before this, File.message_id got set on attach but MessageOut had
 no way to expose it, so a UI could upload+attach a file but never learn
 which messages had attachments, including its own just-created message.
@@ -9,8 +9,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.api.threads import _attach_files  # pyright: ignore[reportPrivateUsage]
-from rivulets.db.models import Channel, File, Message, Thread
+from rivulets.api.rivulets import _attach_files  # pyright: ignore[reportPrivateUsage]
+from rivulets.db.models import Channel, File, Message, Rivulet
 
 
 def _create_channel(client: TestClient, headers: dict[str, str]) -> str:
@@ -29,18 +29,18 @@ def _upload_file(client: TestClient, headers: dict[str, str], filename: str, con
     return upload.json()["file_id"]
 
 
-def test_create_thread_message_has_no_attachments_when_none_sent(
+def test_create_rivulet_message_has_no_attachments_when_none_sent(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     channel_id = _create_channel(client, auth_headers)
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "no files here"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert len(messages) == 1
     assert messages[0]["attachments"] == []
 
@@ -49,17 +49,17 @@ def test_post_message_response_includes_attachment(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     channel_id = _create_channel(client, auth_headers)
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
-        json={"content": "starting thread"},
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "starting rivulet"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
     file_id = _upload_file(client, auth_headers, "notes.txt", b"hello attachment")
 
     posted = client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "see attached", "files": [file_id]},
         headers=auth_headers,
     )
@@ -77,20 +77,20 @@ def test_post_message_response_includes_attachment(
 def test_list_messages_includes_attachments_for_the_root_message(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    """create_thread (unlike post_message) doesn't return the message
-    itself, only the thread -- attachments on that first message can only
+    """create_rivulet (unlike post_message) doesn't return the message
+    itself, only the rivulet -- attachments on that first message can only
     ever be observed via list_messages, so that path needs its own check."""
     channel_id = _create_channel(client, auth_headers)
     file_id = _upload_file(client, auth_headers, "root.txt", b"root attachment")
 
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "root message with a file", "files": [file_id]},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert len(messages) == 1
     assert len(messages[0]["attachments"]) == 1
     assert messages[0]["attachments"][0]["filename"] == "root.txt"
@@ -100,21 +100,21 @@ def test_list_messages_only_attributes_files_to_their_own_message(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     channel_id = _create_channel(client, auth_headers)
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "first message, no file"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
     file_id = _upload_file(client, auth_headers, "second-only.txt", b"only on message two")
     client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "second message, with a file", "files": [file_id]},
         headers=auth_headers,
     )
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert len(messages) == 2
     assert messages[0]["attachments"] == []
     assert len(messages[1]["attachments"]) == 1
@@ -125,15 +125,15 @@ def test_unknown_file_id_is_ignored_and_message_has_no_attachments(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     channel_id = _create_channel(client, auth_headers)
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "starting"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
 
     posted = client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "referencing a bogus file", "files": ["does-not-exist"]},
         headers=auth_headers,
     )
@@ -149,16 +149,16 @@ def test_reattaching_a_file_to_a_different_message_does_not_steal_it(
     must not silently move it there and empty out the first message's
     attachment list."""
     channel_id = _create_channel(client, auth_headers)
-    thread = client.post(
-        f"/api/v1/channels/{channel_id}/threads",
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
         json={"content": "first message"},
         headers=auth_headers,
     )
-    thread_id = thread.json()["id"]
+    rivulet_id = rivulet.json()["id"]
     file_id = _upload_file(client, auth_headers, "shared.txt", b"only ever one owner")
 
     first = client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "attaching here first", "files": [file_id]},
         headers=auth_headers,
     )
@@ -167,14 +167,14 @@ def test_reattaching_a_file_to_a_different_message_does_not_steal_it(
     first_message_id = first.json()["id"]
 
     second = client.post(
-        f"/api/v1/threads/{thread_id}/messages",
+        f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "trying to steal it here", "files": [file_id]},
         headers=auth_headers,
     )
     assert second.status_code == 201, second.text
     assert second.json()["attachments"] == []
 
-    messages = client.get(f"/api/v1/threads/{thread_id}/messages", headers=auth_headers).json()
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     first_now = next(m for m in messages if m["id"] == first_message_id)
     assert len(first_now["attachments"]) == 1
     assert first_now["attachments"][0]["file_id"] == file_id
@@ -191,10 +191,10 @@ async def test_attach_files_is_idempotent_for_the_same_message(
     channel = Channel(name="attach-idempotent-test")
     db_session.add(channel)
     await db_session.flush()
-    thread = Thread(channel_id=channel.id, created_by="human")
-    db_session.add(thread)
+    rivulet = Rivulet(channel_id=channel.id, created_by="human")
+    db_session.add(rivulet)
     await db_session.flush()
-    message = Message(thread_id=thread.id, sender_type="human", sender_name="You", content="hi")
+    message = Message(rivulet_id=rivulet.id, sender_type="human", sender_name="You", content="hi")
     db_session.add(message)
     await db_session.flush()
     file_row = File(

@@ -124,16 +124,16 @@ All derived keys are computed at login time and held in memory only. They are ne
 - Use aiosqlite for async access — no thread pool contention.
 - Connection pooling: one write connection, multiple read connections.
 - If contention is observed, increase WAL `busy_timeout` to 5000ms.
-- Worst case: move to a dedicated write thread with a queue. But WAL mode should suffice.
+- Worst case: move to a dedicated write rivulet with a queue. But WAL mode should suffice.
 
 ### R-6: Hierarchical Summarization Quality Loss
-**Risk:** Meta-summaries of very long threads lose critical context, causing agents to give incorrect or redundant responses.
-**Likelihood:** Low (most threads won't exceed a few hundred messages).
+**Risk:** Meta-summaries of very long rivulets lose critical context, causing agents to give incorrect or redundant responses.
+**Likelihood:** Low (most rivulets won't exceed a few hundred messages).
 **Impact:** Medium (bad agent responses waste tokens and user trust).
 **Mitigation:**
 - Always keep the last 20 messages in full (configurable).
 - Summarization prompt instructs the model to preserve: decisions made, open questions, assigned tasks, key facts.
-- User-facing: "Context was summarized. Start a new thread for a fresh conversation." prompt when opening old threads.
+- User-facing: "Context was summarized. Start a new rivulet for a fresh conversation." prompt when opening old rivulets.
 - Quality monitoring: log summarization events, periodically review for degradation.
 
 ### R-7: Build Complexity for Cross-Platform Binaries
@@ -163,7 +163,7 @@ All derived keys are computed at login time and held in memory only. They are ne
 **Impact:** Medium (user satisfaction).
 **Mitigation:**
 - Agent "status" indicators: thinking, executing tool, waiting for handoff.
-- Thread pause mechanism gives the user control when agents go off-track.
+- Rivulet pause mechanism gives the user control when agents go off-track.
 - Error messages are plain-language, not stack traces.
 - Onboarding sets expectations: "Agents are AI teammates — they're good at focused tasks but may need guidance. You're always in control."
-- /feedback command in threads to rate agent responses (future P2).
+- /feedback command in rivulets to rate agent responses (future P2).

@@ -11,10 +11,10 @@ Workspace
   ├── ProviderConfig (1:N) — LLM provider keys (NOT synced)
   ├── WorkspaceSettings (1:1)
   ├── Channel (1:N)
-  │     ├── Thread (1:N)
+  │     ├── Rivulet (1:N)
   │     │     ├── Message (1:N)
-  │     │     ├── ThreadGuardState (1:1)
-  │     │     └── ThreadSummary (1:N)
+  │     │     ├── RivuletGuardState (1:1)
+  │     │     └── RivuletSummary (1:N)
   │     └── Team (N:1, via channel.team_id)
   ├── Team (1:N)
   │     └── TeamAgent (N:N join)
@@ -73,8 +73,8 @@ CREATE TABLE workspace_settings (
 -- dispatcher.model_override, dispatcher.fallback_enabled,
 -- guard.turn_limit (default: 10), guard.cycle_window (default: 8),
 -- guard.cycle_threshold (default: 3), guard.timeout_minutes (default: 30),
--- thread.summarization_enabled, thread.context_threshold_pct (default: 80),
--- thread.recent_messages_kept (default: 20),
+-- rivulet.summarization_enabled, rivulet.context_threshold_pct (default: 80),
+-- rivulet.recent_messages_kept (default: 20),
 -- sync.eager_files_lan (default: true), sync.eager_files_wan (default: false),
 -- ui.port (default: 8484)
 ```
@@ -213,10 +213,10 @@ CREATE TABLE mcp_server (
 
 ---
 
-### thread
-A conversation thread inside a channel. Created when a human posts a message.
+### rivulet
+A conversation rivulet inside a channel. Created when a human posts a message.
 ```sql
-CREATE TABLE thread (
+CREATE TABLE rivulet (
     id          TEXT PRIMARY KEY,
     channel_id  TEXT NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
     title       TEXT,               -- auto-generated from first message
@@ -227,15 +227,15 @@ CREATE TABLE thread (
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     vector_clock INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX idx_thread_channel ON thread(channel_id, created_at DESC);
+CREATE INDEX idx_rivulet_channel ON rivulet(channel_id, created_at DESC);
 ```
 
 ### message
-A single message in a thread (human or agent). The main channel's human message is the root of the thread and also appears here.
+A single message in a rivulet (human or agent). The main channel's human message is the root of the rivulet and also appears here.
 ```sql
 CREATE TABLE message (
     id          TEXT PRIMARY KEY,
-    thread_id   TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+    rivulet_id   TEXT NOT NULL REFERENCES rivulet(id) ON DELETE CASCADE,
     sender_type TEXT NOT NULL,      -- 'human', 'agent', 'system'
     sender_id   TEXT,               -- agent ID if sender_type = 'agent', null for human/system
     sender_name TEXT NOT NULL,      -- display name
@@ -245,14 +245,14 @@ CREATE TABLE message (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     vector_clock INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX idx_message_thread ON message(thread_id, created_at);
+CREATE INDEX idx_message_rivulet ON message(rivulet_id, created_at);
 ```
 
-### thread_guard_state
-Loop prevention state per thread. Not synced — each node tracks independently based on local message processing.
+### rivulet_guard_state
+Loop prevention state per rivulet. Not synced — each node tracks independently based on local message processing.
 ```sql
-CREATE TABLE thread_guard_state (
-    thread_id           TEXT PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
+CREATE TABLE rivulet_guard_state (
+    rivulet_id           TEXT PRIMARY KEY REFERENCES rivulet(id) ON DELETE CASCADE,
     agent_exchange_count INTEGER NOT NULL DEFAULT 0,
     recent_interactions TEXT,       -- JSON array of last 8 [agent_id, agent_id] pairs
     agent_active_since  TEXT,       -- ISO timestamp of first agent msg without human msg
@@ -262,12 +262,12 @@ CREATE TABLE thread_guard_state (
 );
 ```
 
-### thread_summary
+### rivulet_summary
 Stored summaries for context management (hierarchical summarization).
 ```sql
-CREATE TABLE thread_summary (
+CREATE TABLE rivulet_summary (
     id          TEXT PRIMARY KEY,
-    thread_id   TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+    rivulet_id   TEXT NOT NULL REFERENCES rivulet(id) ON DELETE CASCADE,
     level       INTEGER NOT NULL,   -- 1 = chunk summary, 2 = meta-summary
     summary     TEXT NOT NULL,
     message_range_start TEXT NOT NULL,  -- message_id of first summarized message
@@ -275,7 +275,7 @@ CREATE TABLE thread_summary (
     token_count INTEGER,            -- estimated tokens in the summary
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
-CREATE INDEX idx_summary_thread ON thread_summary(thread_id, level);
+CREATE INDEX idx_summary_rivulet ON rivulet_summary(rivulet_id, level);
 ```
 
 ---
@@ -316,7 +316,7 @@ CREATE TABLE sync_state (
 Per-entity vector clocks for conflict resolution. Each row tracks the clock for one entity on one node.
 ```sql
 CREATE TABLE vector_clock_tracker (
-    entity_type TEXT NOT NULL,      -- 'agent', 'channel', 'thread', 'message', 'tool', etc.
+    entity_type TEXT NOT NULL,      -- 'agent', 'channel', 'rivulet', 'message', 'tool', etc.
     entity_id   TEXT NOT NULL,
     node_id     TEXT NOT NULL,      -- which node's clock this is
     clock       INTEGER NOT NULL DEFAULT 0,
@@ -331,7 +331,7 @@ CREATE TABLE vector_clock_tracker (
 1. **State change events** are published to libp2p gossipsub topic `workspace/state` with the changed entity's full JSON + vector clock.
 2. **Receiving node** compares the incoming vector clock with its local clock for that entity. If incoming > local, apply the change. If incoming <= local, discard (local is newer or same).
 3. **Files** are transferred over libp2p streams using content-hash comparison. The receiving node requests only files where its hash differs from the sender's.
-4. **Initial sync** (new node joins): full state dump from any peer, processed in dependency order (workspace → providers → agents → tools → channels → teams → threads → messages).
+4. **Initial sync** (new node joins): full state dump from any peer, processed in dependency order (workspace → providers → agents → tools → channels → teams → rivulets → messages).
 
 ---
 
