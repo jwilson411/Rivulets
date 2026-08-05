@@ -4,6 +4,7 @@
 	import { channels, type Channel } from '$lib/api/channels';
 	import { threads, type Thread, type Message } from '$lib/api/threads';
 	import { teams, type Team } from '$lib/api/teams';
+	import { files as filesApi } from '$lib/api/files';
 
 	interface ThreadPreview {
 		rootContent: string;
@@ -20,6 +21,18 @@
 	let posting = $state(false);
 	let teamChangeError = $state<string | null>(null);
 	let postError = $state<string | null>(null);
+	let pendingFiles = $state<globalThis.File[]>([]);
+	let fileInput = $state<HTMLInputElement | null>(null);
+
+	function handleFileSelect(event: Event) {
+		const input = event.target as HTMLInputElement;
+		pendingFiles = [...pendingFiles, ...Array.from(input.files ?? [])];
+		input.value = '';
+	}
+
+	function removePendingFile(index: number) {
+		pendingFiles = pendingFiles.filter((_, i) => i !== index);
+	}
 
 	async function loadPreviews(list: Thread[]) {
 		const entries = await Promise.all(
@@ -72,12 +85,18 @@
 	async function handlePost(event: SubmitEvent) {
 		event.preventDefault();
 		const channelId = page.params.id!;
-		if (!newMessage.trim()) return;
+		if (!newMessage.trim() && pendingFiles.length === 0) return;
 		posting = true;
 		postError = null;
 		try {
-			await threads.create(channelId, newMessage.trim());
+			const uploaded = await Promise.all(pendingFiles.map((f) => filesApi.upload(f)));
+			await threads.create(
+				channelId,
+				newMessage.trim(),
+				uploaded.map((f) => f.file_id)
+			);
 			newMessage = '';
+			pendingFiles = [];
 			threadList = await threads.listForChannel(channelId);
 			await loadPreviews(threadList);
 		} catch (err) {
@@ -164,7 +183,42 @@
 		{#if postError}
 			<p class="text-sm text-red-600 dark:text-red-400">{postError}</p>
 		{/if}
+		{#if pendingFiles.length > 0}
+			<div class="flex flex-wrap gap-2">
+				{#each pendingFiles as file, i (file.name + i)}
+					<span
+						class="flex items-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+					>
+						📎 {file.name}
+						<button
+							type="button"
+							onclick={() => removePendingFile(i)}
+							aria-label="Remove {file.name}"
+							class="text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+						>
+							&times;
+						</button>
+					</span>
+				{/each}
+			</div>
+		{/if}
 		<div class="flex gap-2">
+			<input
+				bind:this={fileInput}
+				type="file"
+				multiple
+				onchange={handleFileSelect}
+				class="hidden"
+			/>
+			<button
+				type="button"
+				onclick={() => fileInput?.click()}
+				title="Attach files"
+				aria-label="Attach files"
+				class="rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+			>
+				📎
+			</button>
 			<input
 				type="text"
 				bind:value={newMessage}
@@ -173,7 +227,7 @@
 			/>
 			<button
 				type="submit"
-				disabled={posting || !newMessage.trim()}
+				disabled={posting || (!newMessage.trim() && pendingFiles.length === 0)}
 				class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
 			>
 				Send
