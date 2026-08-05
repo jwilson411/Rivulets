@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from agent_hive.agentos import init_agentos, sync_agents
+from agent_hive.agentos.tool_resolution import seed_builtin_tools
 from agent_hive.api import api_router
 from agent_hive.config import get_settings
 from agent_hive.db.session import init_db, session_scope
@@ -27,10 +28,13 @@ _CSP = "default-src 'self'; script-src 'self'; connect-src 'self' http://localho
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await init_db()
-    # Repopulate AgentOS's agent list from the DB on every startup — agents
-    # created before a restart need to be re-registered since AgentOS's
-    # in-process agent list isn't itself persisted.
     async with session_scope() as db:
+        # Builtin tool rows (FR-8.2) must exist before sync_agents() builds
+        # any agent that might reference one via the agent_tool join table.
+        await seed_builtin_tools(db)
+        # Repopulate AgentOS's agent list from the DB on every startup —
+        # agents created before a restart need to be re-registered since
+        # AgentOS's in-process agent list isn't itself persisted.
         await sync_agents(db)
     yield
     # The sync engine only actually starts on login (api/auth.py — it

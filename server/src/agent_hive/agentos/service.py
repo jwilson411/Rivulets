@@ -48,6 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_hive.agentos.models import resolve_model
+from agent_hive.agentos.tool_resolution import resolve_agent_tools
 from agent_hive.config import get_settings
 from agent_hive.db.models import Agent
 from agent_hive.tools.builtin import handoff
@@ -94,10 +95,7 @@ def reset_agentos_for_testing() -> None:
 
 async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
     model = await resolve_model(db, agent_row.model)
-    # TODO(FR-8.2): resolve agent_row's assigned tools (agent_tool join ->
-    # tool.tool_type) into agno tool callables. Built-in tools already
-    # exist as agno @tool functions (tools/builtin/) — this needs the join
-    # query and a tool_type dispatch, not new tool implementations.
+    assigned_tools = await resolve_agent_tools(db, agent_row)
     return AgnoAgent(
         id=agent_row.id,
         name=agent_row.name,
@@ -105,9 +103,9 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
         instructions=agent_row.instructions,
         model=model,
         db=_agentos_db(),
-        # FR-6.1: unlike the opt-in built-ins above, handoff is available
-        # to every agent unconditionally.
-        tools=[handoff],
+        # FR-6.1: unlike the opt-in tools resolved above, handoff is
+        # available to every agent unconditionally.
+        tools=[handoff, *assigned_tools],
     )
 
 

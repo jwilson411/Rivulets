@@ -109,6 +109,8 @@ async def get_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> Tool:
 @router.patch("/{tool_id}", response_model=ToolOut)
 async def update_tool(tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentWorkspaceId) -> Tool:
     tool = await _get_or_404(db, tool_id)
+    if tool.tool_type == "builtin":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be modified")
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(tool, field, value)
     tool.vector_clock += 1
@@ -121,6 +123,8 @@ async def update_tool(tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentW
 @router.delete("/{tool_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
     tool = await _get_or_404(db, tool_id)
+    if tool.tool_type == "builtin":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be deleted")
     await db.delete(tool)
     await db.commit()
 
