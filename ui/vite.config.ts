@@ -32,6 +32,11 @@ export default defineConfig({
 	},
 	test: {
 		expect: { requireAssertions: true },
+		// No real component/unit tests exist yet (the only prior test files
+		// were the `sv create` scaffold's throwaway examples, removed as
+		// dead weight) -- without this, `vitest --run` exits 1 on an empty
+		// suite and breaks CI the moment there's nothing left to collect.
+		passWithNoTests: true,
 		projects: [
 			{
 				extends: './vite.config.ts',
@@ -43,7 +48,8 @@ export default defineConfig({
 						instances: [{ browser: 'chromium', headless: true }]
 					},
 					include: ['src/**/*.svelte.{test,spec}.{js,ts}'],
-					exclude: ['src/lib/server/**']
+					exclude: ['src/lib/server/**'],
+					passWithNoTests: true
 				}
 			},
 
@@ -53,7 +59,8 @@ export default defineConfig({
 					name: 'server',
 					environment: 'node',
 					include: ['src/**/*.{test,spec}.{js,ts}'],
-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
+					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}'],
+					passWithNoTests: true
 				}
 			}
 		]
