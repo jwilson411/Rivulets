@@ -2,19 +2,19 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { channels, type Channel } from '$lib/api/channels';
-	import { threads, type Thread, type Message } from '$lib/api/threads';
+	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { teams, type Team } from '$lib/api/teams';
 	import { files as filesApi } from '$lib/api/files';
 
-	interface ThreadPreview {
+	interface RivuletPreview {
 		rootContent: string;
 		messageCount: number;
 		lastAgentMessage: Message | null;
 	}
 
 	let channel = $state<Channel | null>(null);
-	let threadList = $state<Thread[]>([]);
-	let previews = $state<Record<string, ThreadPreview>>({});
+	let rivuletList = $state<Rivulet[]>([]);
+	let previews = $state<Record<string, RivuletPreview>>({});
 	let teamList = $state<Team[]>([]);
 	let newMessage = $state('');
 	let loadError = $state<string | null>(null);
@@ -34,13 +34,13 @@
 		pendingFiles = pendingFiles.filter((_, i) => i !== index);
 	}
 
-	async function loadPreviews(list: Thread[]) {
+	async function loadPreviews(list: Rivulet[]) {
 		const entries = await Promise.all(
 			list.map(async (t) => {
-				const msgs = await threads.listMessages(t.id);
+				const msgs = await rivulets.listMessages(t.id);
 				const root = msgs.find((m) => m.sender_type === 'human');
 				const lastAgent = [...msgs].reverse().find((m) => m.sender_type === 'agent') ?? null;
-				const preview: ThreadPreview = {
+				const preview: RivuletPreview = {
 					rootContent: root?.content ?? '',
 					messageCount: msgs.length,
 					lastAgentMessage: lastAgent
@@ -54,15 +54,15 @@
 	async function load(channelId: string) {
 		loadError = null;
 		try {
-			const [loadedChannel, loadedThreads, loadedTeams] = await Promise.all([
+			const [loadedChannel, loadedRivulets, loadedTeams] = await Promise.all([
 				channels.get(channelId),
-				threads.listForChannel(channelId),
+				rivulets.listForChannel(channelId),
 				teams.list()
 			]);
 			channel = loadedChannel;
-			threadList = loadedThreads;
+			rivuletList = loadedRivulets;
 			teamList = loadedTeams;
-			await loadPreviews(loadedThreads);
+			await loadPreviews(loadedRivulets);
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load channel';
 		}
@@ -90,15 +90,15 @@
 		postError = null;
 		try {
 			const uploaded = await Promise.all(pendingFiles.map((f) => filesApi.upload(f)));
-			await threads.create(
+			await rivulets.create(
 				channelId,
 				newMessage.trim(),
 				uploaded.map((f) => f.file_id)
 			);
 			newMessage = '';
 			pendingFiles = [];
-			threadList = await threads.listForChannel(channelId);
-			await loadPreviews(threadList);
+			rivuletList = await rivulets.listForChannel(channelId);
+			await loadPreviews(rivuletList);
 		} catch (err) {
 			postError = err instanceof Error ? err.message : 'Failed to send message';
 		} finally {
@@ -144,17 +144,17 @@
 	<div class="flex-1 overflow-y-auto px-6 py-4">
 		{#if loadError}
 			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
-		{:else if threadList.length === 0}
+		{:else if rivuletList.length === 0}
 			<p class="text-sm text-zinc-400">No messages yet — say something below.</p>
 		{:else}
 			<ul class="flex flex-col gap-2">
-				{#each threadList as thread (thread.id)}
-					{@const preview = previews[thread.id]}
+				{#each rivuletList as rivulet (rivulet.id)}
+					{@const preview = previews[rivulet.id]}
 					<li>
 						<a
-							href={resolve('/channels/[id]/threads/[threadId]', {
+							href={resolve('/channels/[id]/rivulets/[rivuletId]', {
 								id: page.params.id!,
-								threadId: thread.id
+								rivuletId: rivulet.id
 							})}
 							class="block rounded-md border border-zinc-200 px-4 py-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
 						>

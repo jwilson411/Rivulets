@@ -1,9 +1,9 @@
-// Thread & message resource client (FR-5, api-design.md#threads--messages).
+// Rivulet & message resource client (FR-5, api-design.md#rivulets--messages).
 
 import { api } from './client';
 import { auth } from './auth.svelte';
 
-export interface Thread {
+export interface Rivulet {
 	id: string;
 	channel_id: string;
 	title: string | null;
@@ -23,7 +23,7 @@ export interface Attachment {
 
 export interface Message {
 	id: string;
-	thread_id: string;
+	rivulet_id: string;
 	sender_type: SenderType;
 	sender_id: string | null;
 	sender_name: string;
@@ -33,23 +33,23 @@ export interface Message {
 	attachments: Attachment[];
 }
 
-export const threads = {
+export const rivulets = {
 	listForChannel: (channelId: string) =>
-		api.get<Thread[]>(`/channels/${channelId}/threads`, auth.token ?? undefined),
+		api.get<Rivulet[]>(`/channels/${channelId}/rivulets`, auth.token ?? undefined),
 	create: (channelId: string, content: string, fileIds: string[] = []) =>
-		api.post<Thread>(
-			`/channels/${channelId}/threads`,
+		api.post<Rivulet>(
+			`/channels/${channelId}/rivulets`,
 			{ content, files: fileIds },
 			auth.token ?? undefined
 		),
-	get: (id: string) => api.get<Thread>(`/threads/${id}`, auth.token ?? undefined),
+	get: (id: string) => api.get<Rivulet>(`/rivulets/${id}`, auth.token ?? undefined),
 	listMessages: (id: string) =>
-		api.get<Message[]>(`/threads/${id}/messages`, auth.token ?? undefined),
+		api.get<Message[]>(`/rivulets/${id}/messages`, auth.token ?? undefined),
 	postMessage: (id: string, content: string, fileIds: string[] = []) =>
 		api.post<Message>(
-			`/threads/${id}/messages`,
+			`/rivulets/${id}/messages`,
 			{ content, files: fileIds },
 			auth.token ?? undefined
 		),
-	resume: (id: string) => api.post<Thread>(`/threads/${id}/resume`, {}, auth.token ?? undefined)
+	resume: (id: string) => api.post<Rivulet>(`/rivulets/${id}/resume`, {}, auth.token ?? undefined)
 };

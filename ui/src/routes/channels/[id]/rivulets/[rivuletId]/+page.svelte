@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
-	import { threads, type Thread, type Message } from '$lib/api/threads';
+	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { files as filesApi } from '$lib/api/files';
 	import { auth } from '$lib/api/auth.svelte';
 
-	let thread = $state<Thread | null>(null);
+	let rivulet = $state<Rivulet | null>(null);
 	let messages = $state<Message[]>([]);
 	let reply = $state('');
 	let loadError = $state<string | null>(null);
@@ -52,26 +52,26 @@
 		[...messages].reverse().find((m) => m.content_type === 'system_alert')?.content ?? null
 	);
 
-	async function load(threadId: string) {
+	async function load(rivuletId: string) {
 		loadError = null;
 		try {
-			const [loadedThread, loadedMessages] = await Promise.all([
-				threads.get(threadId),
-				threads.listMessages(threadId)
+			const [loadedRivulet, loadedMessages] = await Promise.all([
+				rivulets.get(rivuletId),
+				rivulets.listMessages(rivuletId)
 			]);
-			thread = loadedThread;
+			rivulet = loadedRivulet;
 			messages = loadedMessages;
 		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load thread';
+			loadError = err instanceof Error ? err.message : 'Failed to load rivulet';
 		}
 	}
 
 	$effect(() => {
-		load(page.params.threadId!);
+		load(page.params.rivuletId!);
 	});
 
 	$effect(() => {
-		const threadId = page.params.threadId!;
+		const rivuletId = page.params.rivuletId!;
 		const token = auth.token;
 		if (!token) return;
 
@@ -80,7 +80,7 @@
 		// get_current_workspace_id_for_stream) — everything else keeps
 		// header-only auth.
 		const source = new EventSource(
-			`/api/v1/threads/${threadId}/stream?token=${encodeURIComponent(token)}`
+			`/api/v1/rivulets/${rivuletId}/stream?token=${encodeURIComponent(token)}`
 		);
 
 		source.addEventListener('agent_token', (event) => {
@@ -126,7 +126,7 @@
 
 	async function handleReply(event: SubmitEvent) {
 		event.preventDefault();
-		const threadId = page.params.threadId!;
+		const rivuletId = page.params.rivuletId!;
 		if (!reply.trim() && pendingFiles.length === 0) return;
 		sending = true;
 		try {
@@ -138,14 +138,14 @@
 			// before responding (dispatch/service.py), so re-fetching right
 			// after this resolves already picks up an agent's reply — no
 			// polling or SSE needed for the reply to show up.
-			await threads.postMessage(
-				threadId,
+			await rivulets.postMessage(
+				rivuletId,
 				reply.trim(),
 				uploaded.map((f) => f.file_id)
 			);
 			reply = '';
 			pendingFiles = [];
-			messages = await threads.listMessages(threadId);
+			messages = await rivulets.listMessages(rivuletId);
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to send message';
 		} finally {
@@ -154,11 +154,11 @@
 	}
 
 	async function handleResume() {
-		const threadId = page.params.threadId!;
+		const rivuletId = page.params.rivuletId!;
 		resuming = true;
 		try {
-			thread = await threads.resume(threadId);
-			messages = await threads.listMessages(threadId);
+			rivulet = await rivulets.resume(rivuletId);
+			messages = await rivulets.listMessages(rivuletId);
 		} finally {
 			resuming = false;
 		}
@@ -184,15 +184,15 @@
 			&larr; Back to channel
 		</a>
 		<h1 class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-			Thread{thread?.status && thread.status !== 'active' ? ` (${thread.status})` : ''}
+			Rivulet{rivulet?.status && rivulet.status !== 'active' ? ` (${rivulet.status})` : ''}
 		</h1>
 	</header>
 
-	{#if thread?.status === 'paused'}
+	{#if rivulet?.status === 'paused'}
 		<div
 			class="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
 		>
-			<span>{pauseNotice ?? 'This thread is paused — agent replies are suppressed.'}</span>
+			<span>{pauseNotice ?? 'This rivulet is paused — agent replies are suppressed.'}</span>
 			<button
 				onclick={handleResume}
 				disabled={resuming}
