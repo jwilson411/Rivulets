@@ -2,7 +2,16 @@
 data-model.md) plus a configured `provider_config` row to the matching
 agno Model class. Covers FR-1.4's minimum provider set: OpenAI, Anthropic,
 DeepSeek, and any OpenAI-compatible endpoint.
+
+Also resolves the two "Auto" mode tiers (#23) — `cheap` and `capable` — to
+a concrete `provider:model_name` string. `resolve_default_provider` is
+shared with dispatch/rule_generation.py's `pick_dispatcher_model`, which
+answers the same "which provider backs cheap, dispatcher-adjacent LLM
+calls" question for routing-rule generation and LLM dispatch fallback.
 """
+
+import json
+from typing import Literal
 
 from agno.models.anthropic import Claude
 from agno.models.base import Model
@@ -12,10 +21,32 @@ from agno.models.openai.like import OpenAILike
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.db.models import ProviderConfig
+from rivulets.db.models import ProviderConfig, WorkspaceSetting
 from rivulets.security.credentials import get_provider_key
 
 _DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+# The `agent.model` sentinel for "Auto" mode (#23): the model is resolved
+# fresh per-message (dispatch/service.py) instead of once at agent build
+# time. Stored directly in the existing unconstrained `model` column
+# rather than a new one — there's no live migration tooling in this
+# project (init_db() only does create_all), so it round-trips through the
+# generic peer-sync layer (sync/apply.py) with zero special-casing.
+AUTO_MODEL = "auto"
+
+ModelTier = Literal["cheap", "capable"]
+
+# Default model per provider per tier. `capable` intentionally maps to
+# Opus, not Fable — Fable is priced 2x Opus and is opt-in-only per
+# Anthropic's own guidance (elevated safety classifiers that can outright
+# refuse, different data-retention requirements), so it would be wrong to
+# route to it automatically/silently. A workspace that wants Fable for its
+# hardest traffic sets it explicitly via the `model_tiers.override` setting.
+_DEFAULT_TIER_MODELS: dict[str, dict[ModelTier, str]] = {
+    "anthropic": {"cheap": "claude-haiku-4-5-20251001", "capable": "claude-opus-5"},
+    "openai": {"cheap": "gpt-4o-mini", "capable": "gpt-4o"},
+    "deepseek": {"cheap": "deepseek-chat", "capable": "deepseek-chat"},
+}
 
 
 class UnknownProviderError(ValueError):
@@ -57,3 +88,36 @@ async def resolve_model(db: AsyncSession, provider_model: str) -> Model:
         )
     api_key = get_provider_key(config.api_key_ref)
     return build_model(provider, model_name, api_key, config.base_url)
+
+
+async def resolve_default_provider(db: AsyncSession) -> ProviderConfig | None:
+    """The workspace's default provider (or its first configured one, if
+    none is marked default), or None if no provider is configured at all."""
+    result = await db.execute(select(ProviderConfig))
+    configs = result.scalars().all()
+    if not configs:
+        return None
+    return next((c for c in configs if c.is_default), configs[0])
+
+
+async def resolve_tier_model(db: AsyncSession, tier: ModelTier) -> str | None:
+    """Resolve an Auto-mode tier ('cheap' or 'capable') to a concrete
+    'provider:model_name' string: a workspace's `model_tiers.override`
+    setting (JSON `{"cheap": ..., "capable": ...}`, merged over the
+    computed default) wins if it names this tier, otherwise the default
+    provider's tier model is used. Returns None if no provider is
+    configured, or the default provider has no default model for this
+    tier (e.g. `openai_compatible`, whose models aren't known in advance)."""
+    provider = await resolve_default_provider(db)
+    default = None
+    if provider is not None:
+        model_name = _DEFAULT_TIER_MODELS.get(provider.provider, {}).get(tier)
+        if model_name is not None:
+            default = f"{provider.provider}:{model_name}"
+
+    override_row = await db.get(WorkspaceSetting, "model_tiers.override")
+    if override_row is not None:
+        overrides: dict[str, str] = json.loads(override_row.value) or {}
+        if tier in overrides:
+            return str(overrides[tier])
+    return default

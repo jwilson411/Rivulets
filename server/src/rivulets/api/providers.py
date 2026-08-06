@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from rivulets.agentos.models import AUTO_MODEL, resolve_default_provider
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.db.base import uuid7
 from rivulets.db.models import Agent, ProviderConfig
@@ -108,6 +109,21 @@ async def remove_provider(provider_id: str, db: DbSession, _: CurrentWorkspaceId
             status.HTTP_409_CONFLICT,
             f"Agent '{in_use.name}' uses this provider — reassign it before removing.",
         )
+    # An "auto" agent's model string carries no "provider:" prefix
+    # (agentos/models.py's AUTO_MODEL sentinel), so the check above doesn't
+    # catch it -- it always resolves against the *effective* default
+    # provider (resolve_default_provider's is_default-or-first-configured
+    # fallback, same as resolve_tier_model uses), so deleting that
+    # provider out from under it would leave it unrunnable instead.
+    effective_default = await resolve_default_provider(db)
+    if effective_default is not None and effective_default.id == provider.id:
+        auto_agent = await db.scalar(select(Agent).where(Agent.model == AUTO_MODEL))
+        if auto_agent is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Agent '{auto_agent.name}' is in Auto mode, which resolves against the "
+                "default provider — set a different default provider before removing this one.",
+            )
     delete_provider_key(provider.api_key_ref)
     await db.delete(provider)
     await db.commit()

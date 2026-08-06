@@ -313,6 +313,11 @@
 										>{message.sender_name}</strong
 									>
 									· {formatClock(message.created_at)}
+									{#if message.model_used}
+										<span class="text-neutral-500" title="Auto mode ({message.tier} tier)">
+											· via {message.model_used}
+										</span>
+									{/if}
 								</div>
 								{#if message.sender_type === 'system'}
 									<p

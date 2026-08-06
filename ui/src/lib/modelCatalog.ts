@@ -32,4 +32,11 @@ export const MODEL_CATALOG: Record<ProviderKind, ModelOption[]> = {
 };
 
 export const CUSTOM_MODEL_VALUE = '__custom__';
+
+// The stored `agent.model` sentinel for Auto mode (#23, server's
+// agentos/models.py AUTO_MODEL) -- the model is picked fresh per message
+// instead of being fixed at agent creation. AUTO_MODEL_VALUE is a
+// distinct <option> value only so it never collides with a real
+// "provider:model" string in the same <select>.
+export const AUTO_MODEL = 'auto';
 export const AUTO_MODEL_VALUE = '__auto__';

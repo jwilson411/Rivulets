@@ -41,13 +41,19 @@ from collections.abc import Callable
 
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
+from agno.models.base import Model
 from agno.os import AgentOS
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.models import resolve_model
+from rivulets.agentos.models import (
+    AUTO_MODEL,
+    UnknownProviderError,
+    resolve_model,
+    resolve_tier_model,
+)
 from rivulets.agentos.tool_resolution import resolve_agent_tools
 from rivulets.config import get_settings
 from rivulets.db.models import Agent
@@ -94,7 +100,20 @@ def reset_agentos_for_testing() -> None:
 
 
 async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
-    model = await resolve_model(db, agent_row.model)
+    if agent_row.model == AUTO_MODEL:
+        # An "auto" agent's real per-message model is resolved fresh by
+        # dispatch/service.py (classify -> resolve_tier_model -> run_agent's
+        # model_override) — this registration-time build only needs a
+        # runnable placeholder so the agent is always invokable, and
+        # "classification failed, fell through" (agentos/models.py) and
+        # "never classified, this is the registered model" share the same
+        # cheap-tier safety net.
+        cheap_provider_model = await resolve_tier_model(db, "cheap")
+        if cheap_provider_model is None:
+            raise UnknownProviderError("No provider configured for Auto mode.")
+        model = await resolve_model(db, cheap_provider_model)
+    else:
+        model = await resolve_model(db, agent_row.model)
     assigned_tools = await resolve_agent_tools(db, agent_row)
     return AgnoAgent(
         id=agent_row.id,
@@ -146,6 +165,7 @@ async def run_agent(
     session_id: str,
     user_id: str = "human",
     on_token: Callable[[str], None] | None = None,
+    model_override: Model | None = None,
 ) -> RunOutput:
     """Invoke an agent by our DB id and return its final RunOutput.
 
@@ -158,6 +178,14 @@ async def run_agent(
     returned RunOutput exactly as before streaming existed; this function
     synthesizes one from the terminal stream event since agno's streaming
     mode doesn't hand back a RunOutput object directly.
+
+    `model_override` (Auto mode, #23) swaps the model for this call only,
+    via a per-call `deep_copy` of the already-registered agent rather than
+    mutating the shared registered instance in place — mutating in place
+    would race under concurrent invocations of the same auto-mode agent.
+    Agents not in auto mode never pass this, so their code path (the
+    shared registered instance, unmodified) is exactly what it was before
+    this parameter existed.
     """
     agent_os = get_agentos()
     agno_agent = next(
@@ -168,6 +196,8 @@ async def run_agent(
         raise ValueError(
             f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"
         )
+    if model_override is not None:
+        agno_agent = agno_agent.deep_copy(update={"model": model_override})
 
     final: RunOutput | None = None
     accumulated_content = ""

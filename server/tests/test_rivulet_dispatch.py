@@ -247,3 +247,119 @@ def test_channel_with_no_team_gets_no_dispatch(
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human"]
+
+
+def test_auto_mode_agent_receives_a_per_message_model_override(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto mode (#23): classify_tier picks a tier per message,
+    resolve_tier_model maps it to a concrete model, and run_agent receives
+    that as model_override -- a real per-message decision, not a model
+    fixed once at agent creation. resolve_model itself runs for real here
+    (the in-memory keyring fixture makes that safe, per
+    test_providers_api.py's docstring) since it does no network I/O."""
+    added_provider = client.post(
+        "/api/v1/providers",
+        json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-ant-test"},
+        headers=auth_headers,
+    )
+    assert added_provider.status_code == 201, added_provider.text
+
+    async def fake_classify_tier(*_args: object, **_kwargs: object) -> str:
+        return "capable"
+
+    monkeypatch.setattr("rivulets.dispatch.service.classify_tier", fake_classify_tier)
+
+    received_overrides: list[object] = []
+
+    async def fake_run_agent(*_args: object, **kwargs: object) -> Any:
+        received_overrides.append(kwargs.get("model_override"))
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "Handled."
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "AutoAgent",
+            "description": "Picks its own model per message.",
+            "instructions": "Be helpful.",
+            "model": "auto",
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    agent_id = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "mention_only", "pattern": "", "priority": 0}]},
+        headers=auth_headers,
+    )
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "@AutoAgent solve this hard problem"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    assert len(received_overrides) == 1
+    assert received_overrides[0] is not None
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert messages[1]["model_used"] == "anthropic:claude-opus-5"
+    assert messages[1]["tier"] == "capable"
+
+
+def test_non_auto_agent_never_invokes_the_classifier(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    async def fake_classify_tier(*_args: object, **_kwargs: object) -> str:
+        nonlocal called
+        called = True
+        return "capable"
+
+    monkeypatch.setattr("rivulets.dispatch.service.classify_tier", fake_classify_tier)
+    # Reply text deliberately doesn't contain "widget" -- see
+    # test_keyword_rule_agent_responds_to_new_rivulet's comment on why
+    # that keeps this a single round-trip instead of a recursive loop.
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent", _fake_run_agent("OK, doing that now.")
+    )
+
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Fixed Model Agent",
+            "description": "Responds to widget questions.",
+            "instructions": "Say OK.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
+    agent_id = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": '["widget"]', "priority": 10}]},
+        headers=auth_headers,
+    )
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "tell me about the widget"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["model_used"] is None
+    assert called is False

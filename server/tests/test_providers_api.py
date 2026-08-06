@@ -205,3 +205,39 @@ def test_remove_provider_in_use_by_agent_is_blocked(
 
     listed = client.get("/api/v1/providers", headers=auth_headers)
     assert len(listed.json()) == 1
+
+
+def test_remove_default_provider_in_use_by_auto_agent_is_blocked(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """An 'auto' agent's model string (#23) carries no 'provider:' prefix,
+    so it always resolves against the *default* provider rather than a
+    specific one -- deleting that provider needs its own check, since the
+    startswith('{provider}:') check above never matches 'auto'."""
+    created_provider = client.post(
+        "/api/v1/providers",
+        json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-ant"},
+        headers=auth_headers,
+    )
+    provider_id = created_provider.json()["id"]
+    # The only configured provider -- resolve_default_provider (and hence
+    # the check below) falls back to it even without is_default=True set.
+
+    created_agent = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Auto Agent",
+            "description": "Picks its own model per message.",
+            "instructions": "Be helpful.",
+            "model": "auto",
+        },
+        headers=auth_headers,
+    )
+    assert created_agent.status_code == 201, created_agent.text
+
+    response = client.delete(f"/api/v1/providers/{provider_id}", headers=auth_headers)
+    assert response.status_code == 409
+    assert "Auto Agent" in response.text
+
+    listed = client.get("/api/v1/providers", headers=auth_headers)
+    assert len(listed.json()) == 1

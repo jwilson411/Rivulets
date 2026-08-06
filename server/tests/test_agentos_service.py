@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.models.anthropic import Claude
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent
 from agno.run.base import RunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,3 +125,41 @@ async def test_run_agent_raises_when_stream_ends_with_no_content_and_no_terminal
 
     with pytest.raises(RuntimeError, match="ended without a completion or error event"):
         await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+
+async def test_run_agent_model_override_does_not_run_on_the_registered_instance(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """Auto mode (#23): a model_override must swap the model for that one
+    call via a clone, not mutate the shared registered agent -- otherwise
+    concurrent invocations of the same auto-mode agent would race on which
+    model is set at call time."""
+    registered_original_arun = _scripted_arun([RunCompletedEvent(content="never")])
+    registered_agent.arun = registered_original_arun  # pyright: ignore[reportAttributeAccessIssue]
+    override_model = Claude(id="claude-opus-5", api_key="sk-fake")
+
+    called_on_override = False
+
+    def cloned_arun(*_args: object, **_kwargs: object):  # noqa: ANN202
+        nonlocal called_on_override
+        called_on_override = True
+        return _scripted_arun([RunCompletedEvent(content="Hello from override")])()
+
+    original_deep_copy = registered_agent.deep_copy
+
+    def spying_deep_copy(*, update: Any = None) -> AgnoAgent:
+        clone = original_deep_copy(update=update)
+        clone.arun = cloned_arun  # pyright: ignore[reportAttributeAccessIssue]
+        return clone
+
+    registered_agent.deep_copy = spying_deep_copy  # pyright: ignore[reportAttributeAccessIssue]
+
+    result = await run_agent(
+        db_session, "agent-1", "hi", session_id="s-1", model_override=override_model
+    )
+
+    assert called_on_override is True
+    assert result.content == "Hello from override"
+    # The registered singleton itself is untouched -- the clone got the
+    # override, this fixture's own agent (created with no model) didn't.
+    assert registered_agent.model is None

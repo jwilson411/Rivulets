@@ -35,10 +35,31 @@ describe('ModelPicker.svelte', () => {
 		expect(optgroup?.getAttribute('label')).toBe('My Anthropic key (anthropic)');
 	});
 
-	it('shows the Auto slot as disabled', async () => {
+	it('offers an enabled Auto option', async () => {
 		render(ModelPicker, { providers: [anthropicProvider], value: '' });
 
-		await expect.element(page.getByRole('option', { name: 'Auto (coming soon)' })).toBeDisabled();
+		await expect
+			.element(page.getByRole('option', { name: 'Auto — picks cheap or capable per message' }))
+			.not.toBeDisabled();
+	});
+
+	it('selecting Auto keeps it selected and hides the custom-model input', async () => {
+		render(ModelPicker, { providers: [anthropicProvider], value: '' });
+
+		const select = page.getByRole('combobox');
+		await select.selectOptions('__auto__');
+
+		expect((select.element() as HTMLSelectElement).value).toBe('__auto__');
+		await expect
+			.element(page.getByPlaceholder('model_name (e.g. claude-3-5-haiku-latest)'))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows Auto as selected when value is already the auto sentinel', async () => {
+		render(ModelPicker, { providers: [anthropicProvider], value: 'auto' });
+
+		const select = page.getByRole('combobox').element() as HTMLSelectElement;
+		expect(select.value).toBe('__auto__');
 	});
 
 	it('reveals a free-text input when Custom… is chosen, since openai_compatible has no catalog', async () => {
@@ -55,9 +76,7 @@ describe('ModelPicker.svelte', () => {
 		render(ModelPicker, { providers: [], value: '' });
 
 		await expect
-			.element(
-				page.getByText('No providers configured yet — add one under Providers first.')
-			)
+			.element(page.getByText('No providers configured yet — add one under Providers first.'))
 			.toBeInTheDocument();
 	});
 });

@@ -31,6 +31,11 @@ export interface Message {
 	content_type: string;
 	created_at: string;
 	attachments: Attachment[];
+	// Set only on replies from an "auto" mode agent (#23) -- which
+	// concrete model actually answered this message, and which tier
+	// (cheap/capable) it was classified into.
+	model_used: string | null;
+	tier: string | null;
 }
 
 export const rivulets = {

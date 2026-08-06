@@ -136,6 +136,35 @@ def test_update_agent_tool_ids_and_team_ids(
     assert updated.status_code == 200
 
 
+def test_create_auto_mode_agent_registers_against_cheap_tier_default(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """model='auto' (#23) has no provider configured to resolve directly
+    -- it must still register successfully, falling back to the default
+    provider's cheap-tier model (agentos/service.py's _build_agno_agent)."""
+    added_provider = client.post(
+        "/api/v1/providers",
+        json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-ant-test"},
+        headers=auth_headers,
+    )
+    assert added_provider.status_code == 201, added_provider.text
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Auto Agent",
+            "description": "Picks its own model per message.",
+            "instructions": "Be helpful.",
+            "model": "auto",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    agent = response.json()
+    assert agent["model"] == "auto"
+    assert agent["agentos_agent_id"] == agent["id"]  # registered, not skipped
+
+
 def test_delete_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.delete("/api/v1/agents/nonexistent", headers=auth_headers)
     assert response.status_code == 404
