@@ -39,6 +39,9 @@ docs/*/CLAUDE.md
 .DS_Store
 *.swp
 
+# Playwright MCP tool session artifacts (screenshots, console logs)
+.playwright-mcp/
+
 # Env
 .env
 .env.local
