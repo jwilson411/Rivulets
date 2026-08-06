@@ -1,8 +1,7 @@
 """File upload/download (FR-10.1, FR-10.2).
 
-Content-addressed storage at `~/.rivulets/files/{hash[0:2]}/{full_hash}`
-per docs/infrastructure/compute-and-storage.md — identical uploads share
-one copy on disk.
+Content-addressed storage at `~/.rivulets/files/{hash[0:2]}/{full_hash}` —
+identical uploads share one copy on disk.
 
 Also synced (FR-9.1/FR-9.7) — publish_file_change is exported for
 api/rivulets.py to reuse too: a file's message_id only gets set once it's

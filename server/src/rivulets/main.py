@@ -1,11 +1,10 @@
 """Entry point.
 
-The full design (docs/infrastructure/deployment-and-networking.md) runs a
-process supervisor over three children: App Server, AgentOS, and the Sync
-Engine, with crash-loop detection and graceful shutdown. AgentOS and the
-Sync Engine aren't wired up yet (see their respective TODOs), so this
-currently just runs the App Server directly. Swap this for the real
-supervisor once those two children exist to manage.
+The full design runs a process supervisor over three children: App Server,
+AgentOS, and the Sync Engine, with crash-loop detection and graceful
+shutdown. AgentOS and the Sync Engine aren't wired up yet (see their
+respective TODOs), so this currently just runs the App Server directly.
+Swap this for the real supervisor once those two children exist to manage.
 """
 
 import uvicorn

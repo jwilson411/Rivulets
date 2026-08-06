@@ -1,7 +1,7 @@
 """Declarative base and ID generation shared by all ORM models.
 
 UUIDv7 primary keys are time-sortable and globally unique across nodes,
-which matters once P2P sync is in play (see docs/architecture/data-model.md).
+which matters once P2P sync is in play.
 """
 
 import os

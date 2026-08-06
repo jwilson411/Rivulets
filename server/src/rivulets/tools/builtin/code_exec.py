@@ -155,9 +155,9 @@ def execute_python(code: str) -> str:
     return its combined stdout/stderr."""
     if not is_available():
         raise SandboxUnavailableError(
-            f"No sandbox backend available on this platform ({sys.platform}) — see "
-            "ADR-008 (docs/architecture/adrs.md). Install firejail (Linux) or use "
-            "macOS (sandbox-exec ships with the OS) to enable code execution."
+            f"No sandbox backend available on this platform ({sys.platform}). "
+            "Install firejail (Linux) or use macOS (sandbox-exec ships with the "
+            "OS) to enable code execution."
         )
 
     sandbox_dir = _sandbox_root()

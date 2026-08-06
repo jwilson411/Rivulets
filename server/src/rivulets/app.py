@@ -1,9 +1,9 @@
-"""FastAPI app factory (docs/architecture/overview-and-stack.md).
+"""FastAPI app factory (see docs/architecture.md).
 
-Security posture per NFR-3.4 / security-and-risks.md: same-origin only
-(the UI and API share this process), no CORS, and a CSP that only trusts
-this origin. The App Server binds to 127.0.0.1 — enforced in main.py, not
-here, since that's a listen-address concern rather than an app concern.
+Security posture (see docs/security.md): same-origin only (the UI and API
+share this process), no CORS, and a CSP that only trusts this origin. The
+App Server binds to 127.0.0.1 — enforced in main.py, not here, since
+that's a listen-address concern rather than an app concern.
 """
 
 import base64

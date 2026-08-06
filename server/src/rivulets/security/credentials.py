@@ -1,14 +1,14 @@
-"""LLM provider key storage (NFR-3.3): OS keychain via `keyring`, never SQLite.
+"""LLM provider key storage: OS keychain via `keyring`, never SQLite.
 
 `provider_config.api_key_ref` stores only the reference name below — the
-raw key never touches the database or a sync payload (FR-1.5).
+raw key never touches the database or a sync payload.
 
 If no OS keychain backend is available (headless CI, some Linux setups
 without a Secret Service provider), operations raise `CredentialStoreError`
-rather than silently falling back to an on-disk store. docs/infrastructure/
-security-and-dr.md documents an encrypted-SQLite fallback for that case;
-it's intentionally not implemented here yet — swallowing this error into a
-weaker storage mode is a decision to make deliberately, not by accident.
+rather than silently falling back to an on-disk store. An encrypted-SQLite
+fallback for that case is intentionally not implemented here yet —
+swallowing this error into a weaker storage mode is a decision to make
+deliberately, not by accident.
 """
 
 import keyring

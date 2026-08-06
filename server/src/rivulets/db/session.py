@@ -1,8 +1,7 @@
 """Async SQLAlchemy engine/session setup.
 
-PRAGMAs match docs/infrastructure/compute-and-storage.md — WAL mode,
-NORMAL sync (safe under WAL), a busy timeout to smooth over concurrent
-writers, and a 64MB page cache.
+PRAGMAs: WAL mode, NORMAL sync (safe under WAL), a busy timeout to smooth
+over concurrent writers, and a 64MB page cache.
 """
 
 from collections.abc import AsyncGenerator
@@ -85,9 +84,8 @@ def override_engine(engine: AsyncEngine | None) -> None:
 
 
 async def init_db(engine: AsyncEngine | None = None) -> None:
-    """Create tables if they don't exist. Real deployments use Alembic migrations
-    (see docs/architecture/data-model.md#migration-strategy); this is the
-    fast path for fresh installs and tests."""
+    """Create tables if they don't exist. Real deployments use Alembic migrations;
+    this is the fast path for fresh installs and tests."""
     engine = engine or get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

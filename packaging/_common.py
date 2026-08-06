@@ -3,9 +3,8 @@
 Not a PyInstaller API wrapper — the `Analysis`/`PYZ`/`EXE` calls stay in
 each .spec file since those names only exist in the namespace PyInstaller
 injects when it execs a spec file directly. This module just centralizes
-the bits that are identical across platforms (docs/infrastructure/
-deployment-and-networking.md#binary-packaging-strategy) so linux.spec,
-macos.spec, and windows.spec don't drift from each other.
+the bits that are identical across platforms so linux.spec, macos.spec,
+and windows.spec don't drift from each other.
 """
 
 from pathlib import Path

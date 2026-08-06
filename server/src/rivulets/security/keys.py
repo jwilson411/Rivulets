@@ -1,4 +1,4 @@
-"""Key derivation hierarchy (docs/architecture/security-and-risks.md).
+"""Key derivation hierarchy (see docs/security.md).
 
     BIP-39 Mnemonic (12 words)
       -> PBKDF2 (2048 rounds, built into Mnemonic.to_seed) -> BIP-39 Seed (512 bits)
