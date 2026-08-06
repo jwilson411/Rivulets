@@ -75,9 +75,14 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 def override_engine(engine: AsyncEngine | None) -> None:
-    """Swap the process-wide engine/session-factory singletons. Test-only —
-    lets the test suite point every request at an isolated in-memory DB
-    without a full dependency-injection rewrite of `get_db`."""
+    """Swap the process-wide engine/session-factory singletons.
+
+    Two callers: the test suite, which points every request at an isolated
+    in-memory DB without a full dependency-injection rewrite of `get_db`;
+    and rivulets.backup.restore_from_backup, which passes None after
+    swapping in a restored db file so the next `get_engine()` call opens a
+    fresh connection against it instead of reusing a handle to the
+    pre-restore file."""
     global _engine, _session_factory
     _engine = engine
     _session_factory = None

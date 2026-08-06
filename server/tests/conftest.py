@@ -84,6 +84,11 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     monkeypatch.setattr(SyncEngine, "start", _noop_async)
     monkeypatch.setattr(SyncEngine, "stop", _noop_async)
     reset_sync_engine_for_testing()
+    # Every test using this fixture spins up a fresh app, and lifespan()
+    # would otherwise VACUUM INTO + integrity-check a backup snapshot on
+    # each one — real behavior worth its own tests (test_backup.py), but
+    # pure overhead here against an ephemeral in-memory DB nobody restores.
+    monkeypatch.setattr("rivulets.app.run_startup_backup_checks", _noop_async)
 
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()
