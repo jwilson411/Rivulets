@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from rivulets.api import (
     agents,
     auth,
+    backups,
     channels,
     files,
     health,
@@ -38,5 +39,6 @@ api_router.include_router(files.router)
 api_router.include_router(settings_routes.router)
 api_router.include_router(sync.router)
 api_router.include_router(providers.router)
+api_router.include_router(backups.router)
 
 __all__ = ["api_router"]

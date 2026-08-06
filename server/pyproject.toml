@@ -101,4 +101,16 @@ testpaths = ["tests"]
 # CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
 # local runs during early scaffolding aren't blocked before the suite has grown.
 # NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
-# matches real coverage today (~77%) and should ratchet up as tests are added.
+# matches real coverage today and should ratchet up as tests are added.
+
+[tool.coverage.run]
+# The `client` fixture (tests/conftest.py) wraps FastAPI's TestClient, which
+# runs the whole ASGI app -- every route handler -- inside a separate OS
+# thread via anyio's blocking portal (starlette.testclient.TestClient.
+# __enter__). Without `core = "sysmon"`, coverage.py 7.x on Python 3.12
+# defaults to its legacy C tracer, which does not reliably attribute line
+# hits for coroutines resumed from that portal thread: entire branches of
+# well-tested route handlers (api/mcp_servers.py, api/channels.py, etc.)
+# showed up as "uncovered" despite dedicated passing tests exercising them.
+# Python 3.12's sys.monitoring-based tracer doesn't have this gap.
+core = "sysmon"

@@ -62,9 +62,7 @@ jobs:
       - working-directory: server
         run: |
           uv sync --dev
-          # TODO: raise toward the 85% NFR target (see pyproject.toml comment)
-          # as test coverage grows.
-          uv run pytest --cov-fail-under=77
+          uv run pytest --cov-fail-under=90
 
   lint-ui:
     name: Lint (ui)
