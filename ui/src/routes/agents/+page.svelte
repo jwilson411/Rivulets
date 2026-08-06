@@ -1,16 +1,20 @@
 <script lang="ts">
 	import { agents, type Agent, type RoutingRule, type RuleType } from '$lib/api/agents';
+	import { providers as providersApi, type Provider } from '$lib/api/providers';
+	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
 
 	let agentList = $state<Agent[]>([]);
+	let providerList = $state<Provider[]>([]);
 	let rulesByAgent = $state<Record<string, RoutingRule[]>>({});
 	let loadError = $state<string | null>(null);
 
-	let name = $state('');
-	let description = $state('');
-	let instructions = $state('');
-	let model = $state('');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
+	let createFormKey = $state(0);
+
+	let editingAgentId = $state<string | null>(null);
+	let updating = $state(false);
+	let updateError = $state<string | null>(null);
 
 	let keywordDrafts = $state<Record<string, string>>({});
 	let actionError = $state<string | null>(null);
@@ -18,7 +22,7 @@
 	async function refresh() {
 		loadError = null;
 		try {
-			agentList = await agents.list();
+			[agentList, providerList] = await Promise.all([agents.list(), providersApi.list()]);
 			const entries = await Promise.all(
 				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
 			);
@@ -30,27 +34,41 @@
 
 	refresh();
 
-	async function handleCreate(event: SubmitEvent) {
-		event.preventDefault();
+	async function handleCreate(values: AgentFormValues) {
 		createError = null;
-		if (!name.trim() || !description.trim() || !instructions.trim() || !model.trim()) return;
 		creating = true;
 		try {
-			await agents.create({
-				name: name.trim(),
-				description: description.trim(),
-				instructions: instructions.trim(),
-				model: model.trim()
-			});
-			name = '';
-			description = '';
-			instructions = '';
-			model = '';
+			await agents.create(values);
+			createFormKey += 1; // remounts AgentForm so its fields reset
 			await refresh();
 		} catch (err) {
 			createError = err instanceof Error ? err.message : 'Failed to create agent';
 		} finally {
 			creating = false;
+		}
+	}
+
+	function startEdit(agentId: string) {
+		updateError = null;
+		editingAgentId = agentId;
+	}
+
+	function cancelEdit() {
+		editingAgentId = null;
+		updateError = null;
+	}
+
+	async function handleUpdate(agentId: string, values: AgentFormValues) {
+		updateError = null;
+		updating = true;
+		try {
+			await agents.update(agentId, values);
+			editingAgentId = null;
+			await refresh();
+		} catch (err) {
+			updateError = err instanceof Error ? err.message : 'Failed to update agent';
+		} finally {
+			updating = false;
 		}
 	}
 
@@ -101,50 +119,21 @@
 		</p>
 	</header>
 
-	<form
-		onsubmit={handleCreate}
+	<div
 		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 	>
 		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New agent</h2>
-		<input
-			type="text"
-			bind:value={name}
-			placeholder="Name"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<input
-			type="text"
-			bind:value={description}
-			placeholder="Description (used by the dispatcher for routing)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<textarea
-			bind:value={instructions}
-			placeholder="Instructions (system prompt)"
-			rows="3"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		></textarea>
-		<input
-			type="text"
-			bind:value={model}
-			placeholder="provider:model_name (e.g. anthropic:claude-3-5-haiku-latest)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<p class="text-xs text-neutral-500">
-			Provider must already be configured under Settings &gt; Providers via the API — supported:
-			anthropic, openai, deepseek, openai_compatible.
-		</p>
-		<button
-			type="submit"
-			disabled={creating}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creating ? 'Creating…' : 'Create agent'}
-		</button>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-		{/if}
-	</form>
+		{#key createFormKey}
+			<AgentForm
+				providers={providerList}
+				submitLabel="Create agent"
+				busyLabel="Creating…"
+				busy={creating}
+				error={createError}
+				onsubmit={handleCreate}
+			/>
+		{/key}
+	</div>
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
@@ -155,28 +144,52 @@
 		<ul class="flex flex-col gap-3">
 			{#each agentList as agent (agent.id)}
 				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					<div class="flex items-start justify-between">
-						<div>
-							<p class="font-medium text-ink dark:text-ink-dark">{agent.name}</p>
-							<p class="text-sm text-neutral-600 dark:text-neutral-400">{agent.description}</p>
-							<p class="mt-1 font-mono text-xs text-neutral-500">{agent.model}</p>
+					{#if editingAgentId === agent.id}
+						<AgentForm
+							providers={providerList}
+							initial={{
+								name: agent.name,
+								description: agent.description,
+								instructions: agent.instructions,
+								model: agent.model
+							}}
+							submitLabel="Save changes"
+							busyLabel="Saving…"
+							busy={updating}
+							error={updateError}
+							onsubmit={(values) => handleUpdate(agent.id, values)}
+							oncancel={cancelEdit}
+						/>
+					{:else}
+						<div class="flex items-start justify-between">
+							<div>
+								<p class="font-medium text-ink dark:text-ink-dark">{agent.name}</p>
+								<p class="text-sm text-neutral-600 dark:text-neutral-400">{agent.description}</p>
+								<p class="mt-1 font-mono text-xs text-neutral-500">{agent.model}</p>
+							</div>
+							<div class="flex items-center gap-2">
+								<span
+									class="rounded-sm px-2 py-0.5 text-xs {agent.agentos_agent_id
+										? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+										: 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400'}"
+								>
+									{agent.agentos_agent_id ? 'registered' : 'provider unresolved'}
+								</span>
+								<button
+									onclick={() => startEdit(agent.id)}
+									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+								>
+									Edit
+								</button>
+								<button
+									onclick={() => handleDelete(agent.id)}
+									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
+								>
+									Delete
+								</button>
+							</div>
 						</div>
-						<div class="flex items-center gap-2">
-							<span
-								class="rounded-sm px-2 py-0.5 text-xs {agent.agentos_agent_id
-									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-									: 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400'}"
-							>
-								{agent.agentos_agent_id ? 'registered' : 'provider unresolved'}
-							</span>
-							<button
-								onclick={() => handleDelete(agent.id)}
-								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-							>
-								Delete
-							</button>
-						</div>
-					</div>
+					{/if}
 
 					<div class="mt-3 border-t border-ink/10 pt-3 dark:border-white/10">
 						<p class="text-xs text-neutral-600 dark:text-neutral-400">
