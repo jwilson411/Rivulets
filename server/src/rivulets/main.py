@@ -16,11 +16,25 @@ from rivulets.config import get_settings
 
 def main() -> None:
     settings = get_settings()
-    if settings.app_server_host not in ("127.0.0.1", "localhost"):
-        # NFR-3.4: refuse to bind anywhere but localhost by default.
+    if settings.app_server_host not in ("127.0.0.1", "localhost", "0.0.0.0"):  # noqa: S104
+        # NFR-3.4: refuse to bind anywhere but localhost by default — the
+        # default (config.py) stays 127.0.0.1, so this only fires if
+        # something explicitly set RIVULETS_APP_SERVER_HOST to a value it
+        # doesn't recognize.
+        #
+        # 0.0.0.0 is the one deliberate exception, for the Docker image's
+        # entrypoint: inside a container, the app's own bind address and the
+        # machine's actual exposure are two different layers. 127.0.0.1
+        # would only be reachable from inside the container's own network
+        # namespace — `docker run -p` forwards to the container's eth0, not
+        # its loopback — so 0.0.0.0 here is what lets the *host's* -p flag
+        # be the one enforcing NFR-3.4's intent (see docker-compose.yml and
+        # README.md#docker, both of which publish 127.0.0.1:8484:8484 by
+        # default: loopback-only on the host, same guarantee as a native
+        # install, unless a user explicitly opts into wider exposure there).
         raise SystemExit(
             f"Refusing to start: app_server_host={settings.app_server_host!r} "
-            "must be 127.0.0.1 (see NFR-3.4)."
+            "must be 127.0.0.1, localhost, or 0.0.0.0 (see NFR-3.4)."
         )
     settings.ensure_workspace_dirs()
     # Pass the app object directly rather than the "module:attr" import
