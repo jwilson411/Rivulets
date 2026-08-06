@@ -174,6 +174,8 @@
 - **Trade-off:** firejail is Linux-only. macOS and Windows need separate sandbox implementations (sandbox-exec and job objects, respectively). Cross-platform sandboxing is non-trivial.
 - **Risk:** firejail escape vulnerabilities. Mitigation: pin firejail version, monitor CVEs, run with least privilege. The blast radius is limited to the workspace directory even on escape.
 
+**Implementation update (2026-08-06):** Linux (firejail) and macOS (`sandbox-exec`) are wired up as decided above — see `tools/builtin/code_exec.py`. Windows is deliberately *not* implemented as "job objects": a job object alone only bounds process/resource usage, not filesystem or network access, so it can't actually satisfy NFR-3.5's deny-by-default network requirement or the filesystem-confinement guarantee on its own — that needs a restricted token plus Windows Filtering Platform firewall rules, which is unwritten, unscoped work. Until that lands, `execute_python` reports itself unavailable on Windows (surfaced via `GET /tools`' `available` field) rather than shipping a sandbox that doesn't enforce what it claims to.
+
 ---
 
 ## ADR-009: Hierarchical Summarization for Context Management
