@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     app_server_host: str = "127.0.0.1"
     app_server_port: int = 8484
 
+    # NFR-3.5 / ADR-008: the Code Execution tool denies outbound network
+    # access from sandboxed code by default. No per-workspace UI toggle
+    # exists yet (see tools/builtin/code_exec.py) — this is the only knob.
+    code_exec_network_access: bool = False
+
     @property
     def db_path(self) -> Path:
         return self.workspace_dir / "rivulets.db"

@@ -11,7 +11,40 @@ from collections.abc import AsyncIterator
 _TEST_WORKSPACE_DIR = tempfile.mkdtemp(prefix="rivulets-test-")
 os.environ["RIVULETS_WORKSPACE_DIR"] = _TEST_WORKSPACE_DIR
 
+import keyring  # noqa: E402
+import keyring.errors  # noqa: E402
 import pytest  # noqa: E402
+from keyring.backend import KeyringBackend  # noqa: E402
+
+
+class _InMemoryKeyring(KeyringBackend):
+    """No real OS keychain (macOS Keychain, SecretService, ...) is
+    available on GitHub-hosted Linux runners, so `keyring.set_password`
+    raises `NoKeyringError` there — see rivulets.security.credentials.
+    Installing this backend for the whole test session keeps credential
+    storage working identically in CI and on a developer's machine,
+    without ever touching whatever real keychain the machine has."""
+
+    priority = 1  # type: ignore[assignment]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self._store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self._store[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        key = (service, username)
+        if key not in self._store:
+            raise keyring.errors.PasswordDeleteError("No such password.")
+        del self._store[key]
+
+
+keyring.set_keyring(_InMemoryKeyring())
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 

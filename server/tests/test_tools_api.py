@@ -10,7 +10,10 @@ triggers that via create_app(), so a builtin row is always present.
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+
+import rivulets.api.tools as tools_api
 
 
 def _create_custom_tool(client: TestClient, auth_headers: dict[str, str]) -> dict[str, Any]:
@@ -144,6 +147,50 @@ def test_save_tool_version_rejects_invalid_python(
     assert Path(tool["source_path"]).read_text() == original_source
     versions = client.get(f"/api/v1/tools/{tool['id']}/versions", headers=auth_headers).json()
     assert len(versions) == 1
+
+
+def test_custom_and_default_builtin_tools_report_available(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    custom = _create_custom_tool(client, auth_headers)
+    assert custom["available"] is True
+
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    read_file = next(t for t in tools if t["name"] == "read_file")
+    assert read_file["available"] is True
+
+
+def test_execute_python_availability_reflects_sandbox_backend(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """execute_python is the one builtin tool with a real availability
+    check (NFR-2.4's "unavailable" pattern) -- it's only functional if
+    this machine has ADR-008's sandbox backend installed. Patching the
+    router's own availability registry (rather than
+    code_exec.is_available itself) matches how it's actually wired: the
+    registry captures a function reference at import time, so patching
+    the underlying function after that wouldn't be observed here."""
+    monkeypatch.setitem(
+        tools_api._BUILTIN_AVAILABILITY,  # pyright: ignore[reportPrivateUsage]
+        "execute_python",
+        lambda: False,
+    )
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    assert next(t for t in tools if t["name"] == "execute_python")["available"] is False
+
+    monkeypatch.setitem(
+        tools_api._BUILTIN_AVAILABILITY,  # pyright: ignore[reportPrivateUsage]
+        "execute_python",
+        lambda: True,
+    )
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    assert next(t for t in tools if t["name"] == "execute_python")["available"] is True
+
+    single = client.get(
+        f"/api/v1/tools/{next(t for t in tools if t['name'] == 'execute_python')['id']}",
+        headers=auth_headers,
+    )
+    assert single.json()["available"] is True
 
 
 def test_save_tool_version_rejected_for_builtin_tool(
