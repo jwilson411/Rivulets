@@ -134,7 +134,7 @@ jobs:
           uv sync --group packaging
           uv run --group packaging pyinstaller ../packaging/linux.spec \
             --distpath ../dist --workpath ../build/pyinstaller --noconfirm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rivulets-linux-amd64
           path: dist/rivulets-linux-amd64
