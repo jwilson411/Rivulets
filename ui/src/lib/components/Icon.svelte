@@ -117,4 +117,15 @@
 		<rect x="2.5" y="4" width="15" height="10" rx="1.2" stroke="currentColor" stroke-width="1.5" />
 		<path d="M7 17h6M10 14v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 	</svg>
+{:else if name === 'settings'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M3 5.5h8M14.5 5.5H17M3 14.5h4.5M11 14.5H17"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+		<circle cx="11" cy="5.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
+		<circle cx="9" cy="14.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
+	</svg>
 {/if}
