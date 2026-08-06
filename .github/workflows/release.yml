@@ -50,7 +50,7 @@ jobs:
             binary: rivulets-windows-amd64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v3
         with:
