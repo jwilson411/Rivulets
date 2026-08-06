@@ -21,6 +21,7 @@ below writes straight to disk without recording a new version, so the DB's
 the source of truth for what this node currently has.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
@@ -31,8 +32,26 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.config import get_settings
 from rivulets.db.models import Tool, ToolVersion
 from rivulets.sync.publish import publish_current_state
+from rivulets.tools.builtin import code_exec
 
 router = APIRouter(prefix="/tools", tags=["tools"])
+
+# Per-builtin-tool availability checks (NFR-2.4's "unavailable" pattern,
+# same one used for unreachable model providers): a builtin tool can be
+# implemented but still non-functional on *this* machine — e.g.
+# execute_python needs a sandbox backend that isn't installed. Checked at
+# read time, not cached, since e.g. installing firejail shouldn't require
+# an app restart to be reflected here.
+_BUILTIN_AVAILABILITY: dict[str, Callable[[], bool]] = {
+    "execute_python": code_exec.is_available,
+}
+
+
+def _is_available(tool: Tool) -> bool:
+    if tool.tool_type != "builtin":
+        return True
+    check = _BUILTIN_AVAILABILITY.get(tool.name)
+    return check() if check is not None else True
 
 
 async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
@@ -57,8 +76,13 @@ class ToolOut(BaseModel):
     description: str
     tool_type: str
     source_path: str | None
+    available: bool = True
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_tool(cls, tool: Tool) -> "ToolOut":
+        return cls.model_validate(tool).model_copy(update={"available": _is_available(tool)})
 
 
 class ToolVersionOut(BaseModel):
@@ -81,9 +105,9 @@ async def _get_or_404(db: DbSession, tool_id: str) -> Tool:
 
 
 @router.get("", response_model=list[ToolOut])
-async def list_tools(db: DbSession, _: CurrentWorkspaceId) -> list[Tool]:
+async def list_tools(db: DbSession, _: CurrentWorkspaceId) -> list[ToolOut]:
     result = await db.execute(select(Tool))
-    return list(result.scalars().all())
+    return [ToolOut.from_tool(t) for t in result.scalars().all()]
 
 
 @router.post("", response_model=ToolOut, status_code=status.HTTP_201_CREATED)
@@ -112,8 +136,8 @@ async def create_tool(body: ToolCreate, db: DbSession, _: CurrentWorkspaceId) ->
 
 
 @router.get("/{tool_id}", response_model=ToolOut)
-async def get_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> Tool:
-    return await _get_or_404(db, tool_id)
+async def get_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> ToolOut:
+    return ToolOut.from_tool(await _get_or_404(db, tool_id))
 
 
 @router.patch("/{tool_id}", response_model=ToolOut)
