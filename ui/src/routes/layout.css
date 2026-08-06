@@ -1,6 +1,22 @@
 @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap');
 @import 'tailwindcss';
 
+/* Manual theme override (issue #13): `dark:` utilities default to
+   `@media (prefers-color-scheme: dark)`. This keeps that as the fallback
+   for "system" (no `data-theme` on <html>) and adds a `data-theme`
+   attribute path that wins once a user picks explicitly — see
+   ui/src/lib/theme.svelte.ts. */
+@custom-variant dark {
+	&:where([data-theme='dark'], [data-theme='dark'] *) {
+		@slot;
+	}
+	@media (prefers-color-scheme: dark) {
+		&:where(:root:not([data-theme]), :root:not([data-theme]) *) {
+			@slot;
+		}
+	}
+}
+
 /* Design language: "process inks on paper". Agents are assigned a print ink
    (cyan, magenta, yellow) in join order; the human is the fixed black "ink"
    plate. See ui/src/lib/ink.ts for the agent -> ink assignment. */
@@ -77,6 +93,18 @@ body {
 		background: var(--color-paper-dark);
 		color: var(--color-ink-dark);
 	}
+}
+
+/* Explicit override, higher specificity than the plain `body` rules above
+   (and than the `@media` wrapping) so it wins regardless of OS preference. */
+:root[data-theme='light'] body {
+	background: var(--color-paper);
+	color: var(--color-ink);
+}
+
+:root[data-theme='dark'] body {
+	background: var(--color-paper-dark);
+	color: var(--color-ink-dark);
 }
 
 :focus-visible {

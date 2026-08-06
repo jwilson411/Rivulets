@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import Sidebar from './Sidebar.svelte';
 import { channels } from '$lib/api/channels';
+import { theme } from '$lib/theme.svelte';
 
 vi.mock('$app/state', () => ({
 	page: { url: new URL('http://localhost/agents') }
@@ -29,6 +30,7 @@ vi.mock('$lib/api/channels', () => ({
 
 afterEach(() => {
 	vi.clearAllMocks();
+	theme.set('system');
 });
 
 describe('Sidebar.svelte', () => {
@@ -89,5 +91,19 @@ describe('Sidebar.svelte', () => {
 
 		expect(channels.create).toHaveBeenCalledWith('new-chan');
 		await expect.element(input).toHaveValue('');
+	});
+
+	it('switches the theme and marks the chosen option pressed', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		const darkButton = browserPage.getByTitle('Dark');
+		await darkButton.click();
+
+		expect(theme.preference).toBe('dark');
+		expect(document.documentElement.dataset.theme).toBe('dark');
+		await expect.element(darkButton).toHaveAttribute('aria-pressed', 'true');
+		await expect.element(browserPage.getByTitle('System')).toHaveAttribute('aria-pressed', 'false');
 	});
 });
