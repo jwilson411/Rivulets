@@ -60,6 +60,14 @@ ignore = ["S101"]
 [tool.pyright]
 include = ["src", "tests"]
 pythonVersion = "3.11"
+# Left unset, pyright defaults to the OS it's running on (Linux in CI,
+# whatever a contributor's machine is locally) and statically narrows
+# every `if sys.platform == "..."` branch that doesn't match — code for
+# other platforms gets flagged reportUnreachable/reportUnusedFunction,
+# and which branch that is flips depending on who's running the check.
+# Rivulets ships on Linux/macOS/Windows (ADR-008 etc.), so all platforms'
+# code paths need to type-check regardless of the checking machine.
+pythonPlatform = "All"
 typeCheckingMode = "strict"
 
 # Strict mode is enforced for application code. A few directories get
