@@ -8,7 +8,14 @@
 	import { providers } from '$lib/api/providers';
 	import { mcpServers } from '$lib/api/mcpServers';
 	import { sync } from '$lib/api/sync';
+	import { theme, type ThemePreference } from '$lib/theme.svelte';
 	import Icon from './Icon.svelte';
+
+	const themeOptions: { value: ThemePreference; label: string; icon: string }[] = [
+		{ value: 'light', label: 'Light', icon: 'sun' },
+		{ value: 'dark', label: 'Dark', icon: 'moon' },
+		{ value: 'system', label: 'System', icon: 'monitor' }
+	];
 
 	let channelList = $state<Channel[]>([]);
 	let newChannelName = $state('');
@@ -236,6 +243,30 @@
 		{:else}
 			{syncPeerCount} peer{syncPeerCount === 1 ? '' : 's'} · {syncRunning ? 'in register' : 'idle'}
 		{/if}
+	</div>
+
+	<div class="px-4 pt-2">
+		<div
+			role="group"
+			aria-label="Theme"
+			class="flex rounded-md border border-ink/15 p-0.5 dark:border-white/15"
+		>
+			{#each themeOptions as option (option.value)}
+				<button
+					type="button"
+					title={option.label}
+					aria-pressed={theme.preference === option.value}
+					onclick={() => theme.set(option.value)}
+					class="flex flex-1 items-center justify-center rounded-[3px] py-1 {theme.preference ===
+					option.value
+						? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+						: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
+				>
+					<Icon name={option.icon} class="h-[15px] w-[15px]" />
+					<span class="sr-only">{option.label}</span>
+				</button>
+			{/each}
+		</div>
 	</div>
 
 	<div class="px-4 pt-2">

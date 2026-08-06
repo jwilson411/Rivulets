@@ -93,4 +93,28 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
+{:else if name === 'sun'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="3.2" stroke="currentColor" stroke-width="1.5" />
+		<path
+			d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4M15.3 15.3l-1.4-1.4M6.1 6.1 4.7 4.7"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+	</svg>
+{:else if name === 'moon'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M16.5 12.3A6.7 6.7 0 0 1 7.7 3.5a6.7 6.7 0 1 0 8.8 8.8Z"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linejoin="round"
+		/>
+	</svg>
+{:else if name === 'monitor'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<rect x="2.5" y="4" width="15" height="10" rx="1.2" stroke="currentColor" stroke-width="1.5" />
+		<path d="M7 17h6M10 14v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+	</svg>
 {/if}
