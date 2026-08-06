@@ -1,4 +1,4 @@
-"""App Server REST API (docs/architecture/api-design.md), mounted at /api/v1.
+"""App Server REST API, mounted at /api/v1.
 
 The UI never talks to AgentOS directly — every request here either serves
 App Server state (channels, teams, agents, rivulets, tools, settings...) or

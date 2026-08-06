@@ -1,4 +1,4 @@
-"""ORM models mirroring docs/architecture/data-model.md.
+"""ORM models for all workspace entities.
 
 Every synced entity carries a `vector_clock` column used by the P2P sync
 engine for last-write-wins conflict resolution (FR-9.6). Tables noted as

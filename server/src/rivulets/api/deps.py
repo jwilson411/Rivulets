@@ -31,7 +31,7 @@ async def get_current_workspace_id(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> str:
     """Validate the JWT issued at /auth/login and return the workspace ID
-    from its `sub` claim. See docs/architecture/api-design.md#authentication-flow."""
+    from its `sub` claim."""
     if credentials is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
     return _decode_token(credentials.credentials)

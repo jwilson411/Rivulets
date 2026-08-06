@@ -1,6 +1,5 @@
 #!/usr/bin/env sh
 # Rivulets install script (curl | sh pattern).
-# docs/infrastructure/deployment-and-networking.md#distribution-channels
 #
 #   curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/main/scripts/install.sh | sh
 #

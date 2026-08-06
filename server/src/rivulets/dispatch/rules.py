@@ -1,8 +1,5 @@
 """Deterministic routing rule types and matching.
 
-Structure and semantics per docs/requirements/out-of-scope.md OQ-3 and
-docs/requirements/functional-requirements.md FR-4.2:
-
 - keyword: trigger if the message contains any of `pattern` (case-insensitive)
 - regex: trigger if the message matches `pattern`
 - semantic: trigger if the message contains any of `pattern` trigger phrases

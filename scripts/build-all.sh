@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Local build helper — builds the UI, then produces a PyInstaller binary
 # for the current host platform via packaging/{linux,macos,windows}.spec.
-# docs/infrastructure/deployment-and-networking.md#binary-packaging-strategy
 #
 # CI (.github/workflows/release.yml) runs the equivalent steps per
 # platform in the build matrix; this script is for local testing of a
