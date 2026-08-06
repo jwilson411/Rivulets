@@ -7,6 +7,7 @@
 	import { teams } from '$lib/api/teams';
 	import { providers } from '$lib/api/providers';
 	import { mcpServers } from '$lib/api/mcpServers';
+	import { tools } from '$lib/api/tools';
 	import { sync } from '$lib/api/sync';
 	import { theme, type ThemePreference } from '$lib/theme.svelte';
 	import Icon from './Icon.svelte';
@@ -26,6 +27,7 @@
 	let teamCount = $state<number | null>(null);
 	let providerCount = $state<number | null>(null);
 	let mcpServerCount = $state<number | null>(null);
+	let toolCount = $state<number | null>(null);
 	let syncPeerCount = $state<number | null>(null);
 	let syncRunning = $state(false);
 
@@ -40,17 +42,20 @@
 
 	async function refreshCounts() {
 		try {
-			const [agentList, teamList, providerList, mcpServerList, syncStatus] = await Promise.all([
-				agents.list(),
-				teams.list(),
-				providers.list(),
-				mcpServers.list(),
-				sync.status()
-			]);
+			const [agentList, teamList, providerList, mcpServerList, toolList, syncStatus] =
+				await Promise.all([
+					agents.list(),
+					teams.list(),
+					providers.list(),
+					mcpServers.list(),
+					tools.list(),
+					sync.status()
+				]);
 			agentCount = agentList.length;
 			teamCount = teamList.length;
 			providerCount = providerList.length;
 			mcpServerCount = mcpServerList.length;
+			toolCount = toolList.length;
 			syncRunning = syncStatus.running;
 			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
 		} catch {
@@ -158,6 +163,20 @@
 			MCP Servers
 			{#if mcpServerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
 					>{mcpServerCount}</span
+				>{/if}
+		</a>
+		<a
+			href={resolve('/tools')}
+			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+				isActive('/tools')
+			)}"
+		>
+			<Icon
+				name="wrench"
+				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+			/>
+			Tools
+			{#if toolCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500">{toolCount}</span
 				>{/if}
 		</a>
 		<a

@@ -128,4 +128,13 @@
 		<circle cx="11" cy="5.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
 		<circle cx="9" cy="14.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
 	</svg>
+{:else if name === 'wrench'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M12.7 3.3a4 4 0 0 0-5.2 4.9L3 12.7v2.6h2.6L10.1 11a4 4 0 0 0 4.9-5.2l-2.5 2.5-2-2 2.5-2.5Z"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linejoin="round"
+		/>
+	</svg>
 {/if}
