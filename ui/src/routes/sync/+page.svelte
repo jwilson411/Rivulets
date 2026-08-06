@@ -84,8 +84,8 @@
 
 <div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
 	<header>
-		<h1 class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">Sync</h1>
-		<p class="text-sm text-zinc-500">
+		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Sync</h1>
+		<p class="text-sm text-neutral-600 dark:text-neutral-400">
 			P2P sync status, connected peers, and conflicts that need a decision (FR-9.6). Nodes on the
 			same workspace find each other automatically over the local network — manual connect below is
 			the fallback for nodes on different networks (FR-9.3).
@@ -93,21 +93,23 @@
 	</header>
 
 	{#if loadError}
-		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
 	{:else if status}
-		<section class="flex flex-col gap-3 rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+		<section
+			class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+		>
 			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-zinc-700 dark:text-zinc-300">Status</h2>
+				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Status</h2>
 				<span
-					class="rounded-full px-2 py-0.5 text-xs {status.running
-						? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'
-						: 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400'}"
+					class="rounded-sm px-2 py-0.5 text-xs {status.running
+						? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+						: 'bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400'}"
 				>
 					{status.running ? 'running' : 'not running'}
 				</span>
 			</div>
 			{#if status.node_id}
-				<p class="font-mono text-xs text-zinc-400">node: {status.node_id}</p>
+				<p class="font-mono text-xs text-neutral-500">node: {status.node_id}</p>
 			{/if}
 
 			<form onsubmit={handleConnect} class="flex gap-2 pt-2">
@@ -115,37 +117,37 @@
 					type="text"
 					bind:value={connectAddress}
 					placeholder="Multiaddr (e.g. /ip4/1.2.3.4/tcp/5000/p2p/12D3Koo...)"
-					class="min-w-0 flex-1 rounded-md border border-zinc-300 px-3 py-2 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+					class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 				/>
 				<button
 					type="submit"
 					disabled={connecting || !status.running}
-					class="shrink-0 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+					class="shrink-0 rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
 				>
 					{connecting ? 'Connecting…' : 'Connect'}
 				</button>
 			</form>
 			{#if connectError}
-				<p class="text-sm text-red-600 dark:text-red-400">{connectError}</p>
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
 			{/if}
 
 			{#if status.peers.length === 0}
-				<p class="text-sm text-zinc-400">No peers connected.</p>
+				<p class="text-sm text-neutral-500 italic">No peers connected.</p>
 			{:else}
 				<ul class="flex flex-col gap-2">
 					{#each status.peers as peer (peer.peer_id)}
 						<li
-							class="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-2 dark:border-zinc-800"
+							class="flex items-center justify-between rounded-md border border-ink/12 px-3 py-2 dark:border-white/10"
 						>
 							<div>
-								<p class="font-mono text-xs text-zinc-700 dark:text-zinc-300">
+								<p class="font-mono text-xs text-ink dark:text-ink-dark">
 									{shortId(peer.peer_id)}
 								</p>
-								<p class="font-mono text-xs text-zinc-400">{peer.address}</p>
+								<p class="font-mono text-xs text-neutral-500">{peer.address}</p>
 							</div>
 							<button
 								onclick={() => handleDisconnect(peer)}
-								class="text-xs text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
 							>
 								Disconnect
 							</button>
@@ -156,35 +158,37 @@
 		</section>
 
 		<section class="flex flex-col gap-3">
-			<h2 class="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">
 				Conflicts {conflicts.length > 0 ? `(${conflicts.length})` : ''}
 			</h2>
 			{#if rowError}
-				<p class="text-sm text-red-600 dark:text-red-400">{rowError}</p>
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{rowError}</p>
 			{/if}
 			{#if conflicts.length === 0}
-				<p class="text-sm text-zinc-400">
+				<p class="text-sm text-neutral-500 italic">
 					No unresolved conflicts — concurrent edits to the same entity on two disconnected nodes
 					show up here.
 				</p>
 			{:else}
 				<ul class="flex flex-col gap-3">
 					{#each conflicts as conflict (conflict.id)}
-						<li class="rounded-md border border-amber-300 p-4 dark:border-amber-800">
+						<li
+							class="rounded-lg border border-agent-magenta-300 p-4 dark:border-agent-magenta-800/60"
+						>
 							<div class="mb-3 flex items-center justify-between">
-								<p class="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+								<p class="text-sm font-medium text-ink dark:text-ink-dark">
 									{conflict.entity_type}
-									<span class="ml-1 font-mono text-xs text-zinc-400"
+									<span class="ml-1 font-mono text-xs text-neutral-500"
 										>{shortId(conflict.entity_id)}</span
 									>
 								</p>
-								<p class="text-xs text-zinc-400">from {shortId(conflict.remote_node_id)}</p>
+								<p class="text-xs text-neutral-500">from {shortId(conflict.remote_node_id)}</p>
 							</div>
 
 							<div class="overflow-x-auto">
 								<table class="w-full text-left text-xs">
 									<thead>
-										<tr class="text-zinc-400">
+										<tr class="text-neutral-500">
 											<th class="pr-3 pb-1 font-normal">Field</th>
 											<th class="pr-3 pb-1 font-normal">Local (this node)</th>
 											<th class="pb-1 font-normal">Remote ({shortId(conflict.remote_node_id)})</th>
@@ -195,17 +199,17 @@
 											{@const localVal = conflict.local_snapshot[key]}
 											{@const remoteVal = conflict.remote_snapshot[key]}
 											{@const differs = JSON.stringify(localVal) !== JSON.stringify(remoteVal)}
-											<tr class="border-t border-zinc-100 dark:border-zinc-800">
-												<td class="py-1 pr-3 text-zinc-500">{key}</td>
+											<tr class="border-t border-ink/10 dark:border-white/10">
+												<td class="py-1 pr-3 text-neutral-500">{key}</td>
 												<td
 													class="py-1 pr-3 font-mono {differs
-														? 'text-zinc-900 dark:text-zinc-50'
-														: 'text-zinc-400'}">{displayValue(localVal)}</td
+														? 'text-ink dark:text-ink-dark'
+														: 'text-neutral-500'}">{displayValue(localVal)}</td
 												>
 												<td
 													class="py-1 font-mono {differs
-														? 'text-zinc-900 dark:text-zinc-50'
-														: 'text-zinc-400'}">{displayValue(remoteVal)}</td
+														? 'text-ink dark:text-ink-dark'
+														: 'text-neutral-500'}">{displayValue(remoteVal)}</td
 												>
 											</tr>
 										{/each}
@@ -217,14 +221,14 @@
 								<button
 									onclick={() => handleResolve(conflict, 'local')}
 									disabled={resolvingId === conflict.id}
-									class="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300"
+									class="rounded-md border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
 								>
 									Keep local
 								</button>
 								<button
 									onclick={() => handleResolve(conflict, 'remote')}
 									disabled={resolvingId === conflict.id}
-									class="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+									class="rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
 								>
 									Keep remote
 								</button>

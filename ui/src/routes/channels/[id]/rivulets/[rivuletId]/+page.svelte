@@ -2,9 +2,24 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
+	import { channels, type Channel } from '$lib/api/channels';
 	import { files as filesApi } from '$lib/api/files';
 	import { auth } from '$lib/api/auth.svelte';
+	import {
+		agentInkMap,
+		initials,
+		INK_AVATAR,
+		INK_SPINE,
+		INK_NAME_TEXT,
+		HUMAN_AVATAR,
+		HUMAN_SPINE,
+		HUMAN_NAME_TEXT,
+		type AgentInk
+	} from '$lib/ink';
+	import { formatBytes, formatClock } from '$lib/format';
+	import Icon from '$lib/components/Icon.svelte';
 
+	let channel = $state<Channel | null>(null);
 	let rivulet = $state<Rivulet | null>(null);
 	let messages = $state<Message[]>([]);
 	let reply = $state('');
@@ -14,12 +29,6 @@
 	let pendingFiles = $state<globalThis.File[]>([]);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let downloadError = $state<string | null>(null);
-
-	function formatBytes(bytes: number): string {
-		if (bytes < 1024) return `${bytes} B`;
-		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-	}
 
 	function handleFileSelect(event: Event) {
 		const input = event.target as HTMLInputElement;
@@ -52,13 +61,41 @@
 		[...messages].reverse().find((m) => m.content_type === 'system_alert')?.content ?? null
 	);
 
-	async function load(rivuletId: string) {
+	// Includes the currently-streaming agent (if any) so it gets a stable ink
+	// immediately, before its message is persisted to `messages`.
+	let inkMap = $derived(
+		agentInkMap([
+			...messages,
+			...(liveMessage ? [{ sender_type: 'agent' as const, sender_id: liveMessage.agentId }] : [])
+		])
+	);
+
+	let title = $derived(
+		rivulet?.title || messages.find((m) => m.sender_type === 'human')?.content || 'Rivulet'
+	);
+
+	// inkMap already holds one entry per distinct agent sender_id, in
+	// first-appearance order — just attach each one's display name.
+	let participants = $derived.by(() => {
+		const list: { name: string; ink: AgentInk }[] = [];
+		for (const [senderId, ink] of inkMap) {
+			const name = messages.find((m) => m.sender_id === senderId)?.sender_name;
+			if (name) list.push({ name, ink });
+		}
+		return list;
+	});
+
+	let humanName = $derived(messages.find((m) => m.sender_type === 'human')?.sender_name ?? null);
+
+	async function load(rivuletId: string, channelId: string) {
 		loadError = null;
 		try {
-			const [loadedRivulet, loadedMessages] = await Promise.all([
+			const [loadedChannel, loadedRivulet, loadedMessages] = await Promise.all([
+				channels.get(channelId),
 				rivulets.get(rivuletId),
 				rivulets.listMessages(rivuletId)
 			]);
+			channel = loadedChannel;
 			rivulet = loadedRivulet;
 			messages = loadedMessages;
 		} catch (err) {
@@ -67,7 +104,7 @@
 	}
 
 	$effect(() => {
-		load(page.params.rivuletId!);
+		load(page.params.rivuletId!, page.params.id!);
 	});
 
 	$effect(() => {
@@ -163,119 +200,203 @@
 			resuming = false;
 		}
 	}
-
-	function bubbleClass(senderType: Message['sender_type']): string {
-		if (senderType === 'human') {
-			return 'self-end bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900';
-		}
-		if (senderType === 'agent') {
-			return 'self-start bg-blue-50 text-zinc-900 dark:bg-blue-950 dark:text-zinc-100';
-		}
-		return 'self-center bg-amber-50 text-xs text-amber-900 italic dark:bg-amber-950 dark:text-amber-200';
-	}
 </script>
 
 <div class="flex h-full flex-col">
-	<header class="border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
+	<header class="px-9 pt-6 pb-1">
 		<a
 			href={resolve('/channels/[id]', { id: page.params.id! })}
-			class="text-xs text-zinc-500 hover:underline"
+			class="text-xs text-neutral-500 hover:text-agent-cyan-600 dark:hover:text-agent-cyan-400"
 		>
-			&larr; Back to channel
+			&larr; {channel ? `#${channel.name}` : 'Back to channel'}
 		</a>
-		<h1 class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-			Rivulet{rivulet?.status && rivulet.status !== 'active' ? ` (${rivulet.status})` : ''}
-		</h1>
+		<div class="mt-2 mb-5 flex items-baseline gap-4">
+			<h1 class="max-w-[60ch] truncate text-xl font-semibold text-ink dark:text-ink-dark">
+				{title}
+				{#if rivulet?.status && rivulet.status !== 'active'}
+					<span class="ml-1 text-sm font-normal text-neutral-500">({rivulet.status})</span>
+				{/if}
+			</h1>
+			{#if humanName || participants.length}
+				<span class="ml-auto flex flex-none gap-1.5">
+					{#if humanName}
+						<span
+							class="flex h-[22px] w-[22px] items-center justify-center rounded-sm text-[11px] font-semibold {HUMAN_AVATAR}"
+							title={humanName}
+						>
+							{initials(humanName)}
+						</span>
+					{/if}
+					{#each participants as p (p.name)}
+						<span
+							class="flex h-[22px] w-[22px] items-center justify-center rounded-sm text-[11px] font-semibold {INK_AVATAR[
+								p.ink
+							]}"
+							title={p.name}
+						>
+							{initials(p.name)}
+						</span>
+					{/each}
+				</span>
+			{/if}
+		</div>
 	</header>
 
 	{#if rivulet?.status === 'paused'}
 		<div
-			class="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+			class="flex items-center justify-between gap-3 border-b border-agent-magenta-200 bg-agent-magenta-100/60 px-9 py-2 text-sm text-agent-magenta-800 dark:border-agent-magenta-900 dark:bg-agent-magenta-900/20 dark:text-agent-magenta-300"
 		>
 			<span>{pauseNotice ?? 'This rivulet is paused — agent replies are suppressed.'}</span>
 			<button
 				onclick={handleResume}
 				disabled={resuming}
-				class="shrink-0 rounded-md border border-amber-300 px-3 py-1 text-xs font-medium hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:hover:bg-amber-900"
+				class="shrink-0 rounded-md border border-agent-magenta-400 px-3 py-1 text-xs font-medium hover:bg-agent-magenta-100 disabled:opacity-50 dark:border-agent-magenta-700 dark:hover:bg-agent-magenta-900/30"
 			>
 				{resuming ? 'Resuming…' : 'Resume'}
 			</button>
 		</div>
 	{/if}
 
-	<div class="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
+	<div class="flex-1 overflow-y-auto px-9 py-4">
 		{#if loadError}
-			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
 		{:else}
-			{#each messages as message (message.id)}
-				{#if message.content_type === 'handoff'}
-					<!-- FR-6.3: a distinct divider, not a chat bubble — this didn't
-					come from either party "saying" something, it's an event. -->
-					<div class="my-1 flex items-center gap-3 self-stretch">
-						<div class="h-px flex-1 bg-violet-200 dark:bg-violet-800"></div>
-						<span
-							class="rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-700 dark:bg-violet-950 dark:text-violet-300"
-						>
-							{message.content}
-						</span>
-						<div class="h-px flex-1 bg-violet-200 dark:bg-violet-800"></div>
-					</div>
-				{:else}
-					<div
-						class="flex max-w-lg flex-col gap-1 rounded-lg px-4 py-2 {bubbleClass(
-							message.sender_type
-						)}"
-					>
-						<p class="text-xs font-medium opacity-70">{message.sender_name}</p>
-						<p class="text-sm whitespace-pre-wrap">{message.content}</p>
-						{#if message.attachments.length > 0}
-							<div class="mt-1 flex flex-col gap-1 border-t border-current/10 pt-1">
-								{#each message.attachments as attachment (attachment.file_id)}
-									<button
-										onclick={() => handleDownload(attachment)}
-										class="flex items-center gap-1.5 text-left text-xs underline opacity-80 hover:opacity-100"
-									>
-										📎 {attachment.filename}
-										<span class="opacity-70">({formatBytes(attachment.size_bytes)})</span>
-									</button>
-								{/each}
+			<div class="flex flex-col">
+				{#each messages as message, i (message.id)}
+					{#if message.content_type === 'handoff'}
+						<div class="relative my-1 h-9">
+							<svg
+								class="absolute inset-0 h-full w-full text-agent-magenta-500"
+								viewBox="0 0 900 36"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<path
+									d="M22 0 V36"
+									fill="none"
+									stroke="currentColor"
+									class="spine-flowing"
+									stroke-width="2"
+									stroke-dasharray="5 4"
+								/>
+							</svg>
+							<p class="relative pl-11 text-[12.5px] text-neutral-600 italic dark:text-neutral-400">
+								<span
+									class="bg-paper pr-2 font-medium text-agent-magenta-700 not-italic dark:bg-paper-dark dark:text-agent-magenta-400"
+								>
+									handoff
+								</span>
+								{message.content}
+							</p>
+						</div>
+					{:else}
+						{@const ink =
+							message.sender_type === 'agent' && message.sender_id
+								? inkMap.get(message.sender_id)
+								: null}
+						<div class="grid grid-cols-[44px_1fr]">
+							<div class="flex flex-col items-center">
+								<span
+									class="flex h-[26px] w-[26px] flex-none items-center justify-center rounded-sm text-xs font-semibold {ink
+										? INK_AVATAR[ink]
+										: HUMAN_AVATAR}"
+								>
+									{initials(message.sender_name)}
+								</span>
+								{#if i < messages.length - 1}
+									<span class="mt-1 w-0.5 flex-1 {ink ? INK_SPINE[ink] : HUMAN_SPINE}"></span>
+								{/if}
 							</div>
-						{/if}
+							<div class="pb-5">
+								<div class="mb-0.5 text-[12.5px] text-neutral-600 dark:text-neutral-400">
+									<strong class={ink ? INK_NAME_TEXT[ink] : HUMAN_NAME_TEXT}
+										>{message.sender_name}</strong
+									>
+									· {formatClock(message.created_at)}
+								</div>
+								{#if message.sender_type === 'system'}
+									<p
+										class="text-[12.5px] text-agent-magenta-700 italic dark:text-agent-magenta-400"
+									>
+										{message.content}
+									</p>
+								{:else}
+									<p
+										class="max-w-[68ch] text-[14.5px] leading-[1.55] whitespace-pre-wrap text-ink dark:text-ink-dark"
+									>
+										{message.content}
+									</p>
+								{/if}
+								{#if message.attachments.length > 0}
+									<div class="mt-1.5 flex flex-col gap-1">
+										{#each message.attachments as attachment (attachment.file_id)}
+											<button
+												onclick={() => handleDownload(attachment)}
+												class="flex w-fit items-center gap-1.5 text-left text-xs text-neutral-600 underline decoration-neutral-400 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
+											>
+												<Icon name="paperclip" class="h-3 w-3" />
+												{attachment.filename}
+												<span class="text-neutral-500">({formatBytes(attachment.size_bytes)})</span>
+											</button>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
+				{/each}
+				{#if liveMessage}
+					{@const ink = inkMap.get(liveMessage.agentId)}
+					<div class="grid grid-cols-[44px_1fr]">
+						<div class="flex flex-col items-center">
+							<span
+								class="flex h-[26px] w-[26px] flex-none items-center justify-center rounded-sm text-xs font-semibold {ink
+									? INK_AVATAR[ink]
+									: HUMAN_AVATAR}"
+							>
+								{initials(liveMessage.agentName)}
+							</span>
+						</div>
+						<div class="pb-5">
+							<div class="mb-0.5 text-[12.5px] text-neutral-600 dark:text-neutral-400">
+								<strong class={ink ? INK_NAME_TEXT[ink] : HUMAN_NAME_TEXT}
+									>{liveMessage.agentName}</strong
+								>
+							</div>
+							<p
+								class="max-w-[68ch] text-[14.5px] leading-[1.55] whitespace-pre-wrap text-ink dark:text-ink-dark"
+							>
+								{liveMessage.content}<span class="animate-pulse">▍</span>
+							</p>
+						</div>
 					</div>
 				{/if}
-			{/each}
-			{#if liveMessage}
-				<div class="flex max-w-lg flex-col gap-1 rounded-lg bg-blue-50 px-4 py-2 dark:bg-blue-950">
-					<p class="text-xs font-medium text-zinc-900 opacity-70 dark:text-zinc-100">
-						{liveMessage.agentName}
-					</p>
-					<p class="text-sm whitespace-pre-wrap text-zinc-900 dark:text-zinc-100">
-						{liveMessage.content}<span class="animate-pulse">▍</span>
-					</p>
-				</div>
-			{/if}
+			</div>
 		{/if}
 	</div>
 
 	<form
 		onsubmit={handleReply}
-		class="flex flex-col gap-2 border-t border-zinc-200 p-4 dark:border-zinc-800"
+		class="mx-9 mb-6 rounded-lg border border-ink/12 bg-surface px-3.5 py-2.5 shadow-sm dark:border-white/10 dark:bg-surface-dark"
 	>
 		{#if downloadError}
-			<p class="text-sm text-red-600 dark:text-red-400">{downloadError}</p>
+			<p class="mb-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+				{downloadError}
+			</p>
 		{/if}
 		{#if pendingFiles.length > 0}
-			<div class="flex flex-wrap gap-2">
+			<div class="mb-2 flex flex-wrap gap-2">
 				{#each pendingFiles as file, i (file.name + i)}
 					<span
-						class="flex items-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+						class="flex items-center gap-1.5 rounded-md bg-neutral-200 px-2 py-1 text-xs text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
 					>
-						📎 {file.name}
+						<Icon name="paperclip" class="h-3.5 w-3.5" />
+						{file.name}
 						<button
 							type="button"
 							onclick={() => removePendingFile(i)}
 							aria-label="Remove {file.name}"
-							class="text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+							class="text-neutral-400 hover:text-agent-magenta-600"
 						>
 							&times;
 						</button>
@@ -283,7 +404,13 @@
 				{/each}
 			</div>
 		{/if}
-		<div class="flex gap-2">
+		<input
+			type="text"
+			bind:value={reply}
+			placeholder="Reply to this rivulet…"
+			class="w-full bg-transparent text-sm text-ink placeholder:text-neutral-500 focus:outline-none dark:text-ink-dark"
+		/>
+		<div class="mt-2.5 flex items-center gap-3.5">
 			<input
 				bind:this={fileInput}
 				type="file"
@@ -296,22 +423,17 @@
 				onclick={() => fileInput?.click()}
 				title="Attach files"
 				aria-label="Attach files"
-				class="rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+				class="text-neutral-600 hover:text-ink dark:text-neutral-400 dark:hover:text-ink-dark"
 			>
-				📎
+				<Icon name="paperclip" class="h-[17px] w-[17px]" />
 			</button>
-			<input
-				type="text"
-				bind:value={reply}
-				placeholder="Reply…"
-				class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
-			/>
+			<span class="ml-auto font-mono text-[11.5px] text-neutral-500">⏎ send</span>
 			<button
 				type="submit"
 				disabled={sending || (!reply.trim() && pendingFiles.length === 0)}
-				class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+				class="rounded-md bg-agent-cyan px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-40"
 			>
-				{sending ? 'Sending…' : 'Reply'}
+				{sending ? 'Sending…' : 'Send'}
 			</button>
 		</div>
 	</form>

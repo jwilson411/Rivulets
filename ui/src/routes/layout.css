@@ -1,1 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap');
 @import 'tailwindcss';
+
+/* Design language: "process inks on paper". Agents are assigned a print ink
+   (cyan, magenta, yellow) in join order; the human is the fixed black "ink"
+   plate. See ui/src/lib/ink.ts for the agent -> ink assignment. */
+@theme {
+	--font-serif: 'Source Serif 4', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+
+	--color-paper: #f3f2f2;
+	--color-paper-dark: #1b1a19;
+	--color-surface: #eae9e9;
+	--color-surface-dark: #242322;
+	--color-ink: #201e1d;
+	--color-ink-dark: #eae7e7;
+
+	--color-neutral-50: #fbfafa;
+	--color-neutral-100: #f8f4f4;
+	--color-neutral-200: #eae7e7;
+	--color-neutral-300: #d7d3d3;
+	--color-neutral-400: #bab6b6;
+	--color-neutral-500: #9b9797;
+	--color-neutral-600: #7d7979;
+	--color-neutral-700: #605d5d;
+	--color-neutral-800: #444141;
+	--color-neutral-900: #2d2b2b;
+	--color-neutral-950: #1b1a19;
+
+	/* agent ink #1 — also the interactive/primary accent */
+	--color-agent-cyan: #0088b0;
+	--color-agent-cyan-100: #e9f8ff;
+	--color-agent-cyan-200: #cbeeff;
+	--color-agent-cyan-300: #99e0ff;
+	--color-agent-cyan-400: #62c5ee;
+	--color-agent-cyan-500: #38a6cf;
+	--color-agent-cyan-600: #1186ac;
+	--color-agent-cyan-700: #006786;
+	--color-agent-cyan-800: #004961;
+	--color-agent-cyan-900: #0a303e;
+
+	/* agent ink #2 — also the dispatcher/handoff accent */
+	--color-agent-magenta: #d6006c;
+	--color-agent-magenta-100: #fff1f4;
+	--color-agent-magenta-200: #ffdee6;
+	--color-agent-magenta-300: #ffc0d0;
+	--color-agent-magenta-400: #ff90b1;
+	--color-agent-magenta-500: #ff458e;
+	--color-agent-magenta-600: #d82071;
+	--color-agent-magenta-700: #aa0b56;
+	--color-agent-magenta-800: #790e3d;
+	--color-agent-magenta-900: #4b1528;
+
+	/* agent ink #3 — print treatment only, never chrome or copy */
+	--color-agent-yellow-500: #edbb00;
+	--color-agent-yellow-700: #8a6d00;
+
+	--radius-sm: 1px;
+	--radius-md: 2px;
+	--radius-lg: 4px;
+
+	--shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
+	--shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
+	--shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+
+	/* 5·10·15·20·30·40 print rhythm — replaces Tailwind's default 4px base */
+	--spacing: 5px;
+}
+
+body {
+	background: var(--color-paper);
+	color: var(--color-ink);
+	font-family: var(--font-serif);
+}
+
+@media (prefers-color-scheme: dark) {
+	body {
+		background: var(--color-paper-dark);
+		color: var(--color-ink-dark);
+	}
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-agent-cyan);
+	outline-offset: 2px;
+}
+
+@keyframes riv-flow {
+	to {
+		stroke-dashoffset: -14px;
+	}
+}
+
+.spine-flowing {
+	animation: riv-flow 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.spine-flowing {
+		animation: none;
+	}
+}

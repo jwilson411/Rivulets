@@ -5,11 +5,16 @@
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { teams, type Team } from '$lib/api/teams';
 	import { files as filesApi } from '$lib/api/files';
+	import { agentInkMap, INK_SWATCH, INK_NAME_TEXT, type AgentInk } from '$lib/ink';
+	import { timeAgo } from '$lib/format';
+	import Icon from '$lib/components/Icon.svelte';
 
 	interface RivuletPreview {
 		rootContent: string;
 		messageCount: number;
 		lastAgentMessage: Message | null;
+		lastAgentInk: AgentInk | null;
+		agentInks: AgentInk[];
 	}
 
 	let channel = $state<Channel | null>(null);
@@ -23,6 +28,8 @@
 	let postError = $state<string | null>(null);
 	let pendingFiles = $state<globalThis.File[]>([]);
 	let fileInput = $state<HTMLInputElement | null>(null);
+
+	let routedTeamName = $derived(teamList.find((t) => t.id === channel?.team_id)?.name ?? null);
 
 	function handleFileSelect(event: Event) {
 		const input = event.target as HTMLInputElement;
@@ -40,10 +47,18 @@
 				const msgs = await rivulets.listMessages(t.id);
 				const root = msgs.find((m) => m.sender_type === 'human');
 				const lastAgent = [...msgs].reverse().find((m) => m.sender_type === 'agent') ?? null;
+				const inkMap = agentInkMap(msgs);
+				const agentInks = [...new Set(inkMap.values())];
+				const lastAgentInk =
+					lastAgent?.sender_id && inkMap.has(lastAgent.sender_id)
+						? (inkMap.get(lastAgent.sender_id) ?? null)
+						: null;
 				const preview: RivuletPreview = {
 					rootContent: root?.content ?? '',
 					messageCount: msgs.length,
-					lastAgentMessage: lastAgent
+					lastAgentMessage: lastAgent,
+					lastAgentInk,
+					agentInks
 				};
 				return [t.id, preview] as const;
 			})
@@ -108,46 +123,45 @@
 </script>
 
 <div class="flex h-full flex-col">
-	<header
-		class="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800"
-	>
-		<div>
-			<h1 class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-				#{channel?.name ?? '…'}
-			</h1>
-			{#if channel?.description}
-				<p class="text-sm text-zinc-500">{channel.description}</p>
+	<header class="flex items-baseline gap-4 px-9 pt-6 pb-4">
+		<h1 class="text-[26px] font-semibold text-ink dark:text-ink-dark">
+			<span class="text-neutral-400 dark:text-neutral-600">#</span>{channel?.name ?? '…'}
+		</h1>
+		<span class="text-[12.5px] text-neutral-600 dark:text-neutral-400">
+			{rivuletList.length} rivulet{rivuletList.length === 1 ? '' : 's'}
+		</span>
+		{#if channel?.description}
+			<span class="text-[12.5px] text-neutral-500">· {channel.description}</span>
+		{/if}
+		<div class="ml-auto flex flex-col items-end gap-1">
+			<label class="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+				<Icon name="users" class="h-[15px] w-[15px] text-agent-cyan-600 dark:text-agent-cyan-400" />
+				<select
+					value={channel?.team_id ?? ''}
+					onchange={(e) => handleTeamChange((e.target as HTMLSelectElement).value)}
+					class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+				>
+					<option value="">No team</option>
+					{#each teamList as team (team.id)}
+						<option value={team.id}>{team.name}</option>
+					{/each}
+				</select>
+			</label>
+			{#if teamChangeError}
+				<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+					{teamChangeError}
+				</p>
 			{/if}
 		</div>
-		{#if channel}
-			<div class="flex flex-col items-end gap-1">
-				<label class="flex items-center gap-2 text-xs text-zinc-500">
-					Team:
-					<select
-						value={channel.team_id ?? ''}
-						onchange={(e) => handleTeamChange((e.target as HTMLSelectElement).value)}
-						class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-					>
-						<option value="">No team</option>
-						{#each teamList as team (team.id)}
-							<option value={team.id}>{team.name}</option>
-						{/each}
-					</select>
-				</label>
-				{#if teamChangeError}
-					<p class="text-xs text-red-600 dark:text-red-400">{teamChangeError}</p>
-				{/if}
-			</div>
-		{/if}
 	</header>
 
-	<div class="flex-1 overflow-y-auto px-6 py-4">
+	<div class="flex-1 overflow-y-auto px-9 pb-4">
 		{#if loadError}
-			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
 		{:else if rivuletList.length === 0}
-			<p class="text-sm text-zinc-400">No messages yet — say something below.</p>
+			<p class="text-sm text-neutral-500 italic">No rivulets yet — start one below.</p>
 		{:else}
-			<ul class="flex flex-col gap-2">
+			<ul class="flex flex-col gap-6">
 				{#each rivuletList as rivulet (rivulet.id)}
 					{@const preview = previews[rivulet.id]}
 					<li>
@@ -156,19 +170,43 @@
 								id: page.params.id!,
 								rivuletId: rivulet.id
 							})}
-							class="block rounded-md border border-zinc-200 px-4 py-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
+							class="group grid grid-cols-[10px_1fr] items-start gap-3.5"
 						>
-							<p class="truncate text-sm text-zinc-900 dark:text-zinc-100">
-								{preview?.rootContent ?? '…'}
-							</p>
-							{#if preview?.lastAgentMessage}
-								<p class="mt-1 truncate text-xs text-zinc-500">
-									<span class="font-medium">{preview.lastAgentMessage.sender_name}</span> replied
-									{#if preview.messageCount > 2}
-										· {preview.messageCount - 1} replies
-									{/if}
+							<span class="mt-1.5 flex flex-col items-center gap-1">
+								{#if preview?.agentInks.length}
+									{#each preview.agentInks as ink (ink)}
+										<span class="h-2 w-2 rounded-sm {INK_SWATCH[ink]}"></span>
+									{/each}
+								{:else}
+									<span class="h-2 w-2 rounded-sm bg-ink dark:bg-ink-dark"></span>
+								{/if}
+							</span>
+							<div>
+								<div
+									class="mb-0.5 truncate text-[15.5px] font-semibold text-ink group-hover:underline dark:text-ink-dark"
+								>
+									{preview?.rootContent || '…'}
+								</div>
+								{#if preview?.lastAgentMessage}
+									<p
+										class="max-w-[68ch] truncate text-[13px] text-neutral-700 dark:text-neutral-300"
+									>
+										<strong
+											class={preview.lastAgentInk
+												? INK_NAME_TEXT[preview.lastAgentInk]
+												: 'text-ink dark:text-ink-dark'}
+										>
+											{preview.lastAgentMessage.sender_name}
+										</strong>
+										— {preview.lastAgentMessage.content}
+									</p>
+								{/if}
+								<p class="mt-1 text-xs text-neutral-500">
+									{preview?.messageCount ?? 0} message{(preview?.messageCount ?? 0) === 1
+										? ''
+										: 's'} · {timeAgo(rivulet.created_at)}
 								</p>
-							{/if}
+							</div>
 						</a>
 					</li>
 				{/each}
@@ -176,62 +214,78 @@
 		{/if}
 	</div>
 
-	<form
-		onsubmit={handlePost}
-		class="flex flex-col gap-2 border-t border-zinc-200 p-4 dark:border-zinc-800"
-	>
-		{#if postError}
-			<p class="text-sm text-red-600 dark:text-red-400">{postError}</p>
-		{/if}
-		{#if pendingFiles.length > 0}
-			<div class="flex flex-wrap gap-2">
-				{#each pendingFiles as file, i (file.name + i)}
-					<span
-						class="flex items-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-					>
-						📎 {file.name}
-						<button
-							type="button"
-							onclick={() => removePendingFile(i)}
-							aria-label="Remove {file.name}"
-							class="text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+	<footer class="px-9 pt-2 pb-6">
+		<form
+			onsubmit={handlePost}
+			class="rounded-lg border border-ink/12 bg-surface px-3.5 py-2.5 shadow-sm dark:border-white/10 dark:bg-surface-dark"
+		>
+			{#if postError}
+				<p class="mb-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{postError}</p>
+			{/if}
+			{#if pendingFiles.length > 0}
+				<div class="mb-2 flex flex-wrap gap-2">
+					{#each pendingFiles as file, i (file.name + i)}
+						<span
+							class="flex items-center gap-1.5 rounded-md bg-neutral-200 px-2 py-1 text-xs text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
 						>
-							&times;
-						</button>
-					</span>
-				{/each}
-			</div>
-		{/if}
-		<div class="flex gap-2">
-			<input
-				bind:this={fileInput}
-				type="file"
-				multiple
-				onchange={handleFileSelect}
-				class="hidden"
-			/>
-			<button
-				type="button"
-				onclick={() => fileInput?.click()}
-				title="Attach files"
-				aria-label="Attach files"
-				class="rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
-			>
-				📎
-			</button>
+							<Icon name="paperclip" class="h-3.5 w-3.5" />
+							{file.name}
+							<button
+								type="button"
+								onclick={() => removePendingFile(i)}
+								aria-label="Remove {file.name}"
+								class="text-neutral-400 hover:text-agent-magenta-600"
+							>
+								&times;
+							</button>
+						</span>
+					{/each}
+				</div>
+			{/if}
 			<input
 				type="text"
 				bind:value={newMessage}
-				placeholder="Message #{channel?.name ?? ''}"
-				class="flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900"
+				placeholder="Start a rivulet in #{channel?.name ?? ''}…"
+				class="w-full bg-transparent text-sm text-ink placeholder:text-neutral-500 focus:outline-none dark:text-ink-dark"
 			/>
-			<button
-				type="submit"
-				disabled={posting || (!newMessage.trim() && pendingFiles.length === 0)}
-				class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-			>
-				Send
-			</button>
-		</div>
-	</form>
+			<div class="mt-2.5 flex items-center gap-3.5">
+				<input
+					bind:this={fileInput}
+					type="file"
+					multiple
+					onchange={handleFileSelect}
+					class="hidden"
+				/>
+				<button
+					type="button"
+					onclick={() => fileInput?.click()}
+					title="Attach files"
+					aria-label="Attach files"
+					class="text-neutral-600 hover:text-ink dark:text-neutral-400 dark:hover:text-ink-dark"
+				>
+					<Icon name="paperclip" class="h-[17px] w-[17px]" />
+				</button>
+				{#if routedTeamName}
+					<span
+						class="flex items-center gap-1.5 text-[12.5px] text-neutral-600 dark:text-neutral-400"
+					>
+						<Icon
+							name="route"
+							class="h-[15px] w-[15px] text-agent-cyan-600 dark:text-agent-cyan-400"
+						/>
+						routes to
+						<strong class="text-agent-cyan-700 dark:text-agent-cyan-400">{routedTeamName}</strong>
+					</span>
+				{/if}
+				<span class="ml-auto font-mono text-[11.5px] text-neutral-500">⏎ send</span>
+				<button
+					type="submit"
+					disabled={posting || (!newMessage.trim() && pendingFiles.length === 0)}
+					class="rounded-md bg-agent-cyan px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-40"
+				>
+					{posting ? 'Sending…' : 'Send'}
+				</button>
+			</div>
+		</form>
+	</footer>
 </div>

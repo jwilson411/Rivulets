@@ -95,103 +95,103 @@
 
 <div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
 	<header>
-		<h1 class="text-lg font-semibold text-zinc-900 dark:text-zinc-50">Agents</h1>
-		<p class="text-sm text-zinc-500">
+		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Agents</h1>
+		<p class="text-sm text-neutral-600 dark:text-neutral-400">
 			Agents you create here register with AgentOS automatically (FR-3.2).
 		</p>
 	</header>
 
 	<form
 		onsubmit={handleCreate}
-		class="flex flex-col gap-3 rounded-md border border-zinc-200 p-4 dark:border-zinc-800"
+		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 	>
-		<h2 class="text-sm font-medium text-zinc-700 dark:text-zinc-300">New agent</h2>
+		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New agent</h2>
 		<input
 			type="text"
 			bind:value={name}
 			placeholder="Name"
-			class="rounded-md border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
 		<input
 			type="text"
 			bind:value={description}
 			placeholder="Description (used by the dispatcher for routing)"
-			class="rounded-md border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
 		<textarea
 			bind:value={instructions}
 			placeholder="Instructions (system prompt)"
 			rows="3"
-			class="rounded-md border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		></textarea>
 		<input
 			type="text"
 			bind:value={model}
 			placeholder="provider:model_name (e.g. anthropic:claude-3-5-haiku-latest)"
-			class="rounded-md border border-zinc-300 px-3 py-2 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-900"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
-		<p class="text-xs text-zinc-500">
+		<p class="text-xs text-neutral-500">
 			Provider must already be configured under Settings &gt; Providers via the API — supported:
 			anthropic, openai, deepseek, openai_compatible.
 		</p>
 		<button
 			type="submit"
 			disabled={creating}
-			class="self-start rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
 		>
 			{creating ? 'Creating…' : 'Create agent'}
 		</button>
 		{#if createError}
-			<p class="text-sm text-red-600 dark:text-red-400">{createError}</p>
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
 		{/if}
 	</form>
 
 	{#if loadError}
-		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
 	{:else}
 		{#if actionError}
-			<p class="text-sm text-red-600 dark:text-red-400">{actionError}</p>
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
 		{/if}
 		<ul class="flex flex-col gap-3">
 			{#each agentList as agent (agent.id)}
-				<li class="rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
 					<div class="flex items-start justify-between">
 						<div>
-							<p class="font-medium text-zinc-900 dark:text-zinc-50">{agent.name}</p>
-							<p class="text-sm text-zinc-500">{agent.description}</p>
-							<p class="mt-1 font-mono text-xs text-zinc-400">{agent.model}</p>
+							<p class="font-medium text-ink dark:text-ink-dark">{agent.name}</p>
+							<p class="text-sm text-neutral-600 dark:text-neutral-400">{agent.description}</p>
+							<p class="mt-1 font-mono text-xs text-neutral-500">{agent.model}</p>
 						</div>
 						<div class="flex items-center gap-2">
 							<span
-								class="rounded-full px-2 py-0.5 text-xs {agent.agentos_agent_id
-									? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400'
-									: 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'}"
+								class="rounded-sm px-2 py-0.5 text-xs {agent.agentos_agent_id
+									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+									: 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400'}"
 							>
 								{agent.agentos_agent_id ? 'registered' : 'provider unresolved'}
 							</span>
 							<button
 								onclick={() => handleDelete(agent.id)}
-								class="text-xs text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
 							>
 								Delete
 							</button>
 						</div>
 					</div>
 
-					<div class="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-900">
-						<p class="text-xs text-zinc-500">
+					<div class="mt-3 border-t border-ink/10 pt-3 dark:border-white/10">
+						<p class="text-xs text-neutral-600 dark:text-neutral-400">
 							Routing: <span class="font-mono">{ruleSummary(rulesByAgent[agent.id])}</span>
 						</p>
 						<div class="mt-2 flex flex-wrap items-center gap-2">
 							<button
 								onclick={() => setRule(agent.id, 'always', '')}
-								class="rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700"
+								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
 							>
 								Always respond
 							</button>
 							<button
 								onclick={() => setRule(agent.id, 'mention_only', '')}
-								class="rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700"
+								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
 							>
 								@mention only
 							</button>
@@ -199,11 +199,11 @@
 								type="text"
 								bind:value={keywordDrafts[agent.id]}
 								placeholder="keyword, keyword, ..."
-								class="w-40 rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+								class="w-40 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 							/>
 							<button
 								onclick={() => setKeywordRule(agent.id)}
-								class="rounded-md border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700"
+								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
 							>
 								Set keywords
 							</button>
