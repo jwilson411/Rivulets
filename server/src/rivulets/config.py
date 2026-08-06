@@ -1,8 +1,7 @@
 """Workspace-wide configuration.
 
-Defaults mirror docs/infrastructure/deployment-and-networking.md and
-docs/infrastructure/compute-and-storage.md. Values are overridable via
-RIVULETS_* environment variables (see pydantic-settings env_prefix below).
+Values are overridable via RIVULETS_* environment variables (see
+pydantic-settings env_prefix below).
 """
 
 from functools import lru_cache

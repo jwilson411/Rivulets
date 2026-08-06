@@ -1,15 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Windows (x86_64) — see
-docs/infrastructure/deployment-and-networking.md#build-matrix.
+"""PyInstaller spec for Windows (x86_64).
 
 Build with:
     uv run --group packaging pyinstaller packaging/windows.spec
 
 Output: dist/rivulets-windows-amd64.exe (PyInstaller appends .exe itself).
 
-EV code signing is P2+ per docs/infrastructure/cost-estimate.md — until
-then, Windows SmartScreen will flag the binary and users click "More
-info" -> "Run anyway".
+EV code signing is not configured here yet — until then, Windows
+SmartScreen will flag the binary and users click "More info" -> "Run
+anyway".
 """
 
 import sys

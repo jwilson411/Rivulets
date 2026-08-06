@@ -1,6 +1,5 @@
-// Thin fetch wrapper for the App Server REST API
-// (docs/architecture/api-design.md). Every call is same-origin relative to
-// `/api/v1` — see vite.config.ts for how that resolves in dev vs. prod.
+// Thin fetch wrapper for the App Server REST API. Every call is same-origin
+// relative to `/api/v1` — see vite.config.ts for how that resolves in dev vs. prod.
 
 export class ApiError extends Error {
 	status: number;

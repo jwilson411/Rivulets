@@ -29,7 +29,7 @@ A few conventions worth knowing before you dive in:
 
 - **Comments explain *why*, not *what*.** If a comment just restates the code, delete it. Comments earn their place by capturing a non-obvious constraint, a subtle invariant, or the reason behind a decision that isn't visible from reading the diff alone.
 - **Strict type checking is enforced** (`pyright --strict` on the server, `svelte-check`/TypeScript on the UI). A few directories with untyped third-party dependencies get relaxed Unknown-type reporting — see the `[tool.pyright]` block in `server/pyproject.toml` for the current list and why.
-- **`docs/` is living documentation, not a spec frozen in time.** If your change affects a functional requirement, an architecture decision, or the data model, update the relevant file under `docs/` in the same PR.
+- **`docs/` is living documentation, not a spec frozen in time.** If your change affects the system architecture or the security/threat model, update [`docs/architecture.md`](./docs/architecture.md) or [`docs/security.md`](./docs/security.md) in the same PR.
 
 ## Reporting bugs / requesting features
 

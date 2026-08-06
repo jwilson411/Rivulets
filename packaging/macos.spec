@@ -1,17 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for macOS (x86_64, arm64) — see
-docs/infrastructure/deployment-and-networking.md#build-matrix.
+"""PyInstaller spec for macOS (x86_64, arm64).
 
 Build with:
     uv run --group packaging pyinstaller packaging/macos.spec
 
 Output name reflects the build host's architecture (both amd64 and arm64
-builds run on macos-14 CI runners per the build matrix — this spec doesn't
-need to know which in advance).
+builds run on macos-14 CI runners — this spec doesn't need to know which
+in advance).
 
-Code signing / notarization (Apple Developer ID) is P1+ per ADR-002 and
-docs/infrastructure/security-and-dr.md — not configured here yet. Until
-then, users bypass Gatekeeper via right-click → Open.
+Code signing / notarization (Apple Developer ID) is not configured here
+yet. Until then, users bypass Gatekeeper via right-click → Open.
 """
 
 import platform

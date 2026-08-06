@@ -123,7 +123,7 @@ Rivulets/
 ├── ui/             # SvelteKit frontend
 ├── packaging/      # PyInstaller build specs (native binaries)
 ├── scripts/        # Install script, local build helper
-├── docs/           # Requirements, architecture, and infrastructure docs
+├── docs/           # Architecture overview and security/threat model
 ├── Dockerfile
 ├── docker-compose.yml
 └── .github/        # CI/CD workflows, issue templates
@@ -158,15 +158,12 @@ CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs all of the ab
 
 ## Documentation
 
-Full product requirements, architecture, and infrastructure documentation lives in [`docs/`](./docs):
-
-- [`docs/requirements/`](./docs/requirements) — executive summary, functional & non-functional requirements, user stories, acceptance criteria
-- [`docs/architecture/`](./docs/architecture) — stack overview, API design, data model, security & risks, ADRs
-- [`docs/infrastructure/`](./docs/infrastructure) — CI/CD & observability, compute & storage, deployment & networking, security & DR
+- [`docs/architecture.md`](./docs/architecture.md) — how the pieces fit together and the technology stack
+- [`docs/security.md`](./docs/security.md) — the security model and threat model
 
 ## Security
 
-Rivulets runs entirely on your own machine with no cloud component, but the web UI is still a network service — see [`docs/architecture/security-and-risks.md`](./docs/architecture/security-and-risks.md) for the full threat model. If you find a vulnerability, please report it through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue.
+Rivulets runs entirely on your own machine with no cloud component, but the web UI is still a network service — see [`docs/security.md`](./docs/security.md) for the full threat model. If you find a vulnerability, please report it through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue.
 
 ## Contributing
 
