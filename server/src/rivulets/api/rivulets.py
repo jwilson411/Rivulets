@@ -65,6 +65,13 @@ class MessageOut(BaseModel):
     content_type: str
     created_at: str
     attachments: list[AttachmentOut] = []
+    # Auto mode (#23) visibility: which concrete model answered, and which
+    # tier it was classified into. Only set on replies from an "auto"
+    # agent -- parsed here from Message.metadata_json rather than exposing
+    # that raw JSON column directly, since a UI badge only needs these two
+    # fields, not a general-purpose metadata bag.
+    model_used: str | None = None
+    tier: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -139,6 +146,7 @@ def _to_attachment_out(file_row: File) -> AttachmentOut:
 
 
 def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
+    metadata: dict[str, str] = json.loads(message.metadata_json) if message.metadata_json else {}
     return MessageOut(
         id=message.id,
         rivulet_id=message.rivulet_id,
@@ -149,6 +157,8 @@ def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
         content_type=message.content_type,
         created_at=message.created_at,
         attachments=[_to_attachment_out(f) for f in attachments],
+        model_used=metadata.get("model_used"),
+        tier=metadata.get("tier"),
     )
 
 

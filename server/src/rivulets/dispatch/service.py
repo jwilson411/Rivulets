@@ -47,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
+from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -56,6 +57,7 @@ from rivulets.db.models import (
     RivuletGuardState,
     TeamAgent,
 )
+from rivulets.dispatch.complexity_classifier import classify_tier
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
 from rivulets.dispatch.guards import (
     get_or_create_guard_state,
@@ -240,8 +242,21 @@ async def _invoke_agent(
             {"agent_id": agent_id, "agent_name": agent_name, "token": delta, "seq": seq},
         )
 
+    model_used: str | None = None
+    model_tier: ModelTier | None = None
+    if agent.model == AUTO_MODEL:
+        # Auto mode (#23): classify this message's complexity, resolve the
+        # matching tier to a concrete model, fresh on every call. If no
+        # tier model can be resolved (e.g. no provider configured),
+        # model_used stays None and run_agent falls through to the agent's
+        # already-registered (cheap-tier) model -- see agentos/service.py's
+        # _build_agno_agent "auto" fallback for the other half of this.
+        model_tier = await classify_tier(db, message_content)
+        model_used = await resolve_tier_model(db, model_tier)
+
     assert rivulet.agentos_session_id is not None  # set by the top-level call before any agent runs
     try:
+        model_override = await resolve_model(db, model_used) if model_used is not None else None
         run_output = await run_agent(
             db,
             agent.id,
@@ -249,6 +264,7 @@ async def _invoke_agent(
             session_id=rivulet.agentos_session_id,
             user_id="human",
             on_token=on_token,
+            model_override=model_override,
         )
     except Exception as exc:
         # NFR-2.4: one agent's provider being unreachable doesn't stop
@@ -290,6 +306,14 @@ async def _invoke_agent(
         sender_id=agent.id,
         sender_name=agent.name,
         content=content,
+        # Auto mode (#23) visibility: which concrete model actually
+        # answered. Uses the existing, previously-unused, already-synced
+        # metadata_json column -- no schema/sync work needed. None for
+        # non-auto agents (their model is fixed and already shown in the
+        # agent's own config, not per-message).
+        metadata_json=(
+            json.dumps({"model_used": model_used, "tier": model_tier}) if model_used else None
+        ),
     )
     db.add(message)
     await db.flush()  # populate message.id for the agent_message event below

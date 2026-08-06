@@ -19,11 +19,10 @@ from typing import Literal
 from agno.agent import Agent as AgnoAgent
 from agno.models.base import Model
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.models import resolve_model
-from rivulets.db.models import ProviderConfig, WorkspaceSetting
+from rivulets.agentos.models import resolve_default_provider, resolve_model
+from rivulets.db.models import WorkspaceSetting
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +82,9 @@ async def pick_dispatcher_model(db: AsyncSession) -> str | None:
         if override:
             return str(override)
 
-    result = await db.execute(select(ProviderConfig))
-    configs = result.scalars().all()
-    if not configs:
+    chosen = await resolve_default_provider(db)
+    if chosen is None:
         return None
-    chosen = next((c for c in configs if c.is_default), configs[0])
     model_name = _DEFAULT_DISPATCHER_MODELS.get(chosen.provider)
     if model_name is None:
         return None

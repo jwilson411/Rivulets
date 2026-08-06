@@ -64,6 +64,7 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         session_id: str,  # noqa: ARG001
         user_id: str = "human",  # noqa: ARG001
         on_token: Any = None,
+        model_override: Any = None,  # noqa: ARG001
     ) -> Any:
         if on_token is not None:
             on_token("Hel")

@@ -29,6 +29,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 _DEFAULTS: dict[str, object] = {
     "dispatcher.model_override": None,
     "dispatcher.fallback_enabled": True,
+    "model_tiers.override": None,  # {"cheap": "provider:model", "capable": "provider:model"}
     "guard.turn_limit": 10,
     "guard.cycle_window": 8,
     "guard.cycle_threshold": 3,

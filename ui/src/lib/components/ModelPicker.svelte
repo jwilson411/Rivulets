@@ -1,7 +1,12 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Provider, ProviderKind } from '$lib/api/providers';
-	import { AUTO_MODEL_VALUE, CUSTOM_MODEL_VALUE, MODEL_CATALOG } from '$lib/modelCatalog';
+	import {
+		AUTO_MODEL,
+		AUTO_MODEL_VALUE,
+		CUSTOM_MODEL_VALUE,
+		MODEL_CATALOG
+	} from '$lib/modelCatalog';
 
 	let { providers, value = $bindable('') }: { providers: Provider[]; value: string } = $props();
 
@@ -22,13 +27,16 @@
 		: [];
 	const initialKnown = initialCatalog.some((m) => m.id === initial.modelName);
 
+	let selectedIsAuto = $state(untrack(() => value === AUTO_MODEL));
 	let selectedProvider = $state(initial.provider);
 	let selectedIsCustom = $state(initial.provider !== '' && !initialKnown);
 	let selectedCatalogId = $state(initialKnown ? initial.modelName : '');
 	let customText = $state(initial.provider !== '' && !initialKnown ? initial.modelName : '');
 
 	$effect(() => {
-		if (!selectedProvider) {
+		if (selectedIsAuto) {
+			value = AUTO_MODEL;
+		} else if (!selectedProvider) {
 			value = '';
 		} else if (selectedIsCustom) {
 			value = customText.trim() ? `${selectedProvider}:${customText.trim()}` : '';
@@ -39,7 +47,15 @@
 
 	function handleSelectChange(event: Event) {
 		const raw = (event.target as HTMLSelectElement).value;
-		if (raw === AUTO_MODEL_VALUE) return;
+		if (raw === AUTO_MODEL_VALUE) {
+			selectedIsAuto = true;
+			selectedProvider = '';
+			selectedIsCustom = false;
+			selectedCatalogId = '';
+			customText = '';
+			return;
+		}
+		selectedIsAuto = false;
 		const { provider, modelName } = parse(raw);
 		selectedProvider = provider;
 		if (modelName === CUSTOM_MODEL_VALUE) {
@@ -53,9 +69,11 @@
 	}
 
 	const selectValue = $derived(
-		selectedProvider
-			? `${selectedProvider}:${selectedIsCustom ? CUSTOM_MODEL_VALUE : selectedCatalogId}`
-			: ''
+		selectedIsAuto
+			? AUTO_MODEL_VALUE
+			: selectedProvider
+				? `${selectedProvider}:${selectedIsCustom ? CUSTOM_MODEL_VALUE : selectedCatalogId}`
+				: ''
 	);
 </script>
 
@@ -66,7 +84,7 @@
 		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 	>
 		<option value="" disabled selected={selectValue === ''}>Select a model…</option>
-		<option value={AUTO_MODEL_VALUE} disabled>Auto (coming soon)</option>
+		<option value={AUTO_MODEL_VALUE}>Auto — picks cheap or capable per message</option>
 		{#each providers as provider (provider.id)}
 			<optgroup label="{provider.label} ({provider.provider})">
 				{#each MODEL_CATALOG[provider.provider] as model (model.id)}
