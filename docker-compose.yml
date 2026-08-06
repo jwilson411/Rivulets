@@ -1,0 +1,21 @@
+# docker compose up -d       # start
+# docker compose logs -f     # watch it
+# docker compose down        # stop (workspace data survives — it's in the volume)
+#
+# Published loopback-only (127.0.0.1:8484) by default, matching a native
+# install's NFR-3.4 posture: reachable from this machine only. To expose it
+# to your LAN instead, change the port mapping below to "8484:8484" — do
+# that deliberately, not by accident, since Rivulets has no built-in network
+# auth beyond the workspace key.
+services:
+  rivulets:
+    build: .
+    image: rivulets:local
+    ports:
+      - "127.0.0.1:8484:8484"
+    volumes:
+      - rivulets-data:/data
+    restart: unless-stopped
+
+volumes:
+  rivulets-data:

@@ -2,13 +2,16 @@
 # Rivulets install script (curl | sh pattern).
 # docs/infrastructure/deployment-and-networking.md#distribution-channels
 #
-#   curl -fsSL https://get.rivulets.io | sh
+#   curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/main/scripts/install.sh | sh
+#
+# (get.rivulets.io is the intended short URL once that domain points here —
+# not live yet, so use the raw.githubusercontent.com form above for now.)
 #
 # Detects OS/arch, downloads the matching release binary from GitHub
 # Releases, verifies its SHA-256 checksum, and installs it on PATH.
 set -eu
 
-REPO="${RIVULETS_REPO:-REPLACE_ME/rivulets}" # TODO: set once the repo has a home
+REPO="${RIVULETS_REPO:-jwilson411/Rivulets}"
 INSTALL_DIR="${RIVULETS_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${RIVULETS_VERSION:-latest}"
 

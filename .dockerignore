@@ -1,0 +1,30 @@
+.git
+.github
+.claude
+docs
+scripts
+packaging
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.coverage
+**/htmlcov/
+
+# Node / SvelteKit
+**/node_modules/
+**/.svelte-kit/
+ui/build/
+server/src/rivulets/static/
+
+# Local workspace data — never bake this into an image
+.rivulets/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
