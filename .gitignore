@@ -19,6 +19,10 @@ node_modules/
 /ui/.env.*
 !/ui/.env.example
 
+# Copy of ui/build app.py looks for when running unfrozen (see
+# rivulets.app._static_dir) — dev-only convenience, never committed
+/server/src/rivulets/static/
+
 # Rivulets runtime data (never commit user workspace data)
 .rivulets/
 
