@@ -1,9 +1,14 @@
 name: CI
 
 # docs/infrastructure/cicd-and-observability.md#ci-pipeline-github-actions
-# Runs on every push to develop/main and on PRs: lint + type-check + unit
-# tests for both server and ui in parallel, then a build check and an
-# integration smoke test against the packaged binary.
+# Runs on every push to main/dev/staging and on PRs targeting them: lint +
+# type-check + unit tests for both server and ui in parallel, then a build
+# check and an integration smoke test against the packaged binary.
+#
+# Branch names here (dev/staging/main) match the actual promotion pipeline
+# (dev -> staging -> main) — this originally said "develop", which isn't a
+# real branch in this repo and meant CI silently never ran on PRs into dev
+# or staging.
 #
 # NOTE: Actions below are pinned to major-version tags, not commit SHAs.
 # security-and-dr.md calls for SHA-pinning all actions — that hardening
@@ -12,9 +17,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, dev, staging]
   pull_request:
-    branches: [main, develop]
+    branches: [main, dev, staging]
 
 env:
   PYTHON_VERSION: "3.12"
