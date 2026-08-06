@@ -17,7 +17,13 @@ from rivulets.config import get_settings
 def _sandbox_root() -> Path:
     root = get_settings().workspace_dir / "tool_fs"
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    # Resolved once here so _resolve()'s containment check compares two
+    # canonical paths -- otherwise a workspace_dir sitting behind a
+    # symlink (e.g. macOS's /tmp -> /private/tmp) makes every legitimate
+    # nested path look like it "escapes" the sandbox, since resolving
+    # `root / relative_path` follows the symlink but this unresolved
+    # root never did.
+    return root.resolve()
 
 
 def _resolve(relative_path: str) -> Path:
