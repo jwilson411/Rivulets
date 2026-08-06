@@ -1,6 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Linux (x86_64, aarch64) — see
-docs/infrastructure/deployment-and-networking.md#build-matrix.
+"""PyInstaller spec for Linux (x86_64, aarch64).
 
 Build with:
     uv run --group packaging pyinstaller packaging/linux.spec

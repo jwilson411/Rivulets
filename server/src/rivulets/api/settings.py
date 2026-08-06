@@ -25,7 +25,7 @@ from rivulets.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
-# Defaults per docs/architecture/data-model.md's `workspace_settings` known keys.
+# Known keys for the `workspace_settings` table, with their defaults.
 _DEFAULTS: dict[str, object] = {
     "dispatcher.model_override": None,
     "dispatcher.fallback_enabled": True,

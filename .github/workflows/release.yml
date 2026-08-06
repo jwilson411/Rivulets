@@ -1,13 +1,10 @@
 name: Release
 
-# docs/infrastructure/deployment-and-networking.md#build-matrix and
-# docs/infrastructure/cicd-and-observability.md#on-release-tag-v.
 # Builds all five platform/arch binaries, smoke-tests each, then publishes
 # a GitHub Release with binaries + SHA-256 checksums.
 #
-# No third-party actions here (security-and-dr.md: "no third-party GitHub
-# Actions from untrusted sources") — release creation uses the `gh` CLI,
-# which ships preinstalled on GitHub-hosted runners.
+# No third-party actions here — release creation uses the `gh` CLI, which
+# ships preinstalled on GitHub-hosted runners.
 #
 # scripts/install.sh resolves "latest" via GitHub's own redirect, so
 # there's no version string inside it to bump on release — unlike the
