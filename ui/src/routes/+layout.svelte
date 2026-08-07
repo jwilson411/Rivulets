@@ -1,14 +1,11 @@
 <script lang="ts">
 	import './layout.css';
-	import favicon from '$lib/assets/favicon.svg';
 	import { auth } from '$lib/api/auth.svelte';
 	import LoginForm from '$lib/components/LoginForm.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
 
 	let { children } = $props();
 </script>
-
-<svelte:head><link rel="icon" href={favicon} /></svelte:head>
 
 {#if !auth.isAuthenticated}
 	<LoginForm />

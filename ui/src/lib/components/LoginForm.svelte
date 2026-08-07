@@ -22,7 +22,10 @@
 
 <main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-8 px-6">
 	<header>
-		<h1 class="text-3xl font-semibold tracking-tight text-ink dark:text-ink-dark">
+		<h1
+			class="flex items-center gap-2 text-3xl font-semibold tracking-tight text-ink dark:text-ink-dark"
+		>
+			<img src="/logo.png" alt="" class="h-9 w-9" />
 			Rivulets<span class="text-agent-cyan-600 dark:text-agent-cyan-400">.</span>
 		</h1>
 		<p class="mt-1 text-neutral-600 dark:text-neutral-400">

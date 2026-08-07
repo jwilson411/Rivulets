@@ -143,7 +143,11 @@
 	class="flex h-full w-60 flex-col border-r border-ink/10 bg-paper pt-5 pb-4 dark:border-white/10 dark:bg-paper-dark"
 >
 	<div class="px-6">
-		<a href={resolve('/')} class="text-xl font-semibold tracking-tight text-ink dark:text-ink-dark">
+		<a
+			href={resolve('/')}
+			class="flex items-center gap-1.5 text-xl font-semibold tracking-tight text-ink dark:text-ink-dark"
+		>
+			<img src="/logo.png" alt="" class="h-6 w-6" />
 			Rivulets<span class="text-agent-cyan-600 dark:text-agent-cyan-400">.</span>
 		</a>
 		<p class="mt-0.5 mb-2.5 font-mono text-[11px] text-neutral-600 dark:text-neutral-400">
