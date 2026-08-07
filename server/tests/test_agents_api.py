@@ -36,13 +36,16 @@ def _create_agent(
 
 
 def test_list_agents_empty_then_populated(client: TestClient, auth_headers: dict[str, str]) -> None:
-    assert client.get("/api/v1/agents", headers=auth_headers).json() == []
+    # #16 seeds four starter agents on first login -- "empty" here means
+    # no manually-created agent yet, not zero rows.
+    starter_names = {a["name"] for a in client.get("/api/v1/agents", headers=auth_headers).json()}
+    assert starter_names == {"Assistant", "Coder", "Researcher", "Writer"}
 
     _create_agent(client, auth_headers)
 
     listed = client.get("/api/v1/agents", headers=auth_headers).json()
-    assert len(listed) == 1
-    assert listed[0]["name"] == "DBA"
+    assert len(listed) == 5
+    assert "DBA" in {a["name"] for a in listed}
 
 
 def test_get_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -177,7 +180,9 @@ def test_delete_agent_removes_it(client: TestClient, auth_headers: dict[str, str
     assert deleted.status_code == 204
 
     assert client.get(f"/api/v1/agents/{agent['id']}", headers=auth_headers).status_code == 404
-    assert client.get("/api/v1/agents", headers=auth_headers).json() == []
+    # The four starter agents (#16) are untouched -- only the one created above is gone.
+    remaining = {a["name"] for a in client.get("/api/v1/agents", headers=auth_headers).json()}
+    assert remaining == {"Assistant", "Coder", "Researcher", "Writer"}
 
 
 def test_get_agent_runs_empty(client: TestClient, auth_headers: dict[str, str]) -> None:

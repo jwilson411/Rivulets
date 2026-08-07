@@ -4,6 +4,9 @@ NOTE: There is no dedicated install wizard yet (US-001) — until one
 exists, the first successful login bootstraps the single `workspace` row
 using the provided mnemonic, mirroring "generate a workspace key on first
 install". Every login after that verifies against the stored bcrypt hash.
+That same first-login moment also seeds the starter agent/team library
+(#16, agentos/starter_content.py) — there's exactly one workspace per
+install, so "first workspace creation" only ever happens once.
 
 Login also starts the P2P sync engine (FR-9): the workspace PSK it needs
 (FR-9.4) only exists once the workspace key has been derived here, so it
@@ -31,6 +34,8 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from rivulets.agentos import sync_agents
+from rivulets.agentos.starter_content import seed_starter_agents, seed_starter_teams
 from rivulets.api.deps import DbSession
 from rivulets.db.models import Workspace
 from rivulets.security import keys
@@ -78,6 +83,12 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
         db.add(workspace)
         await db.commit()
         await db.refresh(workspace)
+        # #16: seed the starter agent/team library on the one occasion a
+        # workspace row is ever created (see the module docstring above —
+        # there's no dedicated install wizard yet, so this doubles as it).
+        await seed_starter_agents(db)
+        await seed_starter_teams(db)
+        await sync_agents(db)
     elif not keys.verify_workspace_key(workspace_key, workspace.key_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect recovery phrase")
 

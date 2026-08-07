@@ -83,6 +83,35 @@ def test_login_succeeds_even_when_the_sync_engine_fails_to_start(
     assert response.json()["token"]
 
 
+def test_login_seeds_starter_agents_and_team_on_first_workspace_creation(
+    client: TestClient,
+) -> None:
+    """#16: the moment a workspace is bootstrapped (first-ever login on a
+    fresh DB), the starter agent/team library should already be there."""
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+    headers = {"Authorization": f"Bearer {response.json()['token']}"}
+
+    agents = client.get("/api/v1/agents", headers=headers).json()
+    assert {agent["name"] for agent in agents} == {"Assistant", "Coder", "Researcher", "Writer"}
+
+    teams = client.get("/api/v1/teams", headers=headers).json()
+    assert [team["name"] for team in teams] == ["Starter Team"]
+
+
+def test_second_login_does_not_reseed_starter_content(client: TestClient) -> None:
+    mnemonic = keys.generate_mnemonic()
+    first = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    headers = {"Authorization": f"Bearer {first.json()['token']}"}
+
+    second = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    assert second.status_code == 200
+
+    agents = client.get("/api/v1/agents", headers=headers).json()
+    assert len(agents) == 4
+    teams = client.get("/api/v1/teams", headers=headers).json()
+    assert len(teams) == 1
+
+
 def test_logout_clears_the_session_and_stops_the_sync_engine(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
