@@ -56,7 +56,10 @@ export default defineConfig({
 				'src/lib/index.ts',
 				// SvelteKit route config (`export const ssr = false`), not app logic.
 				'src/routes/+layout.ts'
-			]
+			],
+			thresholds: {
+				statements: 95
+			}
 		},
 		projects: [
 			{
