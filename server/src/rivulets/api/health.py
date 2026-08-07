@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from rivulets.config import get_settings
+from rivulets.version import APP_VERSION
 
 router = APIRouter(tags=["health"])
 
@@ -58,4 +59,4 @@ class InfoResponse(BaseModel):
 
 @router.get("/info", response_model=InfoResponse)
 async def info() -> InfoResponse:
-    return InfoResponse(version="0.1.0")
+    return InfoResponse(version=APP_VERSION)

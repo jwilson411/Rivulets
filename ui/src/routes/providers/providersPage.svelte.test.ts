@@ -91,6 +91,51 @@ describe('providers/+page.svelte', () => {
 		expect(providers.create).not.toHaveBeenCalled();
 	});
 
+	it('requires a base URL for ollama and blocks the request otherwise', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+
+		render(ProvidersPage);
+
+		await page.getByRole('combobox').selectOptions('ollama');
+		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local Ollama');
+		await page.getByRole('button', { name: 'Add provider' }).click();
+
+		await expect
+			.element(page.getByText('ollama requires a base URL (its local host address)'))
+			.toBeInTheDocument();
+		expect(providers.create).not.toHaveBeenCalled();
+	});
+
+	it('adds an ollama provider with no API key', async () => {
+		const ollamaProvider: Provider = {
+			id: 'prov-2',
+			provider: 'ollama',
+			label: 'Local Ollama',
+			base_url: 'http://localhost:11434',
+			is_default: false
+		};
+		vi.mocked(providers.list).mockResolvedValueOnce([]).mockResolvedValueOnce([ollamaProvider]);
+		vi.mocked(providers.create).mockResolvedValueOnce(ollamaProvider);
+
+		render(ProvidersPage);
+		await expect
+			.element(page.getByText('No providers configured yet — add one above.'))
+			.toBeInTheDocument();
+
+		await page.getByRole('combobox').selectOptions('ollama');
+		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local Ollama');
+		await page.getByPlaceholder('Base URL (required)').fill('http://localhost:11434');
+		await page.getByRole('button', { name: 'Add provider' }).click();
+
+		expect(providers.create).toHaveBeenCalledWith({
+			provider: 'ollama',
+			label: 'Local Ollama',
+			api_key: '',
+			base_url: 'http://localhost:11434'
+		});
+		await expect.element(page.getByText('Local Ollama')).toBeInTheDocument();
+	});
+
 	it('shows the ApiError message when removing a provider fails', async () => {
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
 		vi.mocked(providers.remove).mockRejectedValueOnce(

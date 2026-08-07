@@ -2,9 +2,16 @@ import json
 
 import pytest
 from agno.models.anthropic import Claude
+from agno.models.cohere import Cohere
+from agno.models.dashscope import DashScope
 from agno.models.deepseek import DeepSeek
+from agno.models.google import Gemini
+from agno.models.groq import Groq
+from agno.models.mistral import MistralChat
+from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
+from agno.models.xai import xAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import (
@@ -47,6 +54,62 @@ def test_build_model_deepseek_defaults_base_url() -> None:
     model = build_model("deepseek", "deepseek-chat", "sk-fake")
     assert isinstance(model, DeepSeek)
     assert model.base_url == "https://api.deepseek.com"
+
+
+def test_build_model_google() -> None:
+    model = build_model("google", "gemini-3.5-flash", "sk-fake")
+    assert isinstance(model, Gemini)
+    assert model.id == "gemini-3.5-flash"
+
+
+def test_build_model_mistral() -> None:
+    model = build_model("mistral", "mistral-large-latest", "sk-fake")
+    assert isinstance(model, MistralChat)
+    assert model.id == "mistral-large-latest"
+
+
+def test_build_model_groq() -> None:
+    model = build_model("groq", "llama-3.3-70b-versatile", "sk-fake")
+    assert isinstance(model, Groq)
+    assert model.id == "llama-3.3-70b-versatile"
+
+
+def test_build_model_xai_defaults_base_url() -> None:
+    model = build_model("xai", "grok-4-1-fast-non-reasoning-latest", "sk-fake")
+    assert isinstance(model, xAI)
+    assert model.base_url == "https://api.x.ai/v1"
+
+
+def test_build_model_qwen_defaults_base_url() -> None:
+    model = build_model("qwen", "qwen-plus", "sk-fake")
+    assert isinstance(model, DashScope)
+    assert model.base_url == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
+def test_build_model_qwen_honors_custom_base_url() -> None:
+    model = build_model(
+        "qwen", "qwen-plus", "sk-fake", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert isinstance(model, DashScope)
+    assert model.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def test_build_model_cohere() -> None:
+    model = build_model("cohere", "command-a-03-2025", "sk-fake")
+    assert isinstance(model, Cohere)
+    assert model.id == "command-a-03-2025"
+
+
+def test_build_model_ollama_requires_base_url() -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        build_model("ollama", "llama3.1", "")
+
+
+def test_build_model_ollama_with_no_api_key() -> None:
+    model = build_model("ollama", "llama3.1", "", base_url="http://localhost:11434")
+    assert isinstance(model, Ollama)
+    assert model.host == "http://localhost:11434"
+    assert model.api_key is None
 
 
 def test_build_model_openai_compatible_requires_base_url() -> None:

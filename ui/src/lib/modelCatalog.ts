@@ -28,6 +28,24 @@ export const MODEL_CATALOG: Record<ProviderKind, ModelOption[]> = {
 		{ id: 'deepseek-chat', label: 'DeepSeek Chat — fast, cheap' },
 		{ id: 'deepseek-reasoner', label: 'DeepSeek Reasoner — reasoning' }
 	],
+	google: [
+		{ id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash — fast, cheap' },
+		{ id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — fast, cheap' }
+	],
+	mistral: [
+		{ id: 'mistral-large-latest', label: 'Mistral Large — most capable' },
+		{ id: 'mistral-small-latest', label: 'Mistral Small — fast, cheap' }
+	],
+	groq: [
+		{ id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B — capable' },
+		{ id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B — fast, cheap' }
+	],
+	xai: [{ id: 'grok-4-1-fast-non-reasoning-latest', label: 'Grok 4.1 Fast — fast, cheap' }],
+	qwen: [{ id: 'qwen-plus', label: 'Qwen Plus — capable' }],
+	cohere: [{ id: 'command-a-03-2025', label: 'Command A — most capable' }],
+	// Local models pulled by the user's own Ollama install -- names are
+	// whatever they've pulled, same reasoning as openai_compatible below.
+	ollama: [],
 	openai_compatible: []
 };
 

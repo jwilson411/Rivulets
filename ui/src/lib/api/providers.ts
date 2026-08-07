@@ -5,7 +5,18 @@
 import { api } from './client';
 import { auth } from './auth.svelte';
 
-export type ProviderKind = 'openai' | 'anthropic' | 'deepseek' | 'openai_compatible';
+export type ProviderKind =
+	| 'openai'
+	| 'anthropic'
+	| 'deepseek'
+	| 'google'
+	| 'mistral'
+	| 'groq'
+	| 'xai'
+	| 'qwen'
+	| 'cohere'
+	| 'ollama'
+	| 'openai_compatible';
 
 export interface Provider {
 	id: string;

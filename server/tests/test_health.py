@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from rivulets.api.health import _dir_size_mb, _file_size_mb  # pyright: ignore[reportPrivateUsage]
+from rivulets.version import APP_VERSION
 
 
 def test_health_ok(client: TestClient) -> None:
@@ -16,7 +17,7 @@ def test_health_ok(client: TestClient) -> None:
 def test_info(client: TestClient) -> None:
     response = client.get("/api/v1/info")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.1.0"
+    assert response.json()["version"] == APP_VERSION
 
 
 def test_file_size_mb_is_zero_for_a_nonexistent_path(tmp_path: Path) -> None:

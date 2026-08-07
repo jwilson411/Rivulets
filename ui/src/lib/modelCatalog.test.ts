@@ -2,7 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { AUTO_MODEL, AUTO_MODEL_VALUE, CUSTOM_MODEL_VALUE, MODEL_CATALOG } from './modelCatalog';
 import type { ProviderKind } from './api/providers';
 
-const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'deepseek', 'openai_compatible'];
+const PROVIDER_KINDS: ProviderKind[] = [
+	'anthropic',
+	'openai',
+	'deepseek',
+	'google',
+	'mistral',
+	'groq',
+	'xai',
+	'qwen',
+	'cohere',
+	'ollama',
+	'openai_compatible'
+];
 
 describe('MODEL_CATALOG', () => {
 	it('has an entry for every ProviderKind', () => {
@@ -28,8 +40,9 @@ describe('MODEL_CATALOG', () => {
 		}
 	});
 
-	it('leaves openai_compatible catalog-less since its models are self-hosted and unpredictable', () => {
+	it('leaves openai_compatible and ollama catalog-less since their models are self-hosted and unpredictable', () => {
 		expect(MODEL_CATALOG.openai_compatible).toEqual([]);
+		expect(MODEL_CATALOG.ollama).toEqual([]);
 	});
 
 	it('includes anthropic and openai catalogs with at least one option', () => {
