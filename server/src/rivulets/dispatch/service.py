@@ -48,9 +48,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
+from rivulets.agentos.pricing import estimate_cost_usd
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
+    AgentRun,
     Channel,
     Message,
     Rivulet,
@@ -108,6 +110,49 @@ async def _load_team_dispatch_agents(
             )
         )
     return pairs
+
+
+async def _record_agent_run(
+    db: AsyncSession,
+    agent: Agent,
+    model: str,
+    tier: ModelTier | None,
+    status: str,
+    run_output: RunOutput,
+) -> None:
+    """Persist one row of run/token/cost accounting (FR-3.5, #28's usage
+    dashboard). `model` may be the AUTO_MODEL sentinel itself (auto mode
+    whose tier resolution failed, run_agent fell through to the
+    already-registered cheap-tier model — agentos/service.py's
+    `_build_agno_agent`) rather than a real 'provider:model_name' string;
+    cost just can't be estimated for that row, same as any other unpriced
+    model."""
+    # getattr, not run_output.metrics: dispatch tests monkeypatch run_agent
+    # with a plain SimpleNamespace duck-typing only .status/.tools/
+    # .get_content_as_string() (test_rivulet_dispatch.py), which has no
+    # .metrics attribute at all.
+    metrics = getattr(run_output, "metrics", None)
+    input_tokens = getattr(metrics, "input_tokens", 0) or 0
+    output_tokens = getattr(metrics, "output_tokens", 0) or 0
+    total_tokens = getattr(metrics, "total_tokens", 0) or (input_tokens + output_tokens)
+
+    cost_usd = None
+    provider, _, model_name = model.partition(":")
+    if model_name:
+        cost_usd = estimate_cost_usd(provider, model_name, input_tokens, output_tokens)
+
+    db.add(
+        AgentRun(
+            agent_id=agent.id,
+            model=model,
+            tier=tier,
+            status=status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cost_usd=cost_usd,
+        )
+    )
 
 
 def _find_handoff_call(run_output: RunOutput) -> tuple[str, str] | None:
@@ -288,6 +333,9 @@ async def _invoke_agent(
             "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
+        await _record_agent_run(
+            db, agent, model_used or agent.model, model_tier, "error", run_output
+        )
         message = Message(
             rivulet_id=rivulet.id,
             sender_type="system",
@@ -316,6 +364,9 @@ async def _invoke_agent(
         ),
     )
     db.add(message)
+    await _record_agent_run(
+        db, agent, model_used or agent.model, model_tier, "completed", run_output
+    )
     await db.flush()  # populate message.id for the agent_message event below
     new_messages: list[Message] = [message]
     publish(

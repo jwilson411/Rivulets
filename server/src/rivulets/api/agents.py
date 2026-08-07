@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 
 from rivulets.agentos import get_agentos, sync_agents
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
-from rivulets.db.models import Agent, AgentRoutingRule, AgentTool, TeamAgent
+from rivulets.db.models import Agent, AgentRoutingRule, AgentRun, AgentTool, TeamAgent
 from rivulets.dispatch.rule_generation import generate_routing_rules
 from rivulets.sync.publish import publish_current_state
 
@@ -52,6 +52,20 @@ class AgentOut(BaseModel):
     instructions: str
     model: str
     agentos_agent_id: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class AgentRunOut(BaseModel):
+    id: str
+    model: str
+    tier: str | None
+    status: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float | None
+    created_at: str
 
     model_config = {"from_attributes": True}
 
@@ -193,13 +207,20 @@ async def delete_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> N
     await sync_agents(db)
 
 
-@router.get("/{agent_id}/runs")
-async def get_agent_runs(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
-    """Run history (FR-3.5) — AgentOS agents are wired up and runnable now
-    (see agentos/service.py), but reading run history back out of its
-    SqliteDb (tokens, cost, status per run) hasn't been built yet."""
+@router.get("/{agent_id}/runs", response_model=list[AgentRunOut])
+async def get_agent_runs(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[AgentRun]:
+    """Run history (FR-3.5): most recent 100 runs, newest first. Rows come
+    from dispatch/service.py's `_record_agent_run`, added alongside #28's
+    workspace-level usage dashboard — not AgentOS's own SqliteDb, which
+    isn't queried by this app (see agentos/service.py's module docstring)."""
     await _get_or_404(db, agent_id)
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Run history retrieval not yet wired up")
+    result = await db.execute(
+        select(AgentRun)
+        .where(AgentRun.agent_id == agent_id)
+        .order_by(AgentRun.created_at.desc())
+        .limit(100)
+    )
+    return list(result.scalars().all())
 
 
 @router.get("/{agent_id}/routing-rules", response_model=list[RoutingRuleOut])

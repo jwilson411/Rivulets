@@ -128,6 +128,22 @@
 		<circle cx="11" cy="5.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
 		<circle cx="9" cy="14.5" r="1.8" stroke="currentColor" stroke-width="1.5" />
 	</svg>
+{:else if name === 'chart'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M3 17V3M3 17h14"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+		<path
+			d="M6.5 14v-4M10.5 14V6M14.5 14v-7"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+	</svg>
 {:else if name === 'wrench'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path
