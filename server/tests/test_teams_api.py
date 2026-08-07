@@ -7,14 +7,18 @@ from fastapi.testclient import TestClient
 
 
 def test_list_teams_returns_created_teams(client: TestClient, auth_headers: dict[str, str]) -> None:
-    assert client.get("/api/v1/teams", headers=auth_headers).json() == []
+    # #16 seeds a "Starter Team" on first login -- "empty" here means no
+    # manually-created team yet, not zero rows.
+    assert [t["name"] for t in client.get("/api/v1/teams", headers=auth_headers).json()] == [
+        "Starter Team"
+    ]
 
     created = client.post("/api/v1/teams", json={"name": "Engineering"}, headers=auth_headers)
     assert created.status_code == 201, created.text
 
     listed = client.get("/api/v1/teams", headers=auth_headers)
     assert listed.status_code == 200
-    assert [t["name"] for t in listed.json()] == ["Engineering"]
+    assert {t["name"] for t in listed.json()} == {"Starter Team", "Engineering"}
 
 
 def test_get_team_returns_404_for_unknown_team(

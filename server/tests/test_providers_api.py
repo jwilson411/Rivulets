@@ -15,6 +15,15 @@ from rivulets.security.credentials import CredentialStoreError
 from rivulets.security.credentials import store_provider_key as real_store_provider_key
 
 
+def _delete_starter_agents(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """#16 seeds four starter agents in Auto mode (AUTO_MODEL) on first
+    login -- clear them out for tests that need to reason about "no agent
+    depends on this provider" without the starter roster's Auto-mode
+    agents muddying which agent the 409 is about."""
+    for agent in client.get("/api/v1/agents", headers=auth_headers).json():
+        client.delete(f"/api/v1/agents/{agent['id']}", headers=auth_headers)
+
+
 def test_list_providers_starts_empty(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/providers", headers=auth_headers)
     assert response.status_code == 200
@@ -151,6 +160,7 @@ def test_remove_provider_not_found(client: TestClient, auth_headers: dict[str, s
 
 
 def test_remove_provider_success(client: TestClient, auth_headers: dict[str, str]) -> None:
+    _delete_starter_agents(client, auth_headers)
     created = client.post(
         "/api/v1/providers",
         json={"provider": "openai", "label": "OpenAI", "api_key": "sk-x"},
@@ -214,6 +224,7 @@ def test_remove_default_provider_in_use_by_auto_agent_is_blocked(
     so it always resolves against the *default* provider rather than a
     specific one -- deleting that provider needs its own check, since the
     startswith('{provider}:') check above never matches 'auto'."""
+    _delete_starter_agents(client, auth_headers)
     created_provider = client.post(
         "/api/v1/providers",
         json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-ant"},
