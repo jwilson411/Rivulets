@@ -16,9 +16,7 @@ from rivulets.db.models import AgentRun
 from rivulets.db.session import session_scope
 
 
-def _fake_run_agent_with_metrics(
-    content: str, input_tokens: int, output_tokens: int
-) -> Any:
+def _fake_run_agent_with_metrics(content: str, input_tokens: int, output_tokens: int) -> Any:
     async def fake(*_args: object, **_kwargs: object) -> Any:
         return SimpleNamespace(
             status=RunStatus.completed,
