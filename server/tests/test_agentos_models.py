@@ -156,9 +156,7 @@ async def test_resolve_tier_model_returns_none_for_provider_with_no_tier_default
 async def test_resolve_tier_model_honors_workspace_override(db_session: AsyncSession) -> None:
     db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
     db_session.add(
-        WorkspaceSetting(
-            key="model_tiers.override", value=json.dumps({"capable": "openai:gpt-4o"})
-        )
+        WorkspaceSetting(key="model_tiers.override", value=json.dumps({"capable": "openai:gpt-4o"}))
     )
     await db_session.commit()
 

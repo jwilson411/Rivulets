@@ -11,9 +11,11 @@ on the credentials side).
 """
 
 import socket
+import subprocess
 import sys
 from collections.abc import Callable
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -127,6 +129,77 @@ def test_execute_python_allows_network_when_configured(monkeypatch: pytest.Monke
         )
     )
     assert "bound ok" in result
+
+
+def test_run_linux_builds_the_expected_command_and_denies_network_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """This machine doesn't necessarily have firejail (only exercised for
+    real on Linux, per this file's own docstring) -- verifies the command
+    _run_linux hands to subprocess.run is assembled correctly by faking
+    both shutil.which and subprocess.run rather than actually shelling out."""
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
+
+    script_path = tmp_path / "script.py"
+    script_path.write_text("print('hi')")
+
+    result = code_exec._run_linux(  # pyright: ignore[reportPrivateUsage]
+        script_path, tmp_path, allow_network=False
+    )
+
+    assert result.stdout == "ok"
+    cmd = captured["cmd"]
+    assert cmd[0] == "/usr/bin/firejail"
+    assert "--net=none" in cmd
+    assert str(script_path) in cmd
+    assert captured["kwargs"]["cwd"] == tmp_path
+
+
+def test_run_linux_omits_net_none_when_network_access_is_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
+
+    code_exec._run_linux(  # pyright: ignore[reportPrivateUsage]
+        tmp_path / "s.py", tmp_path, allow_network=True
+    )
+
+    assert "--net=none" not in captured["cmd"]
+
+
+def test_execute_python_raises_timeout_error_when_the_sandbox_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(code_exec, "is_available", lambda: True)
+
+    def fake_run_macos(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["sandbox-exec"], timeout=30)
+
+    def fake_run_linux(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["firejail"], timeout=30)
+
+    monkeypatch.setattr(code_exec, "_run_macos", fake_run_macos)
+    monkeypatch.setattr(code_exec, "_run_linux", fake_run_linux)
+
+    with pytest.raises(TimeoutError, match="30s sandbox timeout"):
+        _call(code="import time; time.sleep(60)")
 
 
 def test_socket_module_import_sanity() -> None:

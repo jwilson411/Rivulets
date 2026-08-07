@@ -27,9 +27,16 @@ from rivulets.agentos.mcp import DiscoveredTool, MCPConnectionError, discover_to
 class _FakeMCPTools:
     """Stands in for agno.tools.mcp.MCPTools with scripted behavior."""
 
-    def __init__(self, *, on_connect: BaseException | None, functions: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        on_connect: BaseException | None,
+        functions: dict[str, Any],
+        on_close: BaseException | None = None,
+    ) -> None:
         self._on_connect = on_connect
         self._functions = functions
+        self._on_close = on_close
         self.closed = False
 
     async def connect(self) -> None:
@@ -44,6 +51,8 @@ class _FakeMCPTools:
 
     async def close(self) -> None:
         self.closed = True
+        if self._on_close is not None:
+            raise self._on_close
 
 
 class _FakeFunction:
@@ -57,8 +66,9 @@ def _patch_mcp_tools(
     *,
     on_connect: BaseException | None = None,
     functions: dict[str, Any] | None = None,
+    on_close: BaseException | None = None,
 ) -> _FakeMCPTools:
-    fake = _FakeMCPTools(on_connect=on_connect, functions=functions or {})
+    fake = _FakeMCPTools(on_connect=on_connect, functions=functions or {}, on_close=on_close)
 
     def _fake_mcp_tools(**_kwargs: Any) -> _FakeMCPTools:
         return fake
@@ -109,6 +119,24 @@ async def test_discover_tools_closes_even_on_failure(monkeypatch: pytest.MonkeyP
     with pytest.raises(MCPConnectionError):
         await discover_tools("http://127.0.0.1:9999/mcp")
 
+    assert fake.closed is True
+
+
+async def test_discover_tools_succeeds_even_when_closing_the_connection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure while tearing down the (already-successful) MCP connection
+    must be logged and swallowed, not raised -- the caller already has a
+    good result by the time close() runs in the `finally` block."""
+    fake = _patch_mcp_tools(
+        monkeypatch,
+        functions={"add": _FakeFunction("add", "Adds numbers.")},
+        on_close=RuntimeError("connection already gone"),
+    )
+
+    result = await discover_tools("http://127.0.0.1:9999/mcp")
+
+    assert result == [DiscoveredTool(name="add", description="Adds numbers.")]
     assert fake.closed is True
 
 

@@ -98,10 +98,8 @@ reportUnknownArgumentType = false
 addopts = "--cov=rivulets --cov-report=term-missing"
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# CI enforces --cov-fail-under (see .github/workflows/ci.yml) — not set here so
-# local runs during early scaffolding aren't blocked before the suite has grown.
-# NFR/CI-doc target is 85%; CI is currently gated at a lower baseline that
-# matches real coverage today and should ratchet up as tests are added.
+# CI enforces --cov-fail-under=95 (see .github/workflows/ci.yml) — not set
+# here so local runs aren't blocked while iterating on a single module.
 
 [tool.coverage.run]
 # The `client` fixture (tests/conftest.py) wraps FastAPI's TestClient, which

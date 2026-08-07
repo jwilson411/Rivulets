@@ -62,7 +62,7 @@ jobs:
       - working-directory: server
         run: |
           uv sync --dev
-          uv run pytest --cov-fail-under=90
+          uv run pytest --cov-fail-under=95
 
   lint-ui:
     name: Lint (ui)
@@ -108,7 +108,7 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-          npm run test:unit -- --run
+          npm run test:coverage
 
   build-check:
     name: Build check

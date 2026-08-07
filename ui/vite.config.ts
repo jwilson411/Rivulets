@@ -38,6 +38,29 @@ export default defineConfig({
 		// client/server split above ever ends up with one side temporarily
 		// empty during development.
 		passWithNoTests: true,
+		coverage: {
+			provider: 'v8',
+			reporter: ['text', 'html'],
+			// Without an explicit `include`, coverage only reports files a test
+			// actually imported -- files nobody wrote a test for (yet) would
+			// silently drop out of the denominator instead of showing as 0%.
+			include: ['src/**/*.{ts,svelte}'],
+			exclude: [
+				'.svelte-kit/**',
+				'build/**',
+				'**/*.config.{js,ts}',
+				'src/app.d.ts',
+				'**/*.d.ts',
+				'**/*.{test,spec}.{js,ts}',
+				// Barrel placeholder with no executable statements ($lib alias re-export dir).
+				'src/lib/index.ts',
+				// SvelteKit route config (`export const ssr = false`), not app logic.
+				'src/routes/+layout.ts'
+			],
+			thresholds: {
+				statements: 95
+			}
+		},
 		projects: [
 			{
 				extends: './vite.config.ts',
