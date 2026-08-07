@@ -15,9 +15,9 @@ question, so duplicating the policy would just be a second place for it
 to drift out of sync.
 
 Graceful degradation (NFR-2.4) mirrors rule_generation.py: no provider
-configured, or the call fails for any reason, resolves to an empty list
-(DispatchEngine.dispatch then reports DispatchMethod.NONE) rather than
-raising — a broken/misconfigured LLM fallback must never take down
+configured, or the call fails for any reason, resolves to an empty match
+list (DispatchEngine.dispatch then reports DispatchMethod.NONE) rather
+than raising — a broken/misconfigured LLM fallback must never take down
 dispatch, since it's the last stage checked and by definition everything
 before it already failed to match.
 
@@ -25,6 +25,12 @@ Also honors the `dispatcher.fallback_enabled` workspace setting
 (api/settings.py's _DEFAULTS — declared there but never actually read
 anywhere until now) so a workspace can turn this stage off entirely, e.g.
 for cost control or to keep routing fully deterministic/auditable.
+
+Returns an engine.LlmFallbackResult, not a bare list — R-4's dispatcher
+hit-rate tracking (#31) needs to tell "no provider configured/fallback
+disabled, nothing attempted" apart from "an LLM call ran and matched
+nobody"; only the latter costs money, and both look identical from the
+matched-agent-IDs list alone.
 
 build_llm_fallback(db) closes over the request's own AsyncSession and
 returns a plain callable matching dispatch.engine.LlmFallback's shape,
@@ -42,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import resolve_model
 from rivulets.db.models import WorkspaceSetting
-from rivulets.dispatch.engine import AgentDispatchInfo, LlmFallback
+from rivulets.dispatch.engine import AgentDispatchInfo, LlmFallback, LlmFallbackResult
 from rivulets.dispatch.rule_generation import pick_dispatcher_model
 
 logger = logging.getLogger(__name__)
@@ -89,26 +95,30 @@ async def _fallback_enabled(db: AsyncSession) -> bool:
 
 
 def build_llm_fallback(db: AsyncSession) -> LlmFallback:
-    async def llm_fallback(message: str, agents: list[AgentDispatchInfo]) -> list[str]:
+    async def llm_fallback(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:
         if not await _fallback_enabled(db):
-            return []
+            return LlmFallbackResult(agent_ids=[], invoked=False)
 
         provider_model = await pick_dispatcher_model(db)
         if provider_model is None:
-            return []
+            return LlmFallbackResult(agent_ids=[], invoked=False)
 
         try:
             model = await resolve_model(db, provider_model)
             decision = await _run_decision(model, _build_prompt(message, agents))
         except Exception:
             logger.warning("LLM dispatch fallback failed", exc_info=True)
-            return []
+            # An LLM call was attempted (or at least committed to) before
+            # failing — still a fallback invocation for R-4's cost-tracking
+            # purposes, just one that came back empty.
+            return LlmFallbackResult(agent_ids=[], invoked=True)
 
         if decision is None:
-            return []
+            return LlmFallbackResult(agent_ids=[], invoked=True)
         name_to_id = {a.name.lower(): a.agent_id for a in agents}
-        return [
+        matched = [
             name_to_id[name.lower()] for name in decision.agent_names if name.lower() in name_to_id
         ]
+        return LlmFallbackResult(agent_ids=matched, invoked=True)
 
     return llm_fallback

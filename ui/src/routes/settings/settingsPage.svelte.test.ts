@@ -1,15 +1,33 @@
 // Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
-// route depends only on $lib/api/settings.
+// route depends on $lib/api/settings and $lib/api/dispatch (#31's hit-rate
+// panel).
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import SettingsPage from './+page.svelte';
 import { settings, type WorkspaceSettings } from '$lib/api/settings';
+import { dispatch, type HitRate } from '$lib/api/dispatch';
 
 vi.mock('$lib/api/settings', () => ({
 	settings: { get: vi.fn(), update: vi.fn() }
 }));
+
+vi.mock('$lib/api/dispatch', () => ({
+	dispatch: { hitRate: vi.fn() }
+}));
+
+const emptyHitRate: HitRate = {
+	range: 'week',
+	since: '2026-08-01T00:00:00Z',
+	total_decisions: 0,
+	hit_count: 0,
+	fallback_count: 0,
+	hit_rate: null,
+	fallback_rate: null,
+	fallback_warning: false,
+	by_method: []
+};
 
 const loadedSettings: WorkspaceSettings = {
 	'dispatcher.model_override': null,
@@ -25,6 +43,12 @@ const loadedSettings: WorkspaceSettings = {
 	'sync.eager_files_wan': false,
 	'ui.port': 8484
 };
+
+beforeEach(() => {
+	// Tests that don't care about the hit-rate panel just need it to settle
+	// without erroring; those that do override this per-test.
+	vi.mocked(dispatch.hitRate).mockResolvedValue(emptyHitRate);
+});
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -90,5 +114,72 @@ describe('settings/+page.svelte', () => {
 		render(SettingsPage);
 
 		await expect.element(page.getByText('Failed to load settings')).toBeInTheDocument();
+	});
+
+	it('shows the dispatcher hit rate once loaded', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(dispatch.hitRate).mockResolvedValue({
+			...emptyHitRate,
+			total_decisions: 20,
+			hit_count: 18,
+			fallback_count: 2,
+			hit_rate: 0.9,
+			fallback_rate: 0.1,
+			fallback_warning: false,
+			by_method: [
+				{ method: 'deterministic', count: 18 },
+				{ method: 'llm', count: 2 }
+			]
+		});
+
+		render(SettingsPage);
+
+		await expect.element(page.getByText('90%')).toBeInTheDocument();
+		await expect.element(page.getByText('10%')).toBeInTheDocument();
+		await expect.element(page.getByText('20 decisions')).toBeInTheDocument();
+	});
+
+	it('shows a cost warning banner when the fallback rate crosses 50%', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(dispatch.hitRate).mockResolvedValue({
+			...emptyHitRate,
+			total_decisions: 10,
+			hit_count: 4,
+			fallback_count: 6,
+			hit_rate: 0.4,
+			fallback_rate: 0.6,
+			fallback_warning: true,
+			by_method: [{ method: 'llm', count: 6 }]
+		});
+
+		render(SettingsPage);
+
+		await expect
+			.element(
+				page.getByText('routing decisions this week fell back to the LLM router', { exact: false })
+			)
+			.toBeInTheDocument();
+	});
+
+	it('shows a message when there is no dispatcher activity yet', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(dispatch.hitRate).mockResolvedValue(emptyHitRate);
+
+		render(SettingsPage);
+
+		await expect
+			.element(page.getByText('No dispatcher activity yet this week.'))
+			.toBeInTheDocument();
+	});
+
+	it('shows an error when the hit-rate fetch fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(dispatch.hitRate).mockRejectedValueOnce(
+			new Error('Failed to load dispatcher hit rate')
+		);
+
+		render(SettingsPage);
+
+		await expect.element(page.getByText('Failed to load dispatcher hit rate')).toBeInTheDocument();
 	});
 });

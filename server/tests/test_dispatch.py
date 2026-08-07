@@ -1,6 +1,11 @@
 import pytest
 
-from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine, DispatchMethod
+from rivulets.dispatch.engine import (
+    AgentDispatchInfo,
+    DispatchEngine,
+    DispatchMethod,
+    LlmFallbackResult,
+)
 from rivulets.dispatch.rules import Rule, RuleType
 
 
@@ -72,8 +77,10 @@ async def test_always_rule_matches_every_message() -> None:
 
 @pytest.mark.asyncio
 async def test_llm_fallback_used_when_no_deterministic_match() -> None:
-    async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> list[str]:
-        return [a.agent_id for a in agents if "overfit" in message]
+    async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:
+        return LlmFallbackResult(
+            agent_ids=[a.agent_id for a in agents if "overfit" in message], invoked=True
+        )
 
     engine = DispatchEngine(llm_fallback=fake_llm)
     agent = AgentDispatchInfo(agent_id="ds-1", name="DataScientist", rules=[])
@@ -82,3 +89,34 @@ async def test_llm_fallback_used_when_no_deterministic_match() -> None:
     )
     assert result.method is DispatchMethod.LLM
     assert result.agent_ids == ["ds-1"]
+    assert result.llm_invoked is True
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_not_invoked_reports_none_without_cost() -> None:
+    """R-4 (#31): a fallback that short-circuits (disabled, no provider
+    configured) before ever calling an LLM must be distinguishable from one
+    that called an LLM and simply matched nobody — dispatch/service.py's
+    hit-rate tracking depends on `llm_invoked` alone, since `method` reports
+    DispatchMethod.NONE for both."""
+
+    async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:
+        return LlmFallbackResult(agent_ids=[], invoked=False)
+
+    engine = DispatchEngine(llm_fallback=fake_llm)
+    agent = AgentDispatchInfo(agent_id="ds-1", name="DataScientist", rules=[])
+    result = await engine.dispatch("anything at all", [agent])
+    assert result.method is DispatchMethod.NONE
+    assert result.llm_invoked is False
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_invoked_but_no_match_still_counts_as_invoked() -> None:
+    async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:
+        return LlmFallbackResult(agent_ids=[], invoked=True)
+
+    engine = DispatchEngine(llm_fallback=fake_llm)
+    agent = AgentDispatchInfo(agent_id="ds-1", name="DataScientist", rules=[])
+    result = await engine.dispatch("anything at all", [agent])
+    assert result.method is DispatchMethod.NONE
+    assert result.llm_invoked is True

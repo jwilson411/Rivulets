@@ -13,6 +13,7 @@ from rivulets.api import (
     auth,
     backups,
     channels,
+    dispatch,
     files,
     health,
     mcp_servers,
@@ -42,5 +43,6 @@ api_router.include_router(sync.router)
 api_router.include_router(providers.router)
 api_router.include_router(backups.router)
 api_router.include_router(usage.router)
+api_router.include_router(dispatch.router)
 
 __all__ = ["api_router"]
