@@ -1,7 +1,8 @@
 """Maps our stored `agent.model` string ("provider:model_name",
 data-model.md) plus a configured `provider_config` row to the matching
-agno Model class. Covers FR-1.4's minimum provider set: OpenAI, Anthropic,
-DeepSeek, and any OpenAI-compatible endpoint.
+agno Model class. Covers FR-1.4's provider set: OpenAI, Anthropic,
+DeepSeek, Google (Gemini), Mistral, Groq, xAI (Grok), Qwen (via DashScope),
+Ollama, Cohere, and any other OpenAI-compatible endpoint.
 
 Also resolves the two "Auto" mode tiers (#23) — `cheap` and `capable` — to
 a concrete `provider:model_name` string. `resolve_default_provider` is
@@ -15,9 +16,16 @@ from typing import Literal
 
 from agno.models.anthropic import Claude
 from agno.models.base import Model
+from agno.models.cohere import Cohere
+from agno.models.dashscope import DashScope
 from agno.models.deepseek import DeepSeek
+from agno.models.google import Gemini
+from agno.models.groq import Groq
+from agno.models.mistral import MistralChat
+from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
+from agno.models.xai import xAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +33,7 @@ from rivulets.db.models import ProviderConfig, WorkspaceSetting
 from rivulets.security.credentials import get_provider_key
 
 _DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+_QWEN_DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 # The `agent.model` sentinel for "Auto" mode (#23): the model is resolved
 # fresh per-message (dispatch/service.py) instead of once at agent build
@@ -70,6 +79,30 @@ def build_model(provider: str, model_name: str, api_key: str, base_url: str | No
         return DeepSeek(
             id=model_name, api_key=api_key, base_url=base_url or _DEEPSEEK_DEFAULT_BASE_URL
         )
+    if provider == "google":
+        return Gemini(id=model_name, api_key=api_key)
+    if provider == "mistral":
+        return MistralChat(id=model_name, api_key=api_key)
+    if provider == "groq":
+        return Groq(id=model_name, api_key=api_key, base_url=base_url)
+    if provider == "xai":
+        return xAI(id=model_name, api_key=api_key, base_url=base_url or "https://api.x.ai/v1")
+    if provider == "qwen":
+        # DashScope's OpenAI-compatible endpoint — same shape `openai_compatible`
+        # users already reach Qwen through manually, now first-class with a
+        # sane default base_url instead of requiring one.
+        return DashScope(
+            id=model_name, api_key=api_key, base_url=base_url or _QWEN_DEFAULT_BASE_URL
+        )
+    if provider == "cohere":
+        return Cohere(id=model_name, api_key=api_key)
+    if provider == "ollama":
+        # Local models: no API key required, just a host. An empty string
+        # (the UI's "no key" submission) is treated as "not provided" so
+        # Ollama's own OLLAMA_API_KEY env fallback still applies.
+        if not base_url:
+            raise ValueError("The 'ollama' provider requires a base_url")
+        return Ollama(id=model_name, api_key=api_key or None, host=base_url)
     if provider == "openai_compatible":
         if not base_url:
             raise ValueError("The 'openai_compatible' provider requires a base_url")

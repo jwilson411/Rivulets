@@ -2,7 +2,19 @@
 	import { ApiError } from '$lib/api/client';
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
 
-	const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'deepseek', 'openai_compatible'];
+	const PROVIDER_KINDS: ProviderKind[] = [
+		'anthropic',
+		'openai',
+		'deepseek',
+		'google',
+		'mistral',
+		'groq',
+		'xai',
+		'qwen',
+		'cohere',
+		'ollama',
+		'openai_compatible'
+	];
 
 	let providerList = $state<Provider[]>([]);
 	let loadError = $state<string | null>(null);
@@ -29,9 +41,14 @@
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		createError = null;
-		if (!label.trim() || !apiKey.trim()) return;
+		if (!label.trim()) return;
+		if (kind !== 'ollama' && !apiKey.trim()) return;
 		if (kind === 'openai_compatible' && !baseUrl.trim()) {
 			createError = 'openai_compatible requires a base URL';
+			return;
+		}
+		if (kind === 'ollama' && !baseUrl.trim()) {
+			createError = 'ollama requires a base URL (its local host address)';
 			return;
 		}
 		creating = true;
@@ -95,14 +112,14 @@
 		<input
 			type="password"
 			bind:value={apiKey}
-			placeholder="API key"
+			placeholder={kind === 'ollama' ? 'API key (optional)' : 'API key'}
 			autocomplete="off"
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
 		<input
 			type="text"
 			bind:value={baseUrl}
-			placeholder={kind === 'openai_compatible'
+			placeholder={kind === 'openai_compatible' || kind === 'ollama'
 				? 'Base URL (required)'
 				: 'Base URL (optional override)'}
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"

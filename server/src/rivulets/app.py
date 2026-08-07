@@ -29,6 +29,7 @@ from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.publish import drain_pending_outbound
+from rivulets.version import APP_VERSION
 
 _BASE_CSP = "default-src 'self'; connect-src 'self' http://localhost:8484"
 _INLINE_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
@@ -135,7 +136,7 @@ async def _add_security_headers(
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Rivulets", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Rivulets", version=APP_VERSION, lifespan=lifespan)
     # Registered before the static/SPA-fallback route below so its 404s stay
     # 404s (see _spa_fallback's own "api/" guard for the other half of that).
     app.include_router(api_router)
