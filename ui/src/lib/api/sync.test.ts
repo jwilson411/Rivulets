@@ -76,4 +76,25 @@ describe('sync', () => {
 		expect(init.method).toBe('POST');
 		expect(init.body).toBe(JSON.stringify({ keep: 'remote' }));
 	});
+
+	it('getCapabilities() GETs /sync/capabilities', async () => {
+		const fetchMock = mockFetch({ capabilities: ['router'] });
+
+		const result = await sync.getCapabilities();
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/sync/capabilities');
+		expect(result).toEqual({ capabilities: ['router'] });
+	});
+
+	it('setCapabilities() PATCHes /sync/capabilities with { capabilities }', async () => {
+		const fetchMock = mockFetch({ capabilities: ['router'] });
+
+		await sync.setCapabilities(['router']);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/sync/capabilities');
+		expect(init.method).toBe('PATCH');
+		expect(init.body).toBe(JSON.stringify({ capabilities: ['router'] }));
+	});
 });

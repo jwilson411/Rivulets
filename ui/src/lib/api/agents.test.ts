@@ -101,6 +101,27 @@ describe('agents', () => {
 		expect(init.body).toBe(JSON.stringify({ rules }));
 	});
 
+	it('getPeerPreference() GETs /agents/:id/peer-preference', async () => {
+		const fetchMock = mockFetch({ capability_tag: 'router' });
+
+		const result = await agents.getPeerPreference('a1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/agents/a1/peer-preference');
+		expect(result).toEqual({ capability_tag: 'router' });
+	});
+
+	it('setPeerPreference() PUTs /agents/:id/peer-preference with { capability_tag }', async () => {
+		const fetchMock = mockFetch({ capability_tag: 'router' });
+
+		await agents.setPeerPreference('a1', 'router');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/peer-preference');
+		expect(init.method).toBe('PUT');
+		expect(init.body).toBe(JSON.stringify({ capability_tag: 'router' }));
+	});
+
 	it('sends the Authorization header derived from auth.token', async () => {
 		const fetchMock = mockFetch([]);
 
