@@ -34,7 +34,12 @@ vi.mock('$app/paths', () => ({
 }));
 
 vi.mock('$lib/api/auth.svelte', () => ({
-	auth: { logout: vi.fn() }
+	auth: {
+		displayName: 'Test User',
+		grant: 'owner',
+		logout: vi.fn(),
+		clearIdentity: vi.fn()
+	}
 }));
 
 vi.mock('$lib/api/channels', () => ({
@@ -250,5 +255,17 @@ describe('Sidebar.svelte', () => {
 		await expect.element(browserPage.getByRole('link', { name: /Settings/ })).toBeInTheDocument();
 
 		await expect.element(browserPage.getByTitle('Update available')).not.toBeInTheDocument();
+	});
+
+	it('shows the claimed identity and clears it via the switch control for an owner session', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByText(/Test User/)).toBeInTheDocument();
+		await browserPage.getByText('switch').click();
+
+		const { auth } = await import('$lib/api/auth.svelte');
+		expect(auth.clearIdentity).toHaveBeenCalled();
 	});
 });

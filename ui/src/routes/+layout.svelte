@@ -1,6 +1,7 @@
 <script lang="ts">
 	import './layout.css';
 	import { auth } from '$lib/api/auth.svelte';
+	import IdentityPicker from '$lib/components/IdentityPicker.svelte';
 	import LoginForm from '$lib/components/LoginForm.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
 
@@ -9,6 +10,8 @@
 
 {#if !auth.isAuthenticated}
 	<LoginForm />
+{:else if !auth.humanId}
+	<IdentityPicker />
 {:else}
 	<div class="flex h-screen">
 		<Sidebar />

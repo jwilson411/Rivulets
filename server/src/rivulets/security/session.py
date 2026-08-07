@@ -1,13 +1,17 @@
 """In-memory holder for the current session's derived keys.
 
-Rivulets is single-workspace, single-user per node (data-model.md: "exactly
-one row per installation"), so one active set of keys at a time is enough.
-Every key here is set on successful login and never written to disk — all
-of them are re-derivable from the mnemonic, which is the only thing the
-user persists themselves (per the BIP-39 recovery design, OQ-7). The p2p
-PSK (FR-9.4, see sync/engine.py's module docstring for what it actually
-gates) lives here alongside the JWT signing key for the same reason: it's
-only available once the workspace key has been derived at login.
+Rivulets is single-workspace per node (data-model.md: "exactly one row per
+installation"), so one active set of keys at a time is enough — even with
+multiple humans sharing that workspace (#14/#15), they all authenticate
+against the same mnemonic-derived signing key, just with different
+`human_id`/`grant` claims layered on top of it (see api/deps.py's
+SessionClaims). Every key here is set on successful login and never
+written to disk — all of them are re-derivable from the mnemonic, which is
+the only thing the user persists themselves (per the BIP-39 recovery
+design, OQ-7). The p2p PSK (FR-9.4, see sync/engine.py's module docstring
+for what it actually gates) lives here alongside the JWT signing key for
+the same reason: it's only available once the workspace key has been
+derived at login.
 """
 
 import threading

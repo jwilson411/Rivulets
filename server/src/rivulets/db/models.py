@@ -23,6 +23,24 @@ class Workspace(Base):
     vector_clock: Mapped[int] = mapped_column(default=0)
 
 
+class Human(Base):
+    """A per-human display identity within the single shared workspace
+    (#14). This is a lightweight session claim, not a credential — the
+    workspace mnemonic remains the only thing that's actually
+    authenticated (see api/auth.py's POST /auth/identity). display_name is
+    intentionally not unique: two offline nodes each bootstrapping the
+    same name shouldn't force a sync conflict (sync/apply.py's
+    SyncConflict); id is the real identity."""
+
+    __tablename__ = "human"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    display_name: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+
 class ProviderConfig(Base):
     """LLM provider credentials. NOT synced between nodes (FR-1.5)."""
 
@@ -276,7 +294,9 @@ class Message(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
     sender_type: Mapped[str]  # 'human' | 'agent' | 'system'
-    sender_id: Mapped[str | None] = mapped_column(default=None)  # agent ID if applicable
+    sender_id: Mapped[str | None] = mapped_column(
+        default=None
+    )  # agent ID (sender_type='agent') or human ID (sender_type='human'); None for system messages
     sender_name: Mapped[str]
     content: Mapped[str]  # markdown
     content_type: Mapped[str] = mapped_column(default="text")  # text|handoff|system_alert

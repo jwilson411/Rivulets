@@ -28,21 +28,22 @@ any of them happen to be right.
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 import jwt
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from rivulets.agentos import sync_agents
 from rivulets.agentos.starter_content import seed_starter_agents, seed_starter_teams
-from rivulets.api.deps import DbSession
-from rivulets.db.models import Workspace
+from rivulets.api.deps import DbSession, OwnerGrant, SessionClaims, get_session_claims
+from rivulets.db.models import Human, Workspace
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
 from rivulets.security.session import get_session_key_store
 from rivulets.sync import get_sync_engine
-from rivulets.sync.publish import drain_pending_outbound
+from rivulets.sync.publish import drain_pending_outbound, publish_current_state
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     expires_at: str
+    grant: str
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -113,14 +115,79 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
 
     expires_at = datetime.now(UTC) + _JWT_TTL
     token = jwt.encode(
-        {"sub": workspace.id, "iat": datetime.now(UTC), "exp": expires_at},
+        {"sub": workspace.id, "iat": datetime.now(UTC), "exp": expires_at, "grant": "owner"},
         jwt_signing_key,
         algorithm="HS256",
     )
-    return LoginResponse(token=token, expires_at=expires_at.isoformat())
+    return LoginResponse(token=token, expires_at=expires_at.isoformat(), grant="owner")
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout() -> None:
     get_session_key_store().clear()
     await get_sync_engine().stop()
+
+
+class IdentityRequest(BaseModel):
+    human_id: str | None = None
+    display_name: str | None = None
+
+
+class IdentityResponse(BaseModel):
+    token: str
+    expires_at: str
+    human_id: str
+    display_name: str
+    grant: str
+
+
+@router.post("/identity", response_model=IdentityResponse)
+async def claim_identity(
+    body: IdentityRequest,
+    db: DbSession,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+    _: OwnerGrant,
+) -> IdentityResponse:
+    """Claims a Human identity for the current session (#14) — a display
+    claim layered on top of the existing workspace auth, not a separate
+    credential (see Human's docstring, db/models.py). Owner-gated: an
+    invite-redeemed session's identity is fixed at accept time (#15,
+    api/invites.py) and must never be able to re-claim a different one.
+    """
+    if (body.human_id is None) == (body.display_name is None):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Provide exactly one of human_id (existing identity) or display_name (new one)",
+        )
+
+    if body.human_id is not None:
+        human = await db.get(Human, body.human_id)
+        if human is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Human not found")
+    else:
+        human = Human(display_name=body.display_name)
+        db.add(human)
+        await db.commit()
+        await db.refresh(human)
+        await publish_current_state(db, "human", human.id)
+
+    jwt_signing_key = get_session_key_store().get_key()
+    expires_at = datetime.now(UTC) + _JWT_TTL
+    token = jwt.encode(
+        {
+            "sub": claims.workspace_id,
+            "iat": datetime.now(UTC),
+            "exp": expires_at,
+            "grant": claims.grant,
+            "human_id": human.id,
+        },
+        jwt_signing_key,
+        algorithm="HS256",
+    )
+    return IdentityResponse(
+        token=token,
+        expires_at=expires_at.isoformat(),
+        human_id=human.id,
+        display_name=human.display_name,
+        grant=claims.grant,
+    )

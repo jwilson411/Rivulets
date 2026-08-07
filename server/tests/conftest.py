@@ -145,10 +145,20 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 def auth_headers(client: TestClient) -> dict[str, str]:
-    """Logs in with a fresh mnemonic, which bootstraps the workspace row
-    on this in-memory DB (see api/auth.py), and returns bearer headers."""
+    """Logs in with a fresh mnemonic, which bootstraps the workspace row on
+    this in-memory DB (see api/auth.py), then claims a Human identity
+    (#14) so the returned token carries a human_id -- most routes that
+    write a Message now require CurrentHumanId, and the large existing
+    body of tests posting via this fixture would otherwise 401."""
     mnemonic = keys.generate_mnemonic()
     response = client.post("/api/v1/auth/login", json={"key": mnemonic})
     assert response.status_code == 200, response.text
     token: str = response.json()["token"]
+    identity_response = client.post(
+        "/api/v1/auth/identity",
+        json={"display_name": "Test User"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert identity_response.status_code == 200, identity_response.text
+    token = identity_response.json()["token"]
     return {"Authorization": f"Bearer {token}"}

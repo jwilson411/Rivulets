@@ -91,6 +91,94 @@ describe('auth', () => {
 		expect((init.headers as Headers).get('Authorization')).toBe('Bearer tok-3');
 	});
 
+	it('applySession() sets token, humanId, displayName, and grant together', async () => {
+		auth.applySession({
+			token: 'tok-session',
+			expires_at: 'x',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+
+		expect(auth.token).toBe('tok-session');
+		expect(auth.humanId).toBe('human-1');
+		expect(auth.displayName).toBe('Ada');
+		expect(auth.grant).toBe('owner');
+	});
+
+	it('claimIdentity() with an existing humanId posts { human_id } and applies the session', async () => {
+		auth.applySession({
+			token: 'tok-before',
+			expires_at: 'x',
+			human_id: 'other',
+			display_name: 'Other',
+			grant: 'owner'
+		});
+		const fetchMock = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					token: 'tok-after',
+					expires_at: 'x',
+					human_id: 'human-1',
+					display_name: 'Ada',
+					grant: 'owner'
+				}),
+				{ status: 200 }
+			)
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await auth.claimIdentity({ humanId: 'human-1' });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/auth/identity');
+		expect(init.body).toBe(JSON.stringify({ human_id: 'human-1' }));
+		expect(auth.humanId).toBe('human-1');
+		expect(auth.displayName).toBe('Ada');
+	});
+
+	it('claimIdentity() with a new displayName posts { display_name }', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					token: 'tok-new',
+					expires_at: 'x',
+					human_id: 'human-2',
+					display_name: 'Grace',
+					grant: 'owner'
+				}),
+				{ status: 200 }
+			)
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await auth.claimIdentity({ displayName: 'Grace' });
+
+		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(init.body).toBe(JSON.stringify({ display_name: 'Grace' }));
+		expect(auth.humanId).toBe('human-2');
+	});
+
+	it('clearIdentity() drops humanId/displayName without a fetch call, leaving the token intact', async () => {
+		auth.applySession({
+			token: 'tok-keep',
+			expires_at: 'x',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		auth.clearIdentity();
+
+		expect(auth.humanId).toBeNull();
+		expect(auth.displayName).toBeNull();
+		expect(auth.token).toBe('tok-keep');
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it('logout() is a no-op fetch-wise when already logged out', async () => {
 		// Each stubGlobal below backs exactly one fetch call -- reusing a
 		// single mockResolvedValue Response across login's and logout's
