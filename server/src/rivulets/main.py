@@ -1,10 +1,9 @@
 """Entry point.
 
-The full design runs a process supervisor over three children: App Server,
-AgentOS, and the Sync Engine, with crash-loop detection and graceful
-shutdown. AgentOS and the Sync Engine aren't wired up yet (see their
-respective TODOs), so this currently just runs the App Server directly.
-Swap this for the real supervisor once those two children exist to manage.
+Runs the App Server; AgentOS (agentos/service.py) and the Sync Engine
+(sync/) live in-process inside it rather than as separate supervised child
+processes — see docs/architecture.md's "Why not microservices?" section for
+why that's the deliberate design, not a stopgap.
 """
 
 import os

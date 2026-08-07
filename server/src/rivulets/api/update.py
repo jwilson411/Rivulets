@@ -4,9 +4,9 @@ action that downloads, verifies, swaps the binary in, and restarts.
 
 No automatic/background check runs from here -- unlike backups.py's daily
 snapshot, there's no equivalent existing "runs on every startup" loop to
-hang this off (see main.py's own docstring: the real process supervisor is
-still #12's unimplemented future work). The UI checks on demand instead
-(Sidebar.svelte, alongside its other startup counts).
+hang this off (see main.py: this is a single process, not a supervisor
+managing child processes with their own lifecycles). The UI checks on
+demand instead (Sidebar.svelte, alongside its other startup counts).
 """
 
 import os
