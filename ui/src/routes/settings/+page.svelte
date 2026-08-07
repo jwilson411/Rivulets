@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
+	import { update, type UpdateStatus } from '$lib/api/update';
 
 	let loaded = $state<WorkspaceSettings | null>(null);
 	let loadError = $state<string | null>(null);
@@ -17,6 +18,12 @@
 
 	let hitRate = $state<HitRate | null>(null);
 	let hitRateError = $state<string | null>(null);
+
+	let updateStatus = $state<UpdateStatus | null>(null);
+	let updateError = $state<string | null>(null);
+	let applying = $state(false);
+	let applyError = $state<string | null>(null);
+	let restarting = $state(false);
 
 	async function refresh() {
 		loadError = null;
@@ -42,8 +49,31 @@
 		}
 	}
 
+	async function refreshUpdateStatus() {
+		updateError = null;
+		try {
+			updateStatus = await update.status();
+		} catch (err) {
+			updateError = err instanceof Error ? err.message : 'Failed to check for updates';
+		}
+	}
+
+	async function handleApplyUpdate() {
+		applyError = null;
+		applying = true;
+		try {
+			await update.apply();
+			restarting = true;
+		} catch (err) {
+			applyError = err instanceof Error ? err.message : 'Failed to apply update';
+		} finally {
+			applying = false;
+		}
+	}
+
 	refresh();
 	refreshHitRate();
+	refreshUpdateStatus();
 
 	function formatPct(rate: number | null): string {
 		return rate === null ? '—' : `${Math.round(rate * 100)}%`;
@@ -89,6 +119,65 @@
 			Workspace-wide policy — synced to every peer (FR-9.1), except the local UI port.
 		</p>
 	</header>
+
+	<section
+		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+	>
+		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Updates</h2>
+		<p class="text-xs text-neutral-600 dark:text-neutral-400">
+			This machine only — not synced to peers. Each install checks GitHub Releases independently.
+		</p>
+
+		{#if updateError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{updateError}</p>
+		{:else if !updateStatus}
+			<p class="text-sm text-neutral-500 italic">Checking for updates…</p>
+		{:else}
+			<p class="text-sm text-ink dark:text-ink-dark">
+				Current version <span class="font-mono">{updateStatus.current_version}</span>
+			</p>
+
+			{#if restarting}
+				<p class="text-sm text-agent-cyan-700 dark:text-agent-cyan-400">
+					Restarting to {updateStatus.latest_version}… reload this page in a few seconds.
+				</p>
+			{:else if updateStatus.update_available}
+				<p class="text-sm text-ink dark:text-ink-dark">
+					<span class="font-mono">{updateStatus.latest_version}</span> is available.
+				</p>
+				{#if updateStatus.applicable}
+					<button
+						type="button"
+						onclick={handleApplyUpdate}
+						disabled={applying}
+						class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+					>
+						{applying ? 'Updating…' : `Update to ${updateStatus.latest_version}`}
+					</button>
+					{#if applyError}
+						<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{applyError}</p>
+					{/if}
+				{:else}
+					<p class="text-xs text-neutral-600 dark:text-neutral-400">
+						Auto-update isn't available in this environment. Docker users should pull the new image;
+						a source/dev install should pull the new tag.
+					</p>
+				{/if}
+			{:else}
+				<p class="text-sm text-neutral-600 dark:text-neutral-400">You're up to date.</p>
+			{/if}
+
+			{#if !restarting}
+				<button
+					type="button"
+					onclick={refreshUpdateStatus}
+					class="self-start text-xs text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+				>
+					Check for updates
+				</button>
+			{/if}
+		{/if}
+	</section>
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>

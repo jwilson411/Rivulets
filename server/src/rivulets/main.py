@@ -7,14 +7,23 @@ respective TODOs), so this currently just runs the App Server directly.
 Swap this for the real supervisor once those two children exist to manage.
 """
 
+import os
+
 import uvicorn
 
 from rivulets.app import app
 from rivulets.config import get_settings
+from rivulets.update import RESTART_ENV_VAR, cleanup_stale_backup, wait_for_port_free
 
 
 def main() -> None:
     settings = get_settings()
+    cleanup_stale_backup()
+    if os.environ.pop(RESTART_ENV_VAR, None):
+        # This process was just spawned by update._spawn_restarted_process
+        # handing off from a binary self-update -- wait for the old process
+        # to actually release the port before racing it for the same bind.
+        wait_for_port_free(settings.app_server_host, settings.app_server_port)
     if settings.app_server_host not in ("127.0.0.1", "localhost", "0.0.0.0"):  # noqa: S104
         # NFR-3.4: refuse to bind anywhere but localhost by default — the
         # default (config.py) stays 127.0.0.1, so this only fires if

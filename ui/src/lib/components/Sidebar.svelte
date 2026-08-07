@@ -9,6 +9,7 @@
 	import { mcpServers } from '$lib/api/mcpServers';
 	import { tools } from '$lib/api/tools';
 	import { sync } from '$lib/api/sync';
+	import { update } from '$lib/api/update';
 	import { theme, type ThemePreference } from '$lib/theme.svelte';
 	import Icon from './Icon.svelte';
 
@@ -30,6 +31,7 @@
 	let toolCount = $state<number | null>(null);
 	let syncPeerCount = $state<number | null>(null);
 	let syncRunning = $state(false);
+	let updateAvailable = $state(false);
 
 	async function refresh() {
 		loadError = null;
@@ -42,14 +44,15 @@
 
 	async function refreshCounts() {
 		try {
-			const [agentList, teamList, providerList, mcpServerList, toolList, syncStatus] =
+			const [agentList, teamList, providerList, mcpServerList, toolList, syncStatus, updateStatus] =
 				await Promise.all([
 					agents.list(),
 					teams.list(),
 					providers.list(),
 					mcpServers.list(),
 					tools.list(),
-					sync.status()
+					sync.status(),
+					update.status()
 				]);
 			agentCount = agentList.length;
 			teamCount = teamList.length;
@@ -58,6 +61,7 @@
 			toolCount = toolList.length;
 			syncRunning = syncStatus.running;
 			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
+			updateAvailable = updateStatus.update_available;
 		} catch {
 			// Sidebar counts are a convenience, not load-bearing — leave them
 			// blank rather than surfacing a second error UI alongside `loadError`.
@@ -267,6 +271,13 @@
 						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
 					/>
 					Settings
+					{#if updateAvailable}
+						<span
+							title="Update available"
+							aria-label="Update available"
+							class="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-agent-cyan"
+						></span>
+					{/if}
 				</a>
 			</div>
 		{/if}
