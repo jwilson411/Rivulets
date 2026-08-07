@@ -38,6 +38,18 @@ export default defineConfig({
 		// client/server split above ever ends up with one side temporarily
 		// empty during development.
 		passWithNoTests: true,
+		coverage: {
+			provider: 'v8',
+			reporter: ['text', 'html'],
+			exclude: [
+				'.svelte-kit/**',
+				'build/**',
+				'**/*.config.{js,ts}',
+				'src/app.d.ts',
+				'**/*.d.ts',
+				'**/*.{test,spec}.{js,ts}'
+			]
+		},
 		projects: [
 			{
 				extends: './vite.config.ts',
