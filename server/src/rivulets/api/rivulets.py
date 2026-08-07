@@ -302,11 +302,13 @@ async def stream_rivulet(
     happen, not just the first one, so this never sends a terminal event
     of its own; the generator only exits on client disconnect.
 
-    Emits agent_token, agent_message, handoff, system_alert, error, and
-    done (dispatch/service.py). agent_tool_call isn't emitted yet — no
-    code path publishes it for any tool call (builtin, custom, or MCP),
-    only for the handoff tool specifically, which gets its own dedicated
-    event.
+    Emits agent_status, agent_token, agent_message, handoff, system_alert,
+    error, and done (dispatch/service.py). agent_status (#30) covers an
+    agent's "thinking" / "executing_tool" / "waiting_for_handoff" states
+    between invocation and its first streamed token or persisted message —
+    tool calls get their status via that event's `detail` (tool name only,
+    never args, per FR-5.5); the handoff tool specifically also still gets
+    its own dedicated `handoff` event once the call completes.
 
     The DB session this pulls in via dependency injection stays open for
     as long as the connection does, same as the subscription — acceptable

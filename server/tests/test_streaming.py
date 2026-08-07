@@ -64,6 +64,7 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         session_id: str,  # noqa: ARG001
         user_id: str = "human",  # noqa: ARG001
         on_token: Any = None,
+        on_status: Any = None,
         model_override: Any = None,  # noqa: ARG001
     ) -> Any:
         if on_token is not None:
@@ -122,8 +123,20 @@ def test_dispatch_publishes_documented_sse_event_sequence(
     finally:
         unsubscribe(rivulet_id, event_queue)
 
-    assert [e["event"] for e in events] == ["agent_token", "agent_token", "agent_message", "done"]
-    assert [e["data"]["token"] for e in events[:2]] == ["Hel", "lo"]
-    assert events[2]["data"]["content"] == "Hello"
-    assert events[2]["data"]["agent_id"] == agent_id
-    assert events[3]["data"] == {"rivulet_id": rivulet_id}
+    assert [e["event"] for e in events] == [
+        "agent_status",
+        "agent_token",
+        "agent_token",
+        "agent_message",
+        "done",
+    ]
+    assert events[0]["data"] == {
+        "agent_id": agent_id,
+        "agent_name": "Streamer",
+        "status": "thinking",
+        "detail": None,
+    }
+    assert [e["data"]["token"] for e in events[1:3]] == ["Hel", "lo"]
+    assert events[3]["data"]["content"] == "Hello"
+    assert events[3]["data"]["agent_id"] == agent_id
+    assert events[4]["data"] == {"rivulet_id": rivulet_id}

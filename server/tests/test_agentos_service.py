@@ -11,7 +11,15 @@ from typing import Any
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.anthropic import Claude
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent
+from agno.models.response import ToolExecution
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+    ToolCallCompletedEvent,
+    ToolCallErrorEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -125,6 +133,81 @@ async def test_run_agent_raises_when_stream_ends_with_no_content_and_no_terminal
 
     with pytest.raises(RuntimeError, match="ended without a completion or error event"):
         await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+
+async def test_run_agent_reports_executing_tool_status_for_a_regular_tool_call(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """#30: a non-handoff tool call reports ("executing_tool", tool_name),
+    then reverts to ("thinking", None) once it completes -- never leaking
+    tool_args (FR-5.5)."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallStartedEvent(
+                tool=ToolExecution(tool_name="web_search", tool_args={"query": "secret"})
+            ),
+            ToolCallCompletedEvent(tool=ToolExecution(tool_name="web_search")),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+    statuses: list[tuple[str, str | None]] = []
+
+    await run_agent(
+        db_session,
+        "agent-1",
+        "hi",
+        session_id="s-1",
+        on_status=lambda status, detail: statuses.append((status, detail)),
+    )
+
+    assert statuses == [("executing_tool", "web_search"), ("thinking", None)]
+
+
+async def test_run_agent_reports_waiting_for_handoff_status_for_the_handoff_tool(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """#30: the handoff tool (available to every agent) gets its own
+    distinct status rather than the generic "executing_tool" label."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallStartedEvent(tool=ToolExecution(tool_name="handoff")),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+    statuses: list[tuple[str, str | None]] = []
+
+    await run_agent(
+        db_session,
+        "agent-1",
+        "hi",
+        session_id="s-1",
+        on_status=lambda status, detail: statuses.append((status, detail)),
+    )
+
+    assert statuses == [("waiting_for_handoff", None)]
+
+
+async def test_run_agent_reports_thinking_status_after_a_failed_tool_call(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallStartedEvent(tool=ToolExecution(tool_name="http_request")),
+            ToolCallErrorEvent(tool=ToolExecution(tool_name="http_request"), error="boom"),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+    statuses: list[tuple[str, str | None]] = []
+
+    await run_agent(
+        db_session,
+        "agent-1",
+        "hi",
+        session_id="s-1",
+        on_status=lambda status, detail: statuses.append((status, detail)),
+    )
+
+    assert statuses == [("executing_tool", "http_request"), ("thinking", None)]
 
 
 async def test_run_agent_model_override_does_not_run_on_the_registered_instance(
