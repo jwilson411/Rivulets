@@ -89,6 +89,50 @@
 			? 'bg-agent-cyan-100 font-semibold text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
 			: 'text-ink hover:bg-neutral-200/60 dark:text-ink-dark dark:hover:bg-white/5';
 	}
+
+	// Workspace-management links (issue #43) -- collapsed by default so the
+	// channel list, the thing actually used constantly, dominates the
+	// sidebar. "Sync" isn't in this group: its ambient status readout at the
+	// bottom of the sidebar already covers it (now a link to /sync).
+	const WORKSPACE_ROUTES = [
+		'/agents',
+		'/teams',
+		'/providers',
+		'/mcp-servers',
+		'/tools',
+		'/usage',
+		'/settings'
+	];
+	const WORKSPACE_EXPANDED_KEY = 'rivulets-sidebar-workspace-expanded';
+
+	function isOnWorkspaceRoute(): boolean {
+		return WORKSPACE_ROUTES.some((path) => isActive(path));
+	}
+
+	function readStoredWorkspaceExpanded(): boolean | null {
+		if (typeof localStorage === 'undefined') return null;
+		const stored = localStorage.getItem(WORKSPACE_EXPANDED_KEY);
+		if (stored === 'true') return true;
+		if (stored === 'false') return false;
+		return null;
+	}
+
+	let workspaceExpanded = $state(readStoredWorkspaceExpanded() ?? isOnWorkspaceRoute());
+	const workspaceActive = $derived(isOnWorkspaceRoute());
+
+	// Landing on a workspace route always reveals it, even if the user's
+	// stored preference (or a manual collapse on a previous page) was
+	// closed -- the active item must stay reachable. This only ever opens
+	// the section: it doesn't depend on `workspaceExpanded`, so manually
+	// collapsing it again while staying on the same route isn't fought.
+	$effect(() => {
+		if (isOnWorkspaceRoute()) workspaceExpanded = true;
+	});
+
+	function toggleWorkspace() {
+		workspaceExpanded = !workspaceExpanded;
+		localStorage.setItem(WORKSPACE_EXPANDED_KEY, String(workspaceExpanded));
+	}
 </script>
 
 <nav
@@ -105,116 +149,127 @@
 		<div class="mt-0.5 border-t border-ink dark:border-ink-dark"></div>
 	</div>
 
-	<div class="mt-4 flex flex-col gap-0.5 px-4">
-		<a
-			href={resolve('/agents')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/agents')
-			)}"
+	<div class="mt-4 px-4">
+		<button
+			type="button"
+			onclick={toggleWorkspace}
+			aria-expanded={workspaceExpanded}
+			aria-controls="workspace-links"
+			class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13.5px] {workspaceActive
+				? 'font-semibold text-agent-cyan-700 dark:text-agent-cyan-400'
+				: 'text-ink hover:bg-neutral-200/60 dark:text-ink-dark dark:hover:bg-white/5'}"
 		>
 			<Icon
-				name="robot"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+				name="chevron"
+				class="h-[11px] w-[11px] flex-none text-neutral-500 transition-transform duration-150 {workspaceExpanded
+					? 'rotate-90'
+					: ''}"
 			/>
-			Agents
-			{#if agentCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
-					>{agentCount}</span
-				>{/if}
-		</a>
-		<a
-			href={resolve('/teams')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/teams')
-			)}"
-		>
-			<Icon
-				name="users"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Teams
-			{#if teamCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500">{teamCount}</span
-				>{/if}
-		</a>
-		<a
-			href={resolve('/providers')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/providers')
-			)}"
-		>
-			<Icon
-				name="plug"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Providers
-			{#if providerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
-					>{providerCount}</span
-				>{/if}
-		</a>
-		<a
-			href={resolve('/mcp-servers')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/mcp-servers')
-			)}"
-		>
-			<Icon
-				name="server"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			MCP Servers
-			{#if mcpServerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
-					>{mcpServerCount}</span
-				>{/if}
-		</a>
-		<a
-			href={resolve('/tools')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/tools')
-			)}"
-		>
-			<Icon
-				name="wrench"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Tools
-			{#if toolCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500">{toolCount}</span
-				>{/if}
-		</a>
-		<a
-			href={resolve('/usage')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/usage')
-			)}"
-		>
-			<Icon
-				name="chart"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Usage
-		</a>
-		<a
-			href={resolve('/sync')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/sync')
-			)}"
-		>
-			<Icon
-				name="sync"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Sync
-		</a>
-		<a
-			href={resolve('/settings')}
-			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-				isActive('/settings')
-			)}"
-		>
-			<Icon
-				name="settings"
-				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-			/>
-			Settings
-		</a>
+			Workspace
+		</button>
+		{#if workspaceExpanded}
+			<div id="workspace-links" class="mt-0.5 flex flex-col gap-0.5">
+				<a
+					href={resolve('/agents')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/agents')
+					)}"
+				>
+					<Icon
+						name="robot"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Agents
+					{#if agentCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{agentCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/teams')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/teams')
+					)}"
+				>
+					<Icon
+						name="users"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Teams
+					{#if teamCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{teamCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/providers')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/providers')
+					)}"
+				>
+					<Icon
+						name="plug"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Providers
+					{#if providerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{providerCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/mcp-servers')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/mcp-servers')
+					)}"
+				>
+					<Icon
+						name="server"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					MCP Servers
+					{#if mcpServerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{mcpServerCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/tools')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/tools')
+					)}"
+				>
+					<Icon
+						name="wrench"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Tools
+					{#if toolCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{toolCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/usage')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/usage')
+					)}"
+				>
+					<Icon
+						name="chart"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Usage
+				</a>
+				<a
+					href={resolve('/settings')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/settings')
+					)}"
+				>
+					<Icon
+						name="settings"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Settings
+				</a>
+			</div>
+		{/if}
 	</div>
 
 	<div
@@ -263,8 +318,11 @@
 		{/if}
 	</form>
 
-	<div
-		class="flex items-center gap-2 border-t border-ink/10 px-4 pt-3 text-[12px] text-neutral-600 dark:border-white/10 dark:text-neutral-400"
+	<a
+		href={resolve('/sync')}
+		class="flex items-center gap-2 border-t border-ink/10 px-4 pt-3 text-[12px] {isActive('/sync')
+			? 'text-agent-cyan-700 dark:text-agent-cyan-400'
+			: 'text-neutral-600 hover:text-ink dark:text-neutral-400 dark:hover:text-ink-dark'}"
 	>
 		<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
 			<circle
@@ -286,7 +344,7 @@
 		{:else}
 			{syncPeerCount} peer{syncPeerCount === 1 ? '' : 's'} · {syncRunning ? 'in register' : 'idle'}
 		{/if}
-	</div>
+	</a>
 
 	<div class="px-4 pt-2">
 		<div
