@@ -71,10 +71,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.service import sync_agents
 from rivulets.config import get_settings
 from rivulets.db.base import Base
 from rivulets.db.models import (
     Agent,
+    AgentPeerPreference,
     Channel,
     File,
     MCPServer,
@@ -197,6 +199,9 @@ MESSAGE_SPEC = EntitySpec(
 )
 WORKSPACE_SETTING_SPEC = EntitySpec(
     "workspace_setting", WorkspaceSetting, ("value",), pk_field="key"
+)
+AGENT_PEER_PREFERENCE_SPEC = EntitySpec(
+    "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_field="agent_id"
 )
 
 
@@ -443,6 +448,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "rivulet": RIVULET_SPEC,
     "message": MESSAGE_SPEC,
     "workspace_setting": WORKSPACE_SETTING_SPEC,
+    "agent_peer_preference": AGENT_PEER_PREFERENCE_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields
@@ -554,4 +560,14 @@ async def handle_incoming_state_change(
             logger.info(
                 "Applied remote change for %s/%s from %s", entity_type, entity_id, origin_node_id
             )
+            if entity_type == "agent":
+                # Without this, a node that only ever *receives* an Agent
+                # row via sync has the DB row but no matching in-process
+                # AgentOS registration -- run_agent() would raise "Agent
+                # ... is not registered with AgentOS" the first time
+                # anything (including issue #10's remote dispatch) tried
+                # to invoke it here. Local create/update already calls
+                # this itself (api/agents.py); a remotely-applied change
+                # was the one path that didn't.
+                await sync_agents(db)
             await retry_pending_inbound(db)

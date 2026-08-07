@@ -7,6 +7,7 @@ export interface Peer {
 	peer_id: string;
 	address: string;
 	connected: boolean;
+	capabilities: string[];
 }
 
 export interface SyncStatus {
@@ -36,5 +37,13 @@ export const sync = {
 		api.post<void>('/sync/disconnect', { peer_id }, auth.token ?? undefined),
 	conflicts: () => api.get<SyncConflict[]>('/sync/conflicts', auth.token ?? undefined),
 	resolveConflict: (id: string, keep: 'local' | 'remote') =>
-		api.post<SyncConflict>(`/sync/conflicts/${id}/resolve`, { keep }, auth.token ?? undefined)
+		api.post<SyncConflict>(`/sync/conflicts/${id}/resolve`, { keep }, auth.token ?? undefined),
+	getCapabilities: () =>
+		api.get<{ capabilities: string[] }>('/sync/capabilities', auth.token ?? undefined),
+	setCapabilities: (capabilities: string[]) =>
+		api.patch<{ capabilities: string[] }>(
+			'/sync/capabilities',
+			{ capabilities },
+			auth.token ?? undefined
+		)
 };

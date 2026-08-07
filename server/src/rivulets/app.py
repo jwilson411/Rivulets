@@ -24,8 +24,10 @@ from rivulets.api import api_router
 from rivulets.backup import run_startup_backup_checks
 from rivulets.config import get_settings
 from rivulets.db.session import get_engine, init_db, session_scope
+from rivulets.dispatch import invoke_agent_remotely
 from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
+from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.publish import drain_pending_outbound
 
 _BASE_CSP = "default-src 'self'; connect-src 'self' http://localhost:8484"
@@ -143,7 +145,8 @@ def create_app() -> FastAPI:
     init_agentos()
     engine = init_sync_engine(get_settings().sync_dir)
     engine.set_state_change_handler(handle_incoming_state_change)
-    engine.set_peer_connected_handler(_drain_outbound_on_peer_connected)
+    engine.set_peer_connected_handler(_on_peer_connected)
+    engine.set_agent_dispatch_handler(invoke_agent_remotely)
 
     static_dir = _static_dir()
     app.state.csp = _build_csp(static_dir)
@@ -175,9 +178,16 @@ def _mount_ui(app: FastAPI, static_dir: Path) -> None:
     app.add_api_route("/{full_path:path}", spa_fallback, methods=["GET"])
 
 
-async def _drain_outbound_on_peer_connected() -> None:
+async def _on_peer_connected() -> None:
     async with session_scope() as db:
         await drain_pending_outbound(db)
+    # Issue #10: re-announce this node's own capability tags to every newly
+    # connected peer -- there's no "resync everything on connect" mechanism
+    # in this codebase (see set_peer_connected_handler's own docstring for
+    # why drain_pending_outbound needs the same delayed-retry treatment),
+    # so a fresh broadcast per connection is how a peer that joined after
+    # tags were set still learns about them.
+    await get_sync_engine().publish_capabilities(load_capabilities(get_settings().sync_dir))
 
 
 app = create_app()

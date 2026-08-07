@@ -75,7 +75,8 @@ const humanMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const agentMessage: Message = {
@@ -89,7 +90,8 @@ const agentMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 afterEach(() => {

@@ -19,6 +19,8 @@
 	let keywordDrafts = $state<Record<string, string>>({});
 	let actionError = $state<string | null>(null);
 
+	let peerPreferenceDrafts = $state<Record<string, string>>({});
+
 	async function refresh() {
 		loadError = null;
 		try {
@@ -27,6 +29,12 @@
 				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
 			);
 			rulesByAgent = Object.fromEntries(entries);
+			const preferenceEntries = await Promise.all(
+				agentList.map(
+					async (a) => [a.id, (await agents.getPeerPreference(a.id)).capability_tag ?? ''] as const
+				)
+			);
+			peerPreferenceDrafts = Object.fromEntries(preferenceEntries);
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load agents';
 		}
@@ -91,6 +99,17 @@
 			.filter(Boolean);
 		await setRule(agentId, 'keyword', JSON.stringify(keywords));
 		keywordDrafts[agentId] = '';
+	}
+
+	async function savePeerPreference(agentId: string) {
+		actionError = null;
+		const tag = peerPreferenceDrafts[agentId]?.trim() || null;
+		try {
+			await agents.setPeerPreference(agentId, tag);
+			peerPreferenceDrafts[agentId] = tag ?? '';
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to update peer preference';
+		}
 	}
 
 	function ruleSummary(rules: RoutingRule[] | undefined): string {
@@ -219,6 +238,21 @@
 								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
 							>
 								Set keywords
+							</button>
+						</div>
+						<div class="mt-2 flex flex-wrap items-center gap-2">
+							<span class="text-xs text-neutral-500">Preferred peer capability:</span>
+							<input
+								type="text"
+								bind:value={peerPreferenceDrafts[agent.id]}
+								placeholder="e.g. gpu (blank = no preference)"
+								class="w-56 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+							/>
+							<button
+								onclick={() => savePeerPreference(agent.id)}
+								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+							>
+								Save
 							</button>
 						</div>
 					</div>

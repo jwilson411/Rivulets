@@ -72,6 +72,11 @@ class MessageOut(BaseModel):
     # fields, not a general-purpose metadata bag.
     model_used: str | None = None
     tier: str | None = None
+    # Issue #10: which node actually ran the agent that produced this
+    # message -- None for human messages, or when the sync engine wasn't
+    # running at reply time. Parsed from the same metadata_json bag as
+    # model_used/tier above.
+    executed_node_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -159,6 +164,7 @@ def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
         attachments=[_to_attachment_out(f) for f in attachments],
         model_used=metadata.get("model_used"),
         tier=metadata.get("tier"),
+        executed_node_id=metadata.get("executed_node_id"),
     )
 
 
@@ -208,7 +214,9 @@ async def create_rivulet(
     db.add(human_message)
     await db.flush()  # populate human_message.id before attaching files to it
     attached_files = await _attach_files(db, human_message, body.files)
-    agent_messages = await dispatch_and_respond(db, rivulet, channel, body.content)
+    agent_messages = await dispatch_and_respond(
+        db, rivulet, channel, body.content, triggering_message_id=human_message.id
+    )
     await db.commit()
     await db.refresh(rivulet)
     await _publish_rivulet_change(db, rivulet)
@@ -254,7 +262,9 @@ async def post_message(
     attached_files = await _attach_files(db, message, body.files)
     # dispatch_and_respond resets RivuletGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
-    agent_messages = await dispatch_and_respond(db, rivulet, channel, body.content)
+    agent_messages = await dispatch_and_respond(
+        db, rivulet, channel, body.content, triggering_message_id=message.id
+    )
     await db.commit()
     await db.refresh(message)
     # dispatch can pause the rivulet (a loop guard tripping) as a side

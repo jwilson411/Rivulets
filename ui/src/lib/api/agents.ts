@@ -51,5 +51,16 @@ export const agents = {
 	setRoutingRules: (
 		id: string,
 		rules: { rule_type: RuleType; pattern: string; priority?: number }[]
-	) => api.patch<RoutingRule[]>(`/agents/${id}/routing-rules`, { rules }, auth.token ?? undefined)
+	) => api.patch<RoutingRule[]>(`/agents/${id}/routing-rules`, { rules }, auth.token ?? undefined),
+	getPeerPreference: (id: string) =>
+		api.get<{ capability_tag: string | null }>(
+			`/agents/${id}/peer-preference`,
+			auth.token ?? undefined
+		),
+	setPeerPreference: (id: string, capability_tag: string | null) =>
+		api.put<{ capability_tag: string | null }>(
+			`/agents/${id}/peer-preference`,
+			{ capability_tag },
+			auth.token ?? undefined
+		)
 };

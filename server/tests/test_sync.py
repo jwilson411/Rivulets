@@ -23,6 +23,7 @@ exactly what FR-9.5 says should still work.
 
 import asyncio
 import hashlib
+import json
 import os
 import struct
 from collections.abc import Iterator
@@ -40,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.config import get_settings
 from rivulets.db.models import (
     Agent,
+    AgentPeerPreference,
     Channel,
     File,
     MCPServer,
@@ -53,7 +55,9 @@ from rivulets.db.models import (
     WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
+from rivulets.sync.agent_dispatch import AgentDispatchRequest
 from rivulets.sync.apply import (
+    AGENT_PEER_PREFERENCE_SPEC,
     AGENT_SPEC,
     CHANNEL_SPEC,
     MCP_SERVER_SPEC,
@@ -277,6 +281,103 @@ async def test_apply_remote_workspace_setting_change_updates_existing(
     setting = await db_session.get(WorkspaceSetting, "guard.turn_limit")
     assert setting is not None
     assert setting.value == "20"
+
+
+async def test_apply_remote_agent_peer_preference_creates_row(db_session: AsyncSession) -> None:
+    """Like WorkspaceSetting, AgentPeerPreference's primary key is
+    agent_id, not id -- another EntitySpec.pk_field regression case, plus
+    coverage that issue #10's new entity type is actually wired into
+    _DISPATCH (handle_incoming_state_change), not just apply_remote_change
+    directly."""
+    db_session.add(Agent(id="agent-1", name="Remote Pref Agent", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    await handle_incoming_state_change(
+        "agent_peer_preference", "agent-1", {"node-b": 1}, "node-b", {"capability_tag": "gpu"}
+    )
+
+    async with session_scope() as db:
+        pref = await db.get(AgentPeerPreference, "agent-1")
+        assert pref is not None
+        assert pref.capability_tag == "gpu"
+
+
+async def test_apply_remote_agent_peer_preference_updates_existing(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(Agent(id="agent-1", name="Pref Agent", **_AGENT_FIELDS))
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="cpu-heavy"))
+    await db_session.commit()
+    await record_local_change(db_session, "agent_peer_preference", "agent-1", "node-a")
+
+    result = await apply_remote_change(
+        db_session,
+        AGENT_PEER_PREFERENCE_SPEC,
+        "agent-1",
+        {"node-a": 1, "node-b": 1},
+        "node-b",
+        {"capability_tag": "gpu"},
+    )
+    assert result.applied is True
+
+    pref = await db_session.get(AgentPeerPreference, "agent-1")
+    assert pref is not None
+    assert pref.capability_tag == "gpu"
+
+
+async def test_apply_remote_agent_peer_preference_detects_conflict(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(Agent(id="agent-1", name="Pref Agent", **_AGENT_FIELDS))
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="cpu-heavy"))
+    await db_session.commit()
+    await record_local_change(db_session, "agent_peer_preference", "agent-1", "node-a")
+
+    result = await apply_remote_change(
+        db_session,
+        AGENT_PEER_PREFERENCE_SPEC,
+        "agent-1",
+        {"node-b": 1},  # concurrent with local's {node-a: 1} -- neither dominates
+        "node-b",
+        {"capability_tag": "gpu"},
+    )
+    assert result.applied is False
+    assert result.conflict is True
+
+    pref = await db_session.get(AgentPeerPreference, "agent-1")
+    assert pref is not None
+    assert pref.capability_tag == "cpu-heavy"  # untouched
+
+
+async def test_handle_incoming_agent_change_resyncs_agentos_registry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the sync_agents()-after-remote-apply fix
+    (sync/apply.py's handle_incoming_state_change): before this fix, a
+    node that only ever *received* an Agent row via sync had the DB row
+    but no matching in-process AgentOS registration, so run_agent() would
+    raise "not registered with AgentOS" -- issue #10's remote dispatch
+    depends on this being fixed. Asserts sync_agents() gets called at all
+    (not that the agent successfully joins AgentOS's registry, which also
+    depends on a resolvable provider -- unrelated to the bug this guards
+    against, and AgentOS.agents is skip-on-failure by design, per
+    NFR-2.4)."""
+    calls: list[AsyncSession] = []
+
+    async def fake_sync_agents(db: AsyncSession) -> None:
+        calls.append(db)
+
+    monkeypatch.setattr("rivulets.sync.apply.sync_agents", fake_sync_agents)
+
+    await handle_incoming_state_change(
+        "agent",
+        "agent-remote-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Remotely Synced Agent", **_AGENT_FIELDS},
+    )
+
+    assert len(calls) == 1
 
 
 async def test_apply_remote_rivulet_change_creates_rivulet(db_session: AsyncSession) -> None:
@@ -668,6 +769,47 @@ async def test_engine_tracks_inbound_connections_and_detects_disconnect(tmp_path
         await engine_b.stop()
 
 
+async def test_two_engines_sync_capability_broadcast(tmp_path: Path) -> None:
+    """Issue #10: capability announcements ride the same _STATE_TOPIC as
+    entity sync, but via the "node_capabilities" sentinel branch in
+    _receive_loop -- not apply.py. This is the real end-to-end regression
+    test for that branch, mirroring test_two_engines_sync_agent_state_change."""
+    psk_hex = hashlib.sha256(b"capability-test-workspace").digest().hex()
+
+    engine_a = SyncEngine(tmp_path / "a")
+    engine_b = SyncEngine(tmp_path / "b")
+
+    await engine_a.start("capability-test-fingerprint-a", psk_hex)
+    await engine_b.start("capability-test-fingerprint-b", psk_hex)
+    try:
+        addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            _get_first_addr, engine_a
+        )
+        await engine_b.connect(addr)
+        await asyncio.sleep(2.0)  # let gossipsub GRAFT the mesh (heartbeat-driven)
+
+        await engine_a.publish_capabilities(["gpu", "cpu-heavy"])
+
+        for _ in range(50):
+            capabilities = await engine_b.list_peer_capabilities()
+            if engine_a.node_id in capabilities:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            pytest.fail("engine_b never received engine_a's capability broadcast")
+
+        assert capabilities[engine_a.node_id] == ["gpu", "cpu-heavy"]
+
+        # Disconnecting drops the cached entry -- a peer going offline must
+        # not still count toward remote-dispatch routing.
+        await engine_b.disconnect(engine_a.node_id)
+        await asyncio.sleep(1.0)
+        assert engine_a.node_id not in await engine_b.list_peer_capabilities()
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+
+
 def test_sync_status_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/sync/status", headers=auth_headers)
     assert response.status_code == 200
@@ -687,6 +829,44 @@ def test_sync_disconnect_when_not_running(client: TestClient, auth_headers: dict
         "/api/v1/sync/disconnect", json={"peer_id": "some-peer"}, headers=auth_headers
     )
     assert response.status_code == 409
+
+
+def test_get_capabilities_defaults_to_empty(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Redirect to an isolated tmp_path -- capabilities.json lives under the
+    # shared session workspace dir otherwise, and this test must not
+    # depend on (or be broken by) another test in this file having already
+    # written one there.
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    response = client.get("/api/v1/sync/capabilities", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"capabilities": []}
+
+
+def test_set_capabilities_persists_and_round_trips(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Engine isn't running through the client fixture (see its docstring),
+    so this exercises save/load_capabilities' local file round-trip
+    without needing publish_capabilities to actually broadcast anything."""
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    set_response = client.patch(
+        "/api/v1/sync/capabilities",
+        json={"capabilities": ["gpu", "cpu-heavy"]},
+        headers=auth_headers,
+    )
+    assert set_response.status_code == 200, set_response.text
+    assert set_response.json() == {"capabilities": ["gpu", "cpu-heavy"]}
+
+    read_back = client.get("/api/v1/sync/capabilities", headers=auth_headers)
+    assert read_back.json() == {"capabilities": ["gpu", "cpu-heavy"]}
 
 
 def test_list_conflicts_empty(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -906,6 +1086,9 @@ class _FakeRunningEngine:
     async def list_peers(self) -> list[PeerInfo]:
         return self._peers
 
+    async def list_peer_capabilities(self) -> dict[str, list[str]]:
+        return {}
+
     async def connect(self, address: str) -> PeerInfo:
         if isinstance(self._connect_result, Exception):
             raise self._connect_result
@@ -932,7 +1115,12 @@ def test_sync_status_when_running_reports_peers(
     assert body["running"] is True
     assert body["node_id"] == "fake-node-id"
     assert body["peers"] == [
-        {"peer_id": "peer-1", "address": "/ip4/1.2.3.4/tcp/1", "connected": True}
+        {
+            "peer_id": "peer-1",
+            "address": "/ip4/1.2.3.4/tcp/1",
+            "connected": True,
+            "capabilities": [],
+        }
     ]
 
 
@@ -955,6 +1143,7 @@ def test_sync_connect_when_running_returns_peer(
         "peer_id": "peer-2",
         "address": "/ip4/5.6.7.8/tcp/2",
         "connected": True,
+        "capabilities": [],
     }
 
 
@@ -1659,6 +1848,127 @@ async def test_handle_file_transfer_stream_logs_and_closes_on_malformed_request(
 
     assert stream.written == b""
     assert stream.closed is True  # finally still runs
+
+
+def _sample_dispatch_request() -> AgentDispatchRequest:
+    return AgentDispatchRequest(
+        rivulet_id="riv-1",
+        channel_id="chan-1",
+        agent_id="agent-1",
+        message_content="hello",
+        from_agent_id=None,
+        from_agent_name=None,
+        triggering_message_id="msg-1",
+    )
+
+
+def _framed(data: bytes) -> bytes:
+    return len(data).to_bytes(4, "big") + data
+
+
+def _unframe_response(written: bytes) -> dict[str, Any]:
+    length = int.from_bytes(written[:4], "big")
+    return json.loads(written[4 : 4 + length].decode())
+
+
+async def test_handle_agent_dispatch_stream_acks_accepted_when_handler_registered(
+    tmp_path: Path,
+) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    received: list[AgentDispatchRequest] = []
+
+    async def fake_handler(request: AgentDispatchRequest) -> None:
+        received.append(request)
+
+    engine.set_agent_dispatch_handler(fake_handler)
+    request = _sample_dispatch_request()
+    stream = _FakeFileStream(to_read=_framed(request.to_bytes()))
+
+    await engine._handle_agent_dispatch_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+    assert _unframe_response(stream.written) == {"accepted": True, "reason": None}
+    assert stream.closed is True
+
+    # The handler runs via asyncio.run_coroutine_threadsafe -- fire-and-
+    # forget from the stream handler's own perspective, so poll briefly
+    # for it to actually run before asserting.
+    for _ in range(50):
+        if received:
+            break
+        await asyncio.sleep(0.01)
+    assert received == [request]
+
+
+async def test_handle_agent_dispatch_stream_acks_rejected_when_no_handler_registered(
+    tmp_path: Path,
+) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    stream = _FakeFileStream(to_read=_framed(_sample_dispatch_request().to_bytes()))
+
+    await engine._handle_agent_dispatch_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+    response = _unframe_response(stream.written)
+    assert response["accepted"] is False
+    assert response["reason"]
+    assert stream.closed is True
+
+
+async def test_handle_agent_dispatch_stream_logs_and_closes_on_malformed_request(
+    tmp_path: Path,
+) -> None:
+    engine = SyncEngine(tmp_path)
+    stream = _FakeFileStream(to_read=b"")  # too short -- read_exactly raises EOFError
+
+    await engine._handle_agent_dispatch_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+    assert stream.written == b""
+    assert stream.closed is True  # finally still runs
+
+
+def test_trio_dispatch_agent_returns_true_on_accept(tmp_path: Path) -> None:
+    request = _sample_dispatch_request()
+    response = _framed(json.dumps({"accepted": True, "reason": None}).encode())
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        result = await engine._trio_dispatch_agent(  # pyright: ignore[reportPrivateUsage]
+            _valid_base58_peer_id(), request
+        )
+        assert result is True
+
+    trio.run(main)
+
+
+def test_trio_dispatch_agent_returns_false_on_reject(tmp_path: Path) -> None:
+    response = _framed(json.dumps({"accepted": False, "reason": "no dispatch handler"}).encode())
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        result = await engine._trio_dispatch_agent(  # pyright: ignore[reportPrivateUsage]
+            _valid_base58_peer_id(), _sample_dispatch_request()
+        )
+        assert result is False
+
+    trio.run(main)
+
+
+async def test_dispatch_agent_remotely_returns_false_on_transport_failure(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)  # never started -- _call_trio raises immediately
+    result = await engine.dispatch_agent_remotely("peer-x", _sample_dispatch_request())
+    assert result is False
 
 
 def _valid_base58_peer_id() -> str:

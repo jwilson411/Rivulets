@@ -50,8 +50,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.agentos import run_agent
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.agentos.pricing import estimate_cost_usd
+from rivulets.config import get_settings
 from rivulets.db.models import (
     Agent,
+    AgentPeerPreference,
     AgentRoutingRule,
     AgentRun,
     Channel,
@@ -61,6 +63,7 @@ from rivulets.db.models import (
     RivuletGuardState,
     TeamAgent,
 )
+from rivulets.db.session import session_scope
 from rivulets.dispatch.complexity_classifier import classify_tier
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
 from rivulets.dispatch.guards import (
@@ -71,6 +74,10 @@ from rivulets.dispatch.guards import (
 from rivulets.dispatch.llm_fallback import build_llm_fallback
 from rivulets.dispatch.rules import Rule, RuleType
 from rivulets.streaming import publish
+from rivulets.sync import get_sync_engine
+from rivulets.sync.agent_dispatch import AgentDispatchRequest
+from rivulets.sync.capabilities import load_capabilities
+from rivulets.sync.publish import publish_current_state
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +189,7 @@ async def dispatch_and_respond(
     *,
     from_agent_id: str | None = None,
     from_agent_name: str | None = None,
+    triggering_message_id: str | None = None,
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
     agent, appending its reply to `rivulet` as a Message row. Returns the
@@ -191,12 +199,20 @@ async def dispatch_and_respond(
 
     `from_agent_id`/`from_agent_name` are set only on recursive calls
     triggered by another agent's own message — omit them for the normal,
-    human-triggered path.
+    human-triggered path. `triggering_message_id` (issue #10) rides along
+    for correlation on a remotely-dispatched agent's request/ack, not used
+    locally.
     """
     is_top_level = from_agent_id is None
     try:
         return await _dispatch_and_respond(
-            db, rivulet, channel, message_content, from_agent_id, from_agent_name
+            db,
+            rivulet,
+            channel,
+            message_content,
+            from_agent_id,
+            from_agent_name,
+            triggering_message_id,
         )
     finally:
         # One "no more events for this trigger" signal per external call,
@@ -213,6 +229,7 @@ async def _dispatch_and_respond(
     message_content: str,
     from_agent_id: str | None,
     from_agent_name: str | None,
+    triggering_message_id: str | None = None,
 ) -> list[Message]:
     guard_state = await get_or_create_guard_state(db, rivulet.id)
     if from_agent_id is None:
@@ -248,6 +265,27 @@ async def _dispatch_and_respond(
             # call sharing this guard_state) just tripped a guard.
             break
         agent = agent_by_id[agent_id]
+        remote_peer = await _resolve_remote_peer(db, agent)
+        if remote_peer is not None:
+            dispatched = await _dispatch_to_remote_peer(
+                remote_peer,
+                rivulet,
+                channel,
+                agent,
+                message_content,
+                from_agent_id,
+                from_agent_name,
+                triggering_message_id,
+            )
+            if dispatched:
+                # The reply arrives later via normal Message gossipsub
+                # sync, not as a return value here (see agent_dispatch.py's
+                # module docstring on why the RPC is ack-only).
+                continue
+            # Ack failed or timed out (peer unreachable, no handler,
+            # etc.) -- fall through to running it locally instead, same
+            # "offline -> run locally" fallback as _resolve_remote_peer's
+            # own not-running/no-match cases.
         new_messages.extend(
             await _invoke_agent(
                 db,
@@ -263,6 +301,100 @@ async def _dispatch_and_respond(
         )
 
     return new_messages
+
+
+async def _resolve_remote_peer(db: AsyncSession, agent: Agent) -> str | None:
+    """Issue #10: if `agent` is pinned to a capability tag, and a connected
+    peer (other than this node) advertises it, return that peer's id so
+    the caller can dispatch there instead of running locally. Returns None
+    -- meaning "run locally" -- for every other case: no preference set,
+    sync engine not running (confirmed v1 scope: no queue/retry fallback),
+    this node already has the preferred capability itself, or no connected
+    peer currently advertises it."""
+    pref = await db.get(AgentPeerPreference, agent.id)
+    if pref is None:
+        return None
+    engine = get_sync_engine()
+    if not engine.running:
+        return None
+    if pref.capability_tag in load_capabilities(get_settings().sync_dir):
+        return None  # this node already matches -- no network hop needed
+    for peer_id, tags in (await engine.list_peer_capabilities()).items():
+        if pref.capability_tag in tags:
+            return peer_id  # first match; no load-balancing in v1
+    return None
+
+
+async def _dispatch_to_remote_peer(
+    peer_id: str,
+    rivulet: Rivulet,
+    channel: Channel,
+    agent: Agent,
+    message_content: str,
+    from_agent_id: str | None,
+    from_agent_name: str | None,
+    triggering_message_id: str | None,
+) -> bool:
+    request = AgentDispatchRequest(
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+        agent_id=agent.id,
+        message_content=message_content,
+        from_agent_id=from_agent_id,
+        from_agent_name=from_agent_name,
+        triggering_message_id=triggering_message_id,
+    )
+    return await get_sync_engine().dispatch_agent_remotely(peer_id, request)
+
+
+async def invoke_agent_remotely(request: AgentDispatchRequest) -> None:
+    """Server side of an incoming agent-dispatch RPC (issue #10) -- wired
+    to SyncEngine.set_agent_dispatch_handler in app.py. Opens its own DB
+    session since it isn't running inside a FastAPI request, the same
+    pattern as sync/apply.py's handle_incoming_state_change. Loads
+    everything locally, then calls the exact same `_invoke_agent` the
+    ordinary in-process dispatch path uses -- no parallel execution
+    pipeline. Publishes any resulting messages itself since there's no
+    outer request handler to do it (mirrors api/rivulets.py's
+    create_rivulet/post_message publishing their own dispatch results)."""
+    async with session_scope() as db:
+        rivulet = await db.get(Rivulet, request.rivulet_id)
+        channel = await db.get(Channel, request.channel_id)
+        agent = await db.get(Agent, request.agent_id)
+        if rivulet is None or channel is None or agent is None:
+            logger.warning(
+                "Remote agent dispatch (rivulet=%s channel=%s agent=%s): "
+                "entity not found locally yet",
+                request.rivulet_id,
+                request.channel_id,
+                request.agent_id,
+            )
+            return
+
+        guard_state = await get_or_create_guard_state(db, rivulet.id)
+        if guard_state.paused:
+            return
+        if rivulet.agentos_session_id is None:
+            rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
+
+        team_agents = (
+            await _load_team_dispatch_agents(db, channel.team_id) if channel.team_id else []
+        )
+        new_messages = await _invoke_agent(
+            db,
+            rivulet,
+            channel,
+            guard_state,
+            agent,
+            request.message_content,
+            team_agents,
+            from_agent_id=request.from_agent_id,
+            from_agent_name=request.from_agent_name,
+        )
+        await db.commit()
+        for message in new_messages:
+            await publish_current_state(db, "message", message.id)
+        publish(rivulet.id, "done", {"rivulet_id": rivulet.id})
 
 
 async def _invoke_agent(
@@ -371,20 +503,25 @@ async def _invoke_agent(
 
     # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
     content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
+    # Auto mode (#23) visibility (model_used/tier) and issue #10's "where
+    # did this run execute" (executed_node_id) both ride the same
+    # previously-unused, already-synced metadata_json column -- no schema/
+    # sync work needed for either. executed_node_id is always attached
+    # (None when the sync engine isn't running), unlike model_used/tier
+    # which stay None for non-auto agents.
+    engine = get_sync_engine()
+    message_metadata = {
+        "model_used": model_used,
+        "tier": model_tier,
+        "executed_node_id": engine.node_id if engine.running else None,
+    }
     message = Message(
         rivulet_id=rivulet.id,
         sender_type="agent",
         sender_id=agent.id,
         sender_name=agent.name,
         content=content,
-        # Auto mode (#23) visibility: which concrete model actually
-        # answered. Uses the existing, previously-unused, already-synced
-        # metadata_json column -- no schema/sync work needed. None for
-        # non-auto agents (their model is fixed and already shown in the
-        # agent's own config, not per-message).
-        metadata_json=(
-            json.dumps({"model_used": model_used, "tier": model_tier}) if model_used else None
-        ),
+        metadata_json=json.dumps(message_metadata),
     )
     db.add(message)
     await _record_agent_run(

@@ -3,7 +3,7 @@
 // SvelteKit routing modules, so nothing else needs mocking.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import AgentsPage from './+page.svelte';
 import { agents, type Agent } from '$lib/api/agents';
@@ -16,7 +16,9 @@ vi.mock('$lib/api/agents', () => ({
 		update: vi.fn(),
 		remove: vi.fn(),
 		getRoutingRules: vi.fn(),
-		setRoutingRules: vi.fn()
+		setRoutingRules: vi.fn(),
+		getPeerPreference: vi.fn(),
+		setPeerPreference: vi.fn()
 	}
 }));
 
@@ -43,6 +45,10 @@ const anthropicProvider = {
 
 afterEach(() => {
 	vi.clearAllMocks();
+});
+
+beforeEach(() => {
+	vi.mocked(agents.getPeerPreference).mockResolvedValue({ capability_tag: null });
 });
 
 describe('agents/+page.svelte', () => {

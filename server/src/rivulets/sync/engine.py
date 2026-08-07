@@ -85,6 +85,12 @@ from libp2p.utils.address_validation import find_free_port, get_available_interf
 from multiaddr import Multiaddr
 
 from rivulets.config import get_settings
+from rivulets.sync.agent_dispatch import (
+    AGENT_DISPATCH_PROTOCOL,
+    AgentDispatchRequest,
+    read_framed,
+    write_framed,
+)
 from rivulets.sync.discovery import WorkspaceMDNS, on_peer_discovered
 from rivulets.sync.file_transfer import (
     FILE_TRANSFER_PROTOCOL,
@@ -103,11 +109,13 @@ _CONNECT_TIMEOUT_SECONDS = 10
 _THREAD_START_TIMEOUT_SECONDS = 10
 _THREAD_STOP_TIMEOUT_SECONDS = 10
 _FILE_TRANSFER_TIMEOUT_SECONDS = 60
+_AGENT_DISPATCH_ACK_TIMEOUT_SECONDS = 10
 
 StateChangeHandler = Callable[
     [str, str, dict[str, int], str, dict[str, Any]], Coroutine[Any, Any, None]
 ]
 PeerConnectedHandler = Callable[[], Coroutine[Any, Any, None]]
+AgentDispatchHandler = Callable[[AgentDispatchRequest], Coroutine[Any, Any, None]]
 
 _MESH_FORM_DELAY_SECONDS = 2.0
 
@@ -203,6 +211,12 @@ class SyncEngine:
         self._pubsub: Pubsub | None = None
         self._mdns: WorkspaceMDNS | None = None
         self._connected_peers: dict[str, str] = {}
+        # Other peers' self-declared capability tags (issue #10), keyed by
+        # peer_id -- populated from "node_capabilities" envelopes on the
+        # same _STATE_TOPIC gossipsub channel as entity sync, but this is
+        # live broadcast state, not a DB-backed EntitySpec (see
+        # _receive_loop): no vector clock, no apply.py, latest-wins.
+        self._peer_capabilities: dict[str, list[str]] = {}
         # Serializes concurrent connect attempts to the same peer_id.
         # Manual connect() and mDNS auto-connect can both target the same
         # peer at nearly the same moment; two concurrent host.connect()
@@ -214,6 +228,7 @@ class SyncEngine:
         self._connect_locks: dict[str, trio.Lock] = {}
         self._on_state_change: StateChangeHandler | None = None
         self._on_peer_connected_handler: PeerConnectedHandler | None = None
+        self._on_agent_dispatch: AgentDispatchHandler | None = None
         self._workspace_fingerprint: str | None = None
         self._psk_hex: str | None = None
         self._node_id: str | None = None
@@ -245,6 +260,14 @@ class SyncEngine:
         bumped, but the peer never received anything). Retrying again once
         an actual peer is connected is what makes the retry meaningful."""
         self._on_peer_connected_handler = handler
+
+    def set_agent_dispatch_handler(self, handler: AgentDispatchHandler) -> None:
+        """Wired to dispatch/service.py's invoke_agent_remotely at app
+        startup, same pattern as set_state_change_handler. Registering this
+        is what makes _handle_agent_dispatch_stream ack incoming requests
+        as accepted -- see agent_dispatch.py's module docstring for why the
+        ack itself doesn't do a deeper DB-backed check."""
+        self._on_agent_dispatch = handler
 
     async def start(self, workspace_fingerprint: str, psk_hex: str) -> None:
         """Idempotent: a second call while already running is a no-op —
@@ -284,6 +307,7 @@ class SyncEngine:
         self._host = host
         self._node_id = str(host.get_id())
         host.set_stream_handler(FILE_TRANSFER_PROTOCOL, self._handle_file_transfer_stream)
+        host.set_stream_handler(AGENT_DISPATCH_PROTOCOL, self._handle_agent_dispatch_stream)
         host.get_network().register_notifee(
             _PeerConnectionNotifee(self._on_peer_connected, self._on_peer_disconnected)
         )
@@ -349,6 +373,12 @@ class SyncEngine:
                 payload = envelope["payload"]
             except Exception:
                 logger.warning("Discarding malformed sync message", exc_info=True)
+                continue
+            if entity_type == "node_capabilities":
+                # Not a DB-backed entity -- never reaches apply.py. Latest
+                # broadcast simply replaces whatever this node had cached
+                # for that peer.
+                self._peer_capabilities[origin_node_id] = payload.get("capabilities", [])
                 continue
             handler = self._on_state_change
             loop = self._loop
@@ -467,6 +497,7 @@ class SyncEngine:
     def _on_peer_disconnected(self, peer_id: str) -> None:
         if self._connected_peers.pop(peer_id, None) is not None:
             logger.info("Peer %s disconnected", peer_id)
+        self._peer_capabilities.pop(peer_id, None)
 
     async def _trigger_peer_connected_handler(self) -> None:
         await trio.sleep(_MESH_FORM_DELAY_SECONDS)
@@ -480,6 +511,27 @@ class SyncEngine:
             PeerInfo(peer_id=pid, address=addr, connected=True)
             for pid, addr in self._connected_peers.items()
         ]
+
+    async def list_peer_capabilities(self) -> dict[str, list[str]]:
+        return dict(self._peer_capabilities)
+
+    async def publish_capabilities(self, capabilities: list[str]) -> None:
+        """Broadcast this node's own capability tags to the mesh. Unlike
+        publish_state_change, there's no vector-clock bookkeeping here --
+        this isn't conflict-tracked content, just "latest broadcast wins"
+        (see _receive_loop's node_capabilities branch)."""
+        if self._thread is None:
+            return
+        envelope = json.dumps(
+            {
+                "entity_type": "node_capabilities",
+                "entity_id": self.node_id,
+                "vector_clock": {},
+                "origin_node_id": self.node_id,
+                "payload": {"capabilities": capabilities},
+            }
+        ).encode()
+        await self._call_trio(self._trio_publish, envelope)
 
     async def publish_state_change(
         self,
@@ -564,6 +616,53 @@ class SyncEngine:
                     return None
                 (length,) = struct.unpack(">Q", await read_exactly(stream, 8))
                 return await read_exactly(stream, length)
+        finally:
+            await stream.close()
+
+    async def _handle_agent_dispatch_stream(self, stream: INetStream) -> None:
+        """Server side of agent_dispatch.py's wire protocol. Acks
+        immediately (accepted iff a handler is registered — see that
+        module's docstring for why deeper validation isn't done here) and
+        hands the actual work to asyncio fire-and-forget, the same
+        cross-thread pattern _receive_loop uses for incoming gossipsub
+        messages."""
+        try:
+            request = AgentDispatchRequest.from_bytes(await read_framed(stream))
+            handler = self._on_agent_dispatch
+            loop = self._loop
+            accepted = handler is not None and loop is not None
+            reason = None if accepted else "no dispatch handler registered"
+            await write_framed(
+                stream, json.dumps({"accepted": accepted, "reason": reason}).encode()
+            )
+            if accepted:
+                assert handler is not None and loop is not None
+                asyncio.run_coroutine_threadsafe(handler(request), loop)
+        except Exception:
+            logger.warning("Error handling agent-dispatch stream request", exc_info=True)
+        finally:
+            await stream.close()
+
+    async def dispatch_agent_remotely(self, peer_id: str, request: AgentDispatchRequest) -> bool:
+        """Client side: ask peer_id to run the agent described by request.
+        Returns True only if the peer acked acceptance -- False on a clean
+        reject, timeout, or any transport failure (callers can't
+        distinguish those, same convention as request_file)."""
+        try:
+            return await self._call_trio(self._trio_dispatch_agent, peer_id, request)
+        except Exception:
+            logger.warning("Could not dispatch agent remotely to peer %s", peer_id, exc_info=True)
+            return False
+
+    async def _trio_dispatch_agent(self, peer_id: str, request: AgentDispatchRequest) -> bool:
+        assert self._host is not None
+        stream = await self._host.new_stream(ID.from_base58(peer_id), [AGENT_DISPATCH_PROTOCOL])
+        try:
+            with trio.fail_after(_AGENT_DISPATCH_ACK_TIMEOUT_SECONDS):
+                await write_framed(stream, request.to_bytes())
+                await stream.close_write()  # pyright: ignore[reportAttributeAccessIssue]
+                response = json.loads((await read_framed(stream)).decode())
+                return bool(response.get("accepted", False))
         finally:
             await stream.close()
 

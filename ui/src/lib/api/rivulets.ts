@@ -36,6 +36,10 @@ export interface Message {
 	// (cheap/capable) it was classified into.
 	model_used: string | null;
 	tier: string | null;
+	// Issue #10: which node actually ran the agent that produced this
+	// message -- null for human messages, or when the sync engine wasn't
+	// running at reply time.
+	executed_node_id: string | null;
 }
 
 export const rivulets = {
