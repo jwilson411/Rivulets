@@ -34,11 +34,16 @@ jobs:
             spec: packaging/linux.spec
             binary: rivulets-linux-arm64
           - name: darwin-amd64
-            os: macos-14
+            # macos-14/-15 (no suffix) are Apple Silicon-only hosted
+            # runners; -large is the Intel-hardware variant. Building both
+            # arches on the same arm64 host produced two identically
+            # arm64-targeted binaries (see #67) -- these need to be
+            # genuinely different hardware, not just different YAML labels.
+            os: macos-15-large
             spec: packaging/macos.spec
             binary: rivulets-darwin-amd64
           - name: darwin-arm64
-            os: macos-14
+            os: macos-15
             spec: packaging/macos.spec
             binary: rivulets-darwin-arm64
           - name: windows-amd64

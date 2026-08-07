@@ -4,9 +4,12 @@
 Build with:
     uv run --group packaging pyinstaller packaging/linux.spec
 
-Output: dist/rivulets-linux-amd64 (or -arm64, per build host).
+Output name reflects the build host's architecture (both amd64 and arm64
+builds run their own runner in CI — see release.yml's matrix — so this
+spec doesn't need to know which in advance).
 """
 
+import platform
 import sys
 from pathlib import Path
 
@@ -18,6 +21,10 @@ from _common import (  # noqa: E402
     entry_point,
     server_src,
 )
+
+# platform.machine() on Linux reports "aarch64"/"x86_64", not the
+# "arm64"/"amd64" naming this project's release assets use elsewhere.
+_arch = "arm64" if platform.machine() in ("aarch64", "arm64") else "amd64"
 
 a = Analysis(  # noqa: F821
     [entry_point(SPECPATH)],  # noqa: F821
@@ -36,7 +43,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     a.binaries,
     a.datas,
-    name="rivulets-linux-amd64",
+    name=f"rivulets-linux-{_arch}",
     console=True,
     strip=True,
     upx=False,
