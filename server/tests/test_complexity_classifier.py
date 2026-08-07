@@ -27,9 +27,7 @@ async def test_classify_tier_defaults_to_cheap_when_resolve_model_fails(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("no keychain in CI")
 
-    monkeypatch.setattr(
-        "rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model
-    )
+    monkeypatch.setattr("rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model)
 
     assert await classify_tier(db_session, "Design a distributed consensus protocol.") == "cheap"
 
@@ -46,9 +44,7 @@ async def test_classify_tier_defaults_to_cheap_when_classification_returns_none(
     async def fake_run_classification(*_args: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(
-        "rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model
-    )
+    monkeypatch.setattr("rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model)
     monkeypatch.setattr(
         "rivulets.dispatch.complexity_classifier._run_classification", fake_run_classification
     )
@@ -68,9 +64,7 @@ async def test_classify_tier_returns_capable_when_classifier_says_so(
     async def fake_run_classification(*_args: object, **_kwargs: object) -> _ComplexityDecision:
         return _ComplexityDecision(tier="capable")
 
-    monkeypatch.setattr(
-        "rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model
-    )
+    monkeypatch.setattr("rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model)
     monkeypatch.setattr(
         "rivulets.dispatch.complexity_classifier._run_classification", fake_run_classification
     )
@@ -95,9 +89,7 @@ async def test_classify_tier_runs_on_the_cheap_tier_model_even_when_it_decides_c
     async def fake_run_classification(*_args: object, **_kwargs: object) -> _ComplexityDecision:
         return _ComplexityDecision(tier="capable")
 
-    monkeypatch.setattr(
-        "rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model
-    )
+    monkeypatch.setattr("rivulets.dispatch.complexity_classifier.resolve_model", fake_resolve_model)
     monkeypatch.setattr(
         "rivulets.dispatch.complexity_classifier._run_classification", fake_run_classification
     )

@@ -71,9 +71,7 @@ def test_restore_reverts_workspace_state_to_snapshot(
     assert added.status_code == 201, added.text
     assert len(client.get("/api/v1/providers", headers=auth_headers).json()) == 1
 
-    restore = client.post(
-        f"/api/v1/backups/{backup['filename']}/restore", headers=auth_headers
-    )
+    restore = client.post(f"/api/v1/backups/{backup['filename']}/restore", headers=auth_headers)
     assert restore.status_code == 204, restore.text
 
     after = client.get("/api/v1/providers", headers=auth_headers)
