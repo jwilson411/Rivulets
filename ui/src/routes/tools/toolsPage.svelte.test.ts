@@ -149,4 +149,166 @@ describe('tools/+page.svelte', () => {
 		expect(tools.remove).toHaveBeenCalledWith('tool-custom');
 		await expect.element(page.getByText('my_tool')).not.toBeInTheDocument();
 	});
+
+	it('shows an error when tools fail to load', async () => {
+		vi.mocked(tools.list).mockRejectedValueOnce(new Error('Failed to load tools'));
+
+		render(ToolsPage);
+
+		await expect.element(page.getByText('Failed to load tools')).toBeInTheDocument();
+	});
+
+	it('does nothing when Create tool is submitted with an empty name and description', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+
+		render(ToolsPage);
+		await expect.element(page.getByText('No tools yet — add one above.')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Create tool' }).click();
+
+		expect(tools.create).not.toHaveBeenCalled();
+	});
+
+	it('shows a generic error message when creating a tool fails with a non-ApiError', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(tools.create).mockRejectedValueOnce(new Error('network down'));
+
+		render(ToolsPage);
+		await page.getByPlaceholder('Name').fill('my_tool');
+		await page.getByPlaceholder('Description').fill('Does a custom thing');
+		await page.getByRole('button', { name: 'Create tool' }).click();
+
+		await expect.element(page.getByText('Failed to create tool')).toBeInTheDocument();
+	});
+
+	it('toggles the creation mode back to advanced after switching to simple', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+
+		render(ToolsPage);
+		await page.getByRole('button', { name: 'Simple mode' }).click();
+		await expect
+			.element(page.getByPlaceholder(/Describe what the tool should do/))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Advanced mode' }).click();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Advanced mode' }))
+			.toHaveAttribute('aria-pressed', 'true');
+		await expect
+			.element(page.getByPlaceholder(/Describe what the tool should do/))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows an unavailable badge for a tool marked unavailable', async () => {
+		vi.mocked(tools.list).mockResolvedValue([{ ...builtinTool, available: false }]);
+
+		render(ToolsPage);
+
+		await expect.element(page.getByText('unavailable')).toBeInTheDocument();
+	});
+
+	it('opens the editor for a custom tool and shows the returned path', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.openEditor).mockResolvedValueOnce({ path: '/tools/my_tool.py' });
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Open in editor' }).click();
+
+		expect(tools.openEditor).toHaveBeenCalledWith('tool-custom');
+		await expect.element(page.getByText('/tools/my_tool.py')).toBeInTheDocument();
+	});
+
+	it('shows an error when opening the editor fails', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.openEditor).mockRejectedValueOnce(new ApiError(500, 'Failed to open editor'));
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Open in editor' }).click();
+
+		await expect.element(page.getByText('Failed to open editor')).toBeInTheDocument();
+	});
+
+	it("saves a new version of a tool's source code", async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions)
+			.mockResolvedValueOnce([customToolVersion])
+			.mockResolvedValueOnce([
+				{ version: 2, source_code: 'def run(): return 1', created_at: '2026-08-02T00:00:00Z' },
+				customToolVersion
+			]);
+		vi.mocked(tools.saveVersion).mockResolvedValueOnce({
+			version: 2,
+			source_code: 'def run(): return 1',
+			created_at: '2026-08-02T00:00:00Z'
+		});
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Tool source code').fill('def run(): return 1');
+		await page.getByRole('button', { name: 'Save version' }).click();
+
+		expect(tools.saveVersion).toHaveBeenCalledWith('tool-custom', 'def run(): return 1');
+		await expect.element(page.getByText(/v2 —/)).toBeInTheDocument();
+	});
+
+	it('shows an error when saving a version fails', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.saveVersion).mockRejectedValueOnce(new Error('Failed to save version'));
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Save version' }).click();
+
+		await expect.element(page.getByText('Failed to save version')).toBeInTheDocument();
+	});
+
+	it('rolls back to a previous version and reseeds the draft with its source', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.rollback).mockResolvedValueOnce(customTool);
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Roll back' }).click();
+
+		expect(tools.rollback).toHaveBeenCalledWith('tool-custom', 1);
+		await expect.element(page.getByPlaceholder('Tool source code')).toHaveValue('def run(): pass');
+	});
+
+	it('shows an error when rolling back a version fails', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.rollback).mockRejectedValueOnce(new Error('Failed to roll back'));
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Roll back' }).click();
+
+		await expect.element(page.getByText('Failed to roll back')).toBeInTheDocument();
+	});
+
+	it('shows an error when deleting a tool fails', async () => {
+		vi.mocked(tools.list).mockResolvedValue([customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.remove).mockRejectedValueOnce(new Error('Failed to delete tool'));
+
+		render(ToolsPage);
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Failed to delete tool')).toBeInTheDocument();
+	});
 });

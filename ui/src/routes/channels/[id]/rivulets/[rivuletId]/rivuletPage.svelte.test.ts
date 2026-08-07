@@ -13,6 +13,7 @@ import { render } from 'vitest-browser-svelte';
 import RivuletPage from './+page.svelte';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { channels, type Channel } from '$lib/api/channels';
+import { files as filesApi } from '$lib/api/files';
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -131,6 +132,58 @@ const agentMessage: Message = {
 	tier: null
 };
 
+const attachedMessage: Message = {
+	id: 'msg-3',
+	rivulet_id: 'riv-1',
+	sender_type: 'human',
+	sender_id: null,
+	sender_name: 'Justin',
+	content: 'See attached',
+	content_type: 'text',
+	created_at: new Date().toISOString(),
+	attachments: [
+		{ file_id: 'file-9', filename: 'report.pdf', mime_type: 'application/pdf', size_bytes: 2048 }
+	],
+	model_used: null,
+	tier: null
+};
+
+const handoffMessage: Message = {
+	id: 'msg-h',
+	rivulet_id: 'riv-1',
+	sender_type: 'system',
+	sender_id: null,
+	sender_name: 'System',
+	content: 'Researcher handed off to Writer',
+	content_type: 'handoff',
+	created_at: new Date().toISOString(),
+	attachments: [],
+	model_used: null,
+	tier: null
+};
+
+const systemAlertMessage: Message = {
+	id: 'msg-sys',
+	rivulet_id: 'riv-1',
+	sender_type: 'system',
+	sender_id: null,
+	sender_name: 'System',
+	content: 'Agent Researcher was paused after an error',
+	content_type: 'system_alert',
+	created_at: new Date().toISOString(),
+	attachments: [],
+	model_used: null,
+	tier: null
+};
+
+const autoModeMessage: Message = {
+	...agentMessage,
+	id: 'msg-auto',
+	content: 'Here is the answer',
+	model_used: 'claude-haiku-4-5',
+	tier: 'cheap'
+};
+
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.token = null;
@@ -230,5 +283,294 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		render(RivuletPage);
 
 		await expect.element(page.getByText('Failed to load rivulet')).toBeInTheDocument();
+	});
+
+	it('adds a pending file via the file input, shows it as a chip, and removes it', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		const { container } = await render(RivuletPage);
+		await expect
+			.element(page.getByRole('heading', { name: 'Kickoff message' }))
+			.toBeInTheDocument();
+
+		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+		await page
+			.elementLocator(input)
+			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
+
+		await expect.element(page.getByText('notes.txt')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Remove notes.txt' }).click();
+		await expect.element(page.getByText('notes.txt')).not.toBeInTheDocument();
+	});
+
+	it('uploads pending files before sending and includes their ids in the message', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages)
+			.mockResolvedValueOnce([humanMessage])
+			.mockResolvedValueOnce([humanMessage, agentMessage]);
+		vi.mocked(filesApi.upload).mockResolvedValue({
+			file_id: 'file-1',
+			content_hash: 'hash',
+			filename: 'notes.txt',
+			mime_type: 'text/plain',
+			size_bytes: 5
+		});
+		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(agentMessage);
+
+		const { container } = await render(RivuletPage);
+		await expect
+			.element(page.getByRole('heading', { name: 'Kickoff message' }))
+			.toBeInTheDocument();
+
+		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+		await page
+			.elementLocator(input)
+			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
+		await expect.element(page.getByText('notes.txt')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Reply to this rivulet…').fill('See attached');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(filesApi.upload).toHaveBeenCalledTimes(1);
+		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-1', 'See attached', ['file-1']);
+	});
+
+	it('does nothing when the form is submitted with no reply text and no pending files', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		const { container } = await render(RivuletPage);
+		await expect
+			.element(page.getByRole('heading', { name: 'Kickoff message' }))
+			.toBeInTheDocument();
+
+		// The Send button is disabled in this state, so drive the guard
+		// inside handleReply directly via a native form submission instead.
+		const form = container.querySelector('form')!;
+		form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+
+		expect(rivulets.postMessage).not.toHaveBeenCalled();
+	});
+
+	it('shows an error when sending a reply fails', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		vi.mocked(rivulets.postMessage).mockRejectedValueOnce(new Error('Failed to send message'));
+
+		render(RivuletPage);
+		await expect
+			.element(page.getByRole('heading', { name: 'Kickoff message' }))
+			.toBeInTheDocument();
+
+		await page.getByPlaceholder('Reply to this rivulet…').fill('Hello');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		await expect.element(page.getByText('Failed to send message')).toBeInTheDocument();
+	});
+
+	it('downloads an attachment when clicked', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([attachedMessage]);
+		vi.mocked(filesApi.download).mockResolvedValueOnce(undefined);
+
+		render(RivuletPage);
+		await expect.element(page.getByRole('button', { name: /report\.pdf/ })).toBeInTheDocument();
+
+		await page.getByRole('button', { name: /report\.pdf/ }).click();
+
+		expect(filesApi.download).toHaveBeenCalledWith('file-9', 'report.pdf');
+	});
+
+	it('shows a download error when the download fails', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([attachedMessage]);
+		vi.mocked(filesApi.download).mockRejectedValueOnce(new Error('Failed to download file'));
+
+		render(RivuletPage);
+		await expect.element(page.getByRole('button', { name: /report\.pdf/ })).toBeInTheDocument();
+
+		await page.getByRole('button', { name: /report\.pdf/ }).click();
+
+		await expect.element(page.getByText('Failed to download file')).toBeInTheDocument();
+	});
+
+	it('renders a handoff message as a divider', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, handoffMessage]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('handoff')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Researcher handed off to Writer', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it('shows the model used and tier for an auto-mode reply', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, autoModeMessage]);
+
+		render(RivuletPage);
+
+		await expect
+			.element(page.getByText('via claude-haiku-4-5', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it('renders system alert messages distinctly from human/agent messages', async () => {
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, systemAlertMessage]);
+
+		render(RivuletPage);
+
+		await expect
+			.element(page.getByText('Agent Researcher was paused after an error'))
+			.toBeInTheDocument();
+	});
+
+	it('shows an executing_tool status pill with the tool name from an agent_status event', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'executing_tool',
+			detail: 'search_web'
+		});
+
+		await expect.element(page.getByText('using search_web…')).toBeInTheDocument();
+	});
+
+	it('shows a waiting_for_handoff status pill', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'waiting_for_handoff',
+			detail: null
+		});
+
+		await expect.element(page.getByText('handing off…')).toBeInTheDocument();
+	});
+
+	it('shows a thinking status pill, then updates it in place for a second event from the same agent', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'thinking',
+			detail: null
+		});
+		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+
+		// Same agent id as before -> updates the existing liveMessage's status
+		// in place instead of creating a second one.
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'executing_tool',
+			detail: 'search_web'
+		});
+		await expect.element(page.getByText('using search_web…')).toBeInTheDocument();
+	});
+
+	it('clears the live status pill on a handoff event', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'thinking',
+			detail: null
+		});
+		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+
+		source.emit('handoff', {});
+		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
+	});
+
+	it('clears the live status pill on a system_alert event', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'thinking',
+			detail: null
+		});
+		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+
+		source.emit('system_alert', {});
+		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
+	});
+
+	it('clears the live status pill on a connection error event', async () => {
+		authState.token = 'test-token';
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		const source = FakeEventSource.instances[0];
+
+		source.emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'thinking',
+			detail: null
+		});
+		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+
+		source.emit('error', {});
+		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
 	});
 });

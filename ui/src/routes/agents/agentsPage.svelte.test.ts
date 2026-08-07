@@ -102,4 +102,192 @@ describe('agents/+page.svelte', () => {
 		expect(agents.update).not.toHaveBeenCalled();
 		await expect.element(page.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
 	});
+
+	it('shows an error when agents fail to load', async () => {
+		vi.mocked(agents.list).mockRejectedValueOnce(new Error('Failed to load agents'));
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+
+		render(AgentsPage);
+
+		await expect.element(page.getByText('Failed to load agents')).toBeInTheDocument();
+	});
+
+	it('creates a new agent via the New agent form and refreshes the list', async () => {
+		vi.mocked(agents.list).mockResolvedValueOnce([]).mockResolvedValueOnce([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.create).mockResolvedValueOnce(researcher);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('New agent')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Name').fill('Researcher');
+		await page
+			.getByPlaceholder('Description (used by the dispatcher for routing)')
+			.fill('Looks things up');
+		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(agents.create).toHaveBeenCalledWith({
+			name: 'Researcher',
+			description: 'Looks things up',
+			instructions: 'Be thorough',
+			model: 'anthropic:claude-haiku-4-5-20251001'
+		});
+		await expect
+			.element(page.getByRole('heading', { level: 1, name: 'Agents' }))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Researcher', { exact: false })).toBeInTheDocument();
+	});
+
+	it('shows an error when creating an agent fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.create).mockRejectedValueOnce(new Error('Failed to create agent'));
+
+		render(AgentsPage);
+		await expect.element(page.getByText('New agent')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Name').fill('Researcher');
+		await page
+			.getByPlaceholder('Description (used by the dispatcher for routing)')
+			.fill('Looks things up');
+		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		await expect.element(page.getByText('Failed to create agent')).toBeInTheDocument();
+	});
+
+	it('shows an error when saving an edit fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.update).mockRejectedValueOnce(new Error('Failed to update agent'));
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Edit' }).click();
+		await page.getByRole('button', { name: 'Save changes' }).click();
+
+		await expect.element(page.getByText('Failed to update agent')).toBeInTheDocument();
+		// Stays in edit mode on failure.
+		await expect.element(page.getByRole('button', { name: 'Save changes' })).toBeInTheDocument();
+	});
+
+	it('sets an always-respond routing rule and reflects it in the summary', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules)
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([{ id: 'r1', rule_type: 'always', pattern: '', priority: 10 }]);
+		vi.mocked(agents.setRoutingRules).mockResolvedValueOnce([]);
+
+		render(AgentsPage);
+		await expect
+			.element(page.getByText('No routing rules — only @mention triggers this agent'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Always respond' }).click();
+
+		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
+			{ rule_type: 'always', pattern: '', priority: 10 }
+		]);
+		await expect.element(page.getByText('Routing:', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByText('always', { exact: true })).toBeInTheDocument();
+	});
+
+	it('sets a mention-only routing rule', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setRoutingRules).mockResolvedValueOnce([]);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '@mention only' }).click();
+
+		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
+			{ rule_type: 'mention_only', pattern: '', priority: 10 }
+		]);
+	});
+
+	it('shows an error when setting a routing rule fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setRoutingRules).mockRejectedValueOnce(
+			new Error('Failed to update routing rule')
+		);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Always respond' }).click();
+
+		await expect.element(page.getByText('Failed to update routing rule')).toBeInTheDocument();
+	});
+
+	it('sets keyword routing rules from the comma-separated draft and clears the input', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setRoutingRules).mockResolvedValueOnce([]);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		const keywordInput = page.getByPlaceholder('keyword, keyword, ...');
+		await keywordInput.fill('billing, invoices');
+		await page.getByRole('button', { name: 'Set keywords' }).click();
+
+		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
+			{ rule_type: 'keyword', pattern: JSON.stringify(['billing', 'invoices']), priority: 10 }
+		]);
+		await expect.element(keywordInput).toHaveValue('');
+	});
+
+	it('does nothing when Set keywords is clicked with an empty draft', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Set keywords' }).click();
+
+		expect(agents.setRoutingRules).not.toHaveBeenCalled();
+	});
+
+	it('deletes an agent via agents.remove and refreshes the list', async () => {
+		vi.mocked(agents.list).mockResolvedValueOnce([researcher]).mockResolvedValueOnce([]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.remove).mockResolvedValueOnce(undefined);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		expect(agents.remove).toHaveBeenCalledWith('agent-1');
+		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+	});
+
+	it('shows an error when deleting an agent fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.remove).mockRejectedValueOnce(new Error('Failed to delete agent'));
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Failed to delete agent')).toBeInTheDocument();
+	});
 });
