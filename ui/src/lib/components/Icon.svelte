@@ -144,6 +144,16 @@
 			stroke-linecap="round"
 		/>
 	</svg>
+{:else if name === 'chevron'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M7 4l6 6-6 6"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+	</svg>
 {:else if name === 'wrench'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path

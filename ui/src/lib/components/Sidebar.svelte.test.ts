@@ -12,8 +12,14 @@ import Sidebar from './Sidebar.svelte';
 import { channels } from '$lib/api/channels';
 import { theme } from '$lib/theme.svelte';
 
+const routeState = vi.hoisted(() => ({ pathname: '/agents' }));
+
 vi.mock('$app/state', () => ({
-	page: { url: new URL('http://localhost/agents') }
+	page: {
+		get url() {
+			return new URL('http://localhost' + routeState.pathname);
+		}
+	}
 }));
 
 vi.mock('$app/paths', () => ({
@@ -31,6 +37,8 @@ vi.mock('$lib/api/channels', () => ({
 afterEach(() => {
 	vi.clearAllMocks();
 	theme.set('system');
+	routeState.pathname = '/agents';
+	localStorage.clear();
 });
 
 describe('Sidebar.svelte', () => {
@@ -105,5 +113,82 @@ describe('Sidebar.svelte', () => {
 		expect(document.documentElement.dataset.theme).toBe('dark');
 		await expect.element(darkButton).toHaveAttribute('aria-pressed', 'true');
 		await expect.element(browserPage.getByTitle('System')).toHaveAttribute('aria-pressed', 'false');
+	});
+
+	it('auto-expands the workspace links when landing on a workspace route', async () => {
+		routeState.pathname = '/agents';
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).toBeInTheDocument();
+	});
+
+	it('collapses the workspace links by default on a non-workspace route', async () => {
+		routeState.pathname = '/channels/chan-1';
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect
+			.element(browserPage.getByRole('button', { name: 'Workspace' }))
+			.toBeInTheDocument();
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).not.toBeInTheDocument();
+	});
+
+	it('toggles the workspace links open and closed, persisting the choice', async () => {
+		routeState.pathname = '/channels/chan-1';
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+		const toggle = browserPage.getByRole('button', { name: 'Workspace' });
+
+		await toggle.click();
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).toBeInTheDocument();
+		expect(localStorage.getItem('rivulets-sidebar-workspace-expanded')).toBe('true');
+
+		await toggle.click();
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).not.toBeInTheDocument();
+		expect(localStorage.getItem('rivulets-sidebar-workspace-expanded')).toBe('false');
+	});
+
+	it('restores a collapsed workspace section from a stored preference on a non-workspace route', async () => {
+		routeState.pathname = '/channels/chan-1';
+		localStorage.setItem('rivulets-sidebar-workspace-expanded', 'false');
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).not.toBeInTheDocument();
+	});
+
+	it('restores an expanded workspace section from a stored preference', async () => {
+		routeState.pathname = '/channels/chan-1';
+		localStorage.setItem('rivulets-sidebar-workspace-expanded', 'true');
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Agents/ })).toBeInTheDocument();
+	});
+
+	it('reveals the workspace section on a workspace route even if a stored preference says collapsed', async () => {
+		routeState.pathname = '/teams';
+		localStorage.setItem('rivulets-sidebar-workspace-expanded', 'false');
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Teams/ })).toBeInTheDocument();
+	});
+
+	it('links the ambient sync status readout to the sync page', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect
+			.element(browserPage.getByRole('link', { name: /checking sync…/ }))
+			.toHaveAttribute('href', '/sync');
 	});
 });
