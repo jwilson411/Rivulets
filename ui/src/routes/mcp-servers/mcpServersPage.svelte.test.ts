@@ -29,7 +29,15 @@ const fsServerSummary: MCPServer = {
 
 const fsServerDetail: MCPServerDetail = {
 	...fsServerSummary,
-	tools: [{ id: 't-1', name: 'read_file', description: 'Reads a file', mcp_tool_name: 'read_file' }]
+	tools: [
+		{
+			id: 't-1',
+			name: 'read_file',
+			description: 'Reads a file',
+			mcp_tool_name: 'read_file',
+			input_schema: { type: 'object', properties: { path: { type: 'string' } } }
+		}
+	]
 };
 
 afterEach(() => {
@@ -45,7 +53,8 @@ describe('mcp-servers/+page.svelte', () => {
 
 		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
 		await expect.element(page.getByText('connected')).toBeInTheDocument();
-		await expect.element(page.getByText('1 tool: read_file')).toBeInTheDocument();
+		await expect.element(page.getByText('1 tool')).toBeInTheDocument();
+		await expect.element(page.getByText('read_file')).toBeInTheDocument();
 	});
 
 	it('shows a disconnected badge and no tool count for a disconnected server', async () => {
@@ -60,7 +69,43 @@ describe('mcp-servers/+page.svelte', () => {
 		render(McpServersPage);
 
 		await expect.element(page.getByText('disconnected')).toBeInTheDocument();
-		await expect.element(page.getByText(/tool:/)).not.toBeInTheDocument();
+		await expect.element(page.getByText(/\d+ tools?/)).not.toBeInTheDocument();
+	});
+
+	it('flags a discovered tool whose schema has conditional/dependent args', async () => {
+		const conditionalDetail: MCPServerDetail = {
+			...fsServerDetail,
+			tools: [
+				{
+					id: 't-2',
+					name: 'send_message',
+					description: 'Sends a message, optionally scheduled',
+					mcp_tool_name: 'send_message',
+					input_schema: {
+						type: 'object',
+						properties: { schedule_at: { type: 'string' } },
+						dependentRequired: { schedule_at: ['timezone'] }
+					}
+				}
+			]
+		};
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(conditionalDetail);
+
+		render(McpServersPage);
+
+		await expect.element(page.getByText('send_message')).toBeInTheDocument();
+		await expect.element(page.getByText('conditional args')).toBeInTheDocument();
+	});
+
+	it('does not flag a discovered tool with a plain, unconditional schema', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+
+		render(McpServersPage);
+
+		await expect.element(page.getByText('read_file')).toBeInTheDocument();
+		await expect.element(page.getByText('conditional args')).not.toBeInTheDocument();
 	});
 
 	it('registers a server via mcpServers.create and clears the form', async () => {

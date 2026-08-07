@@ -12,7 +12,9 @@ MCP_SERVER_SPEC and module docstring); reconnect doesn't change name/url
 so it never publishes. Discovered Tool rows aren't synced here either —
 each node discovers its own by connecting to the (synced) url."""
 
+import json
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -49,6 +51,7 @@ class MCPToolOut(BaseModel):
     name: str
     description: str
     mcp_tool_name: str | None
+    input_schema: dict[str, Any]
 
     model_config = {"from_attributes": True}
 
@@ -73,7 +76,16 @@ async def _to_detail(db: DbSession, server: MCPServer) -> MCPServerDetailOut:
         url=server.url,
         connected=server.connected,
         last_connected_at=server.last_connected_at,
-        tools=[MCPToolOut.model_validate(t, from_attributes=True) for t in tools],
+        tools=[
+            MCPToolOut(
+                id=t.id,
+                name=t.name,
+                description=t.description,
+                mcp_tool_name=t.mcp_tool_name,
+                input_schema=json.loads(t.mcp_input_schema_json) if t.mcp_input_schema_json else {},
+            )
+            for t in tools
+        ],
     )
 
 
@@ -101,6 +113,7 @@ async def _connect_and_sync_tools(db: DbSession, server: MCPServer) -> None:
                 tool_type="mcp",
                 mcp_server_id=server.id,
                 mcp_tool_name=discovered_tool.name,
+                mcp_input_schema_json=json.dumps(discovered_tool.input_schema),
             )
         )
 

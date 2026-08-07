@@ -200,6 +200,7 @@ class Tool(Base):
     source_path: Mapped[str | None] = mapped_column(default=None)
     mcp_server_id: Mapped[str | None] = mapped_column(ForeignKey("mcp_server.id"), default=None)
     mcp_tool_name: Mapped[str | None] = mapped_column(default=None)
+    mcp_input_schema_json: Mapped[str | None] = mapped_column(default=None)  # JSON
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)

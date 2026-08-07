@@ -56,9 +56,12 @@ class _FakeMCPTools:
 
 
 class _FakeFunction:
-    def __init__(self, name: str, description: str) -> None:
+    def __init__(
+        self, name: str, description: str, parameters: dict[str, Any] | None = None
+    ) -> None:
         self.name = name
         self.description = description
+        self.parameters = parameters or {}
 
 
 def _patch_mcp_tools(
@@ -78,10 +81,15 @@ def _patch_mcp_tools(
 
 
 async def test_discover_tools_returns_discovered_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    add_schema = {
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "dependentRequired": {"a": ["b"]},
+    }
     fake = _patch_mcp_tools(
         monkeypatch,
         functions={
-            "add": _FakeFunction("add", "Add two numbers together."),
+            "add": _FakeFunction("add", "Add two numbers together.", parameters=add_schema),
             "get_weather": _FakeFunction("get_weather", ""),
         },
     )
@@ -89,7 +97,9 @@ async def test_discover_tools_returns_discovered_tools(monkeypatch: pytest.Monke
     result = await discover_tools("http://127.0.0.1:9999/mcp")
 
     assert result == [
-        DiscoveredTool(name="add", description="Add two numbers together."),
+        DiscoveredTool(
+            name="add", description="Add two numbers together.", input_schema=add_schema
+        ),
         DiscoveredTool(name="get_weather", description=""),
     ]
     assert fake.closed is True
@@ -154,10 +164,17 @@ def _patch_discover_tools(
 def test_register_mcp_server_success(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    add_schema = {
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "dependentRequired": {"a": ["b"]},
+    }
     _patch_discover_tools(
         monkeypatch,
         [
-            DiscoveredTool(name="add", description="Add two numbers together."),
+            DiscoveredTool(
+                name="add", description="Add two numbers together.", input_schema=add_schema
+            ),
             DiscoveredTool(name="get_weather", description=""),
         ],
     )
@@ -174,6 +191,9 @@ def test_register_mcp_server_success(
     assert body["last_connected_at"] is not None
     assert {t["name"] for t in body["tools"]} == {"add", "get_weather"}
     assert all(t["mcp_tool_name"] for t in body["tools"])
+    tools_by_name = {t["name"]: t for t in body["tools"]}
+    assert tools_by_name["add"]["input_schema"] == add_schema
+    assert tools_by_name["get_weather"]["input_schema"] == {}
 
 
 def test_register_mcp_server_degrades_gracefully_on_connection_failure(

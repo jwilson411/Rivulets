@@ -1,6 +1,15 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
-	import { mcpServers, type MCPServerDetail } from '$lib/api/mcpServers';
+	import { mcpServers, type MCPServerDetail, type MCPTool } from '$lib/api/mcpServers';
+
+	// JSON Schema keywords that make one argument's requiredness/shape depend
+	// on another — surfaced as a badge so a user scanning the tool list can
+	// spot conditional args without opening the raw schema.
+	const CONDITIONAL_SCHEMA_KEYWORDS = ['if', 'dependentRequired', 'dependentSchemas', 'oneOf'];
+
+	function hasConditionalArgs(tool: MCPTool): boolean {
+		return CONDITIONAL_SCHEMA_KEYWORDS.some((keyword) => keyword in tool.input_schema);
+	}
 
 	let serverList = $state<MCPServerDetail[]>([]);
 	let loadError = $state<string | null>(null);
@@ -131,9 +140,39 @@
 							<p class="text-xs text-neutral-500">{server.url}</p>
 							{#if server.connected}
 								<p class="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
-									{server.tools.length} tool{server.tools.length === 1 ? '' : 's'}:
-									{server.tools.map((t) => t.name).join(', ')}
+									{server.tools.length} tool{server.tools.length === 1 ? '' : 's'}
 								</p>
+								<ul class="mt-2 flex flex-col gap-1">
+									{#each server.tools as tool (tool.id)}
+										<li>
+											<details class="group">
+												<summary
+													class="cursor-pointer text-xs text-neutral-700 marker:content-none dark:text-neutral-300"
+												>
+													<span class="font-mono">{tool.name}</span>
+													{#if hasConditionalArgs(tool)}
+														<span
+															class="ml-1 rounded-sm bg-agent-cyan-100 px-1.5 py-0.5 text-[10px] text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400"
+														>
+															conditional args
+														</span>
+													{/if}
+												</summary>
+												<div class="mt-1 ml-3 flex flex-col gap-1">
+													{#if tool.description}
+														<p class="text-xs text-neutral-500">{tool.description}</p>
+													{/if}
+													<pre
+														class="overflow-x-auto rounded-md bg-ink/5 p-2 text-[11px] text-ink dark:bg-white/5 dark:text-ink-dark">{JSON.stringify(
+															tool.input_schema,
+															null,
+															2
+														)}</pre>
+												</div>
+											</details>
+										</li>
+									{/each}
+								</ul>
 							{/if}
 						</div>
 						<div class="flex shrink-0 items-center gap-3">

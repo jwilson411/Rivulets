@@ -11,6 +11,10 @@ export interface MCPTool {
 	name: string;
 	description: string;
 	mcp_tool_name: string | null;
+	// Raw JSON Schema the MCP server advertised for this tool's arguments —
+	// can express conditional/dependent structure via if/then/else,
+	// dependentRequired, dependentSchemas, oneOf, etc.
+	input_schema: Record<string, unknown>;
 }
 
 export interface MCPServer {

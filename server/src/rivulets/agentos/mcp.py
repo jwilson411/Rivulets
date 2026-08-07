@@ -14,7 +14,8 @@ constraint first.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from agno.tools.mcp import MCPTools
 
@@ -35,6 +36,10 @@ class MCPConnectionError(RuntimeError):
 class DiscoveredTool:
     name: str
     description: str
+    # The MCP tool's raw inputSchema (JSON Schema) — can express conditional/
+    # dependent structure via if/then/else, dependentRequired,
+    # dependentSchemas, oneOf, etc. Empty dict if the server advertised none.
+    input_schema: dict[str, Any] = field(default_factory=lambda: {})
 
 
 async def discover_tools(
@@ -91,5 +96,13 @@ async def _run_handshake(url: str, timeout_seconds: int) -> list[DiscoveredTool]
             logger.warning("Error closing MCP connection to %s", url, exc_info=True)
 
     return [
-        DiscoveredTool(name=fn.name, description=fn.description or "") for fn in functions.values()
+        DiscoveredTool(
+            name=fn.name,
+            description=fn.description or "",
+            # fn.parameters is agno's Function.parameters, set to the MCP
+            # tool's own tool.inputSchema verbatim by MCPTools.build_tools()
+            # — not reshaped, so conditional/dependent keywords survive.
+            input_schema=fn.parameters or {},
+        )
+        for fn in functions.values()
     ]
