@@ -55,6 +55,7 @@ from rivulets.db.models import (
     AgentRoutingRule,
     AgentRun,
     Channel,
+    DispatchDecision,
     Message,
     Rivulet,
     RivuletGuardState,
@@ -231,6 +232,11 @@ async def _dispatch_and_respond(
 
     engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
     result = await engine.dispatch(message_content, dispatch_infos)
+    # R-4 dispatcher hit-rate tracking (#31): one row per routing decision,
+    # recursive re-dispatches (FR-5.6) included — each is its own invocation
+    # of the same two-stage pipeline and can independently hit the LLM
+    # fallback.
+    db.add(DispatchDecision(method=result.method.value, llm_invoked=result.llm_invoked))
 
     if rivulet.agentos_session_id is None:
         rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet

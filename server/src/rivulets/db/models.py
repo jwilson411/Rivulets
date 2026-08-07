@@ -154,6 +154,29 @@ class AgentRun(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
 
+class DispatchDecision(Base):
+    """One row per dispatch/engine.py `dispatch()` call's outcome — the raw
+    data behind R-4's dispatcher hit-rate metric and fallback-rate cost
+    warning (#31). Deliberately separate from AgentRun: most decisions
+    (mention/deterministic matches, and LLM-fallback calls that matched zero
+    agents) carry no token spend, so folding this into AgentRun's token/cost
+    accounting would misrepresent both tables. Not synced — local telemetry,
+    not user content, same reasoning as AgentRun.
+    """
+
+    __tablename__ = "dispatch_decision"
+    __table_args__ = (Index("idx_dispatch_decision_created", "created_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    method: Mapped[str]  # 'mention' | 'deterministic' | 'llm' | 'none'
+    # True iff the LLM fallback callable was actually invoked (stage 3 ran),
+    # regardless of whether it matched an agent — that's the event that
+    # costs money, which `method == 'none'` alone can't distinguish (it also
+    # covers "no fallback configured at all").
+    llm_invoked: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class AgentTool(Base):
     """Join table: which tools are assigned to which agents."""
 

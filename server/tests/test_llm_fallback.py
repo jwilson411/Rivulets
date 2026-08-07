@@ -25,7 +25,9 @@ _AGENTS = [
 
 async def test_llm_fallback_returns_empty_with_no_provider(db_session: AsyncSession) -> None:
     fallback = build_llm_fallback(db_session)
-    assert await fallback("How do I optimize this SQL query?", _AGENTS) == []
+    result = await fallback("How do I optimize this SQL query?", _AGENTS)
+    assert result.agent_ids == []
+    assert result.invoked is False  # short-circuited before any LLM call (#31)
 
 
 async def test_llm_fallback_disabled_via_workspace_setting_skips_the_llm_call(
@@ -47,7 +49,9 @@ async def test_llm_fallback_disabled_via_workspace_setting_skips_the_llm_call(
     )
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("How do I optimize this SQL query?", _AGENTS) == []
+    result = await fallback("How do I optimize this SQL query?", _AGENTS)
+    assert result.agent_ids == []
+    assert result.invoked is False  # disabled -> never even picks a model
     assert called is False
 
 
@@ -67,7 +71,9 @@ async def test_llm_fallback_defaults_to_enabled_when_setting_is_unset(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("query help please", _AGENTS) == ["dba-1"]
+    result = await fallback("query help please", _AGENTS)
+    assert result.agent_ids == ["dba-1"]
+    assert result.invoked is True
 
 
 async def test_llm_fallback_returns_empty_when_resolve_model_fails(
@@ -82,7 +88,11 @@ async def test_llm_fallback_returns_empty_when_resolve_model_fails(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("How do I optimize this SQL query?", _AGENTS) == []
+    result = await fallback("How do I optimize this SQL query?", _AGENTS)
+    assert result.agent_ids == []
+    # A provider was configured and a call was attempted before failing —
+    # still counts toward R-4's fallback rate, not a silent no-op (#31).
+    assert result.invoked is True
 
 
 async def test_llm_fallback_maps_agent_names_back_to_ids(
@@ -101,8 +111,9 @@ async def test_llm_fallback_maps_agent_names_back_to_ids(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    matched = await fallback("How do I optimize this SQL query?", _AGENTS)
-    assert matched == ["dba-1"]
+    result = await fallback("How do I optimize this SQL query?", _AGENTS)
+    assert result.agent_ids == ["dba-1"]
+    assert result.invoked is True
 
 
 async def test_llm_fallback_is_case_insensitive_on_agent_name(
@@ -121,7 +132,9 @@ async def test_llm_fallback_is_case_insensitive_on_agent_name(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("query help please", _AGENTS) == ["dba-1"]
+    result = await fallback("query help please", _AGENTS)
+    assert result.agent_ids == ["dba-1"]
+    assert result.invoked is True
 
 
 async def test_llm_fallback_drops_hallucinated_agent_names(
@@ -142,7 +155,9 @@ async def test_llm_fallback_drops_hallucinated_agent_names(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("query help please", _AGENTS) == ["dba-1"]
+    result = await fallback("query help please", _AGENTS)
+    assert result.agent_ids == ["dba-1"]
+    assert result.invoked is True
 
 
 async def test_llm_fallback_returns_empty_when_nothing_matches(
@@ -161,7 +176,9 @@ async def test_llm_fallback_returns_empty_when_nothing_matches(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("totally unrelated message", _AGENTS) == []
+    result = await fallback("totally unrelated message", _AGENTS)
+    assert result.agent_ids == []
+    assert result.invoked is True
 
 
 async def test_llm_fallback_returns_empty_when_decision_is_none(
@@ -182,4 +199,6 @@ async def test_llm_fallback_returns_empty_when_decision_is_none(
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
 
     fallback = build_llm_fallback(db_session)
-    assert await fallback("totally unrelated message", _AGENTS) == []
+    result = await fallback("totally unrelated message", _AGENTS)
+    assert result.agent_ids == []
+    assert result.invoked is True

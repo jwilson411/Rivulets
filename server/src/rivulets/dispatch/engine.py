@@ -19,9 +19,24 @@ from enum import StrEnum
 
 from rivulets.dispatch.rules import Rule, RuleType, rule_matches
 
-LlmFallback = Callable[[str, list["AgentDispatchInfo"]], Awaitable[list[str]]]
-
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
+
+
+@dataclass(frozen=True, slots=True)
+class LlmFallbackResult:
+    """What the injected LLM fallback callable actually did. Plain matched
+    agent IDs aren't enough for R-4 (#31): `invoked` tells the caller
+    whether a real LLM call was attempted, as distinct from a "no match"
+    outcome reached without ever calling a provider — e.g. the fallback is
+    disabled (dispatcher.fallback_enabled) or no provider is configured
+    (dispatch/llm_fallback.py's own short-circuits). Both look identical
+    from `agent_ids` alone, but only one of them costs money."""
+
+    agent_ids: list[str]
+    invoked: bool
+
+
+LlmFallback = Callable[[str, list["AgentDispatchInfo"]], Awaitable[LlmFallbackResult]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +60,12 @@ class DispatchMethod(StrEnum):
 class DispatchResult:
     agent_ids: list[str]
     method: DispatchMethod
+    # True iff stage 3 made a real LLM call (LlmFallbackResult.invoked) —
+    # the event R-4 cares about, since it's the one that costs money.
+    # `method` alone can't tell "fallback ran, called an LLM, matched
+    # nobody" apart from "fallback wasn't configured/short-circuited" —
+    # both report DispatchMethod.NONE.
+    llm_invoked: bool = False
 
 
 class DispatchEngine:
@@ -82,6 +103,8 @@ class DispatchEngine:
         # Graceful degradation (NFR-2.4): callers should catch exceptions from
         # the injected fallback and treat them as DispatchMethod.NONE while
         # surfacing a "routing degraded" warning in the UI.
-        llm_matched = await self._llm_fallback(message, agents)
-        method = DispatchMethod.LLM if llm_matched else DispatchMethod.NONE
-        return DispatchResult(agent_ids=llm_matched, method=method)
+        fallback_result = await self._llm_fallback(message, agents)
+        method = DispatchMethod.LLM if fallback_result.agent_ids else DispatchMethod.NONE
+        return DispatchResult(
+            agent_ids=fallback_result.agent_ids, method=method, llm_invoked=fallback_result.invoked
+        )

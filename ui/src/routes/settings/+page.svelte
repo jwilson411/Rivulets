@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
+	import { dispatch, type HitRate } from '$lib/api/dispatch';
 
 	let loaded = $state<WorkspaceSettings | null>(null);
 	let loadError = $state<string | null>(null);
@@ -13,6 +14,9 @@
 	let modelOverride = $state('');
 	let eagerFilesLan = $state(true);
 	let eagerFilesWan = $state(false);
+
+	let hitRate = $state<HitRate | null>(null);
+	let hitRateError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -29,7 +33,21 @@
 		}
 	}
 
+	async function refreshHitRate() {
+		hitRateError = null;
+		try {
+			hitRate = await dispatch.hitRate('week');
+		} catch (err) {
+			hitRateError = err instanceof Error ? err.message : 'Failed to load dispatcher hit rate';
+		}
+	}
+
 	refresh();
+	refreshHitRate();
+
+	function formatPct(rate: number | null): string {
+		return rate === null ? '—' : `${Math.round(rate * 100)}%`;
+	}
 
 	async function handleSave(event: SubmitEvent) {
 		event.preventDefault();
@@ -135,6 +153,51 @@
 					placeholder="provider:model_name (e.g. anthropic:claude-3-5-haiku-latest)"
 					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 				/>
+
+				<div class="mt-2 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
+					<h3 class="text-xs font-medium text-ink dark:text-ink-dark">
+						Hit rate <span class="text-neutral-500">(last 7 days)</span>
+					</h3>
+					{#if hitRateError}
+						<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+							{hitRateError}
+						</p>
+					{:else if !hitRate}
+						<p class="text-xs text-neutral-500 italic">Loading…</p>
+					{:else if hitRate.total_decisions === 0}
+						<p class="text-xs text-neutral-600 dark:text-neutral-400">
+							No dispatcher activity yet this week.
+						</p>
+					{:else}
+						<div
+							class="flex flex-wrap items-center gap-4 text-xs text-neutral-600 dark:text-neutral-400"
+						>
+							<span>
+								Resolved without the LLM fallback:
+								<span class="font-medium text-ink dark:text-ink-dark"
+									>{formatPct(hitRate.hit_rate)}</span
+								>
+								<span class="text-neutral-500">(goal &gt;80%)</span>
+							</span>
+							<span>
+								Fallback rate:
+								<span class="font-medium text-ink dark:text-ink-dark"
+									>{formatPct(hitRate.fallback_rate)}</span
+								>
+							</span>
+							<span class="text-neutral-500">{hitRate.total_decisions} decisions</span>
+						</div>
+						{#if hitRate.fallback_warning}
+							<p
+								class="rounded-md border border-agent-magenta-700/30 bg-agent-magenta-700/10 px-3 py-2 text-xs text-agent-magenta-700 dark:border-agent-magenta-400/30 dark:text-agent-magenta-400"
+							>
+								Over half of routing decisions this week fell back to the LLM router — this is
+								costing more than expected. Consider tightening agent descriptions or adding manual
+								routing rules (FR-3.3/FR-3.4) to route more messages deterministically.
+							</p>
+						{/if}
+					{/if}
+				</div>
 			</section>
 
 			<section
