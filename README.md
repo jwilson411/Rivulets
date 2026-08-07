@@ -47,8 +47,6 @@ rivulets
 
 This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum, and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled.
 
-> No release has been tagged yet — until then, use Docker or build from source below.
-
 **Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it.
 
 ### Docker

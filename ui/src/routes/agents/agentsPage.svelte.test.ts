@@ -268,6 +268,51 @@ describe('agents/+page.svelte', () => {
 		expect(agents.setRoutingRules).not.toHaveBeenCalled();
 	});
 
+	it('saves a peer preference via agents.setPeerPreference', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setPeerPreference).mockResolvedValueOnce({ capability_tag: 'gpu' });
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByPlaceholder('e.g. gpu (blank = no preference)').fill('gpu');
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.setPeerPreference).toHaveBeenCalledWith('agent-1', 'gpu');
+	});
+
+	it('saves a blank peer preference as null', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setPeerPreference).mockResolvedValueOnce({ capability_tag: null });
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.setPeerPreference).toHaveBeenCalledWith('agent-1', null);
+	});
+
+	it('shows an error when saving a peer preference fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.setPeerPreference).mockRejectedValueOnce(
+			new Error('Failed to update peer preference')
+		);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		await expect.element(page.getByText('Failed to update peer preference')).toBeInTheDocument();
+	});
+
 	it('deletes an agent via agents.remove and refreshes the list', async () => {
 		vi.mocked(agents.list).mockResolvedValueOnce([researcher]).mockResolvedValueOnce([]);
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
