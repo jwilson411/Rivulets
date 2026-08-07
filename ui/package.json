@@ -13,6 +13,7 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test:unit": "vitest",
+		"test:coverage": "vitest run --coverage",
 		"test": "npm run test:unit -- --run && npm run test:e2e",
 		"test:e2e": "playwright install && playwright test"
 	},
@@ -25,6 +26,7 @@
 		"@tailwindcss/vite": "^4.3.0",
 		"@types/node": "^26",
 		"@vitest/browser-playwright": "^4.1.8",
+		"@vitest/coverage-v8": "^4.1.10",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.19.0",
