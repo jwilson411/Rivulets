@@ -123,6 +123,26 @@ class AgentRoutingRule(Base):
     agent: Mapped["Agent"] = relationship(back_populates="routing_rules")
 
 
+class AgentPeerPreference(Base):
+    """Issue #10: free-form capability tag this agent should preferentially
+    run on (e.g. "gpu"). One row per agent (v1 pins agents, not teams).
+    Synced across the workspace, unlike per-node status fields — the node
+    that ends up dispatching for a given rivulet isn't necessarily the
+    node where this preference was set. See sync/apply.py's
+    AGENT_PEER_PREFERENCE_SPEC and dispatch/service.py's
+    _resolve_remote_peer for how it's used."""
+
+    __tablename__ = "agent_peer_preference"
+
+    agent_id: Mapped[str] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True
+    )
+    capability_tag: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+
 class AgentRun(Base):
     """One agent invocation's token/cost/status accounting (FR-3.5), and the
     source data for the workspace-level usage dashboard (#28). Not synced —

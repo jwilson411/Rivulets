@@ -115,7 +115,8 @@ const humanMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const agentMessage: Message = {
@@ -129,7 +130,8 @@ const agentMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const attachedMessage: Message = {
@@ -145,7 +147,8 @@ const attachedMessage: Message = {
 		{ file_id: 'file-9', filename: 'report.pdf', mime_type: 'application/pdf', size_bytes: 2048 }
 	],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const handoffMessage: Message = {
@@ -159,7 +162,8 @@ const handoffMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const systemAlertMessage: Message = {
@@ -173,7 +177,8 @@ const systemAlertMessage: Message = {
 	created_at: new Date().toISOString(),
 	attachments: [],
 	model_used: null,
-	tier: null
+	tier: null,
+	executed_node_id: null
 };
 
 const autoModeMessage: Message = {

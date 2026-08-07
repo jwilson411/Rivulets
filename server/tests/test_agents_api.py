@@ -190,3 +190,61 @@ def test_get_agent_runs_empty(client: TestClient, auth_headers: dict[str, str]) 
 def test_get_agent_runs_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/agents/nonexistent/runs", headers=auth_headers)
     assert response.status_code == 404
+
+
+def test_get_peer_preference_defaults_to_none(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    response = client.get(f"/api/v1/agents/{agent['id']}/peer-preference", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"capability_tag": None}
+
+
+def test_get_peer_preference_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/agents/nonexistent/peer-preference", headers=auth_headers)
+    assert response.status_code == 404
+
+
+def test_set_and_clear_peer_preference(client: TestClient, auth_headers: dict[str, str]) -> None:
+    agent = _create_agent(client, auth_headers)
+
+    set_response = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=auth_headers,
+    )
+    assert set_response.status_code == 200, set_response.text
+    assert set_response.json() == {"capability_tag": "gpu"}
+
+    read_back = client.get(f"/api/v1/agents/{agent['id']}/peer-preference", headers=auth_headers)
+    assert read_back.json() == {"capability_tag": "gpu"}
+
+    updated = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": "cpu-heavy"},
+        headers=auth_headers,
+    )
+    assert updated.json() == {"capability_tag": "cpu-heavy"}
+
+    cleared = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": None},
+        headers=auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"capability_tag": None}
+
+    read_after_clear = client.get(
+        f"/api/v1/agents/{agent['id']}/peer-preference", headers=auth_headers
+    )
+    assert read_after_clear.json() == {"capability_tag": None}
+
+
+def test_set_peer_preference_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.put(
+        "/api/v1/agents/nonexistent/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 404

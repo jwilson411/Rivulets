@@ -20,7 +20,14 @@ from sqlalchemy import delete, select
 
 from rivulets.agentos import get_agentos, sync_agents
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
-from rivulets.db.models import Agent, AgentRoutingRule, AgentRun, AgentTool, TeamAgent
+from rivulets.db.models import (
+    Agent,
+    AgentPeerPreference,
+    AgentRoutingRule,
+    AgentRun,
+    AgentTool,
+    TeamAgent,
+)
 from rivulets.dispatch.rule_generation import generate_routing_rules
 from rivulets.sync.publish import publish_current_state
 
@@ -87,6 +94,14 @@ class RoutingRuleIn(BaseModel):
 
 class RoutingRulesUpdate(BaseModel):
     rules: list[RoutingRuleIn]
+
+
+class PeerPreferenceOut(BaseModel):
+    capability_tag: str | None
+
+
+class PeerPreferenceIn(BaseModel):
+    capability_tag: str | None = None
 
 
 async def _get_or_404(db: DbSession, agent_id: str) -> Agent:
@@ -256,3 +271,40 @@ async def update_routing_rules(
     for row in rows:
         await db.refresh(row)
     return rows
+
+
+@router.get("/{agent_id}/peer-preference", response_model=PeerPreferenceOut)
+async def get_peer_preference(
+    agent_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> PeerPreferenceOut:
+    """Issue #10: which capability tag (if any) this agent should
+    preferentially run on. See dispatch/service.py's _resolve_remote_peer
+    for how this is consumed at dispatch time."""
+    await _get_or_404(db, agent_id)
+    pref = await db.get(AgentPeerPreference, agent_id)
+    return PeerPreferenceOut(capability_tag=pref.capability_tag if pref else None)
+
+
+@router.put("/{agent_id}/peer-preference", response_model=PeerPreferenceOut)
+async def set_peer_preference(
+    agent_id: str, body: PeerPreferenceIn, db: DbSession, _: CurrentWorkspaceId
+) -> PeerPreferenceOut:
+    """capability_tag=None clears the preference. Clearing is local-only
+    (not propagated to peers) -- same as Agent/Team deletion elsewhere in
+    this API, sync's generic path has no delete-propagation mechanism."""
+    await _get_or_404(db, agent_id)
+    pref = await db.get(AgentPeerPreference, agent_id)
+    if body.capability_tag is None:
+        if pref is not None:
+            await db.delete(pref)
+            await db.commit()
+        return PeerPreferenceOut(capability_tag=None)
+    if pref is None:
+        pref = AgentPeerPreference(agent_id=agent_id, capability_tag=body.capability_tag)
+        db.add(pref)
+    else:
+        pref.capability_tag = body.capability_tag
+        pref.vector_clock += 1
+    await db.commit()
+    await publish_current_state(db, "agent_peer_preference", agent_id)
+    return PeerPreferenceOut(capability_tag=pref.capability_tag)

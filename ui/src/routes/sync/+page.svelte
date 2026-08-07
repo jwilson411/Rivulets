@@ -12,16 +12,44 @@
 	let rowError = $state<string | null>(null);
 	let resolvingId = $state<string | null>(null);
 
+	let myCapabilities = $state<string[]>([]);
+	let capabilitiesDraft = $state('');
+	let savingCapabilities = $state(false);
+	let capabilitiesError = $state<string | null>(null);
+
 	async function refresh() {
 		loadError = null;
 		try {
-			[status, conflicts] = await Promise.all([sync.status(), sync.conflicts()]);
+			[status, conflicts, { capabilities: myCapabilities }] = await Promise.all([
+				sync.status(),
+				sync.conflicts(),
+				sync.getCapabilities()
+			]);
+			capabilitiesDraft = myCapabilities.join(', ');
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load sync status';
 		}
 	}
 
 	refresh();
+
+	async function handleSetCapabilities(event: SubmitEvent) {
+		event.preventDefault();
+		capabilitiesError = null;
+		const tags = capabilitiesDraft
+			.split(',')
+			.map((t) => t.trim())
+			.filter(Boolean);
+		savingCapabilities = true;
+		try {
+			const result = await sync.setCapabilities(tags);
+			myCapabilities = result.capabilities;
+		} catch (err) {
+			capabilitiesError = err instanceof ApiError ? err.message : 'Failed to save capabilities';
+		} finally {
+			savingCapabilities = false;
+		}
+	}
 
 	async function handleConnect(event: SubmitEvent) {
 		event.preventDefault();
@@ -112,6 +140,27 @@
 				<p class="font-mono text-xs text-neutral-500">node: {status.node_id}</p>
 			{/if}
 
+			<form onsubmit={handleSetCapabilities} class="flex gap-2 pt-2">
+				<input
+					type="text"
+					bind:value={capabilitiesDraft}
+					placeholder="My capabilities (e.g. gpu, cpu-heavy)"
+					class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				/>
+				<button
+					type="submit"
+					disabled={savingCapabilities}
+					class="shrink-0 rounded-md border border-ink/15 px-4 py-2 text-sm font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+				>
+					{savingCapabilities ? 'Saving…' : 'Save capabilities'}
+				</button>
+			</form>
+			{#if capabilitiesError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+					{capabilitiesError}
+				</p>
+			{/if}
+
 			<form onsubmit={handleConnect} class="flex gap-2 pt-2">
 				<input
 					type="text"
@@ -144,6 +193,11 @@
 									{shortId(peer.peer_id)}
 								</p>
 								<p class="font-mono text-xs text-neutral-500">{peer.address}</p>
+								{#if peer.capabilities.length > 0}
+									<p class="font-mono text-xs text-neutral-500">
+										{peer.capabilities.join(', ')}
+									</p>
+								{/if}
 							</div>
 							<button
 								onclick={() => handleDisconnect(peer)}

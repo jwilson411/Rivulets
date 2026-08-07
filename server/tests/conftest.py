@@ -48,7 +48,7 @@ keyring.set_keyring(_InMemoryKeyring())
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from rivulets.agentos.service import reset_agentos_for_testing  # noqa: E402
+from rivulets.agentos.service import init_agentos, reset_agentos_for_testing  # noqa: E402
 from rivulets.app import create_app  # noqa: E402
 from rivulets.db.session import (  # noqa: E402
     get_engine,
@@ -124,13 +124,23 @@ async def _noop_async(*_args: object, **_kwargs: object) -> None:
 @pytest.fixture
 async def db_session() -> AsyncIterator[AsyncSession]:
     """A bare in-memory-DB session, for tests that need DB access without
-    the HTTP/app layer (e.g. exercising agentos/models.py directly)."""
+    the HTTP/app layer (e.g. exercising agentos/models.py directly).
+
+    Also resets/initializes the AgentOS singleton (same as the `client`
+    fixture): sync/apply.py's handle_incoming_state_change calls
+    sync_agents() after applying a remote "agent" change (issue #10 --
+    without it, a node that only ever *receives* an Agent row via sync has
+    no matching in-process AgentOS registration), which needs
+    get_agentos() to not raise "not initialized"."""
     override_engine(make_engine(in_memory=True))
     await init_db()
+    reset_agentos_for_testing()
+    init_agentos()
     async with session_scope() as session:
         yield session
     await get_engine().dispose()  # see client fixture's comment on why
     override_engine(None)
+    reset_agentos_for_testing()
 
 
 @pytest.fixture

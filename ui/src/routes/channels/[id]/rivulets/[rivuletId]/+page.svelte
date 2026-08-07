@@ -4,6 +4,7 @@
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { channels, type Channel } from '$lib/api/channels';
 	import { files as filesApi } from '$lib/api/files';
+	import { sync } from '$lib/api/sync';
 	import { auth } from '$lib/api/auth.svelte';
 	import {
 		agentInkMap,
@@ -29,6 +30,21 @@
 	let pendingFiles = $state<globalThis.File[]>([]);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let downloadError = $state<string | null>(null);
+	// Issue #10: this node's own node_id, fetched once, so a remotely
+	// executed reply's "ran on" badge only shows when it actually differs
+	// -- avoids noise on the common (local-execution) case.
+	let myNodeId = $state<string | null>(null);
+
+	sync
+		.status()
+		.then((status) => {
+			myNodeId = status.node_id;
+		})
+		.catch(() => {}); // best-effort -- badge just stays hidden if this fails
+
+	function shortNodeId(id: string): string {
+		return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
+	}
 
 	function handleFileSelect(event: Event) {
 		const input = event.target as HTMLInputElement;
@@ -363,6 +379,11 @@
 									{#if message.model_used}
 										<span class="text-neutral-500" title="Auto mode ({message.tier} tier)">
 											· via {message.model_used}
+										</span>
+									{/if}
+									{#if message.executed_node_id && message.executed_node_id !== myNodeId}
+										<span class="text-neutral-500" title="Ran on peer {message.executed_node_id}">
+											· ran on {shortNodeId(message.executed_node_id)}
 										</span>
 									{/if}
 								</div>

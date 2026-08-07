@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.app import (
     _build_csp,  # pyright: ignore[reportPrivateUsage]
-    _drain_outbound_on_peer_connected,  # pyright: ignore[reportPrivateUsage]
+    _on_peer_connected,  # pyright: ignore[reportPrivateUsage]
     create_app,
 )
 from rivulets.db.session import get_engine, make_engine, override_engine
@@ -97,13 +97,17 @@ def test_mounted_ui_serves_static_assets_and_falls_back_to_index_for_spa_routes(
         reset_sync_engine_for_testing()
 
 
-async def test_drain_outbound_on_peer_connected_is_a_noop_with_nothing_pending(
+async def test_on_peer_connected_is_a_noop_with_nothing_pending(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
+    """Covers both halves of _on_peer_connected: drain_pending_outbound and
+    (issue #10) publish_capabilities -- neither may raise just because the
+    engine isn't actually running (publish_capabilities no-ops cleanly,
+    same as publish_state_change already does)."""
     del db_session  # only needed to get an overridden in-memory engine set up
     reset_sync_engine_for_testing()
     init_sync_engine(tmp_path / "sync")
     try:
-        await _drain_outbound_on_peer_connected()  # must not raise; engine isn't running
+        await _on_peer_connected()  # must not raise; engine isn't running
     finally:
         reset_sync_engine_for_testing()

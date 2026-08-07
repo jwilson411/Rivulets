@@ -3,7 +3,7 @@
 // for the ApiError class used in instanceof checks.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import SyncPage from './+page.svelte';
 import { sync, type SyncStatus, type SyncConflict } from '$lib/api/sync';
@@ -15,16 +15,29 @@ vi.mock('$lib/api/sync', () => ({
 		connect: vi.fn(),
 		disconnect: vi.fn(),
 		conflicts: vi.fn(),
-		resolveConflict: vi.fn()
+		resolveConflict: vi.fn(),
+		getCapabilities: vi.fn(),
+		setCapabilities: vi.fn()
 	}
 }));
 
 const runningStatus: SyncStatus = {
 	running: true,
 	node_id: 'node-abc123',
-	peers: [{ peer_id: 'peer-1', address: '/ip4/1.2.3.4/tcp/5000/p2p/peer-1', connected: true }],
+	peers: [
+		{
+			peer_id: 'peer-1',
+			address: '/ip4/1.2.3.4/tcp/5000/p2p/peer-1',
+			connected: true,
+			capabilities: []
+		}
+	],
 	pending_changes: 0
 };
+
+beforeEach(() => {
+	vi.mocked(sync.getCapabilities).mockResolvedValue({ capabilities: [] });
+});
 
 const conflict: SyncConflict = {
 	id: 'conf-1',
@@ -60,7 +73,8 @@ describe('sync/+page.svelte', () => {
 		vi.mocked(sync.connect).mockResolvedValueOnce({
 			peer_id: 'peer-2',
 			address: '/ip4/9.9.9.9/tcp/5000/p2p/peer-2',
-			connected: true
+			connected: true,
+			capabilities: []
 		});
 
 		render(SyncPage);

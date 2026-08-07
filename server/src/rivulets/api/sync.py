@@ -20,9 +20,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.config import get_settings
 from rivulets.db.models import SyncConflict
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import get_entity_spec
+from rivulets.sync.capabilities import load_capabilities, save_capabilities
 from rivulets.sync.engine import PeerInfo as EnginePeerInfo
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ class PeerOut(BaseModel):
     peer_id: str
     address: str
     connected: bool
+    capabilities: list[str] = []
 
 
 class ConflictOut(BaseModel):
@@ -70,8 +73,21 @@ class ResolveConflictRequest(BaseModel):
     keep: str  # "local" | "remote"
 
 
-def _peer_out(peer: EnginePeerInfo) -> PeerOut:
-    return PeerOut(peer_id=peer.peer_id, address=peer.address, connected=peer.connected)
+class CapabilitiesOut(BaseModel):
+    capabilities: list[str]
+
+
+class SetCapabilitiesRequest(BaseModel):
+    capabilities: list[str]
+
+
+def _peer_out(peer: EnginePeerInfo, capabilities: list[str]) -> PeerOut:
+    return PeerOut(
+        peer_id=peer.peer_id,
+        address=peer.address,
+        connected=peer.connected,
+        capabilities=capabilities,
+    )
 
 
 @router.get("/status", response_model=SyncStatus)
@@ -80,12 +96,27 @@ async def sync_status(_: CurrentWorkspaceId) -> SyncStatus:
     if not engine.running:
         return SyncStatus(running=False, node_id=None, peers=[], pending_changes=0)
     peers = await engine.list_peers()
+    peer_capabilities = await engine.list_peer_capabilities()
     return SyncStatus(
         running=True,
         node_id=engine.node_id,
-        peers=[_peer_out(p) for p in peers],
+        peers=[_peer_out(p, peer_capabilities.get(p.peer_id, [])) for p in peers],
         pending_changes=0,
     )
+
+
+@router.get("/capabilities", response_model=CapabilitiesOut)
+async def get_capabilities(_: CurrentWorkspaceId) -> CapabilitiesOut:
+    return CapabilitiesOut(capabilities=load_capabilities(get_settings().sync_dir))
+
+
+@router.patch("/capabilities", response_model=CapabilitiesOut)
+async def set_capabilities(body: SetCapabilitiesRequest, _: CurrentWorkspaceId) -> CapabilitiesOut:
+    save_capabilities(get_settings().sync_dir, body.capabilities)
+    engine = get_sync_engine()
+    if engine.running:
+        await engine.publish_capabilities(body.capabilities)
+    return CapabilitiesOut(capabilities=body.capabilities)
 
 
 @router.post("/connect", response_model=PeerOut)
@@ -100,7 +131,7 @@ async def sync_connect(body: ConnectRequest, _: CurrentWorkspaceId) -> PeerOut:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"Could not connect to {body.address}: {exc}"
         ) from exc
-    return _peer_out(peer)
+    return _peer_out(peer, [])
 
 
 @router.post("/disconnect", status_code=status.HTTP_204_NO_CONTENT)

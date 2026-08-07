@@ -10,6 +10,10 @@ from typing import Any
 import pytest
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from rivulets.db.models import Agent, AgentPeerPreference
+from rivulets.dispatch.service import _resolve_remote_peer  # pyright: ignore[reportPrivateUsage]
 
 
 def _fake_run_agent(content: str) -> Any:
@@ -363,3 +367,237 @@ def test_non_auto_agent_never_invokes_the_classifier(
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
     assert messages[1]["model_used"] is None
     assert called is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #10: multi-machine capability-aware task routing. _resolve_remote_peer
+# is unit-tested directly (db_session fixture) against a fake, capability-
+# aware engine -- same "swap in a test double for the network dependency"
+# pattern test_sync.py's _FakeRunningEngine uses. load_capabilities is
+# monkeypatched rather than written to the real (session-shared) sync_dir,
+# so these tests don't depend on -- or leak into -- disk state any other
+# test in the suite might touch.
+# ---------------------------------------------------------------------------
+
+_AGENT_FIELDS = {
+    "description": "A test agent used only in remote-dispatch tests.",
+    "instructions": "Do the thing.",
+    "model": "anthropic:claude-3-5-haiku-latest",
+}
+
+
+def _fake_load_capabilities(tags: list[str]) -> Any:
+    def load(_sync_dir: object) -> list[str]:
+        return tags
+
+    return load
+
+
+class _FakeCapabilityEngine:
+    node_id = "fake-local-node"
+
+    def __init__(
+        self, running: bool, peer_capabilities: dict[str, list[str]] | None = None
+    ) -> None:
+        self.running = running
+        self._peer_capabilities = peer_capabilities or {}
+
+    async def list_peer_capabilities(self) -> dict[str, list[str]]:
+        return self._peer_capabilities
+
+
+async def test_resolve_remote_peer_returns_none_without_preference(
+    db_session: AsyncSession,
+) -> None:
+    agent = Agent(id="agent-1", name="A", **_AGENT_FIELDS)
+    db_session.add(agent)
+    await db_session.commit()
+
+    assert await _resolve_remote_peer(db_session, agent) is None
+
+
+async def test_resolve_remote_peer_returns_none_when_engine_not_running(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = Agent(id="agent-1", name="A", **_AGENT_FIELDS)
+    db_session.add(agent)
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.get_sync_engine",
+        lambda: _FakeCapabilityEngine(running=False),
+    )
+
+    assert await _resolve_remote_peer(db_session, agent) is None
+
+
+async def test_resolve_remote_peer_returns_none_when_this_node_already_matches(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = Agent(id="agent-1", name="A", **_AGENT_FIELDS)
+    db_session.add(agent)
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.load_capabilities", _fake_load_capabilities(["gpu"])
+    )
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.get_sync_engine",
+        lambda: _FakeCapabilityEngine(running=True, peer_capabilities={"peer-x": ["gpu"]}),
+    )
+
+    # This node already has the preferred capability -- no network hop.
+    assert await _resolve_remote_peer(db_session, agent) is None
+
+
+async def test_resolve_remote_peer_returns_matching_peer(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = Agent(id="agent-1", name="A", **_AGENT_FIELDS)
+    db_session.add(agent)
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+
+    monkeypatch.setattr("rivulets.dispatch.service.load_capabilities", _fake_load_capabilities([]))
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.get_sync_engine",
+        lambda: _FakeCapabilityEngine(running=True, peer_capabilities={"peer-x": ["gpu"]}),
+    )
+
+    assert await _resolve_remote_peer(db_session, agent) == "peer-x"
+
+
+async def test_resolve_remote_peer_returns_none_when_no_peer_matches(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = Agent(id="agent-1", name="A", **_AGENT_FIELDS)
+    db_session.add(agent)
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+
+    monkeypatch.setattr("rivulets.dispatch.service.load_capabilities", _fake_load_capabilities([]))
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.get_sync_engine",
+        lambda: _FakeCapabilityEngine(running=True, peer_capabilities={"peer-x": ["cpu-heavy"]}),
+    )
+
+    assert await _resolve_remote_peer(db_session, agent) is None
+
+
+def test_agent_with_remote_peer_preference_dispatches_via_rpc_not_locally(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full-pipeline integration: an agent pinned to a capability tag a
+    connected peer advertises gets dispatched over the RPC instead of
+    running locally -- run_agent must never fire, and no agent reply shows
+    up in this node's own message list (it would arrive later via normal
+    Message sync in production, which this test doesn't exercise)."""
+    local_run_called = False
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        nonlocal local_run_called
+        local_run_called = True
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "should not run"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    monkeypatch.setattr("rivulets.dispatch.service.load_capabilities", _fake_load_capabilities([]))
+
+    dispatch_calls: list[tuple[str, object]] = []
+
+    class _FakeEngine:
+        running = True
+
+        async def list_peer_capabilities(self) -> dict[str, list[str]]:
+            return {"peer-gpu": ["gpu"]}
+
+        async def dispatch_agent_remotely(self, peer_id: str, request: object) -> bool:
+            dispatch_calls.append((peer_id, request))
+            return True
+
+    monkeypatch.setattr("rivulets.dispatch.service.get_sync_engine", lambda: _FakeEngine())
+
+    agent_id = _create_agent_with_always_rule(client, auth_headers, "GPU Agent")
+    pref = client.put(
+        f"/api/v1/agents/{agent_id}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=auth_headers,
+    )
+    assert pref.status_code == 200, pref.text
+
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "do the gpu thing"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    assert local_run_called is False
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0][0] == "peer-gpu"
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human"]
+
+
+def test_agent_with_remote_peer_preference_falls_back_to_local_when_no_peer_matches(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same integration: a preference with no
+    matching connected peer must still run locally, same as before issue
+    #10 -- the offline/no-match fallback is "run locally", not "drop".
+    Uses a keyword rule (not "always") whose reply text deliberately
+    doesn't repeat the keyword, same as test_keyword_rule_agent_responds_
+    to_new_rivulet -- an "always" rule here would make the agent's own
+    successful reply re-trigger itself and recurse into a guard pause,
+    unrelated to what this test is checking."""
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("ran locally"))
+    monkeypatch.setattr("rivulets.dispatch.service.load_capabilities", _fake_load_capabilities([]))
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.get_sync_engine",
+        lambda: _FakeCapabilityEngine(running=True, peer_capabilities={}),
+    )
+
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Unmatched GPU Agent",
+            "description": "Responds to widget questions.",
+            "instructions": "Say OK.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    agent_id = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": '["widget"]', "priority": 10}]},
+        headers=auth_headers,
+    )
+    pref = client.put(
+        f"/api/v1/agents/{agent_id}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=auth_headers,
+    )
+    assert pref.status_code == 200, pref.text
+
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "tell me about the widget"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["content"] == "ran locally"
