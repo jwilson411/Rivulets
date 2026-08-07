@@ -5,7 +5,10 @@ are no-op'd for the `client` fixture (see conftest.py) — this file only
 exercises what a user triggers directly.
 """
 
+import pytest
 from fastapi.testclient import TestClient
+
+from rivulets.backup import BackupIntegrityError
 
 
 def test_create_manual_backup_returns_metadata(
@@ -77,3 +80,17 @@ def test_restore_reverts_workspace_state_to_snapshot(
     after = client.get("/api/v1/providers", headers=auth_headers)
     assert after.status_code == 200, after.text
     assert after.json() == []
+
+
+def test_create_manual_backup_returns_500_on_integrity_failure(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_create_backup(*_args: object, **_kwargs: object) -> None:
+        raise BackupIntegrityError("VACUUM INTO snapshot failed integrity_check")
+
+    monkeypatch.setattr("rivulets.api.backups.create_backup", fake_create_backup)
+
+    response = client.post("/api/v1/backups", headers=auth_headers)
+
+    assert response.status_code == 500
+    assert "integrity_check" in response.json()["detail"]

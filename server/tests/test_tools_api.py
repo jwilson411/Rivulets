@@ -205,3 +205,86 @@ def test_save_tool_version_rejected_for_builtin_tool(
     )
 
     assert response.status_code == 400
+
+
+def test_create_tool_simple_mode_is_not_yet_implemented(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "codegen_tool", "description": "d", "mode": "simple", "prompt": "do a thing"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 501
+
+
+def _create_custom_tool_named(
+    client: TestClient, auth_headers: dict[str, str], name: str
+) -> dict[str, Any]:
+    """Like _create_custom_tool, but with a caller-chosen name -- needed for
+    tests that make assertions about the file's exact on-disk content,
+    since "my_tool" (the fixed name _create_custom_tool always uses) maps
+    to the same tools_dir path across every test in this session (a real
+    file on disk, not reset per-test the way the in-memory DB is)."""
+    create = client.post(
+        "/api/v1/tools",
+        json={"name": name, "description": "Does a thing."},
+        headers=auth_headers,
+    )
+    assert create.status_code == 201, create.text
+    return create.json()
+
+
+def test_rollback_tool_version_restores_earlier_source(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """create_tool records version 1 as an empty ToolVersion row without
+    writing anything to disk yet (the file only gets created by the first
+    real save) -- so version 2 has to actually exist on disk before this
+    test can meaningfully assert that rolling back to version 1 restores
+    the (empty) pre-save content."""
+    tool = _create_custom_tool_named(client, auth_headers, "rollback_test_tool")
+
+    client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "# v2 content"},
+        headers=auth_headers,
+    )
+    assert Path(tool["source_path"]).read_text() == "# v2 content"
+
+    rollback = client.post(f"/api/v1/tools/{tool['id']}/versions/1/rollback", headers=auth_headers)
+    assert rollback.status_code == 200, rollback.text
+    assert Path(tool["source_path"]).read_text() == ""
+
+
+def test_rollback_tool_version_returns_404_for_unknown_version(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = _create_custom_tool_named(client, auth_headers, "rollback_404_test_tool")
+
+    response = client.post(
+        f"/api/v1/tools/{tool['id']}/versions/999/rollback", headers=auth_headers
+    )
+    assert response.status_code == 404
+
+
+def test_open_tool_editor_returns_the_source_path(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = _create_custom_tool_named(client, auth_headers, "open_editor_test_tool")
+
+    response = client.post(f"/api/v1/tools/{tool['id']}/open-editor", headers=auth_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"path": tool["source_path"]}
+
+
+def test_open_tool_editor_rejects_a_tool_with_no_source_file(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    # Builtin tool rows never get a source_path (api/tools.py's ToolOut).
+    builtin_id = _get_builtin_tool_id(client, auth_headers)
+
+    response = client.post(f"/api/v1/tools/{builtin_id}/open-editor", headers=auth_headers)
+
+    assert response.status_code == 400

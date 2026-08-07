@@ -180,10 +180,11 @@ def test_delete_agent_removes_it(client: TestClient, auth_headers: dict[str, str
     assert client.get("/api/v1/agents", headers=auth_headers).json() == []
 
 
-def test_get_agent_runs_not_implemented(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_get_agent_runs_empty(client: TestClient, auth_headers: dict[str, str]) -> None:
     agent = _create_agent(client, auth_headers)
     response = client.get(f"/api/v1/agents/{agent['id']}/runs", headers=auth_headers)
-    assert response.status_code == 501
+    assert response.status_code == 200, response.text
+    assert response.json() == []
 
 
 def test_get_agent_runs_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:

@@ -1,7 +1,9 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
+from rivulets.security.session import get_session_key_store
 
 
 def test_login_bootstraps_workspace_on_first_use(client: TestClient) -> None:
@@ -61,3 +63,34 @@ def test_login_rate_limit_is_scoped_independently_per_ip(client: TestClient) -> 
         assert limiter.check("1.2.3.4") is True
     assert limiter.check("1.2.3.4") is False
     assert limiter.check("5.6.7.8") is True
+
+
+def test_login_succeeds_even_when_the_sync_engine_fails_to_start(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-9.5: a node must be fully functional with sync unreachable,
+    including sync itself failing to come up at login time -- this must
+    never turn into a failed login."""
+
+    async def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("libp2p host failed to bind")
+
+    monkeypatch.setattr("rivulets.sync.engine.SyncEngine.start", _boom)
+
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["token"]
+
+
+def test_logout_clears_the_session_and_stops_the_sync_engine(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post("/api/v1/auth/logout", headers=auth_headers)
+    assert response.status_code == 204
+
+    with pytest.raises(RuntimeError, match="No active session"):
+        get_session_key_store().get_key()
+
+    # The session is gone, so the same bearer token is no longer accepted.
+    assert client.get("/api/v1/channels", headers=auth_headers).status_code == 401

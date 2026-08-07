@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.db.models import ProviderConfig
 from rivulets.dispatch.complexity_classifier import (
     _ComplexityDecision,  # pyright: ignore[reportPrivateUsage]
+    _run_classification,  # pyright: ignore[reportPrivateUsage]
     classify_tier,
 )
 
@@ -96,3 +97,51 @@ async def test_classify_tier_runs_on_the_cheap_tier_model_even_when_it_decides_c
 
     await classify_tier(db_session, "Prove P != NP.")
     assert resolved_provider_models == ["anthropic:claude-haiku-4-5-20251001"]
+
+
+class _FakeRunOutput:
+    def __init__(self, content: object) -> None:
+        self.content = content
+
+
+def _fake_agno_agent(run_output_content: object) -> type:
+    class _FakeAgnoAgent:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def arun(self, *_args: object, **_kwargs: object) -> _FakeRunOutput:
+            return _FakeRunOutput(run_output_content)
+
+    return _FakeAgnoAgent
+
+
+async def test_run_classification_returns_the_decision_from_the_agent_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real seam llm_fallback/complexity_classifier both isolate for
+    tests -- this is the one test that actually calls through it, faking
+    only agno's AgnoAgent class itself (not the seam), so the real
+    instantiate-call-unwrap logic in _run_classification runs for real."""
+    monkeypatch.setattr(
+        "rivulets.dispatch.complexity_classifier.AgnoAgent",
+        _fake_agno_agent(_ComplexityDecision(tier="capable")),
+    )
+
+    result = await _run_classification(object(), "a hard question")  # type: ignore[arg-type]
+
+    assert result == _ComplexityDecision(tier="capable")
+
+
+async def test_run_classification_returns_none_for_unexpected_content_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agno's output_schema coercion is trusted but not blindly -- content
+    that isn't a _ComplexityDecision instance (a malformed/failed
+    structured-output call) must come back as None, not be passed through."""
+    monkeypatch.setattr(
+        "rivulets.dispatch.complexity_classifier.AgnoAgent", _fake_agno_agent("not a decision")
+    )
+
+    result = await _run_classification(object(), "anything")  # type: ignore[arg-type]
+
+    assert result is None

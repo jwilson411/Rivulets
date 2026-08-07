@@ -23,11 +23,17 @@ exactly what FR-9.5 says should still work.
 
 import asyncio
 import hashlib
+import os
+import struct
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import trio
 from fastapi.testclient import TestClient
+from libp2p.peer.id import ID as _ID  # pyright: ignore[reportMissingTypeStubs]
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +46,7 @@ from rivulets.db.models import (
     Message,
     Rivulet,
     SyncConflict,
+    SyncPendingInbound,
     Team,
     Tool,
     ToolVersion,
@@ -59,10 +66,21 @@ from rivulets.sync.apply import (
     apply_remote_file_change,
     apply_remote_tool_change,
     compare_vector_clocks,
+    handle_incoming_state_change,
     merge_vector_clocks,
     record_local_change,
+    retry_pending_inbound,
 )
-from rivulets.sync.engine import SyncEngine, init_sync_engine, reset_sync_engine_for_testing
+from rivulets.sync.engine import (
+    PeerInfo,
+    SyncEngine,
+    _bound_port,  # pyright: ignore[reportPrivateUsage]
+    _PeerConnectionNotifee,  # pyright: ignore[reportPrivateUsage]
+    get_sync_engine,
+    init_sync_engine,
+    reset_sync_engine_for_testing,
+)
+from rivulets.sync.file_transfer import HASH_LEN, HIT_PREFIX, MISS_MARKER
 
 _AGENT_FIELDS = {
     "description": "A test agent used only in sync tests.",
@@ -860,3 +878,839 @@ def test_settings_patch_does_not_fail_when_sync_engine_not_running(
     response = client.patch("/api/v1/settings", json={"guard.turn_limit": 15}, headers=auth_headers)
     assert response.status_code == 200, response.text
     assert response.json()["guard.turn_limit"] == 15
+
+
+# ---------------------------------------------------------------------------
+# api/sync.py: sync_status/connect/disconnect's "engine actually running"
+# branches. The `client` fixture no-ops SyncEngine.start()/stop() (see
+# conftest.py), so engine.running is always False through it -- these branches
+# are only reachable by swapping in a fake engine that reports running=True,
+# the same pattern test_mcp_servers.py uses for MCPTools.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunningEngine:
+    running = True
+    node_id = "fake-node-id"
+
+    def __init__(
+        self,
+        peers: list[PeerInfo] | None = None,
+        connect_result: PeerInfo | Exception | None = None,
+        disconnect_error: Exception | None = None,
+    ) -> None:
+        self._peers = peers or []
+        self._connect_result = connect_result
+        self._disconnect_error = disconnect_error
+
+    async def list_peers(self) -> list[PeerInfo]:
+        return self._peers
+
+    async def connect(self, address: str) -> PeerInfo:
+        if isinstance(self._connect_result, Exception):
+            raise self._connect_result
+        assert self._connect_result is not None
+        return self._connect_result
+
+    async def disconnect(self, peer_id: str) -> None:  # noqa: ARG002
+        if self._disconnect_error is not None:
+            raise self._disconnect_error
+
+
+def test_sync_status_when_running_reports_peers(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine(
+        peers=[PeerInfo(peer_id="peer-1", address="/ip4/1.2.3.4/tcp/1", connected=True)]
+    )
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.get("/api/v1/sync/status", headers=auth_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["running"] is True
+    assert body["node_id"] == "fake-node-id"
+    assert body["peers"] == [
+        {"peer_id": "peer-1", "address": "/ip4/1.2.3.4/tcp/1", "connected": True}
+    ]
+
+
+def test_sync_connect_when_running_returns_peer(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine(
+        connect_result=PeerInfo(peer_id="peer-2", address="/ip4/5.6.7.8/tcp/2", connected=True)
+    )
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.post(
+        "/api/v1/sync/connect",
+        json={"address": "/ip4/5.6.7.8/tcp/2/p2p/peer-2"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "peer_id": "peer-2",
+        "address": "/ip4/5.6.7.8/tcp/2",
+        "connected": True,
+    }
+
+
+def test_sync_connect_when_running_wraps_failure_as_502(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine(connect_result=RuntimeError("no route to host"))
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.post(
+        "/api/v1/sync/connect", json={"address": "/ip4/9.9.9.9/tcp/1/p2p/x"}, headers=auth_headers
+    )
+
+    assert response.status_code == 502
+    assert "no route to host" in response.json()["detail"]
+
+
+def test_sync_disconnect_when_running_succeeds(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine()
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.post(
+        "/api/v1/sync/disconnect", json={"peer_id": "peer-2"}, headers=auth_headers
+    )
+
+    assert response.status_code == 204
+
+
+async def test_resolve_conflict_rejects_invalid_keep_for_a_real_conflict(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Unlike test_resolve_conflict_invalid_keep (which hits a nonexistent
+    conflict id, so it can't tell 400-before-404 apart from a plain 404),
+    this creates a real conflict first so an invalid `keep` value is
+    unambiguously exercising the 400 validation branch, not the 404 lookup."""
+    create = client.post("/api/v1/channels", json={"name": "conflict-chan"}, headers=auth_headers)
+    channel_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "channel", channel_id, "node-a")
+        result = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-b": 1},
+            "node-b",
+            {"name": "remote", "description": None, "position": 0, "archived": False},
+        )
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == channel_id)
+
+    response = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "bogus"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# sync/apply.py: branches the HTTP-layer/db_session tests above don't reach --
+# stale tool/file deliveries, file-level conflicts, the "peer doesn't have it
+# either" fetch outcome, pending-inbound retry with an unexpected entity type,
+# and handle_incoming_state_change (SyncEngine's real callback) end to end.
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_remote_tool_change_ignores_stale(db_session: AsyncSession) -> None:
+    await record_local_change(db_session, "tool", "tool-stale", "node-a")  # local at {node-a: 1}
+
+    result = await apply_remote_tool_change(
+        db_session,
+        "tool-stale",
+        {"node-a": 0},
+        "node-b",
+        {"name": "whatever", "description": "x", "source_code": "pass"},
+    )
+
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(Tool, "tool-stale") is None
+
+
+async def test_apply_remote_file_change_ignores_stale(db_session: AsyncSession) -> None:
+    await record_local_change(db_session, "file", "file-stale", "node-a")
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-stale",
+        {"node-a": 0},
+        "node-b",
+        {
+            "content_hash": "d" * 64,
+            "filename": "x.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 1,
+            "message_id": None,
+        },
+    )
+
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(File, "file-stale") is None
+
+
+async def test_apply_remote_file_change_detects_conflict(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    db_session.add(
+        File(
+            id="file-1",
+            content_hash="e" * 64,
+            filename="local.txt",
+            mime_type="text/plain",
+            size_bytes=1,
+            local_path="not-a-real-path/local.txt",
+        )
+    )
+    await db_session.commit()
+    await record_local_change(db_session, "file", "file-1", "node-a")
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": "f" * 64,
+            "filename": "remote.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 2,
+            "message_id": None,
+        },
+    )
+
+    assert result.applied is False
+    assert result.conflict is True
+    file_row = await db_session.get(File, "file-1")
+    assert file_row is not None
+    assert file_row.filename == "local.txt"  # untouched
+
+    conflicts = list((await db_session.execute(select(SyncConflict))).scalars().all())
+    assert len(conflicts) == 1
+    assert conflicts[0].entity_type == "file"
+
+
+async def test_apply_remote_file_change_logs_when_peer_also_lacks_content(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    content_hash = "1" * 64
+
+    class _FakeEngineNoContent:
+        running = True
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            assert peer_id == "node-b"
+            assert requested_hash == content_hash
+            return None
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngineNoContent())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-2",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 5,
+            "message_id": None,
+        },
+    )
+
+    assert result.applied is True
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert not local_path.exists()
+
+
+async def test_retry_pending_inbound_skips_unrecognized_entity_type(
+    db_session: AsyncSession,
+) -> None:
+    """Tool/file never end up in SyncPendingInbound (module docstring: they
+    have no FK-ordering hazard), but retry_pending_inbound must still cope
+    defensively with an entity_type get_entity_spec doesn't dispatch on
+    without raising -- it just clears the row and moves on."""
+    db_session.add(
+        SyncPendingInbound(
+            entity_type="not-a-real-entity-type",
+            entity_id="whatever",
+            vector_clock_json="{}",
+            origin_node_id="node-b",
+            payload_json="{}",
+        )
+    )
+    await db_session.commit()
+
+    await retry_pending_inbound(db_session)
+
+    remaining = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
+    assert remaining == []
+
+
+async def test_handle_incoming_state_change_applies_a_dispatch_entity(
+    db_session: AsyncSession,
+) -> None:
+    await handle_incoming_state_change(
+        "agent", "agent-remote-1", {"node-b": 1}, "node-b", {"name": "Remote", **_AGENT_FIELDS}
+    )
+    agent = await db_session.get(Agent, "agent-remote-1")
+    assert agent is not None
+    assert agent.name == "Remote"
+
+
+async def test_handle_incoming_state_change_applies_a_tool(db_session: AsyncSession) -> None:
+    await handle_incoming_state_change(
+        "tool",
+        "tool-remote-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "remote_tool", "description": "d", "source_code": "def f():\n    pass\n"},
+    )
+    tool = await db_session.get(Tool, "tool-remote-1")
+    assert tool is not None
+    assert tool.name == "remote_tool"
+
+
+async def test_handle_incoming_state_change_applies_a_file(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    content_hash = "2" * 64
+    await handle_incoming_state_change(
+        "file",
+        "file-remote-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "remote.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 3,
+            "message_id": None,
+        },
+    )
+    file_row = await db_session.get(File, "file-remote-1")
+    assert file_row is not None
+    assert file_row.content_hash == content_hash
+
+
+async def test_handle_incoming_state_change_drops_unsupported_entity_type(
+    db_session: AsyncSession,
+) -> None:
+    # Must not raise, and must not create anything -- just logged and dropped.
+    await handle_incoming_state_change(
+        "not-a-real-entity-type", "whatever", {"node-b": 1}, "node-b", {}
+    )
+
+
+async def test_handle_incoming_state_change_records_a_conflict(db_session: AsyncSession) -> None:
+    db_session.add(Agent(id="agent-conf", name="Local", **_AGENT_FIELDS))
+    await db_session.commit()
+    await record_local_change(db_session, "agent", "agent-conf", "node-a")
+
+    await handle_incoming_state_change(
+        "agent", "agent-conf", {"node-b": 1}, "node-b", {"name": "Remote", **_AGENT_FIELDS}
+    )
+
+    conflicts = list(
+        (
+            await db_session.execute(
+                select(SyncConflict).where(SyncConflict.entity_id == "agent-conf")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(conflicts) == 1
+    agent = await db_session.get(Agent, "agent-conf")
+    assert agent is not None
+    assert agent.name == "Local"  # untouched -- the conflict wasn't auto-applied
+
+
+async def test_handle_incoming_state_change_retries_pending_inbound_on_success(
+    db_session: AsyncSession,
+) -> None:
+    """End-to-end regression for the FK-ordering hazard (module docstring):
+    a rivulet arrives before its channel and gets queued; once the channel
+    itself arrives via handle_incoming_state_change, the queued rivulet
+    must be retried automatically, not left stranded."""
+    queue_result = await apply_remote_change(
+        db_session,
+        RIVULET_SPEC,
+        "rivulet-pending",
+        {"node-b": 1},
+        "node-b",
+        {
+            "channel_id": "chan-not-yet-synced",
+            "title": "Queued",
+            "status": "active",
+            "created_by": "human",
+        },
+    )
+    assert queue_result.applied is False
+    from rivulets.sync.apply import _record_pending_inbound  # pyright: ignore[reportPrivateUsage]
+
+    await _record_pending_inbound(
+        db_session,
+        "rivulet",
+        "rivulet-pending",
+        {"node-b": 1},
+        "node-b",
+        {
+            "channel_id": "chan-not-yet-synced",
+            "title": "Queued",
+            "status": "active",
+            "created_by": "human",
+        },
+    )
+
+    await handle_incoming_state_change(
+        "channel",
+        "chan-not-yet-synced",
+        {"node-b": 1},
+        "node-b",
+        {"name": "general", "description": None, "position": 0, "archived": False},
+    )
+
+    rivulet = await db_session.get(Rivulet, "rivulet-pending")
+    assert rivulet is not None
+    assert rivulet.title == "Queued"
+    remaining_pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
+    assert remaining_pending == []
+
+
+# ---------------------------------------------------------------------------
+# sync/engine.py: unit-level coverage of SyncEngine internals that the real
+# two-host tests above (test_two_engines_sync_agent_state_change,
+# test_engine_tracks_inbound_connections_and_detects_disconnect) don't
+# exercise -- error/edge branches around startup, shutdown, auto-connect
+# races, malformed gossipsub messages, and the file-transfer wire protocol,
+# using fakes rather than real libp2p hosts (matching this file's own
+# module docstring on _FakeEngine-style tests for apply.py above).
+# ---------------------------------------------------------------------------
+
+
+def test_bound_port_raises_when_host_has_no_tcp_port() -> None:
+    class _BadAddr:
+        def value_for_protocol(self, proto: str) -> int | None:
+            raise ValueError(f"no {proto} protocol on this addr")
+
+    class _FakeHost:
+        def get_addrs(self) -> list[_BadAddr]:
+            return [_BadAddr()]
+
+    with pytest.raises(RuntimeError, match="no bound TCP port"):
+        _bound_port(_FakeHost())  # pyright: ignore[reportArgumentType]
+
+
+async def test_notifee_connected_handles_transport_address_lookup_failure() -> None:
+    connected: list[tuple[str, str]] = []
+    notifee = _PeerConnectionNotifee(
+        on_connected=lambda pid, addr: connected.append((pid, addr)), on_disconnected=lambda _: None
+    )
+
+    class _BoomConn:
+        muxed_conn = SimpleNamespace(peer_id="peer-x")
+
+        def get_transport_addresses(self) -> list[str]:
+            raise RuntimeError("peerstore race")
+
+    await notifee.connected(None, _BoomConn())  # pyright: ignore[reportArgumentType]
+
+    assert connected == [("peer-x", "")]
+
+
+def test_node_id_raises_when_engine_not_running(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = engine.node_id
+
+
+async def test_start_is_a_noop_when_already_running(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    sentinel = object()
+    engine._thread = sentinel  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    await engine.start("fingerprint", "psk-hex")
+
+    assert engine._thread is sentinel  # pyright: ignore[reportPrivateUsage]  # start() returned early
+
+
+async def test_start_surfaces_the_underlying_trio_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = SyncEngine(tmp_path)
+
+    async def _boom() -> None:
+        raise RuntimeError("psk rejected by new_host")
+
+    monkeypatch.setattr(engine, "_trio_main", _boom)
+
+    with pytest.raises(RuntimeError, match="Sync engine failed to start"):
+        await engine.start("fingerprint", "bad-psk")
+
+    assert engine._thread is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_stop_is_a_noop_when_not_running(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    await engine.stop()  # must not raise
+
+
+async def test_stop_swallows_run_finished_error_from_the_trio_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trio.run() that's already tearing down on its own races stop()'s
+    own signal -- trio.from_thread.run_sync raises RunFinishedError in that
+    case, which must be swallowed rather than propagated."""
+    engine = SyncEngine(tmp_path)
+    already_finished_thread = threading_dummy_thread()
+    engine._thread = already_finished_thread  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    engine._trio_token = object()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    engine._stop_event = trio.Event()  # pyright: ignore[reportPrivateUsage]
+
+    def _raise_run_finished(*_args: object, **_kwargs: object) -> None:
+        raise trio.RunFinishedError("trio run already exited")
+
+    monkeypatch.setattr(trio.from_thread, "run_sync", _raise_run_finished)
+
+    await engine.stop()  # must not raise
+
+    assert engine._thread is None  # pyright: ignore[reportPrivateUsage]
+
+
+def threading_dummy_thread() -> Any:
+    import threading
+
+    t = threading.Thread(target=lambda: None)
+    t.start()
+    t.join()
+    return t
+
+
+async def test_call_trio_raises_when_engine_not_running(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    with pytest.raises(RuntimeError, match="not running"):
+        await engine.connect("/ip4/127.0.0.1/tcp/1/p2p/x")
+
+
+async def test_publish_state_change_is_a_noop_when_engine_not_running(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    await engine.publish_state_change("agent", "agent-1", {"name": "x"}, {"node-a": 1})
+    # No exception, and nothing to assert on the wire -- the log message
+    # itself (FR-9.5 offline operation) is the documented behavior here.
+
+
+def _peer_info(peer_id: str, addrs: list[str] | None = None) -> Any:
+    """A duck-typed stand-in for libp2p's PeerInfo (peer_id + addrs is all
+    engine.py's auto-connect path ever reads off of it) -- typed as Any so
+    it satisfies engine.py's real (stub-less, per pyproject.toml's
+    per-directory pyright config) PeerInfo parameter type without a
+    reportArgumentType ignore-comment at every call site below."""
+    return SimpleNamespace(peer_id=peer_id, addrs=addrs or [])
+
+
+def test_on_peer_discovered_returns_early_with_no_trio_token(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)  # never started -- _trio_token is None
+    engine._on_peer_discovered(  # pyright: ignore[reportPrivateUsage]
+        _peer_info("peer-x")
+    )  # must not raise
+
+
+def test_on_peer_discovered_logs_and_swallows_auto_connect_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._trio_token = object()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("not actually in a trio thread")
+
+    monkeypatch.setattr(trio.from_thread, "run", _raise)
+
+    engine._on_peer_discovered(  # pyright: ignore[reportPrivateUsage]
+        _peer_info("peer-x")
+    )  # must not raise
+
+
+def test_trio_auto_connect_branches(tmp_path: Path) -> None:
+    """_trio_auto_connect uses trio.Lock/trio.fail_after, so it needs a real
+    trio run loop -- exercised directly here (rather than through a real
+    libp2p host) for the self/already-connected/failure/success branches."""
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._node_id = "self-node"  # pyright: ignore[reportPrivateUsage]
+        engine._host = object()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+        # 1. Skips connecting to itself.
+        await engine._trio_auto_connect(  # pyright: ignore[reportPrivateUsage]
+            _peer_info("self-node")
+        )
+        assert engine._connected_peers == {}  # pyright: ignore[reportPrivateUsage]
+
+        # 2. Skips a peer already recorded as connected.
+        engine._connected_peers["peer-already"] = "/some/addr"  # pyright: ignore[reportPrivateUsage]
+        await engine._trio_auto_connect(  # pyright: ignore[reportPrivateUsage]
+            _peer_info("peer-already")
+        )
+        assert engine._connected_peers["peer-already"] == "/some/addr"  # pyright: ignore[reportPrivateUsage]
+
+        # 3. Logs and swallows a connect failure -- never recorded as connected.
+        class _FailingHost:
+            async def connect(self, _info: object) -> None:
+                raise RuntimeError("connection refused")
+
+        engine._host = _FailingHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        await engine._trio_auto_connect(  # pyright: ignore[reportPrivateUsage]
+            _peer_info("peer-fails")
+        )
+        assert "peer-fails" not in engine._connected_peers  # pyright: ignore[reportPrivateUsage]
+
+        # 4. A clean connect records the peer and its first address.
+        class _WorkingHost:
+            async def connect(self, _info: object) -> None:
+                return None
+
+        engine._host = _WorkingHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        await engine._trio_auto_connect(  # pyright: ignore[reportPrivateUsage]
+            _peer_info("peer-ok", ["/ip4/1.2.3.4/tcp/1"])
+        )
+        assert engine._connected_peers["peer-ok"] == "/ip4/1.2.3.4/tcp/1"  # pyright: ignore[reportPrivateUsage]
+
+    trio.run(main)
+
+
+def test_on_peer_connected_ignores_self(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._node_id = "self-node"  # pyright: ignore[reportPrivateUsage]
+    engine._on_peer_connected("self-node", "/some/addr")  # pyright: ignore[reportPrivateUsage]
+    assert engine._connected_peers == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_trigger_peer_connected_handler_is_a_noop_with_no_handler(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # pyright: ignore[reportPrivateUsage]
+    # Sleeps _MESH_FORM_DELAY_SECONDS internally -- monkeypatch trio.sleep so
+    # this doesn't add ~2s of real wall-clock time to the suite.
+    import rivulets.sync.engine as engine_module
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    original_sleep = engine_module.trio.sleep
+    engine_module.trio.sleep = _no_sleep  # type: ignore[assignment]
+    try:
+        await engine._trigger_peer_connected_handler()  # pyright: ignore[reportPrivateUsage]
+    finally:
+        engine_module.trio.sleep = original_sleep  # type: ignore[assignment]
+
+
+async def test_trigger_peer_connected_handler_invokes_the_registered_handler(
+    tmp_path: Path,
+) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # pyright: ignore[reportPrivateUsage]
+    called = asyncio.Event()
+
+    async def handler() -> None:
+        called.set()
+
+    engine.set_peer_connected_handler(handler)
+
+    import rivulets.sync.engine as engine_module
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    original_sleep = engine_module.trio.sleep
+    engine_module.trio.sleep = _no_sleep  # type: ignore[assignment]
+    try:
+        await engine._trigger_peer_connected_handler()  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(called.wait(), timeout=5)
+    finally:
+        engine_module.trio.sleep = original_sleep  # type: ignore[assignment]
+
+
+def _noop_on_connected(_peer_id: str, _address: str) -> None:
+    return None
+
+
+def _noop_on_disconnected(_peer_id: str) -> None:
+    return None
+
+
+async def test_notifee_listen_callbacks_are_no_ops() -> None:
+    """opened_stream/closed_stream/listen/listen_close are protocol-required
+    INotifee overrides this engine doesn't act on -- confirms they're
+    genuinely inert rather than accidentally raising."""
+    notifee = _PeerConnectionNotifee(
+        on_connected=_noop_on_connected, on_disconnected=_noop_on_disconnected
+    )
+    assert await notifee.opened_stream(None, None) is None  # pyright: ignore[reportArgumentType]
+    assert await notifee.closed_stream(None, None) is None  # pyright: ignore[reportArgumentType]
+    assert await notifee.listen(None, None) is None  # pyright: ignore[reportArgumentType]
+    assert await notifee.listen_close(None, None) is None  # pyright: ignore[reportArgumentType]
+
+
+async def test_receive_loop_discards_a_malformed_message(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # pyright: ignore[reportPrivateUsage]
+    received: list[object] = []
+
+    async def on_change(*args: object) -> None:
+        received.append(args)
+
+    engine.set_state_change_handler(on_change)  # type: ignore[arg-type]
+
+    class _BadMessage:
+        from_id = b"someone-else"
+        data = b"not valid json"
+
+    async def _one_message() -> Any:
+        yield _BadMessage()
+
+    await engine._receive_loop(_one_message())  # pyright: ignore[reportPrivateUsage]
+
+    assert received == []  # malformed message was discarded, not handed to the handler
+
+
+class _FakeFileStream:
+    def __init__(self, to_read: bytes = b"") -> None:
+        self._buf = to_read
+        self.written = b""
+        self.closed = False
+        self.write_closed = False
+
+    async def read(self, n: int) -> bytes:
+        chunk = self._buf[:n]
+        self._buf = self._buf[n:]
+        return chunk
+
+    async def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def close_write(self) -> None:
+        self.write_closed = True
+
+
+async def test_handle_file_transfer_stream_reports_miss(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    try:
+        stream = _FakeFileStream(to_read=("0" * HASH_LEN).encode())
+        await engine._handle_file_transfer_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+        assert stream.written == MISS_MARKER
+        assert stream.closed is True
+    finally:
+        monkeypatch.undo()
+
+
+async def test_handle_file_transfer_stream_reports_hit(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    try:
+        content_hash = "a" * HASH_LEN
+        local_path = get_settings().files_dir / content_hash[:2] / content_hash
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"hello from disk")
+
+        stream = _FakeFileStream(to_read=content_hash.encode())
+        await engine._handle_file_transfer_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+        assert (
+            stream.written
+            == HIT_PREFIX + struct.pack(">Q", len(b"hello from disk")) + b"hello from disk"
+        )
+        assert stream.closed is True
+    finally:
+        monkeypatch.undo()
+
+
+async def test_handle_file_transfer_stream_logs_and_closes_on_malformed_request(
+    tmp_path: Path,
+) -> None:
+    engine = SyncEngine(tmp_path)
+    stream = _FakeFileStream(to_read=b"")  # too short -- read_exactly raises EOFError
+
+    await engine._handle_file_transfer_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+    assert stream.written == b""
+    assert stream.closed is True  # finally still runs
+
+
+def _valid_base58_peer_id() -> str:
+    """A syntactically valid libp2p peer id string -- _trio_request_file
+    round-trips it through ID.from_base58 before ever touching the (faked)
+    host, so an arbitrary string like "peer-x" fails there with a base58
+    decode error unrelated to what this test actually exercises."""
+    return str(_ID(os.urandom(32)))
+
+
+def test_trio_request_file_reads_a_hit_response(tmp_path: Path) -> None:
+    data = b"remote file bytes"
+    response = HIT_PREFIX + struct.pack(">Q", len(data)) + data
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        result = await engine._trio_request_file(  # pyright: ignore[reportPrivateUsage]
+            _valid_base58_peer_id(), "b" * HASH_LEN
+        )
+        assert result == data
+
+    trio.run(main)
+
+
+def test_trio_request_file_returns_none_on_miss(tmp_path: Path) -> None:
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=MISS_MARKER)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        result = await engine._trio_request_file(  # pyright: ignore[reportPrivateUsage]
+            _valid_base58_peer_id(), "c" * HASH_LEN
+        )
+        assert result is None
+
+    trio.run(main)
+
+
+async def test_request_file_returns_none_and_logs_on_transport_failure(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path)  # never started -- _call_trio raises immediately
+    result = await engine.request_file("peer-x", "d" * HASH_LEN)
+    assert result is None
+
+
+def test_get_sync_engine_raises_when_not_initialized() -> None:
+    reset_sync_engine_for_testing()
+    with pytest.raises(RuntimeError, match="not initialized"):
+        get_sync_engine()

@@ -180,6 +180,18 @@
 				>{/if}
 		</a>
 		<a
+			href={resolve('/usage')}
+			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+				isActive('/usage')
+			)}"
+		>
+			<Icon
+				name="chart"
+				class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+			/>
+			Usage
+		</a>
+		<a
 			href={resolve('/sync')}
 			class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
 				isActive('/sync')

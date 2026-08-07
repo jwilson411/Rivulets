@@ -247,8 +247,15 @@ async def run_agent(
         elif isinstance(event, RunCompletedEvent):
             # `tools` carries any tool calls made during the run (e.g. a
             # handoff() call — dispatch/service.py inspects this to detect
-            # and act on it after the run completes).
-            final = RunOutput(content=event.content, status=RunStatus.completed, tools=event.tools)
+            # and act on it after the run completes). `metrics` (tokens,
+            # #28's usage dashboard) only arrives on this terminal event —
+            # RunContentEvent deltas don't carry it.
+            final = RunOutput(
+                content=event.content,
+                status=RunStatus.completed,
+                tools=event.tools,
+                metrics=event.metrics,
+            )
 
     if final is None:
         if accumulated_content:

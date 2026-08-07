@@ -123,6 +123,37 @@ class AgentRoutingRule(Base):
     agent: Mapped["Agent"] = relationship(back_populates="routing_rules")
 
 
+class AgentRun(Base):
+    """One agent invocation's token/cost/status accounting (FR-3.5), and the
+    source data for the workspace-level usage dashboard (#28). Not synced —
+    local telemetry, not user content; a fresh peer doesn't need another
+    node's run history to function.
+
+    `source` leaves room for #31 (dispatcher hit-rate tracking) to record
+    dispatcher-side LLM calls (classification, rule generation, fallback
+    routing) in this same table without a schema change — those all record
+    `"dispatcher_call"` instead of the default `"agent_run"`.
+    """
+
+    __tablename__ = "agent_run"
+    __table_args__ = (Index("idx_agent_run_agent", "agent_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(default="agent_run")  # 'agent_run' | 'dispatcher_call'
+    model: Mapped[str]  # 'provider:model_name' — the concrete model that actually ran
+    tier: Mapped[str | None] = mapped_column(default=None)  # 'cheap'|'capable'|None (fixed model)
+    status: Mapped[str]  # 'completed' | 'error'
+    input_tokens: Mapped[int] = mapped_column(default=0)
+    output_tokens: Mapped[int] = mapped_column(default=0)
+    total_tokens: Mapped[int] = mapped_column(default=0)
+    # None when `model` isn't in pricing.py's static table — an unpriced
+    # model's tokens still count toward totals, its cost just can't be
+    # estimated (see api/usage.py's `cost_incomplete` flag).
+    cost_usd: Mapped[float | None] = mapped_column(default=None)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class AgentTool(Base):
     """Join table: which tools are assigned to which agents."""
 
