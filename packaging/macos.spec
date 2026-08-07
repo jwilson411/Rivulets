@@ -4,9 +4,12 @@
 Build with:
     uv run --group packaging pyinstaller packaging/macos.spec
 
-Output name reflects the build host's architecture (both amd64 and arm64
-builds run on macos-14 CI runners — this spec doesn't need to know which
-in advance).
+Output name reflects the build host's architecture -- this spec doesn't
+need to know which in advance. Note CI must run each arch on genuinely
+different hardware (see release.yml's macos-15 vs macos-15-large): a
+Rosetta-translated x86_64 interpreter on Apple Silicon still yields an
+arm64 EXE here, since PyInstaller's own target-arch detection is
+independent of which Python interpreter invoked it.
 
 Code signing / notarization (Apple Developer ID) is not configured here
 yet. Until then, users bypass Gatekeeper via right-click → Open.
