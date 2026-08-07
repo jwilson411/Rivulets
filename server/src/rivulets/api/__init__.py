@@ -22,6 +22,7 @@ from rivulets.api import (
     sync,
     teams,
     tools,
+    update,
     usage,
 )
 from rivulets.api import (
@@ -44,5 +45,6 @@ api_router.include_router(providers.router)
 api_router.include_router(backups.router)
 api_router.include_router(usage.router)
 api_router.include_router(dispatch.router)
+api_router.include_router(update.router)
 
 __all__ = ["api_router"]

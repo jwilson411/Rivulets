@@ -10,6 +10,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import Sidebar from './Sidebar.svelte';
 import { channels } from '$lib/api/channels';
+import { agents } from '$lib/api/agents';
+import { teams } from '$lib/api/teams';
+import { providers } from '$lib/api/providers';
+import { mcpServers } from '$lib/api/mcpServers';
+import { tools } from '$lib/api/tools';
+import { sync } from '$lib/api/sync';
+import { update } from '$lib/api/update';
 import { theme } from '$lib/theme.svelte';
 
 const routeState = vi.hoisted(() => ({ pathname: '/agents' }));
@@ -33,6 +40,14 @@ vi.mock('$lib/api/auth.svelte', () => ({
 vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
+
+vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn() } }));
+vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
+vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
+vi.mock('$lib/api/mcpServers', () => ({ mcpServers: { list: vi.fn() } }));
+vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn() } }));
+vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
+vi.mock('$lib/api/update', () => ({ update: { status: vi.fn() } }));
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -190,5 +205,50 @@ describe('Sidebar.svelte', () => {
 		await expect
 			.element(browserPage.getByRole('link', { name: /checking sync…/ }))
 			.toHaveAttribute('href', '/sync');
+	});
+
+	function mockWorkspaceCounts() {
+		vi.mocked(agents.list).mockResolvedValue([]);
+		vi.mocked(teams.list).mockResolvedValue([]);
+		vi.mocked(providers.list).mockResolvedValue([]);
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(sync.status).mockResolvedValue({
+			running: false,
+			node_id: null,
+			peers: [],
+			pending_changes: 0
+		});
+	}
+
+	it('shows an update badge next to Settings when one is available', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		mockWorkspaceCounts();
+		vi.mocked(update.status).mockResolvedValue({
+			current_version: '0.1.0',
+			latest_version: 'v0.2.0',
+			update_available: true,
+			applicable: true
+		});
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByTitle('Update available')).toBeInTheDocument();
+	});
+
+	it('shows no update badge when already up to date', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		mockWorkspaceCounts();
+		vi.mocked(update.status).mockResolvedValue({
+			current_version: '0.1.0',
+			latest_version: null,
+			update_available: false,
+			applicable: true
+		});
+
+		render(Sidebar);
+		await expect.element(browserPage.getByRole('link', { name: /Settings/ })).toBeInTheDocument();
+
+		await expect.element(browserPage.getByTitle('Update available')).not.toBeInTheDocument();
 	});
 });
