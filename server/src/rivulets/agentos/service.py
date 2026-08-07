@@ -43,7 +43,15 @@ from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.models.base import Model
 from agno.os import AgentOS
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunErrorEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallErrorEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,6 +173,7 @@ async def run_agent(
     session_id: str,
     user_id: str = "human",
     on_token: Callable[[str], None] | None = None,
+    on_status: Callable[[str, str | None], None] | None = None,
     model_override: Model | None = None,
 ) -> RunOutput:
     """Invoke an agent by our DB id and return its final RunOutput.
@@ -178,6 +187,16 @@ async def run_agent(
     returned RunOutput exactly as before streaming existed; this function
     synthesizes one from the terminal stream event since agno's streaming
     mode doesn't hand back a RunOutput object directly.
+
+    `on_status(status, detail)` surfaces agno's tool-call lifecycle events
+    (#30, R-9's "agent status indicators") — called with `("executing_tool",
+    tool_name)` when a tool call starts and `("thinking", None)` when it
+    finishes, so a caller can show "what kind of thing" an agent is doing
+    before its first token streams. Deliberately forwards only `tool_name`,
+    never `tool.tool_args` — leaking call arguments would violate FR-5.5's
+    internal-reasoning suppression. The handoff tool (tools/builtin/
+    handoff.py) is available to every agent, so a call to it is reported as
+    `("waiting_for_handoff", None)` instead of the generic tool label.
 
     `model_override` (Auto mode, #23) swaps the model for this call only,
     via a per-call `deep_copy` of the already-registered agent rather than
@@ -211,6 +230,18 @@ async def run_agent(
                 accumulated_content += event.content
             if on_token is not None and isinstance(event.content, str):
                 on_token(event.content)
+        elif isinstance(event, ToolCallStartedEvent):
+            if on_status is not None:
+                tool_name = event.tool.tool_name if event.tool else None
+                if tool_name == "handoff":
+                    on_status("waiting_for_handoff", None)
+                else:
+                    on_status("executing_tool", tool_name)
+        elif isinstance(event, (ToolCallCompletedEvent, ToolCallErrorEvent)):
+            # Tool call finished either way — back to "thinking" until the
+            # next token, tool call, or the run itself completes.
+            if on_status is not None:
+                on_status("thinking", None)
         elif isinstance(event, RunErrorEvent):
             final = RunOutput(content=event.content, status=RunStatus.error)
         elif isinstance(event, RunCompletedEvent):

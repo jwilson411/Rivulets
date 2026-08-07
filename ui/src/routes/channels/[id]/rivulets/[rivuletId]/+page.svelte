@@ -49,13 +49,33 @@
 		}
 	}
 
+	// R-9's "agent status indicators" (#30): what an agent is doing before
+	// its first token streams — set from agent_status events, cleared to
+	// 'streaming' the moment real content starts arriving so the status
+	// pill below hands off to the token-by-token cursor.
+	type LiveStatus = 'thinking' | 'executing_tool' | 'waiting_for_handoff' | 'streaming';
+
 	// Filled in token-by-token from the SSE stream below (FR-12.3) while an
 	// agent is mid-run, then cleared once its agent_message event lands —
 	// at which point the message is already in `messages` too, either from
 	// this same event or from the refetch handleReply does once its POST
 	// resolves (dispatch runs synchronously server-side; SSE is what makes
 	// the wait visible incrementally instead of as one silent pause).
-	let liveMessage = $state<{ agentId: string; agentName: string; content: string } | null>(null);
+	let liveMessage = $state<{
+		agentId: string;
+		agentName: string;
+		content: string;
+		status: LiveStatus;
+		statusDetail: string | null;
+	} | null>(null);
+
+	// R-9's "roughly what kind of thing" — never renders tool args, only the
+	// tool name the backend already limited itself to forwarding.
+	function statusLabel(status: LiveStatus, detail: string | null): string {
+		if (status === 'executing_tool') return detail ? `using ${detail}…` : 'using a tool…';
+		if (status === 'waiting_for_handoff') return 'handing off…';
+		return 'thinking…';
+	}
 
 	let pauseNotice = $derived(
 		[...messages].reverse().find((m) => m.content_type === 'system_alert')?.content ?? null
@@ -120,12 +140,39 @@
 			`/api/v1/rivulets/${rivuletId}/stream?token=${encodeURIComponent(token)}`
 		);
 
+		// Arrives before an agent's first token (invocation, tool calls,
+		// handoff) — see run_agent's on_status in agentos/service.py. Content
+		// deltas below take over as soon as they start arriving, so this
+		// only ever drives the pre-content status pill.
+		source.addEventListener('agent_status', (event) => {
+			const data = JSON.parse((event as MessageEvent).data);
+			if (!liveMessage || liveMessage.agentId !== data.agent_id) {
+				liveMessage = {
+					agentId: data.agent_id,
+					agentName: data.agent_name,
+					content: '',
+					status: data.status,
+					statusDetail: data.detail
+				};
+			} else {
+				liveMessage.status = data.status;
+				liveMessage.statusDetail = data.detail;
+			}
+		});
+
 		source.addEventListener('agent_token', (event) => {
 			const data = JSON.parse((event as MessageEvent).data);
 			if (!liveMessage || liveMessage.agentId !== data.agent_id) {
-				liveMessage = { agentId: data.agent_id, agentName: data.agent_name, content: '' };
+				liveMessage = {
+					agentId: data.agent_id,
+					agentName: data.agent_name,
+					content: '',
+					status: 'streaming',
+					statusDetail: null
+				};
 			}
 			liveMessage.content += data.token;
+			liveMessage.status = 'streaming';
 		});
 
 		source.addEventListener('agent_message', () => {
@@ -368,11 +415,34 @@
 									>{liveMessage.agentName}</strong
 								>
 							</div>
-							<p
-								class="max-w-[68ch] text-[14.5px] leading-[1.55] whitespace-pre-wrap text-ink dark:text-ink-dark"
-							>
-								{liveMessage.content}<span class="animate-pulse">▍</span>
-							</p>
+							{#if liveMessage.status === 'streaming' || liveMessage.content}
+								<p
+									class="max-w-[68ch] text-[14.5px] leading-[1.55] whitespace-pre-wrap text-ink dark:text-ink-dark"
+								>
+									{liveMessage.content}<span class="animate-pulse">▍</span>
+								</p>
+							{:else}
+								<p
+									class="flex items-center gap-1.5 text-[12.5px] text-neutral-500 italic dark:text-neutral-400"
+								>
+									{#if liveMessage.status === 'executing_tool'}
+										<Icon name="wrench" class="h-3 w-3 flex-none" />
+									{:else if liveMessage.status === 'waiting_for_handoff'}
+										<Icon name="route" class="h-3 w-3 flex-none" />
+									{:else}
+										<span class="flex gap-0.5">
+											<span
+												class="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.3s]"
+											></span>
+											<span
+												class="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.15s]"
+											></span>
+											<span class="h-1 w-1 animate-bounce rounded-full bg-current"></span>
+										</span>
+									{/if}
+									{statusLabel(liveMessage.status, liveMessage.statusDetail)}
+								</p>
+							{/if}
 						</div>
 					</div>
 				{/if}

@@ -24,10 +24,11 @@ that happens to also carry a human-readable announcement — it goes
 through the same guard bookkeeping as any other agent-to-agent step, so a
 handoff ping-pong trips the same cycle detector a mention ping-pong would.
 
-Publishes SSE events (FR-12.3, streaming.py) as it goes — `agent_token`
-per streamed content delta, `agent_message` once a reply is persisted,
-`handoff` when one occurs, `error`/`system_alert` on failure or guard
-pause, and `done` once per external (non-recursive) call. Persisting rows
+Publishes SSE events (FR-12.3, streaming.py) as it goes — `agent_status`
+before an agent starts and on each tool-call transition (R-9, #30),
+`agent_token` per streamed content delta, `agent_message` once a reply is
+persisted, `handoff` when one occurs, `error`/`system_alert` on failure or
+guard pause, and `done` once per external (non-recursive) call. Persisting rows
 and publishing events both happen inline here, in the same request that
 triggered the dispatch — see api/rivulets.py's SSE endpoint for how a
 concurrent connection observes these live while this coroutine runs.
@@ -242,6 +243,21 @@ async def _invoke_agent(
             {"agent_id": agent_id, "agent_name": agent_name, "token": delta, "seq": seq},
         )
 
+    def on_status(
+        status: str, detail: str | None, agent_id: str = agent.id, agent_name: str = agent.name
+    ) -> None:
+        publish(
+            rivulet.id,
+            "agent_status",
+            {"agent_id": agent_id, "agent_name": agent_name, "status": status, "detail": detail},
+        )
+
+    # R-9's "agent status indicators": fires before run_agent even starts,
+    # covering the gap between invocation and either a tool call or the
+    # first streamed token — agno's own RunStartedEvent fires no earlier
+    # than this point would anyway, so there's nothing to wait on.
+    on_status("thinking", None)
+
     model_used: str | None = None
     model_tier: ModelTier | None = None
     if agent.model == AUTO_MODEL:
@@ -264,6 +280,7 @@ async def _invoke_agent(
             session_id=rivulet.agentos_session_id,
             user_id="human",
             on_token=on_token,
+            on_status=on_status,
             model_override=model_override,
         )
     except Exception as exc:
