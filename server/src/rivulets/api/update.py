@@ -15,7 +15,7 @@ import time
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from pydantic import BaseModel
 
-from rivulets.api.deps import CurrentWorkspaceId
+from rivulets.api.deps import CurrentWorkspaceId, OwnerGrant
 from rivulets.update import (
     UpdateNotApplicableError,
     UpdateNotAvailableError,
@@ -51,7 +51,7 @@ class UpdateApplyOut(BaseModel):
 
 
 @router.get("/status", response_model=UpdateStatusOut)
-async def get_update_status(_: CurrentWorkspaceId) -> UpdateStatusOut:
+async def get_update_status(_: CurrentWorkspaceId, _o: OwnerGrant) -> UpdateStatusOut:
     return UpdateStatusOut.from_status(await check_for_update())
 
 
@@ -71,7 +71,7 @@ def _exit_after_response() -> None:
 
 @router.post("/apply", response_model=UpdateApplyOut, status_code=status.HTTP_202_ACCEPTED)
 async def apply_update_endpoint(
-    background_tasks: BackgroundTasks, _: CurrentWorkspaceId
+    background_tasks: BackgroundTasks, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> UpdateApplyOut:
     try:
         await apply_update()

@@ -17,6 +17,7 @@ from rivulets.api import (
     files,
     health,
     humans,
+    invites,
     mcp_servers,
     providers,
     rivulets,
@@ -38,6 +39,7 @@ api_router.include_router(teams.router)
 api_router.include_router(agents.router)
 api_router.include_router(rivulets.router)
 api_router.include_router(humans.router)
+api_router.include_router(invites.router)
 api_router.include_router(tools.router)
 api_router.include_router(mcp_servers.router)
 api_router.include_router(files.router)

@@ -50,3 +50,14 @@ _limiter = LoginRateLimiter()
 
 def get_login_rate_limiter() -> LoginRateLimiter:
     return _limiter
+
+
+# Same 5/minute/IP budget, same brute-force reasoning, but a separate
+# counter (#15's invite-secret guessing shouldn't share a budget with
+# mnemonic-guessing, and vice versa) -- an attacker who exhausts one
+# shouldn't be locked out of legitimately retrying the other.
+_invite_accept_limiter = LoginRateLimiter()
+
+
+def get_invite_accept_rate_limiter() -> LoginRateLimiter:
+    return _invite_accept_limiter

@@ -58,7 +58,10 @@ from rivulets.db.session import (  # noqa: E402
     session_scope,
 )
 from rivulets.security import keys  # noqa: E402
-from rivulets.security.rate_limit import get_login_rate_limiter  # noqa: E402
+from rivulets.security.rate_limit import (  # noqa: E402
+    get_invite_accept_rate_limiter,
+    get_login_rate_limiter,
+)
 from rivulets.security.session import get_session_key_store  # noqa: E402
 from rivulets.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
 
@@ -97,6 +100,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # sharing TestClient's fixed client IP would trip each other's 5/min
     # cap well before the suite finishes.
     get_login_rate_limiter().reset_for_testing()
+    get_invite_accept_rate_limiter().reset_for_testing()
 
     app = create_app()
     with TestClient(app) as test_client:
@@ -115,6 +119,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     reset_agentos_for_testing()
     reset_sync_engine_for_testing()
     get_login_rate_limiter().reset_for_testing()
+    get_invite_accept_rate_limiter().reset_for_testing()
 
 
 async def _noop_async(*_args: object, **_kwargs: object) -> None:

@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.models import WorkspaceSetting
 from rivulets.sync.publish import publish_current_state
 
@@ -56,13 +56,15 @@ async def _current_settings(db: DbSession) -> dict[str, object]:
 
 
 @router.get("")
-async def get_settings_values(db: DbSession, _: CurrentWorkspaceId) -> dict[str, object]:
+async def get_settings_values(
+    db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> dict[str, object]:
     return await _current_settings(db)
 
 
 @router.patch("")
 async def patch_settings(
-    body: SettingsUpdate, db: DbSession, _: CurrentWorkspaceId
+    body: SettingsUpdate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> dict[str, object]:
     updates = body.model_dump()
     for key, value in updates.items():
