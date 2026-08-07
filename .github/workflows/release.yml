@@ -1,7 +1,14 @@
 name: Release
 
-# Builds all five platform/arch binaries, smoke-tests each, then publishes
-# a GitHub Release with binaries + SHA-256 checksums.
+# Builds four platform/arch binaries, smoke-tests each, then publishes a
+# GitHub Release with binaries + SHA-256 checksums.
+#
+# No darwin-amd64 (Intel Mac) leg: that requires either a genuine Intel
+# hosted runner (the "-large" macOS labels, which need a GitHub Team/
+# Enterprise plan we don't have on this personal account) or a
+# cross-compiled, unverifiable-by-smoke-test build. Intel Mac users fall
+# back to Docker or build-from-source (see README's Installation section)
+# until that changes.
 #
 # No third-party actions here — release creation uses the `gh` CLI, which
 # ships preinstalled on GitHub-hosted runners.
@@ -33,15 +40,6 @@ jobs:
             os: ubuntu-24.04-arm
             spec: packaging/linux.spec
             binary: rivulets-linux-arm64
-          - name: darwin-amd64
-            # macos-14/-15 (no suffix) are Apple Silicon-only hosted
-            # runners; -large is the Intel-hardware variant. Building both
-            # arches on the same arm64 host produced two identically
-            # arm64-targeted binaries (see #67) -- these need to be
-            # genuinely different hardware, not just different YAML labels.
-            os: macos-15-large
-            spec: packaging/macos.spec
-            binary: rivulets-darwin-amd64
           - name: darwin-arm64
             os: macos-15
             spec: packaging/macos.spec

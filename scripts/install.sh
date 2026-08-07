@@ -38,6 +38,14 @@ arch() {
 
 OS="$(os)"
 ARCH="$(arch)"
+
+# No darwin-amd64 release asset (Intel Mac) yet -- see release.yml for why.
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "amd64" ]; then
+	echo "No native build for Intel Macs yet -- use Docker or build from source." >&2
+	echo "See: https://github.com/${REPO}#installation" >&2
+	exit 1
+fi
+
 ASSET="rivulets-${OS}-${ARCH}"
 
 if [ "$VERSION" = "latest" ]; then
