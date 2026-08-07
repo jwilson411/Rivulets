@@ -49,6 +49,8 @@ This downloads the right binary for your OS/architecture from [GitHub Releases](
 
 **Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it.
 
+**Intel Mac:** no native binary yet (only Apple Silicon `darwin-arm64` is built) — use Docker or build from source below.
+
 ### Docker
 
 ```bash
