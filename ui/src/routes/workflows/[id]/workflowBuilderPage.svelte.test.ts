@@ -32,6 +32,7 @@ vi.mock('$app/paths', () => ({
 vi.mock('$lib/api/workflows', () => ({
 	workflows: {
 		get: vi.fn(),
+		list: vi.fn(),
 		update: vi.fn(),
 		publish: vi.fn(),
 		unpublish: vi.fn(),
@@ -66,6 +67,7 @@ const fetchNode: WorkflowNode = {
 	name: 'Fetch',
 	node_type: 'agent',
 	agent_id: 'agent-1',
+	child_workflow_id: null,
 	config: {},
 	retry_max_attempts: 0,
 	retry_backoff_seconds: 5
@@ -77,6 +79,7 @@ const formatNode: WorkflowNode = {
 	name: 'Format',
 	node_type: 'transform',
 	agent_id: null,
+	child_workflow_id: null,
 	config: { template: '{input}!' },
 	retry_max_attempts: 0,
 	retry_backoff_seconds: 5
@@ -98,6 +101,7 @@ const chainConnection: WorkflowConnection = {
 
 function mockLoad() {
 	vi.mocked(workflows.get).mockResolvedValue(reviewFlow);
+	vi.mocked(workflows.list).mockResolvedValue([reviewFlow]);
 	vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode]);
 	vi.mocked(workflows.listConnections).mockResolvedValue([entryConnection, chainConnection]);
 	vi.mocked(agents.list).mockResolvedValue([
@@ -136,6 +140,7 @@ describe('workflows/[id]/+page.svelte', () => {
 			name: 'Recap',
 			node_type: 'summarize',
 			agent_id: null,
+			child_workflow_id: null,
 			config: {},
 			retry_max_attempts: 0,
 			retry_backoff_seconds: 5
@@ -155,6 +160,7 @@ describe('workflows/[id]/+page.svelte', () => {
 			name: 'Recap',
 			node_type: 'summarize',
 			agent_id: null,
+			child_workflow_id: null,
 			config: {},
 			retry_max_attempts: 0,
 			retry_backoff_seconds: 5
@@ -167,6 +173,50 @@ describe('workflows/[id]/+page.svelte', () => {
 		expect(workflows.createConnection).toHaveBeenNthCalledWith(2, 'wf-1', {
 			from_node_id: 'n3',
 			to_node_id: 'n2'
+		});
+	});
+
+	it('inserts a nested workflow step, excluding the current workflow from the picker', async () => {
+		mockLoad();
+		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
+		vi.mocked(workflows.createNode).mockResolvedValueOnce({
+			id: 'n3',
+			workflow_id: 'wf-1',
+			name: 'Invoke other',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '+ Add step' }).first().click();
+		await page.getByPlaceholder('Step name').fill('Invoke other');
+		await page.getByRole('combobox').first().selectOptions('workflow');
+
+		const workflowPicker = page.getByRole('combobox').nth(1);
+		await expect
+			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
+			.toBeInTheDocument();
+		await expect
+			.element(workflowPicker.getByRole('option', { name: '/review-pr' }))
+			.not.toBeInTheDocument();
+		await workflowPicker.selectOptions('wf-2');
+		await page.getByRole('button', { name: 'Add step', exact: true }).click();
+
+		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
+			name: 'Invoke other',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
 		});
 	});
 
@@ -247,6 +297,7 @@ describe('workflows/[id]/+page.svelte', () => {
 				status: 'completed',
 				current_node_id: null,
 				error_message: null,
+				final_output: 'fetched stuff',
 				started_at: '2026-08-01T00:00:00Z',
 				completed_at: '2026-08-01T00:01:00Z'
 			}

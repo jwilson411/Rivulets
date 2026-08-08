@@ -23,6 +23,7 @@ from rivulets.db.models import (
     WorkflowConnection,
     WorkflowNode,
     WorkflowNodeRun,
+    WorkflowRun,
 )
 from rivulets.workflows.engine import MAX_NODE_VISITS_PER_RUN, resume_workflow, run_workflow
 
@@ -52,6 +53,19 @@ def _transform_node(workflow_id: str, name: str, template: str, **kwargs: Any) -
         config_json=json.dumps({"template": template}),
         **kwargs,
     )
+
+
+def _workflow_node(workflow_id: str, name: str, child_workflow_id: str) -> WorkflowNode:
+    return WorkflowNode(
+        workflow_id=workflow_id,
+        name=name,
+        node_type="workflow",
+        child_workflow_id=child_workflow_id,
+    )
+
+
+async def _entry_connect(db: AsyncSession, workflow_id: str, node_id: str) -> None:
+    db.add(WorkflowConnection(workflow_id=workflow_id, from_node_id=None, to_node_id=node_id))
 
 
 async def test_linear_transform_chain_completes_and_chains_output(
@@ -774,3 +788,164 @@ async def test_resume_workflow_can_pause_again_at_a_second_human_input_node(
     run = await resume_workflow(db_session, run, "second reply")
     assert run.status == "completed"
     assert rivulet.status == "active"
+
+
+async def test_run_final_output_reflects_the_terminal_nodes_output(
+    db_session: AsyncSession,
+) -> None:
+    """#85: WorkflowRun.final_output didn't exist before nesting needed a
+    queryable "this run's result" -- verify the plumbing on an ordinary,
+    non-nested run first."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="final-output")
+    step = _transform_node(workflow.id, "step", "done: {input}")
+    db_session.add(step)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow.id, step.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    assert run.final_output == "done: go"
+
+
+async def test_workflow_node_invokes_a_nested_workflow_and_chains_its_output(
+    db_session: AsyncSession,
+) -> None:
+    """#85: a 'workflow' node runs the referenced workflow as a nested
+    WorkflowRun and its final_output becomes this node's own output --
+    the same "output becomes the next input" contract every node type
+    honors."""
+    rivulet = await _make_rivulet(db_session)
+
+    child = await _make_workflow(db_session, name="child-flow")
+    child_step = _transform_node(child.id, "child-step", "child saw: {input}")
+    db_session.add(child_step)
+    await db_session.flush()
+    await _entry_connect(db_session, child.id, child_step.id)
+
+    parent = await _make_workflow(db_session, name="parent-flow")
+    invoke = _workflow_node(parent.id, "invoke-child", child.id)
+    wrap = _transform_node(parent.id, "wrap", "parent got: {input}")
+    db_session.add_all([invoke, wrap])
+    await db_session.flush()
+    await _entry_connect(db_session, parent.id, invoke.id)
+    db_session.add(
+        WorkflowConnection(workflow_id=parent.id, from_node_id=invoke.id, to_node_id=wrap.id)
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "hello", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    assert run.final_output == "parent got: child saw: hello"
+
+    result = await db_session.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == child.id)
+    )
+    child_run = result.scalars().one()
+    assert child_run.status == "completed"
+    assert child_run.triggered_by == "workflow"
+    assert child_run.triggered_by_id == run.id
+    assert child_run.final_output == "child saw: hello"
+
+    # Both runs post into the same rivulet, interleaved: the child's own
+    # output, then the parent's "invoke-child" node relaying that same
+    # value as its own output (unmodified, same as any other node type),
+    # then "wrap" transforming it.
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    contents = [m.content for m in result.scalars().all()]
+    assert contents == [
+        "child saw: hello",
+        "child saw: hello",
+        "parent got: child saw: hello",
+    ]
+
+
+async def test_workflow_node_rejects_a_direct_self_cycle(db_session: AsyncSession) -> None:
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="self-embed")
+    invoke = _workflow_node(workflow.id, "invoke-self", workflow.id)
+    db_session.add(invoke)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow.id, invoke.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "cycle" in (run.error_message or "")
+
+
+async def test_workflow_node_rejects_an_indirect_cycle(db_session: AsyncSession) -> None:
+    """A embeds B, B embeds A -- api/workflows.py's create-time check can
+    only catch a *direct* self-reference (see _validate_child_workflow's
+    docstring); this multi-hop case is only catchable at run time, via
+    the engine's own ancestry-based guard."""
+    rivulet = await _make_rivulet(db_session)
+    workflow_a = await _make_workflow(db_session, name="workflow-a")
+    workflow_b = await _make_workflow(db_session, name="workflow-b")
+
+    invoke_b = _workflow_node(workflow_a.id, "invoke-b", workflow_b.id)
+    db_session.add(invoke_b)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow_a.id, invoke_b.id)
+
+    invoke_a = _workflow_node(workflow_b.id, "invoke-a", workflow_a.id)
+    db_session.add(invoke_a)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow_b.id, invoke_a.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow_a, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "cycle" in (run.error_message or "")
+
+
+async def test_nested_workflow_pausing_fails_the_parent_and_the_child(
+    db_session: AsyncSession,
+) -> None:
+    """#85's documented boundary: a nested child pausing on 'human_input'
+    isn't propagated -- it fails the parent's 'workflow' node, and the
+    child run is failed too (not left dangling in 'awaiting_human',
+    discoverable by a later reply with no parent left waiting on it)."""
+    rivulet = await _make_rivulet(db_session)
+
+    child = await _make_workflow(db_session, name="asks-a-question")
+    ask = WorkflowNode(workflow_id=child.id, name="ask", node_type="human_input")
+    db_session.add(ask)
+    await db_session.flush()
+    await _entry_connect(db_session, child.id, ask.id)
+
+    parent = await _make_workflow(db_session, name="calls-asker")
+    invoke = _workflow_node(parent.id, "invoke-child", child.id)
+    db_session.add(invoke)
+    await db_session.flush()
+    await _entry_connect(db_session, parent.id, invoke.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "paused for human input" in (run.error_message or "")
+    assert rivulet.status == "active"
+
+    result = await db_session.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == child.id)
+    )
+    child_run = result.scalars().one()
+    assert child_run.status == "failed"

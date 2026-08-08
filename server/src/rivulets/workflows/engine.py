@@ -1,7 +1,7 @@
 """Workflow execution engine (#24, branching/parallel/loops via #81, real
 merge joining via #82, pause/resume via #83, run-graph snapshotting via
-#84): runs a saved `Workflow` definition end-to-end against a rivulet,
-following `WorkflowConnection` edges.
+#84, nested workflows via #85): runs a saved `Workflow` definition
+end-to-end against a rivulet, following `WorkflowConnection` edges.
 
 A node may now have more than one outbound edge (api/workflows.py only
 enforces a single *entry* connection, from_node_id=None, since a workflow
@@ -41,7 +41,9 @@ guards (mirroring dispatch/guards.py's cycle detection for agent-to-agent
 chat, the same "unbounded loop is a runaway-cost failure mode" concern)
 cap that: MAX_NODE_VISITS_PER_RUN per node, MAX_TOTAL_STEPS_PER_RUN across
 the whole run (protects against wide fan-out amplifying a smaller loop).
-Tripping either ends the run the same way a node failure does.
+Tripping either ends the run the same way a node failure does. Both live
+on a shared, per-run `_RunContext` (see below) alongside the ancestry set
+#85's cycle guard needs.
 
 Mirrors dispatch/service.py's shape deliberately: `WorkflowRun`/
 `WorkflowNodeRun` play the same "local execution telemetry" role as
@@ -121,6 +123,49 @@ graph the way a full draft/published model would be, so editing an
 already-published workflow still takes effect immediately for the next
 trigger. See Workflow's own docstring for why that's the scope this
 landed with.
+
+Nested workflows (#85): a 'workflow' node (WorkflowNode.child_workflow_id)
+is a normal node type again, unlike merge/human_input -- it runs
+synchronously to completion via `_execute_workflow_node`
+(workflows/nodes.py doesn't define it; see that module's docstring for
+why), dispatched from `_execute_node` and retried like any other node.
+It recursively calls `run_workflow` with this node's input as the child's
+`input_content`, `triggered_by="workflow"`/`triggered_by_id=`this run's
+id, and the *current* run's ancestry (the set of workflow ids already
+executing up this call chain, including this workflow itself) so the
+child's own `run_workflow` call can refuse to start if its target is
+already in that set -- a structural cycle guard, checked live rather than
+at save time (the same tradeoff Workflow's docstring already made for
+other structural invariants). A completed child's `WorkflowRun.
+final_output` becomes this node's own output, the same "a node's output
+becomes the next node's input" contract every other type honors -- which
+is also why `_BranchOutcome` now carries an `output` field threaded
+through every clean-success return, not just failure/pause: nothing else
+needed a queryable "this run's result" before nesting required one.
+
+Deliberately out of scope: a nested child pausing on its own 'human_input'
+node. `_execute_workflow_node` treats that outcome as a failure of the
+parent's 'workflow' node rather than propagating the pause up through
+however many ancestor runs are waiting -- correctly resuming an entire
+nested chain (which run does a reply belong to? does every ancestor also
+need graph_snapshot_json-style protection against edits made while
+*it* was blocked on a grandchild?) is a substantial, separate problem
+issue #85 doesn't ask this engine to solve, and #83 (which introduced
+pausing) predates nesting entirely. `_execute_workflow_node` fails the
+child run too when this happens (not just the parent) and clears the
+rivulet's pause, rather than leaving a paused-but-orphaned child sitting
+there discoverable by a later reply with no parent left waiting on it.
+Because of this, `resume_workflow` never needs nesting-awareness: a
+nested run either completes or fails synchronously within the same
+`run_workflow` call that started it, so `find_awaiting_workflow_run` can
+only ever find a top-level (triggered_by != 'workflow') run.
+
+Run history (#85's other open question) is deliberately flat, not a
+cross-workflow tree: a nested child's own WorkflowRun rows only show up
+under *its own* workflow's run history (`GET /workflows/{id}/runs`), not
+folded into the parent's. `triggered_by`/`triggered_by_id` are what let a
+human or tool trace a nested run back to the parent node that started it,
+without this module or its API needing a new tree-shaped endpoint.
 """
 
 import asyncio
@@ -166,6 +211,26 @@ MAX_TOTAL_STEPS_PER_RUN = 200
 
 
 @dataclass
+class _RunContext:
+    """Everything about a single run_workflow (or resume_workflow) call
+    that every node executor down the call chain needs to see and mutate
+    together -- bundled into one object instead of three loose parameters
+    once #85 added a third (`ancestry`) to the two #81 already needed.
+    Shared across every branch of one run, including ones on sibling
+    sessions (see module docstring) -- mutating `visit_counts`/
+    `total_steps` without a lock is safe because asyncio only ever runs
+    one coroutine's synchronous code at a time; each check-then-increment
+    completes before the next `await`. `ancestry` is read-only once
+    built, so sharing it needs no such care."""
+
+    visit_counts: dict[str, int]
+    total_steps: list[int]
+    # Workflow ids currently executing up this call chain, including the
+    # current one -- #85's cycle guard for nested 'workflow' node types.
+    ancestry: frozenset[str]
+
+
+@dataclass
 class _BranchOutcome:
     failed: bool
     error_message: str | None = None
@@ -181,18 +246,25 @@ class _BranchOutcome:
     # pause, but a pause still needs to win over sibling branches that
     # happened to complete cleanly.
     paused: bool = False
+    # The most recent node output this branch actually produced (#85) --
+    # carried through every clean-success return so run_workflow's final
+    # WorkflowRun.final_output is populated, which is what makes a nested
+    # 'workflow' node's own output well-defined. None for a branch that
+    # failed, paused, or never executed a node (e.g. no entry point).
+    output: str | None = None
 
 
-def _check_loop_guard(
-    node: WorkflowNode, visit_counts: dict[str, int], total_steps: list[int]
-) -> str | None:
+def _check_loop_guard(node: WorkflowNode, ctx: _RunContext) -> str | None:
     """Shared by every node executor (_run_branch, _run_merge_node,
     _pause_for_human_input): returns a detail message once `node` (or the
     run overall) has been visited too many times, else None. See module
     docstring's "Loops" section."""
-    visit_counts[node.id] = visit_counts.get(node.id, 0) + 1
-    total_steps[0] += 1
-    if visit_counts[node.id] > MAX_NODE_VISITS_PER_RUN or total_steps[0] > MAX_TOTAL_STEPS_PER_RUN:
+    ctx.visit_counts[node.id] = ctx.visit_counts.get(node.id, 0) + 1
+    ctx.total_steps[0] += 1
+    if (
+        ctx.visit_counts[node.id] > MAX_NODE_VISITS_PER_RUN
+        or ctx.total_steps[0] > MAX_TOTAL_STEPS_PER_RUN
+    ):
         return (
             f"exceeded the workflow's loop guard ({MAX_NODE_VISITS_PER_RUN} visits to this step "
             f"or {MAX_TOTAL_STEPS_PER_RUN} steps in this run) — likely an unbounded loop"
@@ -235,6 +307,22 @@ async def _post_alert(
     )
 
 
+async def _begin_node(
+    db: AsyncSession, run_id: str, workflow: Workflow, rivulet_id: str, node: WorkflowNode
+) -> Rivulet:
+    """Shared prologue for every node executor: records this node as the
+    run's current position and announces it in the rivulet before doing
+    any actual work."""
+    rivulet = await db.get(Rivulet, rivulet_id)
+    assert rivulet is not None
+    await db.execute(
+        update(WorkflowRun).where(WorkflowRun.id == run_id).values(current_node_id=node.id)
+    )
+    await db.commit()
+    await _post_message(db, _step_message(rivulet, workflow, node))
+    return rivulet
+
+
 async def _load_nodes_and_connections(
     db: AsyncSession, workflow_id: str
 ) -> tuple[dict[str, WorkflowNode], list[WorkflowConnection]]:
@@ -264,6 +352,7 @@ def _serialize_graph(nodes: dict[str, WorkflowNode], connections: list[WorkflowC
                     "name": node.name,
                     "node_type": node.node_type,
                     "agent_id": node.agent_id,
+                    "child_workflow_id": node.child_workflow_id,
                     "config_json": node.config_json,
                     "retry_max_attempts": node.retry_max_attempts,
                     "retry_backoff_seconds": node.retry_backoff_seconds,
@@ -299,6 +388,7 @@ def _deserialize_graph(
             name=n["name"],
             node_type=n["node_type"],
             agent_id=n["agent_id"],
+            child_workflow_id=n.get("child_workflow_id"),
             config_json=n["config_json"],
             retry_max_attempts=n["retry_max_attempts"],
             retry_backoff_seconds=n["retry_backoff_seconds"],
@@ -386,7 +476,13 @@ def _output_message(rivulet: Rivulet, node: WorkflowNode, content: str) -> Messa
 
 
 async def _execute_node(
-    db: AsyncSession, node: WorkflowNode, session_id: str, input_content: str
+    db: AsyncSession,
+    node: WorkflowNode,
+    session_id: str,
+    input_content: str,
+    rivulet_id: str,
+    run_id: str,
+    ctx: _RunContext,
 ) -> str:
     if node.node_type == "agent":
         return await execute_agent_node(db, node, session_id, input_content)
@@ -401,7 +497,67 @@ async def _execute_node(
         # (see module docstring / _resolve_merge_arrivals) -- it always
         # passes a JSON-encoded list, never a bare string.
         return execute_merge_node(node, json.loads(input_content))
+    if node.node_type == "workflow":
+        return await _execute_workflow_node(db, node, rivulet_id, run_id, input_content, ctx)
     raise ValueError(f"Unknown node_type {node.node_type!r}")
+
+
+async def _execute_workflow_node(
+    db: AsyncSession,
+    node: WorkflowNode,
+    rivulet_id: str,
+    run_id: str,
+    input_content: str,
+    ctx: _RunContext,
+) -> str:
+    """#85: invokes `node.child_workflow_id` as a nested run and returns
+    its final_output as this node's own output. See module docstring's
+    "Nested workflows" section for the ancestry-based cycle guard and why
+    a nested pause becomes a failure here rather than propagating."""
+    if node.child_workflow_id is None:
+        raise ValueError(f"Node {node.name!r} has no workflow selected")
+    if node.child_workflow_id in ctx.ancestry:
+        raise ValueError(
+            f"Node {node.name!r} would create a cycle — that workflow is already running "
+            "further up this chain"
+        )
+    child_workflow = await db.get(Workflow, node.child_workflow_id)
+    if child_workflow is None:
+        raise ValueError(f"Node {node.name!r} references a deleted workflow")
+    rivulet = await db.get(Rivulet, rivulet_id)
+    assert rivulet is not None
+
+    child_run = await run_workflow(
+        db,
+        child_workflow,
+        rivulet,
+        input_content,
+        triggered_by="workflow",
+        triggered_by_id=run_id,
+        ancestry=ctx.ancestry,
+    )
+    if child_run.status == "awaiting_human":
+        detail = (
+            f"Nested workflow /{child_workflow.name} paused for human input, which isn't "
+            "supported inside a nested workflow yet"
+        )
+        # Leaving the child at 'awaiting_human' would dangle it: the
+        # parent node is about to fail (and this run along with it), but
+        # the child -- sharing this same rivulet -- would still look like
+        # a live, resumable pause to find_awaiting_workflow_run the next
+        # time a human types here, disconnected from the parent that gave
+        # up on it. Fail it too and clear the pause instead.
+        child_run.status = "failed"
+        child_run.error_message = detail
+        child_run.completed_at = utcnow_iso()
+        rivulet.status = "active"
+        await db.commit()
+        raise RuntimeError(detail)
+    if child_run.status == "failed":
+        raise RuntimeError(
+            f"Nested workflow /{child_workflow.name} failed: {child_run.error_message}"
+        )
+    return child_run.final_output or ""
 
 
 async def run_workflow(
@@ -412,15 +568,21 @@ async def run_workflow(
     *,
     triggered_by: str,
     triggered_by_id: str | None,
+    ancestry: frozenset[str] = frozenset(),
 ) -> WorkflowRun:
     """Run `workflow` against `rivulet`, starting with `input_content` as
     the entry node's input. `triggered_by`/`triggered_by_id` record who
     kicked this off ('human' from api/rivulets.py's slash-command
-    interceptor, or 'agent' from tools/builtin/run_workflow.py) for the
-    same audit purpose AgentRun.source does for dispatcher-originated LLM
-    calls. Returns the WorkflowRun row (already committed) regardless of
-    outcome — callers inspect `.status` rather than this raising, mirroring
-    dispatch_and_respond's "failures are recorded, not propagated" style.
+    interceptor, 'agent' from tools/builtin/run_workflow.py, or
+    'workflow' for a nested invocation, #85 -- see WorkflowRun's
+    docstring) for the same audit purpose AgentRun.source does for
+    dispatcher-originated LLM calls. `ancestry` is only ever passed by a
+    nested invocation (workflows/engine.py's own `_execute_workflow_node`)
+    -- an ordinary top-level call leaves it empty, so this run's own id is
+    the whole ancestry chain. Returns the WorkflowRun row (already
+    committed) regardless of outcome — callers inspect `.status` rather
+    than this raising, mirroring dispatch_and_respond's "failures are
+    recorded, not propagated" style.
     """
     nodes, connections = await _load_nodes_and_connections(db, workflow.id)
 
@@ -463,30 +625,12 @@ async def run_workflow(
     # fan-out opens below can see this run and rivulet immediately.
     await db.commit()
 
-    visit_counts: dict[str, int] = {}
-    total_steps = [0]
+    ctx = _RunContext(visit_counts={}, total_steps=[0], ancestry=ancestry | {workflow.id})
     entry_outcome = await _advance(
-        db,
-        run.id,
-        workflow,
-        rivulet.id,
-        nodes,
-        connections,
-        entry_node_id,
-        input_content,
-        visit_counts,
-        total_steps,
+        db, run.id, workflow, rivulet.id, nodes, connections, entry_node_id, input_content, ctx
     )
     outcome = await _resolve_merge_arrivals(
-        [entry_outcome],
-        db,
-        run.id,
-        workflow,
-        rivulet.id,
-        nodes,
-        connections,
-        visit_counts,
-        total_steps,
+        [entry_outcome], db, run.id, workflow, rivulet.id, nodes, connections, ctx
     )
 
     return await _finalize_run(db, run, outcome)
@@ -504,6 +648,7 @@ async def _finalize_run(db: AsyncSession, run: WorkflowRun, outcome: _BranchOutc
 
     run.status = "failed" if outcome.failed else "completed"
     run.error_message = outcome.error_message
+    run.final_output = outcome.output if not outcome.failed else None
     run.completed_at = utcnow_iso()
     await db.commit()
     return run
@@ -520,7 +665,9 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     starts fresh: visit_counts/total_steps were local to the original
     run_workflow call and aren't persisted across a pause, so a run that
     paused near its budget gets a clean one again on resume rather than
-    inheriting an exhausted one.
+    inheriting an exhausted one. Ancestry resets to just this workflow's
+    own id -- a resumed run is always a top-level one (#85's module
+    docstring section on why a nested run can never be the one paused).
 
     #84: hydrates the graph from `run.graph_snapshot_json` rather than
     re-querying the live WorkflowNode/WorkflowConnection rows -- a
@@ -562,17 +709,9 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     run.status = "running"
     await db.commit()
 
+    ctx = _RunContext(visit_counts={}, total_steps=[0], ancestry=frozenset({workflow.id}))
     outcome = await _follow_edges(
-        db,
-        run.id,
-        workflow,
-        rivulet.id,
-        nodes,
-        connections,
-        paused_node.id,
-        human_reply,
-        visit_counts={},
-        total_steps=[0],
+        db, run.id, workflow, rivulet.id, nodes, connections, paused_node.id, human_reply, ctx
     )
     return await _finalize_run(db, run, outcome)
 
@@ -586,39 +725,33 @@ async def _run_branch(
     connections: list[WorkflowConnection],
     node_id: str,
     input_content: str,
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """Executes `node_id` and everything reachable from it on this branch,
     recursing (or fanning out — see module docstring) for each matching
-    outbound edge. `visit_counts`/`total_steps` are shared, plain mutable
-    containers across every branch of one run, including ones on sibling
-    sessions — safe without a lock because asyncio only ever runs one
-    coroutine's synchronous code at a time; each check-then-increment here
-    completes before the next `await`."""
+    outbound edge."""
     node = nodes.get(node_id)
     if node is None:
         return _BranchOutcome(failed=False)  # edge to a since-deleted node: a quiet dead end
 
-    detail = _check_loop_guard(node, visit_counts, total_steps)
+    detail = _check_loop_guard(node, ctx)
     if detail is not None:
         await _post_alert(db, rivulet_id, workflow, node, detail)
         return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
 
-    rivulet = await db.get(Rivulet, rivulet_id)
-    assert rivulet is not None
+    rivulet = await _begin_node(db, run_id, workflow, rivulet_id, node)
     session_id = rivulet.agentos_session_id
     assert session_id is not None  # run_workflow sets this before any branch starts
-    await db.execute(
-        update(WorkflowRun).where(WorkflowRun.id == run_id).values(current_node_id=node.id)
-    )
-    await db.commit()
-    await _post_message(db, _step_message(rivulet, workflow, node))
 
-    output, failure = await _run_node_with_retries(db, run_id, node, session_id, input_content)
+    output, failure = await _run_node_with_retries(
+        db, run_id, node, session_id, input_content, rivulet_id, ctx
+    )
 
     if isinstance(failure, ConditionNotMetError):
-        return _BranchOutcome(failed=False)  # the node's own gate said stop here, not a failure
+        # the node's own gate said stop here, not a failure -- input_content
+        # is the most recent real output this branch produced (the gate
+        # itself never advanced it).
+        return _BranchOutcome(failed=False, output=input_content)
 
     if failure is not None:
         await _post_alert(db, rivulet_id, workflow, node, str(failure))
@@ -628,16 +761,7 @@ async def _run_branch(
     await _post_message(db, _output_message(rivulet, node, output))
 
     return await _follow_edges(
-        db,
-        run_id,
-        workflow,
-        rivulet_id,
-        nodes,
-        connections,
-        node.id,
-        output,
-        visit_counts,
-        total_steps,
+        db, run_id, workflow, rivulet_id, nodes, connections, node.id, output, ctx
     )
 
 
@@ -650,8 +774,7 @@ async def _follow_edges(
     connections: list[WorkflowConnection],
     from_node_id: str,
     output: str,
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """Shared tail for both _run_branch and _run_merge_node: pick
     `from_node_id`'s matching outbound edges, advance onto each (fanning
@@ -670,7 +793,7 @@ async def _follow_edges(
     unresolved once a branch stops introducing new fan-outs."""
     matching = _matching_outbound_edges(connections, from_node_id, output)
     if not matching:
-        return _BranchOutcome(failed=False)  # terminal node, or no edge's condition matched
+        return _BranchOutcome(failed=False, output=output)  # terminal node, or no edge matched
 
     if len(matching) == 1:
         return await _advance(
@@ -682,23 +805,13 @@ async def _follow_edges(
             connections,
             matching[0].to_node_id,
             output,
-            visit_counts,
-            total_steps,
+            ctx,
         )
 
     async def _in_new_session(to_node_id: str) -> _BranchOutcome:
         async with session_scope() as branch_db:
             return await _advance(
-                branch_db,
-                run_id,
-                workflow,
-                rivulet_id,
-                nodes,
-                connections,
-                to_node_id,
-                output,
-                visit_counts,
-                total_steps,
+                branch_db, run_id, workflow, rivulet_id, nodes, connections, to_node_id, output, ctx
             )
 
     outcomes = await asyncio.gather(
@@ -711,21 +824,12 @@ async def _follow_edges(
             connections,
             matching[0].to_node_id,
             output,
-            visit_counts,
-            total_steps,
+            ctx,
         ),
         *(_in_new_session(edge.to_node_id) for edge in matching[1:]),
     )
     return await _resolve_merge_arrivals(
-        list(outcomes),
-        db,
-        run_id,
-        workflow,
-        rivulet_id,
-        nodes,
-        connections,
-        visit_counts,
-        total_steps,
+        list(outcomes), db, run_id, workflow, rivulet_id, nodes, connections, ctx
     )
 
 
@@ -738,33 +842,25 @@ async def _advance(
     connections: list[WorkflowConnection],
     node_id: str,
     input_content: str,
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """The one place a branch is about to move onto a node: if that node
     is a 'merge', stop here and report the arrival instead of executing it
     (a merge node only ever runs via _run_merge_node, once per group of
     siblings -- see _resolve_merge_arrivals). If it's a 'human_input'
     node, pause instead (#83, _pause_for_human_input). Otherwise just
-    _run_branch as normal."""
+    _run_branch as normal (this includes 'workflow' nodes, #85 -- nested
+    invocation is a normal, synchronous node executor, not a special
+    interception point the way merge/human_input are)."""
     target = nodes.get(node_id)
     if target is not None and target.node_type == "merge":
         return _BranchOutcome(failed=False, arrived_at_merge=(node_id, input_content))
     if target is not None and target.node_type == "human_input":
         return await _pause_for_human_input(
-            db, run_id, workflow, rivulet_id, target, input_content, visit_counts, total_steps
+            db, run_id, workflow, rivulet_id, target, input_content, ctx
         )
     return await _run_branch(
-        db,
-        run_id,
-        workflow,
-        rivulet_id,
-        nodes,
-        connections,
-        node_id,
-        input_content,
-        visit_counts,
-        total_steps,
+        db, run_id, workflow, rivulet_id, nodes, connections, node_id, input_content, ctx
     )
 
 
@@ -775,8 +871,7 @@ async def _pause_for_human_input(
     rivulet_id: str,
     node: WorkflowNode,
     input_content: str,
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """#83: stops this branch at a 'human_input' node and waits. One
     WorkflowNodeRun row is created now (status='awaiting_human',
@@ -787,7 +882,7 @@ async def _pause_for_human_input(
     Rivulet.status='paused' + a system_alert mirrors dispatch/guards.py's
     loop-guard pause exactly, so the existing paused-rivulet banner in the
     channel UI picks this up with no UI changes needed."""
-    detail = _check_loop_guard(node, visit_counts, total_steps)
+    detail = _check_loop_guard(node, ctx)
     if detail is not None:
         await _post_alert(db, rivulet_id, workflow, node, detail)
         return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
@@ -837,8 +932,7 @@ async def _resolve_merge_arrivals(
     rivulet_id: str,
     nodes: dict[str, WorkflowNode],
     connections: list[WorkflowConnection],
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """`outcomes` is one fan-out's worth of sibling results (or a single
     result, for the non-branching case) -- this is the *only* place a
@@ -858,7 +952,13 @@ async def _resolve_merge_arrivals(
     there's nothing to lose by not attempting it. Resuming re-enters at
     the paused node specifically (resume_workflow), not this fan-out, so
     any sibling that already reached a merge node before the pause won't
-    be replayed -- see module docstring's pause/resume section."""
+    be replayed -- see module docstring's pause/resume section.
+
+    When nothing arrived at a merge and nothing paused, this batch is
+    just a set of independently-terminated branches -- the first one
+    (in the fanned-out edges' own order, not completion order) supplies
+    the aggregate output (#85), matching the "first branch is primary"
+    convention _follow_edges already uses for which session stays shared."""
     failed = next((o for o in outcomes if o.failed), None)
     if failed is not None:
         return failed
@@ -874,50 +974,25 @@ async def _resolve_merge_arrivals(
             merge_groups.setdefault(merge_id, []).append(merge_input)
 
     if not merge_groups:
-        return _BranchOutcome(failed=False)
+        output = next((o.output for o in outcomes if o.output is not None), None)
+        return _BranchOutcome(failed=False, output=output)
 
     groups = list(merge_groups.items())
 
     async def _in_new_session(merge_id: str, inputs: list[str]) -> _BranchOutcome:
         async with session_scope() as branch_db:
             return await _run_merge_node(
-                branch_db,
-                run_id,
-                workflow,
-                rivulet_id,
-                nodes,
-                connections,
-                merge_id,
-                inputs,
-                visit_counts,
-                total_steps,
+                branch_db, run_id, workflow, rivulet_id, nodes, connections, merge_id, inputs, ctx
             )
 
     merge_outcomes = await asyncio.gather(
         _run_merge_node(
-            db,
-            run_id,
-            workflow,
-            rivulet_id,
-            nodes,
-            connections,
-            groups[0][0],
-            groups[0][1],
-            visit_counts,
-            total_steps,
+            db, run_id, workflow, rivulet_id, nodes, connections, groups[0][0], groups[0][1], ctx
         ),
         *(_in_new_session(merge_id, inputs) for merge_id, inputs in groups[1:]),
     )
     return await _resolve_merge_arrivals(
-        list(merge_outcomes),
-        db,
-        run_id,
-        workflow,
-        rivulet_id,
-        nodes,
-        connections,
-        visit_counts,
-        total_steps,
+        list(merge_outcomes), db, run_id, workflow, rivulet_id, nodes, connections, ctx
     )
 
 
@@ -930,8 +1005,7 @@ async def _run_merge_node(
     connections: list[WorkflowConnection],
     merge_node_id: str,
     inputs: list[str],
-    visit_counts: dict[str, int],
-    total_steps: list[int],
+    ctx: _RunContext,
 ) -> _BranchOutcome:
     """Executes a merge node exactly once for the group of sibling inputs
     _resolve_merge_arrivals collected, then continues the walk from there
@@ -942,22 +1016,18 @@ async def _run_merge_node(
     if node is None:
         return _BranchOutcome(failed=False)
 
-    detail = _check_loop_guard(node, visit_counts, total_steps)
+    detail = _check_loop_guard(node, ctx)
     if detail is not None:
         await _post_alert(db, rivulet_id, workflow, node, detail)
         return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
 
-    rivulet = await db.get(Rivulet, rivulet_id)
-    assert rivulet is not None
+    rivulet = await _begin_node(db, run_id, workflow, rivulet_id, node)
     session_id = rivulet.agentos_session_id
     assert session_id is not None
-    await db.execute(
-        update(WorkflowRun).where(WorkflowRun.id == run_id).values(current_node_id=node.id)
-    )
-    await db.commit()
-    await _post_message(db, _step_message(rivulet, workflow, node))
 
-    output, failure = await _run_node_with_retries(db, run_id, node, session_id, json.dumps(inputs))
+    output, failure = await _run_node_with_retries(
+        db, run_id, node, session_id, json.dumps(inputs), rivulet_id, ctx
+    )
 
     if failure is not None:
         await _post_alert(db, rivulet_id, workflow, node, str(failure))
@@ -967,16 +1037,7 @@ async def _run_merge_node(
     await _post_message(db, _output_message(rivulet, node, output))
 
     return await _follow_edges(
-        db,
-        run_id,
-        workflow,
-        rivulet_id,
-        nodes,
-        connections,
-        node.id,
-        output,
-        visit_counts,
-        total_steps,
+        db, run_id, workflow, rivulet_id, nodes, connections, node.id, output, ctx
     )
 
 
@@ -986,6 +1047,8 @@ async def _run_node_with_retries(
     node: WorkflowNode,
     session_id: str,
     input_content: str,
+    rivulet_id: str,
+    ctx: _RunContext,
 ) -> tuple[str | None, Exception | None]:
     """Executes `node`, retrying up to `node.retry_max_attempts` additional
     times on failure with `node.retry_backoff_seconds` between attempts —
@@ -1003,7 +1066,9 @@ async def _run_node_with_retries(
         db.add(node_run)
         await db.flush()
         try:
-            output = await _execute_node(db, node, session_id, input_content)
+            output = await _execute_node(
+                db, node, session_id, input_content, rivulet_id, run_id, ctx
+            )
         except ConditionNotMetError as exc:
             node_run.status = "skipped"
             node_run.error_message = str(exc)
