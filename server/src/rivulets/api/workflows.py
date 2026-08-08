@@ -10,12 +10,15 @@ authored as plain JSON against this API for now. `Workflow`/`WorkflowNode`/
 `WorkflowRun`/`WorkflowNodeRun` (execution state) are read-only here,
 local to whichever node actually ran them — see db/models.py's docstrings.
 
-The MVP execution engine (workflows/engine.py) only walks a single linear
-chain, so this module enforces two invariants the schema itself doesn't
-(deliberately — see WorkflowConnection's docstring on why): a workflow has
-at most one entry connection (`from_node_id IS NULL`), and a node has at
-most one outbound connection. Both are 409s, not 400s — they're conflicts
-with existing connections, not malformed input.
+The engine (workflows/engine.py, branching/parallel/loops via #81) now
+walks a real graph, not just a single chain, so this module enforces only
+one invariant the schema itself doesn't: a workflow has at most one entry
+connection (`from_node_id IS NULL`) — still a 409, a conflict with an
+existing connection, not malformed input. A node may have any number of
+outbound connections; `condition_json` on each (validated by
+`_validate_condition` below) decides whether the engine follows it — see
+workflows/engine.py's module docstring for the predicate shape and how
+multiple matching edges fan out.
 """
 
 import json
@@ -112,6 +115,10 @@ class WorkflowNodeOut(BaseModel):
 class WorkflowConnectionCreate(BaseModel):
     from_node_id: str | None = None  # None = this workflow's entry point
     to_node_id: str
+    # None = always follow this edge. Otherwise exactly one of
+    # {"contains": "text"} / {"not_contains": "text"} — see
+    # workflows/engine.py's module docstring.
+    condition_json: dict[str, object] | None = None
 
 
 class WorkflowConnectionOut(BaseModel):
@@ -119,8 +126,36 @@ class WorkflowConnectionOut(BaseModel):
     workflow_id: str
     from_node_id: str | None
     to_node_id: str
+    condition_json: dict[str, object] | None
 
-    model_config = {"from_attributes": True}
+    @classmethod
+    def from_row(cls, row: WorkflowConnection) -> "WorkflowConnectionOut":
+        return cls(
+            id=row.id,
+            workflow_id=row.workflow_id,
+            from_node_id=row.from_node_id,
+            to_node_id=row.to_node_id,
+            condition_json=json.loads(row.condition_json) if row.condition_json else None,
+        )
+
+
+def _validate_condition(condition: dict[str, object] | None) -> None:
+    if condition is None:
+        return
+    keys = set(condition)
+    if keys == {"contains"} and isinstance(condition["contains"], str) and condition["contains"]:
+        return
+    if (
+        keys == {"not_contains"}
+        and isinstance(condition["not_contains"], str)
+        and condition["not_contains"]
+    ):
+        return
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        "condition_json must be omitted or exactly one of "
+        '{"contains": "text"} / {"not_contains": "text"}',
+    )
 
 
 class WorkflowRunOut(BaseModel):
@@ -304,45 +339,49 @@ async def delete_node(workflow_id: str, node_id: str, db: DbSession, _: CurrentW
 )
 async def create_connection(
     workflow_id: str, body: WorkflowConnectionCreate, db: DbSession, _: CurrentWorkspaceId
-) -> WorkflowConnection:
+) -> WorkflowConnectionOut:
     await _get_workflow_or_404(db, workflow_id)
     if body.from_node_id is not None:
         await _get_node_or_404(db, workflow_id, body.from_node_id)
     await _get_node_or_404(db, workflow_id, body.to_node_id)
+    _validate_condition(body.condition_json)
 
-    existing = await db.scalar(
-        select(WorkflowConnection).where(
-            WorkflowConnection.workflow_id == workflow_id,
-            WorkflowConnection.from_node_id == body.from_node_id,
+    if body.from_node_id is None:
+        existing_entry = await db.scalar(
+            select(WorkflowConnection).where(
+                WorkflowConnection.workflow_id == workflow_id,
+                WorkflowConnection.from_node_id.is_(None),
+            )
         )
-    )
-    if existing is not None:
-        origin = "the workflow's entry point" if body.from_node_id is None else "that node"
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"{origin} already has an outbound connection — the linear engine only "
-            "follows one path (see Workflow's docstring on branching support)",
-        )
+        if existing_entry is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "the workflow's entry point already has an outbound connection — a workflow "
+                "starts at exactly one node",
+            )
 
     connection = WorkflowConnection(
-        workflow_id=workflow_id, from_node_id=body.from_node_id, to_node_id=body.to_node_id
+        workflow_id=workflow_id,
+        from_node_id=body.from_node_id,
+        to_node_id=body.to_node_id,
+        condition_json=json.dumps(body.condition_json) if body.condition_json else None,
     )
     db.add(connection)
     await db.commit()
     await db.refresh(connection)
     await publish_current_state(db, "workflow_connection", connection.id)
-    return connection
+    return WorkflowConnectionOut.from_row(connection)
 
 
 @router.get("/{workflow_id}/connections", response_model=list[WorkflowConnectionOut])
 async def list_connections(
     workflow_id: str, db: DbSession, _: CurrentWorkspaceId
-) -> list[WorkflowConnection]:
+) -> list[WorkflowConnectionOut]:
     await _get_workflow_or_404(db, workflow_id)
     result = await db.execute(
         select(WorkflowConnection).where(WorkflowConnection.workflow_id == workflow_id)
     )
-    return list(result.scalars().all())
+    return [WorkflowConnectionOut.from_row(row) for row in result.scalars().all()]
 
 
 @router.delete("/{workflow_id}/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)

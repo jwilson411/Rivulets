@@ -111,8 +111,10 @@ def execute_conditional_node(node: WorkflowNode, input_content: str) -> str:
 
 
 def execute_merge_node(input_content: str) -> str:
-    """Multi-input merge needs parallel branches, out of scope for the
-    linear-only MVP engine (workflows/engine.py) — this is a pass-through
-    placeholder so the node type exists in the schema/API today and the
-    real merge behavior can land later without a new node_type."""
+    """Still a pass-through placeholder — parallel branch execution landed
+    in the engine (#81), but *combining* multiple branches' outputs into
+    one is #82's job. Until then, a merge node reached by several
+    concurrent branches (workflows/engine.py's fan-out) just runs once per
+    arriving branch, independently, each a no-op passthrough of that one
+    branch's input — not yet the multi-input join the node type implies."""
     return input_content
