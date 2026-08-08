@@ -1,6 +1,6 @@
-"""Workflow execution engine (#24, branching/parallel/loops via #81): runs
-a saved `Workflow` definition end-to-end against a rivulet, following
-`WorkflowConnection` edges.
+"""Workflow execution engine (#24, branching/parallel/loops via #81, real
+merge joining via #82): runs a saved `Workflow` definition end-to-end
+against a rivulet, following `WorkflowConnection` edges.
 
 A node may now have more than one outbound edge (api/workflows.py only
 enforces a single *entry* connection, from_node_id=None, since a workflow
@@ -56,6 +56,31 @@ back to the human, no automatic escalation. If any branch of a run fails
 (or trips a loop guard), the whole WorkflowRun is marked 'failed' with
 that branch's error, even if sibling branches completed cleanly — a
 partially-successful fan-out is still a run a human should look at.
+
+Merge nodes (#82): a branch that's about to advance onto a 'merge' node
+stops there instead (`_advance`) and reports the arrival rather than
+executing it, and single-edge continuations bubble that arrival straight
+back up unresolved (`_follow_edges`) rather than firing the merge node
+immediately. Resolution only happens where genuine concurrency actually
+exists: at the nearest ancestor fan-out (2+ matching edges gathered
+together) or, failing that, at run_workflow's own top level. That's what
+lets siblings a *different* number of hops from the merge node (one path
+runs through an extra node, another goes straight there) still join into
+one execution — since a workflow has exactly one entry point, any two
+branches that both reach the same merge node necessarily share some
+common ancestor fan-out somewhere back up the graph; the join naturally
+happens at whichever one is nearest. `_resolve_merge_arrivals` groups
+whatever arrivals surface at that point by merge node id and runs each
+group's merge node exactly once with all of their outputs combined
+(`workflows/nodes.py`'s `execute_merge_node`), then continues the walk
+from there. The one way a merge node still runs more than once for what
+looks like "the same" arrival is a loop: a second pass through an
+already-resolved fan-out is a temporally separate visit, not a sibling of
+the first. If a sibling in a group fails outright, the whole run fails as
+usual (see above) and the merge waiting on it never runs; a sibling that
+instead dead-ends cleanly (an unmatched edge condition, or a conditional
+node's own gate) simply doesn't contribute — the merge still fires with
+however many of its group did arrive.
 """
 
 import asyncio
@@ -105,6 +130,10 @@ class _BranchOutcome:
     failed: bool
     error_message: str | None = None
     node_name: str | None = None
+    # Set instead of `failed` when this branch's next hop is a 'merge' node:
+    # (merge_node_id, this_branch's_output) — the branch stops there rather
+    # than executing the merge node itself; see _resolve_merge_arrivals.
+    arrived_at_merge: tuple[str, str] | None = None
 
 
 async def _post_message(db: AsyncSession, message: Message) -> Message:
@@ -238,7 +267,10 @@ async def _execute_node(
     if node.node_type == "conditional":
         return execute_conditional_node(node, input_content)
     if node.node_type == "merge":
-        return execute_merge_node(input_content)
+        # _run_merge_node is the only caller that ever reaches a merge node
+        # (see module docstring / _resolve_merge_arrivals) -- it always
+        # passes a JSON-encoded list, never a bare string.
+        return execute_merge_node(node, json.loads(input_content))
     raise ValueError(f"Unknown node_type {node.node_type!r}")
 
 
@@ -297,7 +329,9 @@ async def run_workflow(
     # fan-out opens below can see this run and rivulet immediately.
     await db.commit()
 
-    outcome = await _run_branch(
+    visit_counts: dict[str, int] = {}
+    total_steps = [0]
+    entry_outcome = await _advance(
         db,
         run.id,
         workflow,
@@ -306,8 +340,19 @@ async def run_workflow(
         connections,
         entry_node_id,
         input_content,
-        visit_counts={},
-        total_steps=[0],
+        visit_counts,
+        total_steps,
+    )
+    outcome = await _resolve_merge_arrivals(
+        [entry_outcome],
+        db,
+        run.id,
+        workflow,
+        rivulet.id,
+        nodes,
+        connections,
+        visit_counts,
+        total_steps,
     )
 
     run.status = "failed" if outcome.failed else "completed"
@@ -372,12 +417,53 @@ async def _run_branch(
     assert output is not None
     await _post_message(db, _output_message(rivulet, node, output))
 
-    matching = _matching_outbound_edges(connections, node.id, output)
+    return await _follow_edges(
+        db,
+        run_id,
+        workflow,
+        rivulet_id,
+        nodes,
+        connections,
+        node.id,
+        output,
+        visit_counts,
+        total_steps,
+    )
+
+
+async def _follow_edges(
+    db: AsyncSession,
+    run_id: str,
+    workflow: Workflow,
+    rivulet_id: str,
+    nodes: dict[str, WorkflowNode],
+    connections: list[WorkflowConnection],
+    from_node_id: str,
+    output: str,
+    visit_counts: dict[str, int],
+    total_steps: list[int],
+) -> _BranchOutcome:
+    """Shared tail for both _run_branch and _run_merge_node: pick
+    `from_node_id`'s matching outbound edges, advance onto each (fanning
+    out to fresh sessions beyond the first -- see module docstring).
+
+    A single matching edge introduces no concurrency, so it isn't a real
+    fan-out point -- an unresolved merge arrival is passed straight back
+    to the caller rather than resolved here. That matters for siblings
+    that reach the same merge node a different number of hops apart (one
+    goes straight there, another passes through an extra node first): if
+    this level resolved eagerly, the extra-hop sibling's arrival would
+    fire the merge node alone before its sibling ever got a chance to
+    join it. Resolution only happens where genuine concurrency exists
+    (2+ matching edges, gathered below) or at run_workflow's top level,
+    which is the guaranteed final catch-all for whatever's still
+    unresolved once a branch stops introducing new fan-outs."""
+    matching = _matching_outbound_edges(connections, from_node_id, output)
     if not matching:
         return _BranchOutcome(failed=False)  # terminal node, or no edge's condition matched
 
     if len(matching) == 1:
-        return await _run_branch(
+        return await _advance(
             db,
             run_id,
             workflow,
@@ -392,7 +478,7 @@ async def _run_branch(
 
     async def _in_new_session(to_node_id: str) -> _BranchOutcome:
         async with session_scope() as branch_db:
-            return await _run_branch(
+            return await _advance(
                 branch_db,
                 run_id,
                 workflow,
@@ -406,7 +492,7 @@ async def _run_branch(
             )
 
     outcomes = await asyncio.gather(
-        _run_branch(
+        _advance(
             db,
             run_id,
             workflow,
@@ -420,7 +506,197 @@ async def _run_branch(
         ),
         *(_in_new_session(edge.to_node_id) for edge in matching[1:]),
     )
-    return next((o for o in outcomes if o.failed), _BranchOutcome(failed=False))
+    return await _resolve_merge_arrivals(
+        list(outcomes),
+        db,
+        run_id,
+        workflow,
+        rivulet_id,
+        nodes,
+        connections,
+        visit_counts,
+        total_steps,
+    )
+
+
+async def _advance(
+    db: AsyncSession,
+    run_id: str,
+    workflow: Workflow,
+    rivulet_id: str,
+    nodes: dict[str, WorkflowNode],
+    connections: list[WorkflowConnection],
+    node_id: str,
+    input_content: str,
+    visit_counts: dict[str, int],
+    total_steps: list[int],
+) -> _BranchOutcome:
+    """The one place a branch is about to move onto a node: if that node
+    is a 'merge', stop here and report the arrival instead of executing it
+    (a merge node only ever runs via _run_merge_node, once per group of
+    siblings -- see _resolve_merge_arrivals). Otherwise just _run_branch
+    as normal."""
+    target = nodes.get(node_id)
+    if target is not None and target.node_type == "merge":
+        return _BranchOutcome(failed=False, arrived_at_merge=(node_id, input_content))
+    return await _run_branch(
+        db,
+        run_id,
+        workflow,
+        rivulet_id,
+        nodes,
+        connections,
+        node_id,
+        input_content,
+        visit_counts,
+        total_steps,
+    )
+
+
+async def _resolve_merge_arrivals(
+    outcomes: list[_BranchOutcome],
+    db: AsyncSession,
+    run_id: str,
+    workflow: Workflow,
+    rivulet_id: str,
+    nodes: dict[str, WorkflowNode],
+    connections: list[WorkflowConnection],
+    visit_counts: dict[str, int],
+    total_steps: list[int],
+) -> _BranchOutcome:
+    """`outcomes` is one fan-out's worth of sibling results (or a single
+    result, for the non-branching case) -- this is the *only* place a
+    merge node actually executes. Siblings that arrived at the *same*
+    merge node are grouped and it runs once with all of their outputs
+    (workflows/nodes.py's execute_merge_node); this only joins branches
+    that diverged together at this fan-out, not any two branches anywhere
+    in the graph that happen to reach the same merge node (see module
+    docstring) -- reached some other way, a merge node still just runs
+    once per independent arrival, unchanged from #81. Recurses because a
+    merge node's own next hop could be another merge node."""
+    failed = next((o for o in outcomes if o.failed), None)
+    if failed is not None:
+        return failed
+
+    merge_groups: dict[str, list[str]] = {}
+    for outcome in outcomes:
+        if outcome.arrived_at_merge is not None:
+            merge_id, merge_input = outcome.arrived_at_merge
+            merge_groups.setdefault(merge_id, []).append(merge_input)
+
+    if not merge_groups:
+        return _BranchOutcome(failed=False)
+
+    groups = list(merge_groups.items())
+
+    async def _in_new_session(merge_id: str, inputs: list[str]) -> _BranchOutcome:
+        async with session_scope() as branch_db:
+            return await _run_merge_node(
+                branch_db,
+                run_id,
+                workflow,
+                rivulet_id,
+                nodes,
+                connections,
+                merge_id,
+                inputs,
+                visit_counts,
+                total_steps,
+            )
+
+    merge_outcomes = await asyncio.gather(
+        _run_merge_node(
+            db,
+            run_id,
+            workflow,
+            rivulet_id,
+            nodes,
+            connections,
+            groups[0][0],
+            groups[0][1],
+            visit_counts,
+            total_steps,
+        ),
+        *(_in_new_session(merge_id, inputs) for merge_id, inputs in groups[1:]),
+    )
+    return await _resolve_merge_arrivals(
+        list(merge_outcomes),
+        db,
+        run_id,
+        workflow,
+        rivulet_id,
+        nodes,
+        connections,
+        visit_counts,
+        total_steps,
+    )
+
+
+async def _run_merge_node(
+    db: AsyncSession,
+    run_id: str,
+    workflow: Workflow,
+    rivulet_id: str,
+    nodes: dict[str, WorkflowNode],
+    connections: list[WorkflowConnection],
+    merge_node_id: str,
+    inputs: list[str],
+    visit_counts: dict[str, int],
+    total_steps: list[int],
+) -> _BranchOutcome:
+    """Executes a merge node exactly once for the group of sibling inputs
+    _resolve_merge_arrivals collected, then continues the walk from there
+    -- the same visit/step accounting, message posting, and edge-following
+    _run_branch does for every other node type, just with a pre-combined
+    list of inputs instead of a single predecessor's output."""
+    node = nodes.get(merge_node_id)
+    if node is None:
+        return _BranchOutcome(failed=False)
+
+    visit_counts[merge_node_id] = visit_counts.get(merge_node_id, 0) + 1
+    total_steps[0] += 1
+    if (
+        visit_counts[merge_node_id] > MAX_NODE_VISITS_PER_RUN
+        or total_steps[0] > MAX_TOTAL_STEPS_PER_RUN
+    ):
+        detail = (
+            f"exceeded the workflow's loop guard ({MAX_NODE_VISITS_PER_RUN} visits to this step "
+            f"or {MAX_TOTAL_STEPS_PER_RUN} steps in this run) — likely an unbounded loop"
+        )
+        await _post_alert(db, rivulet_id, workflow, node, detail)
+        return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
+
+    rivulet = await db.get(Rivulet, rivulet_id)
+    assert rivulet is not None
+    session_id = rivulet.agentos_session_id
+    assert session_id is not None
+    await db.execute(
+        update(WorkflowRun).where(WorkflowRun.id == run_id).values(current_node_id=node.id)
+    )
+    await db.commit()
+    await _post_message(db, _step_message(rivulet, workflow, node))
+
+    output, failure = await _run_node_with_retries(db, run_id, node, session_id, json.dumps(inputs))
+
+    if failure is not None:
+        await _post_alert(db, rivulet_id, workflow, node, str(failure))
+        return _BranchOutcome(failed=True, error_message=str(failure), node_name=node.name)
+
+    assert output is not None
+    await _post_message(db, _output_message(rivulet, node, output))
+
+    return await _follow_edges(
+        db,
+        run_id,
+        workflow,
+        rivulet_id,
+        nodes,
+        connections,
+        node.id,
+        output,
+        visit_counts,
+        total_steps,
+    )
 
 
 async def _run_node_with_retries(

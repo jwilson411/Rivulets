@@ -472,13 +472,13 @@ async def test_unbounded_loop_trips_the_loop_guard(db_session: AsyncSession) -> 
     assert "loop guard" in alerts.scalars().one().content
 
 
-async def test_merge_node_reached_by_two_branches_runs_once_per_arrival(
+async def test_merge_node_joins_sibling_branches_as_a_json_array(
     db_session: AsyncSession,
 ) -> None:
-    """#81's documented boundary (see workflows/nodes.py's
-    execute_merge_node docstring): real multi-input joining is #82's job.
-    Until then, a merge node reached by concurrent branches just runs
-    independently once per arrival."""
+    """#82: two branches that fan out from the same node and reconverge at
+    a merge node get joined into ONE execution, not one per arrival --
+    the default (no config.template) strategy is a JSON array, in the
+    fanned-out edges' creation order, not arrival order."""
     rivulet = await _make_rivulet(db_session)
     workflow = await _make_workflow(db_session, name="converge")
     start = _transform_node(workflow.id, "start", "{input}")
@@ -515,11 +515,120 @@ async def test_merge_node_reached_by_two_branches_runs_once_per_arrival(
         select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == merge.id)
     )
     merge_runs = list(result.scalars().all())
-    assert len(merge_runs) == 2
-    assert {r.output_content for r in merge_runs} == {"A: go", "B: go"}
+    assert len(merge_runs) == 1
+    assert merge_runs[0].output_content == json.dumps(["A: go", "B: go"])
+    assert json.loads(merge_runs[0].input_content) == ["A: go", "B: go"]
 
 
-async def test_merge_node_passes_input_through(db_session: AsyncSession) -> None:
+async def test_merge_node_template_mode_combines_sibling_outputs(
+    db_session: AsyncSession,
+) -> None:
+    """#82's "beyond naive concatenation" strategy: config.template with
+    one indexed placeholder per contributing branch."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="converge-template")
+    start = _transform_node(workflow.id, "start", "{input}")
+    branch_a = _transform_node(workflow.id, "branch-a", "left")
+    branch_b = _transform_node(workflow.id, "branch-b", "right")
+    merge = WorkflowNode(
+        workflow_id=workflow.id,
+        name="merge",
+        node_type="merge",
+        config_json=json.dumps({"template": "{input0} vs {input1}"}),
+    )
+    db_session.add_all([start, branch_a, branch_b, merge])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_a.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_b.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=branch_a.id, to_node_id=merge.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=branch_b.id, to_node_id=merge.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    outputs = [m.content for m in result.scalars().all()]
+    assert outputs[-1] == "left vs right"
+
+
+async def test_merge_node_joins_siblings_at_different_hop_depths(
+    db_session: AsyncSession,
+) -> None:
+    """#82: siblings don't need to be the same number of hops from the
+    merge node to join -- gate-a fans out to [gate-b -> merge] and
+    [merge directly]; despite one path being a hop longer, both still
+    trace back to gate-a as their nearest common fan-out, so they're
+    still recognized as one group and the merge runs once, not twice."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="asymmetric-converge")
+    gate_a = WorkflowNode(
+        workflow_id=workflow.id,
+        name="gate-a",
+        node_type="conditional",
+        config_json=json.dumps({"contains": "go"}),
+    )
+    gate_b = WorkflowNode(
+        workflow_id=workflow.id,
+        name="gate-b",
+        node_type="conditional",
+        config_json=json.dumps({"contains": "go"}),
+    )
+    merge = WorkflowNode(workflow_id=workflow.id, name="merge", node_type="merge")
+    db_session.add_all([gate_a, gate_b, merge])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=gate_a.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=gate_a.id, to_node_id=gate_b.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=gate_a.id, to_node_id=merge.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=gate_b.id, to_node_id=merge.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == merge.id)
+    )
+    merge_runs = list(result.scalars().all())
+    assert len(merge_runs) == 1
+    assert json.loads(merge_runs[0].input_content) == ["go", "go"]
+
+
+async def test_merge_node_with_single_arrival_still_wraps_as_json_array(
+    db_session: AsyncSession,
+) -> None:
+    """A merge node's output shape doesn't depend on how many branches
+    arrived -- even a lone arrival gets wrapped, not passed through bare,
+    so downstream nodes can always expect the same shape."""
     rivulet = await _make_rivulet(db_session)
     workflow = await _make_workflow(db_session, name="merge-flow")
     merge = WorkflowNode(workflow_id=workflow.id, name="merge", node_type="merge")
@@ -538,4 +647,4 @@ async def test_merge_node_passes_input_through(db_session: AsyncSession) -> None
     result = await db_session.execute(
         select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
     )
-    assert result.scalars().one().content == "unchanged"
+    assert result.scalars().one().content == json.dumps(["unchanged"])
