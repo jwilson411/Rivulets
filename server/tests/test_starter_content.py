@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.starter_content import (
-    _STARTER_AGENTS,
-    _STARTER_TEAM_NAME,
+    _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
+    _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     seed_starter_agents,
     seed_starter_teams,
 )
