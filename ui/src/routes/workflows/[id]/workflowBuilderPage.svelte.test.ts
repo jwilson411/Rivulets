@@ -389,6 +389,66 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('digest-channel', { exact: false })).toBeInTheDocument();
 	});
 
+	it('shows a one-off agent-created schedule pending approval', async () => {
+		mockLoad();
+		const pending: WorkflowSchedule = {
+			id: 'sched-pending',
+			workflow_id: 'wf-1',
+			channel_id: 'ch-1',
+			cron_expression: null,
+			run_once: true,
+			input_content: '',
+			enabled: false,
+			next_fire_at: '2026-08-09T09:00:00Z',
+			last_fired_at: null,
+			consecutive_failures: 0,
+			name: 'daily digest reminder',
+			created_by: 'agent-1',
+			created_at: '2026-08-08T00:00:00Z',
+			updated_at: '2026-08-08T00:00:00Z'
+		};
+		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([pending]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await expect
+			.element(page.getByText('daily digest reminder', { exact: false }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText('pending your approval', { exact: false }))
+			.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Enable' })).toBeInTheDocument();
+	});
+
+	it('hides the Enable button for a one-off schedule that already fired', async () => {
+		mockLoad();
+		const spent: WorkflowSchedule = {
+			id: 'sched-spent',
+			workflow_id: 'wf-1',
+			channel_id: 'ch-1',
+			cron_expression: null,
+			run_once: true,
+			input_content: '',
+			enabled: false,
+			next_fire_at: '2020-01-01T00:00:00Z',
+			last_fired_at: '2020-01-01T00:05:00Z',
+			consecutive_failures: 0,
+			name: null,
+			created_by: 'human',
+			created_at: '2026-08-08T00:00:00Z',
+			updated_at: '2026-08-08T00:00:00Z'
+		};
+		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([spent]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await expect.element(page.getByText('once at', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Enable' })).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Disable' })).not.toBeInTheDocument();
+	});
+
 	it('shows a validation error from the preview endpoint without saving', async () => {
 		mockLoad();
 		vi.mocked(workflows.previewSchedule).mockResolvedValueOnce({
