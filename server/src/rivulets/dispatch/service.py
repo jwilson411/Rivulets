@@ -41,9 +41,11 @@ selection and graceful-degradation behavior.
 
 import json
 import logging
+from datetime import UTC, datetime
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from croniter import CroniterError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +64,8 @@ from rivulets.db.models import (
     Rivulet,
     RivuletGuardState,
     TeamAgent,
+    Workflow,
+    WorkflowSchedule,
 )
 from rivulets.db.session import session_scope
 from rivulets.dispatch.complexity_classifier import classify_tier
@@ -193,6 +197,66 @@ def _find_run_workflow_call(run_output: RunOutput) -> tuple[str, str] | None:
         workflow_input = args.get("workflow_input")
         if isinstance(name, str) and isinstance(workflow_input, str):
             return name, workflow_input
+    return None
+
+
+# #93: the number of WorkflowSchedule rows a single agent can have
+# outstanding (WorkflowSchedule.created_by == agent.id) at once, mirroring
+# engine.py's own MAX_NODE_VISITS_PER_RUN/MAX_TOTAL_STEPS_PER_RUN
+# runaway-execution guards — nothing else stops a misunderstanding, a
+# prompt injection, or a loop in an agent's own reasoning from
+# proliferating schedules across a long conversation.
+MAX_AGENT_SCHEDULES = 20
+
+
+def _str_or_none(args: dict[str, object], key: str) -> str | None:
+    value = args.get(key)
+    return value if isinstance(value, str) else None
+
+
+class ScheduleWorkflowCall:
+    """Parsed args for a schedule_workflow tool call (#93). Only
+    `workflow_name` is required; the rest fall back to None/"" when the
+    model didn't pass them (tool_args only reflects what the model
+    actually supplied, not the function's own default values)."""
+
+    def __init__(self, args: dict[str, object], workflow_name: str) -> None:
+        self.workflow_name = workflow_name
+        self.input_content = _str_or_none(args, "input_content") or ""
+        self.cron_expression = _str_or_none(args, "cron_expression")
+        self.fire_at = _str_or_none(args, "fire_at")
+        self.name = _str_or_none(args, "name")
+
+
+def _find_schedule_workflow_call(run_output: RunOutput) -> ScheduleWorkflowCall | None:
+    """Same shape as _find_run_workflow_call, for the schedule_workflow
+    tool (tools/builtin/schedules.py, #93)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "schedule_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        workflow_name = args.get("workflow_name")
+        if isinstance(workflow_name, str):
+            return ScheduleWorkflowCall(args, workflow_name)
+    return None
+
+
+def _find_list_schedules_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_handoff_call, for the argument-less
+    list_schedules tool (tools/builtin/schedules.py, #93)."""
+    return any(tool_call.tool_name == "list_schedules" for tool_call in run_output.tools or [])
+
+
+def _find_cancel_schedule_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_run_workflow_call, for the cancel_schedule tool
+    (tools/builtin/schedules.py, #93)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "cancel_schedule":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        schedule_ref = args.get("schedule")
+        if isinstance(schedule_ref, str):
+            return schedule_ref
     return None
 
 
@@ -594,6 +658,21 @@ async def _invoke_agent(
         workflow_name, workflow_input = run_workflow_call
         await _handle_run_workflow_trigger(db, rivulet, agent, workflow_name, workflow_input)
 
+    schedule_workflow_call = _find_schedule_workflow_call(run_output)
+    if schedule_workflow_call is not None:
+        new_messages.extend(
+            await _handle_schedule_workflow_trigger(db, rivulet, agent, schedule_workflow_call)
+        )
+
+    if _find_list_schedules_call(run_output):
+        new_messages.extend(await _handle_list_schedules_trigger(db, rivulet, agent))
+
+    cancel_schedule_call = _find_cancel_schedule_call(run_output)
+    if cancel_schedule_call is not None:
+        new_messages.extend(
+            await _handle_cancel_schedule_trigger(db, rivulet, agent, cancel_schedule_call)
+        )
+
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
@@ -691,3 +770,229 @@ async def _handle_run_workflow_trigger(
     await run_workflow(
         db, workflow, rivulet, workflow_input, triggered_by="agent", triggered_by_id=agent.id
     )
+
+
+def _normalize_fire_at(fire_at: str) -> str:
+    """Parses an ISO 8601 timestamp (the schedule_workflow tool's
+    `fire_at` arg) into the same "%Y-%m-%dT%H:%M:%SZ" UTC shape
+    workflows/scheduler.py's compute_next_fire_at produces, so
+    WorkflowSchedule.next_fire_at is one consistent format regardless of
+    which path created the row. Raises ValueError on anything
+    unparseable — the same exception type _handle_schedule_workflow_trigger
+    already catches for an invalid cron_expression."""
+    parsed = datetime.fromisoformat(fire_at.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _agent_schedules(db: AsyncSession, agent_id: str) -> list[WorkflowSchedule]:
+    """Every WorkflowSchedule this agent created (#93) — the ownership
+    boundary _handle_list_schedules_trigger and _handle_cancel_schedule_trigger
+    both enforce, so an agent can only ever see or cancel its own
+    schedules, never another agent's or a human's."""
+    return list(
+        (
+            await db.scalars(
+                select(WorkflowSchedule)
+                .where(WorkflowSchedule.created_by == agent_id)
+                .order_by(WorkflowSchedule.created_at)
+            )
+        ).all()
+    )
+
+
+def _system_message(db: AsyncSession, rivulet: Rivulet, content: str) -> Message:
+    """Builds a system_alert Message and stages it on `db` -- every one of
+    #93's schedule_workflow/list_schedules/cancel_schedule outcomes
+    (success and every rejection) needs one, so staging happens here
+    rather than at each call site, where forgetting it would silently
+    drop the message from the caller's returned list without erroring."""
+    message = Message(
+        rivulet_id=rivulet.id,
+        sender_type="system",
+        sender_name="system",
+        content=content,
+        content_type="system_alert",
+    )
+    db.add(message)
+    return message
+
+
+async def _handle_schedule_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: ScheduleWorkflowCall
+) -> list[Message]:
+    """#93: an agent called the schedule_workflow tool — validate the
+    request and, if well-formed, create a WorkflowSchedule (#92). Unlike
+    run_workflow (silent on a bad request, since it has nothing useful to
+    say), this always posts a visible confirmation or rejection: a
+    schedule is a standing background effect the human in this
+    conversation needs to actually see, not just take the agent's own
+    unconfirmed word for. Imports rivulets.workflows lazily for the same
+    circular-import reason as _handle_run_workflow_trigger."""
+    from rivulets.workflows import find_workflow_by_name
+    from rivulets.workflows.scheduler import compute_next_fire_at
+
+    workflow = await find_workflow_by_name(db, call.workflow_name)
+    if workflow is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to schedule a workflow, but no published workflow "
+                f"named {call.workflow_name!r} exists.",
+            )
+        ]
+
+    if bool(call.cron_expression) == bool(call.fire_at):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to schedule workflow /{workflow.name}, but the request "
+                "must specify exactly one of a recurring cron schedule or a one-time fire time.",
+            )
+        ]
+
+    # A one-off that already fired is inert (scheduler.py's _fire disables
+    # it and never re-arms it) -- it doesn't count against the cap, or an
+    # agent that mostly sends one-time reminders would eventually exhaust
+    # its quota on schedules that aren't outstanding in any sense.
+    existing = [
+        s for s in await _agent_schedules(db, agent.id) if not (s.run_once and s.last_fired_at)
+    ]
+    if len(existing) >= MAX_AGENT_SCHEDULES:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to schedule workflow /{workflow.name}, but it already has "
+                f"{len(existing)} scheduled workflows outstanding (limit {MAX_AGENT_SCHEDULES}) "
+                "— cancel one first.",
+            )
+        ]
+
+    run_once = call.fire_at is not None
+    try:
+        if run_once:
+            assert call.fire_at is not None
+            next_fire_at = _normalize_fire_at(call.fire_at)
+        else:
+            assert call.cron_expression is not None
+            next_fire_at = compute_next_fire_at(call.cron_expression)
+    except (CroniterError, ValueError) as exc:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to schedule workflow /{workflow.name}, but the "
+                f"schedule was invalid: {exc}",
+            )
+        ]
+
+    schedule = WorkflowSchedule(
+        workflow_id=workflow.id,
+        channel_id=rivulet.channel_id,
+        cron_expression=call.cron_expression,
+        run_once=run_once,
+        input_content=call.input_content,
+        # #93: agent-created schedules need human approval before they can
+        # fire — the same "unilateral agent action doesn't take effect
+        # without a human" precedent #84 already established for
+        # draft/published workflows.
+        enabled=False,
+        next_fire_at=next_fire_at,
+        name=call.name,
+        created_by=agent.id,
+    )
+    db.add(schedule)
+    await db.flush()
+
+    when = f"once at {next_fire_at}" if run_once else f"on schedule {call.cron_expression!r}"
+    message = _system_message(
+        db,
+        rivulet,
+        f"@{agent.name} scheduled workflow /{workflow.name} to run {when} "
+        f"(id: {schedule.id}) — pending human approval before it starts firing.",
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "schedule_created", "schedule_id": schedule.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_schedules_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#93: an agent called the list_schedules tool, scoped strictly to
+    WorkflowSchedule.created_by == agent.id (see _agent_schedules)."""
+    schedules = await _agent_schedules(db, agent.id)
+    if not schedules:
+        content = f"@{agent.name} has no scheduled workflows."
+    else:
+        workflow_ids = {s.workflow_id for s in schedules}
+        workflows = (await db.scalars(select(Workflow).where(Workflow.id.in_(workflow_ids)))).all()
+        workflow_names = {w.id: w.name for w in workflows}
+        lines = [f"@{agent.name}'s scheduled workflows:"]
+        for s in schedules:
+            when = (
+                f"once at {s.next_fire_at}"
+                if s.run_once
+                else f"cron {s.cron_expression!r}, next at {s.next_fire_at}"
+            )
+            status = (
+                "enabled"
+                if s.enabled
+                else "pending approval"
+                if s.last_fired_at is None
+                else "disabled"
+            )
+            label = f" ({s.name})" if s.name else ""
+            workflow_name = workflow_names.get(s.workflow_id, s.workflow_id)
+            lines.append(f"- /{workflow_name}{label}: {when} [{status}] (id: {s.id})")
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+async def _handle_cancel_schedule_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, schedule_ref: str
+) -> list[Message]:
+    """#93: an agent called the cancel_schedule tool. `schedule_ref` may
+    be a schedule id or its `name` label; either way, ownership is
+    enforced by only ever matching against _agent_schedules(agent.id) —
+    an agent can cancel a schedule it created, never one it merely knows
+    the id of. An id match is checked first and is unambiguous by
+    construction (it's the primary key); `name` isn't unique -- nothing
+    stops schedule_workflow from creating two schedules with the same
+    name -- so a name match that isn't exactly one row is treated as
+    ambiguous rather than silently deleting whichever one sorts first."""
+    schedules = await _agent_schedules(db, agent.id)
+    by_id = next((s for s in schedules if s.id == schedule_ref), None)
+
+    if by_id is not None:
+        await db.delete(by_id)
+        content = f"@{agent.name} cancelled schedule {schedule_ref!r} (id: {by_id.id})."
+    else:
+        name_matches = [s for s in schedules if s.name == schedule_ref]
+        if len(name_matches) == 1:
+            match = name_matches[0]
+            await db.delete(match)
+            content = f"@{agent.name} cancelled schedule {schedule_ref!r} (id: {match.id})."
+        elif name_matches:
+            ids = ", ".join(s.id for s in name_matches)
+            content = (
+                f"@{agent.name} tried to cancel schedule {schedule_ref!r}, but that name matches "
+                f"{len(name_matches)} schedules ({ids}) -- cancel by id instead."
+            )
+        else:
+            content = (
+                f"@{agent.name} tried to cancel schedule {schedule_ref!r}, but no schedule with "
+                "that id or name was found among the ones it created."
+            )
+
+    message = _system_message(db, rivulet, content)
+    return [message]

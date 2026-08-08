@@ -103,12 +103,22 @@ export interface WorkflowSchedule {
 	id: string;
 	workflow_id: string;
 	channel_id: string;
-	cron_expression: string;
+	// null for a #93 one-off (run_once) schedule created via the
+	// schedule_workflow agent tool -- next_fire_at is the fire time
+	// itself, there's no recurring cron expression to show.
+	cron_expression: string | null;
+	run_once: boolean;
 	input_content: string;
 	enabled: boolean;
 	next_fire_at: string;
 	last_fired_at: string | null;
 	consecutive_failures: number;
+	// Optional short label (e.g. "daily digest"). 'human' vs. an agent id
+	// distinguishes a schedule made through this builder from one an
+	// agent created via chat -- the latter starts disabled pending
+	// approval (#93).
+	name: string | null;
+	created_by: string;
 	created_at: string;
 	updated_at: string;
 }

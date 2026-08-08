@@ -223,6 +223,27 @@
 		}
 	}
 
+	// #93: a schedule an agent creates via the schedule_workflow tool has
+	// no cron_expression (it's a one-off run_once fire time) and starts
+	// disabled with created_by set to the agent's id, not 'human' --
+	// pending human approval before toggleScheduleEnabled can turn it on.
+	function scheduleTiming(schedule: WorkflowSchedule): string {
+		return schedule.run_once
+			? `once at ${new Date(schedule.next_fire_at).toLocaleString()}`
+			: (schedule.cron_expression ?? '');
+	}
+
+	function isPendingAgentApproval(schedule: WorkflowSchedule): boolean {
+		return schedule.created_by !== 'human' && !schedule.enabled && !schedule.last_fired_at;
+	}
+
+	// A one-off already fired can't be turned back on (api/workflows.py's
+	// update_schedule rejects it — its next_fire_at is necessarily in the
+	// past, so re-enabling would fire the same reminder again immediately).
+	function isSpentOneOff(schedule: WorkflowSchedule): boolean {
+		return schedule.run_once && schedule.last_fired_at !== null;
+	}
+
 	async function toggleScheduleEnabled(schedule: WorkflowSchedule) {
 		if (!workflow) return;
 		const workflowId = workflow.id;
@@ -516,15 +537,20 @@
 						>
 							<div class="flex items-center justify-between">
 								<span class="font-mono text-sm text-ink dark:text-ink-dark">
-									{schedule.cron_expression}
+									{scheduleTiming(schedule)}
+									{#if schedule.name}
+										<span class="font-sans text-neutral-500">({schedule.name})</span>
+									{/if}
 								</span>
 								<div class="flex items-center gap-2">
-									<button
-										onclick={() => toggleScheduleEnabled(schedule)}
-										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-									>
-										{schedule.enabled ? 'Disable' : 'Enable'}
-									</button>
+									{#if schedule.enabled || !isSpentOneOff(schedule)}
+										<button
+											onclick={() => toggleScheduleEnabled(schedule)}
+											class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+										>
+											{schedule.enabled ? 'Disable' : 'Enable'}
+										</button>
+									{/if}
 									<button
 										onclick={() => removeSchedule(schedule.id)}
 										class="text-neutral-500 hover:text-agent-magenta-600"
@@ -533,6 +559,11 @@
 									</button>
 								</div>
 							</div>
+							{#if isPendingAgentApproval(schedule)}
+								<p class="text-amber-700 dark:text-amber-400">
+									⏳ Created by an agent — pending your approval before it can fire
+								</p>
+							{/if}
 							<p class="text-neutral-500">
 								Channel: {channelList.find((c) => c.id === schedule.channel_id)?.name ??
 									'Deleted channel'}

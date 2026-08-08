@@ -12,17 +12,21 @@ from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
 from rivulets.tools.builtin.run_workflow import run_workflow
+from rivulets.tools.builtin.schedules import cancel_schedule, list_schedules, schedule_workflow
 from rivulets.tools.builtin.web_search import web_search
 
 __all__ = [
+    "cancel_schedule",
     "execute_python",
     "handoff",
     "http_request",
     "list_files",
+    "list_schedules",
     "query_workspace_db",
     "read_attached_file",
     "read_file",
     "run_workflow",
+    "schedule_workflow",
     "web_search",
     "write_file",
 ]
