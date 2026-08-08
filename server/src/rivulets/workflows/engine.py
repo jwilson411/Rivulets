@@ -1,7 +1,7 @@
 """Workflow execution engine (#24, branching/parallel/loops via #81, real
-merge joining via #82, pause/resume via #83): runs a saved `Workflow`
-definition end-to-end against a rivulet, following `WorkflowConnection`
-edges.
+merge joining via #82, pause/resume via #83, run-graph snapshotting via
+#84): runs a saved `Workflow` definition end-to-end against a rivulet,
+following `WorkflowConnection` edges.
 
 A node may now have more than one outbound edge (api/workflows.py only
 enforces a single *entry* connection, from_node_id=None, since a workflow
@@ -103,6 +103,24 @@ already reached the merge node before the pause isn't replayed, so that
 merge (if reached again on resume) fires with just the resumed branch's
 input. Pausing on a linear path, or in a fan-out with no shared merge
 downstream, has no such gap.
+
+Run-graph snapshotting (#84): `run_workflow` freezes the workflow's nodes
+and connections into `WorkflowRun.graph_snapshot_json`
+(`_serialize_graph`) the moment a run starts, and `resume_workflow` reads
+that back (`_deserialize_graph`) instead of re-querying the live
+WorkflowNode/WorkflowConnection rows -- a workflow edited in the builder
+while a run sits paused on a 'human_input' node doesn't change what that
+paused run does on resume. A run that never crosses a pause boundary
+doesn't strictly need this (the graph is already loaded once into local
+variables for that whole synchronous call), but every run gets a snapshot
+uniformly. `Workflow.published` is a separate, narrower gate on top of
+this: it only controls whether a *new* run can be *started* via the
+slash-command/run_workflow-tool triggers (workflows/trigger.py's
+find_workflow_by_name) -- it isn't a second, independent copy of the
+graph the way a full draft/published model would be, so editing an
+already-published workflow still takes effect immediately for the next
+trigger. See Workflow's own docstring for why that's the scope this
+landed with.
 """
 
 import asyncio
@@ -233,6 +251,72 @@ async def _load_nodes_and_connections(
     return nodes, connections
 
 
+def _serialize_graph(nodes: dict[str, WorkflowNode], connections: list[WorkflowConnection]) -> str:
+    """#84: captures exactly the fields the engine ever reads off a node
+    or connection -- not the full row (created_at/vector_clock/etc. are
+    irrelevant to execution) -- so a WorkflowRun can freeze the graph it
+    started with. See _deserialize_graph and WorkflowRun.graph_snapshot_json."""
+    return json.dumps(
+        {
+            "nodes": [
+                {
+                    "id": node.id,
+                    "name": node.name,
+                    "node_type": node.node_type,
+                    "agent_id": node.agent_id,
+                    "config_json": node.config_json,
+                    "retry_max_attempts": node.retry_max_attempts,
+                    "retry_backoff_seconds": node.retry_backoff_seconds,
+                }
+                for node in nodes.values()
+            ],
+            "connections": [
+                {
+                    "id": connection.id,
+                    "from_node_id": connection.from_node_id,
+                    "to_node_id": connection.to_node_id,
+                    "condition_json": connection.condition_json,
+                }
+                for connection in connections
+            ],
+        }
+    )
+
+
+def _deserialize_graph(
+    snapshot_json: str,
+) -> tuple[dict[str, WorkflowNode], list[WorkflowConnection]]:
+    """The other half of _serialize_graph: reconstructs detached
+    WorkflowNode/WorkflowConnection instances (never added to a session,
+    just plain attribute containers) from a WorkflowRun's frozen snapshot.
+    The rest of the engine only ever reads attributes off these objects,
+    never mutates or persists them directly, so a detached instance built
+    straight from JSON is indistinguishable to it from one loaded live."""
+    raw = json.loads(snapshot_json)
+    nodes = {
+        n["id"]: WorkflowNode(
+            id=n["id"],
+            name=n["name"],
+            node_type=n["node_type"],
+            agent_id=n["agent_id"],
+            config_json=n["config_json"],
+            retry_max_attempts=n["retry_max_attempts"],
+            retry_backoff_seconds=n["retry_backoff_seconds"],
+        )
+        for n in raw["nodes"]
+    }
+    connections = [
+        WorkflowConnection(
+            id=c["id"],
+            from_node_id=c["from_node_id"],
+            to_node_id=c["to_node_id"],
+            condition_json=c["condition_json"],
+        )
+        for c in raw["connections"]
+    ]
+    return nodes, connections
+
+
 def _entry_node_id(connections: list[WorkflowConnection]) -> str | None:
     for connection in connections:
         if connection.from_node_id is None:
@@ -346,6 +430,10 @@ async def run_workflow(
         triggered_by=triggered_by,
         triggered_by_id=triggered_by_id,
         input_content=input_content,
+        # #84: freezes the graph this run executes against -- a later
+        # resume_workflow reads it back rather than re-querying the live
+        # (possibly since-edited) WorkflowNode/WorkflowConnection rows.
+        graph_snapshot_json=_serialize_graph(nodes, connections),
     )
     db.add(run)
     await db.flush()
@@ -432,14 +520,19 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     starts fresh: visit_counts/total_steps were local to the original
     run_workflow call and aren't persisted across a pause, so a run that
     paused near its budget gets a clean one again on resume rather than
-    inheriting an exhausted one."""
+    inheriting an exhausted one.
+
+    #84: hydrates the graph from `run.graph_snapshot_json` rather than
+    re-querying the live WorkflowNode/WorkflowConnection rows -- a
+    workflow edited in the builder while a run sits paused shouldn't
+    change what that run does when it resumes."""
     assert run.current_node_id is not None  # set by _pause_for_human_input
     workflow = await db.get(Workflow, run.workflow_id)
     rivulet = await db.get(Rivulet, run.rivulet_id)
     assert workflow is not None
     assert rivulet is not None
 
-    nodes, connections = await _load_nodes_and_connections(db, workflow.id)
+    nodes, connections = _deserialize_graph(run.graph_snapshot_json)
     paused_node = nodes.get(run.current_node_id)
     if paused_node is None:
         return await _finalize_run(

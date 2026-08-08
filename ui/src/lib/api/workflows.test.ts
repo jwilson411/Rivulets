@@ -65,6 +65,28 @@ describe('workflows', () => {
 		expect(init.method).toBe('DELETE');
 	});
 
+	it('publish() POSTs to /workflows/:id/publish', async () => {
+		const fetchMock = mockFetch({ id: 'w1', published: true });
+
+		const result = await workflows.publish('w1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/publish');
+		expect(init.method).toBe('POST');
+		expect(result).toEqual({ id: 'w1', published: true });
+	});
+
+	it('unpublish() POSTs to /workflows/:id/unpublish', async () => {
+		const fetchMock = mockFetch({ id: 'w1', published: false });
+
+		const result = await workflows.unpublish('w1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/unpublish');
+		expect(init.method).toBe('POST');
+		expect(result).toEqual({ id: 'w1', published: false });
+	});
+
 	it('listNodes() GETs /workflows/:id/nodes', async () => {
 		const fetchMock = mockFetch([{ id: 'n1' }]);
 

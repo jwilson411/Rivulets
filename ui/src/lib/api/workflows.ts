@@ -14,6 +14,7 @@ export interface Workflow {
 	id: string;
 	name: string;
 	description: string | null;
+	published: boolean;
 	created_at: string;
 	updated_at: string;
 }
@@ -102,6 +103,10 @@ export const workflows = {
 	update: (id: string, patch: WorkflowUpdateInput) =>
 		api.patch<Workflow>(`/workflows/${id}`, patch, auth.token ?? undefined),
 	remove: (id: string) => api.delete<void>(`/workflows/${id}`, auth.token ?? undefined),
+	publish: (id: string) =>
+		api.post<Workflow>(`/workflows/${id}/publish`, {}, auth.token ?? undefined),
+	unpublish: (id: string) =>
+		api.post<Workflow>(`/workflows/${id}/unpublish`, {}, auth.token ?? undefined),
 
 	listNodes: (workflowId: string) =>
 		api.get<WorkflowNode[]>(`/workflows/${workflowId}/nodes`, auth.token ?? undefined),

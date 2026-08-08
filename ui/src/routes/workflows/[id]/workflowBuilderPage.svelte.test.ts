@@ -33,6 +33,8 @@ vi.mock('$lib/api/workflows', () => ({
 	workflows: {
 		get: vi.fn(),
 		update: vi.fn(),
+		publish: vi.fn(),
+		unpublish: vi.fn(),
 		listNodes: vi.fn(),
 		createNode: vi.fn(),
 		updateNode: vi.fn(),
@@ -53,6 +55,7 @@ const reviewFlow: Workflow = {
 	id: 'wf-1',
 	name: 'review-pr',
 	description: 'Runs a PR through review',
+	published: true,
 	created_at: '2026-08-01T00:00:00Z',
 	updated_at: '2026-08-01T00:00:00Z'
 };
@@ -199,6 +202,37 @@ describe('workflows/[id]/+page.svelte', () => {
 			name: 'review-pr-v2',
 			description: 'Runs a PR through review'
 		});
+	});
+
+	it('shows the Published badge and lets a published workflow be unpublished', async () => {
+		mockLoad();
+		vi.mocked(workflows.unpublish).mockResolvedValueOnce({ ...reviewFlow, published: false });
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Published')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Unpublish' }).click();
+
+		expect(workflows.unpublish).toHaveBeenCalledWith('wf-1');
+		await expect.element(page.getByText('Draft')).toBeInTheDocument();
+	});
+
+	it('publishes a draft workflow and surfaces a rejection', async () => {
+		mockLoad();
+		vi.mocked(workflows.get).mockResolvedValue({ ...reviewFlow, published: false });
+		vi.mocked(workflows.publish).mockRejectedValueOnce(
+			new Error('Workflow has no entry point yet — connect a first step before publishing')
+		);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Draft')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Publish' }).click();
+
+		expect(workflows.publish).toHaveBeenCalledWith('wf-1');
+		await expect
+			.element(page.getByText(/connect a first step before publishing/))
+			.toBeInTheDocument();
 	});
 
 	it('loads and expands run history', async () => {

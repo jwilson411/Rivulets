@@ -36,6 +36,9 @@
 	let descriptionDraft = $state('');
 	let renameError = $state<string | null>(null);
 
+	let publishBusy = $state(false);
+	let publishError = $state<string | null>(null);
+
 	// `undefined` = no insert form open; `null` = inserting as the new entry
 	// (before the current first step); a node id = inserting right after it.
 	let insertAfter = $state<string | null | undefined>(undefined);
@@ -113,6 +116,21 @@
 			renaming = false;
 		} catch (err) {
 			renameError = err instanceof Error ? err.message : 'Failed to rename workflow';
+		}
+	}
+
+	async function togglePublish() {
+		if (!workflow) return;
+		publishError = null;
+		publishBusy = true;
+		try {
+			workflow = workflow.published
+				? await workflows.unpublish(workflow.id)
+				: await workflows.publish(workflow.id);
+		} catch (err) {
+			publishError = err instanceof Error ? err.message : 'Failed to update publish state';
+		} finally {
+			publishBusy = false;
 		}
 	}
 
@@ -307,22 +325,49 @@
 			{:else}
 				<div class="flex items-start justify-between">
 					<div>
-						<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">
+						<h1 class="flex items-center gap-2 text-2xl font-semibold text-ink dark:text-ink-dark">
 							<span class="text-neutral-500">/</span>{workflow.name}
+							<span
+								class="rounded-sm px-1.5 py-0.5 text-xs font-normal {workflow.published
+									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+									: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
+							>
+								{workflow.published ? 'Published' : 'Draft'}
+							</span>
 						</h1>
 						{#if workflow.description}
 							<p class="text-sm text-neutral-600 dark:text-neutral-400">{workflow.description}</p>
 						{/if}
 					</div>
-					<button
-						onclick={startRename}
-						class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-					>
-						Edit
-					</button>
+					<div class="flex flex-none items-center gap-2">
+						<button
+							onclick={togglePublish}
+							disabled={publishBusy}
+							class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+						>
+							{#if publishBusy}
+								…
+							{:else}
+								{workflow.published ? 'Unpublish' : 'Publish'}
+							{/if}
+						</button>
+						<button
+							onclick={startRename}
+							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+						>
+							Edit
+						</button>
+					</div>
 				</div>
+				{#if publishError}
+					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{publishError}</p>
+				{/if}
 				<p class="font-mono text-xs text-neutral-500">
-					Trigger from any channel: /{workflow.name} &lt;input&gt;
+					{#if workflow.published}
+						Trigger from any channel: /{workflow.name} &lt;input&gt;
+					{:else}
+						Publish this workflow to trigger it with /{workflow.name} &lt;input&gt;
+					{/if}
 				</p>
 			{/if}
 		</header>

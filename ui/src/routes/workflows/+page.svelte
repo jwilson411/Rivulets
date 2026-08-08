@@ -61,8 +61,9 @@
 	<header>
 		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Workflows</h1>
 		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			Saved, reusable chains of agents and utility steps (#24). Trigger a saved workflow from any
-			channel with <code class="font-mono">/&#123;name&#125; &lt;input&gt;</code>.
+			Saved, reusable chains of agents and utility steps (#24). A new workflow starts as a draft —
+			publish it from the builder to trigger it from any channel with
+			<code class="font-mono">/&#123;name&#125; &lt;input&gt;</code>.
 		</p>
 	</header>
 
@@ -114,8 +115,15 @@
 						class="flex items-start justify-between rounded-lg border border-ink/12 p-4 dark:border-white/10"
 					>
 						<a href={resolve('/workflows/[id]', { id: workflow.id })} class="min-w-0 flex-1">
-							<p class="font-medium text-ink dark:text-ink-dark">
+							<p class="flex items-center gap-2 font-medium text-ink dark:text-ink-dark">
 								<span class="text-neutral-500">/</span>{workflow.name}
+								<span
+									class="rounded-sm px-1.5 py-0.5 text-[11px] font-normal {workflow.published
+										? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+										: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
+								>
+									{workflow.published ? 'Published' : 'Draft'}
+								</span>
 							</p>
 							{#if workflow.description}
 								<p class="text-sm text-neutral-600 dark:text-neutral-400">

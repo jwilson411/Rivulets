@@ -38,7 +38,16 @@ def parse_slash_command(content: str) -> tuple[str, str] | None:
 
 
 async def find_workflow_by_name(db: AsyncSession, name: str) -> Workflow | None:
-    return await db.scalar(select(Workflow).where(Workflow.name == name.lower()))
+    """Only matches a *published* workflow (#84) -- both callers
+    (find_triggered_workflow's slash command, dispatch/service.py's
+    _handle_run_workflow_trigger for the run_workflow tool) exist purely
+    to trigger a run, and Workflow's own docstring explains why an
+    unpublished one shouldn't be reachable that way. Nothing else calls
+    this by name; api/workflows.py's own CRUD looks workflows up by id,
+    where an unpublished one is still fully visible/editable."""
+    return await db.scalar(
+        select(Workflow).where(Workflow.name == name.lower(), Workflow.published)
+    )
 
 
 async def find_triggered_workflow(db: AsyncSession, content: str) -> tuple[Workflow, str] | None:

@@ -19,6 +19,13 @@ outbound connections; `condition_json` on each (validated by
 `_validate_condition` below) decides whether the engine follows it — see
 workflows/engine.py's module docstring for the predicate shape and how
 multiple matching edges fan out.
+
+`publish_workflow`/`unpublish_workflow` (#84) flip `Workflow.published`,
+the gate on whether `/{name}` or the run_workflow tool can start a new
+run — see Workflow's own docstring for exactly what that does and
+doesn't protect. Editing nodes/connections isn't otherwise restricted by
+publish state; a published workflow can still be freely edited here,
+same as before this existed.
 """
 
 import json
@@ -65,6 +72,7 @@ class WorkflowOut(BaseModel):
     id: str
     name: str
     description: str | None
+    published: bool
     created_at: str
     updated_at: str
 
@@ -251,6 +259,47 @@ async def delete_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId
     workflow = await _get_workflow_or_404(db, workflow_id)
     await db.delete(workflow)
     await db.commit()
+
+
+@router.post("/{workflow_id}/publish", response_model=WorkflowOut)
+async def publish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
+    """#84: only a published workflow can be triggered via `/{name}` or
+    the run_workflow tool (workflows/trigger.py's find_workflow_by_name)
+    -- see Workflow's docstring for what this does and doesn't guarantee.
+    Refuses (400) without an entry connection, the same "can this even
+    run" check the engine itself makes at trigger time -- publishing is
+    meant to mean "ready", not just "flagged"."""
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    entry = await db.scalar(
+        select(WorkflowConnection).where(
+            WorkflowConnection.workflow_id == workflow_id,
+            WorkflowConnection.from_node_id.is_(None),
+        )
+    )
+    if entry is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Workflow has no entry point yet — connect a first step before publishing",
+        )
+    workflow.published = True
+    await db.commit()
+    await db.refresh(workflow)
+    await publish_current_state(db, "workflow", workflow.id)
+    return workflow
+
+
+@router.post("/{workflow_id}/unpublish", response_model=WorkflowOut)
+async def unpublish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
+    """Reverts to draft -- new triggers stop matching this workflow's name
+    (find_workflow_by_name), but this has no effect on any WorkflowRun
+    already in flight (workflows/engine.py's graph_snapshot_json is what
+    protects those, not `published`)."""
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    workflow.published = False
+    await db.commit()
+    await db.refresh(workflow)
+    await publish_current_state(db, "workflow", workflow.id)
+    return workflow
 
 
 @router.post(

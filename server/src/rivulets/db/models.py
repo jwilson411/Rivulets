@@ -299,7 +299,25 @@ class Workflow(Base):
     than a separate `slash_command` column since the issue's proposal
     never distinguishes them and a second, possibly-diverging name would
     just be a sync hazard for no benefit. Synced like Agent/Team: a
-    workflow definition is shared workspace content, not per-node state."""
+    workflow definition is shared workspace content, not per-node state.
+
+    `published` (#84): a new workflow starts unpublished, and
+    workflows/trigger.py's find_workflow_by_name -- the lookup behind both
+    the slash-command trigger and the run_workflow tool -- only matches
+    published ones, so a workflow still being built in the canvas (#80)
+    can't be accidentally triggered by a stray `/{name}` message. This is
+    deliberately a single boolean gate on the *live* nodes/connections,
+    not a second, independent copy of the graph: publishing doesn't
+    snapshot anything, and editing an already-published workflow still
+    takes effect immediately for the next trigger, same as before this
+    column existed. (What *does* get frozen at trigger time is a specific
+    WorkflowRun's own execution -- see WorkflowRun.graph_snapshot_json --
+    which is what actually protects an in-flight run from a concurrent
+    edit; `published` only gates *starting* a new one.) api/workflows.py's
+    publish endpoint refuses if the workflow has no entry connection, the
+    same "can this even run" check the engine itself makes at trigger
+    time (workflows/engine.py's "Workflow has no entry point" failure) --
+    published is meant to mean "ready", not just "flagged"."""
 
     __tablename__ = "workflow"
     __table_args__ = (UniqueConstraint("name", name="idx_workflow_name"),)
@@ -307,6 +325,7 @@ class Workflow(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str]
     description: Mapped[str | None] = mapped_column(default=None)
+    published: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
@@ -394,7 +413,20 @@ class WorkflowRun(Base):
     posted to `rivulet_id` (api/rivulets.py's post_message, via
     workflows/trigger.py's find_awaiting_workflow_run), which becomes that
     node's output. Rivulet.status is set to 'paused' alongside this, the
-    same surfacing dispatch/guards.py's loop-guard pause already uses."""
+    same surfacing dispatch/guards.py's loop-guard pause already uses.
+
+    `graph_snapshot_json` (#84): the workflow's nodes/connections, as they
+    existed the moment this run started, serialized so a *later* resume
+    doesn't re-read the live (possibly since-edited) WorkflowNode/
+    WorkflowConnection rows -- without this, a run paused on a
+    'human_input' node and resumed after the workflow was edited in the
+    builder meanwhile would silently execute a different graph than the
+    one that paused it. A run that never crosses a pause boundary doesn't
+    strictly need this (workflows/engine.py already loads the graph once
+    per run_workflow call and holds it in memory for that call's
+    duration), but every run gets one uniformly rather than only runs that
+    turn out to pause -- simpler than a null column meaning "never
+    snapshotted" that engine.py would need to branch on."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -409,6 +441,7 @@ class WorkflowRun(Base):
     status: Mapped[str] = mapped_column(default="running")
     current_node_id: Mapped[str | None] = mapped_column(default=None)
     error_message: Mapped[str | None] = mapped_column(default=None)
+    graph_snapshot_json: Mapped[str] = mapped_column(default="{}")
     started_at: Mapped[str] = mapped_column(default=utcnow_iso)
     completed_at: Mapped[str | None] = mapped_column(default=None)
 
