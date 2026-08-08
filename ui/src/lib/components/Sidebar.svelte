@@ -105,7 +105,8 @@
 		'/mcp-servers',
 		'/tools',
 		'/usage',
-		'/settings'
+		'/settings',
+		'/invites'
 	];
 	const WORKSPACE_EXPANDED_KEY = 'rivulets-sidebar-workspace-expanded';
 
@@ -275,6 +276,20 @@
 					/>
 					Usage
 				</a>
+				{#if auth.grant === 'owner'}
+					<a
+						href={resolve('/invites')}
+						class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+							isActive('/invites')
+						)}"
+					>
+						<Icon
+							name="user-plus"
+							class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+						/>
+						Invites
+					</a>
+				{/if}
 				<a
 					href={resolve('/settings')}
 					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(

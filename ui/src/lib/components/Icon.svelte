@@ -154,6 +154,22 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
+{:else if name === 'user-plus'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<circle cx="7.5" cy="6.5" r="2.8" stroke="currentColor" stroke-width="1.5" />
+		<path
+			d="M2.5 17c.6-3.4 2.4-5 5-5s4.4 1.6 5 5"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+		<path
+			d="M15 5v5.5M12.25 7.75h5.5"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+	</svg>
 {:else if name === 'wrench'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path

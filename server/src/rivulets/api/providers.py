@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from rivulets.agentos.models import AUTO_MODEL, resolve_default_provider
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.base import uuid7
 from rivulets.db.models import Agent, ProviderConfig
 from rivulets.security.credentials import (
@@ -53,14 +53,16 @@ async def _get_or_404(db: DbSession, provider_id: str) -> ProviderConfig:
 
 
 @router.get("", response_model=list[ProviderOut])
-async def list_providers(db: DbSession, _: CurrentWorkspaceId) -> list[ProviderConfig]:
+async def list_providers(
+    db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> list[ProviderConfig]:
     result = await db.execute(select(ProviderConfig))
     return list(result.scalars().all())
 
 
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
 async def add_provider(
-    body: ProviderCreate, db: DbSession, _: CurrentWorkspaceId
+    body: ProviderCreate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> ProviderConfig:
     provider_id = uuid7()
     try:
@@ -83,7 +85,7 @@ async def add_provider(
 
 @router.patch("/{provider_id}", response_model=ProviderOut)
 async def update_provider(
-    provider_id: str, body: ProviderUpdate, db: DbSession, _: CurrentWorkspaceId
+    provider_id: str, body: ProviderUpdate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> ProviderConfig:
     provider = await _get_or_404(db, provider_id)
     if body.label is not None:
@@ -101,7 +103,9 @@ async def update_provider(
 
 
 @router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_provider(provider_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def remove_provider(
+    provider_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> None:
     provider = await _get_or_404(db, provider_id)
     in_use = await db.scalar(select(Agent).where(Agent.model.startswith(f"{provider.provider}:")))
     if in_use is not None:

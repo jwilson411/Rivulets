@@ -20,6 +20,7 @@ import { update } from '$lib/api/update';
 import { theme } from '$lib/theme.svelte';
 
 const routeState = vi.hoisted(() => ({ pathname: '/agents' }));
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -36,7 +37,9 @@ vi.mock('$app/paths', () => ({
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		displayName: 'Test User',
-		grant: 'owner',
+		get grant() {
+			return authState.grant;
+		},
 		logout: vi.fn(),
 		clearIdentity: vi.fn()
 	}
@@ -58,6 +61,7 @@ afterEach(() => {
 	vi.clearAllMocks();
 	theme.set('system');
 	routeState.pathname = '/agents';
+	authState.grant = 'owner';
 	localStorage.clear();
 });
 
@@ -255,6 +259,25 @@ describe('Sidebar.svelte', () => {
 		await expect.element(browserPage.getByRole('link', { name: /Settings/ })).toBeInTheDocument();
 
 		await expect.element(browserPage.getByTitle('Update available')).not.toBeInTheDocument();
+	});
+
+	it('shows the Invites link for an owner session', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Invites/ })).toBeInTheDocument();
+	});
+
+	it('hides the Invites link for a non-owner (invite-grant) session', async () => {
+		authState.grant = 'invite';
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect
+			.element(browserPage.getByRole('link', { name: /Invites/ }))
+			.not.toBeInTheDocument();
 	});
 
 	it('shows the claimed identity and clears it via the switch control for an owner session', async () => {

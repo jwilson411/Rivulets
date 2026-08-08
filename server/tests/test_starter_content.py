@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.starter_content import (
-    _STARTER_AGENTS,
-    _STARTER_TEAM_NAME,
+    _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
+    _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     seed_starter_agents,
     seed_starter_teams,
 )
@@ -62,9 +62,7 @@ async def test_seed_starter_agents_assigns_expected_tools(db_session: AsyncSessi
     assistant = (
         await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
     ).scalar_one()
-    result = await db_session.execute(
-        select(AgentTool).where(AgentTool.agent_id == assistant.id)
-    )
+    result = await db_session.execute(select(AgentTool).where(AgentTool.agent_id == assistant.id))
     assert result.scalars().all() == []
 
 

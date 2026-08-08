@@ -41,6 +41,30 @@ class Human(Base):
     vector_clock: Mapped[int] = mapped_column(default=0)
 
 
+class Invite(Base):
+    """A scoped, revocable credential for a second human to join the
+    workspace (#15) -- deliberately NOT the mnemonic, and never synced
+    (excluded by omission from sync/apply.py's spec table, same FR-9.2
+    treatment as ProviderConfig.api_key_ref: only secret_hash is stored,
+    never the raw secret). Redemption (api/invites.py's accept_invite)
+    only works against the specific node whose HTTP port receives the
+    accept request while that node's SessionKeyStore is populated -- an
+    invite doesn't grant P2P mesh membership, just a scoped HTTP session
+    on whichever node issued it (a deliberately lighter-weight design than
+    handing an invited human's device a P2P pre-shared key)."""
+
+    __tablename__ = "invite"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    secret_hash: Mapped[str]
+    display_name_hint: Mapped[str | None] = mapped_column(default=None)
+    max_uses: Mapped[int] = mapped_column(default=1)
+    use_count: Mapped[int] = mapped_column(default=0)
+    expires_at: Mapped[str]
+    revoked: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class ProviderConfig(Base):
     """LLM provider credentials. NOT synced between nodes (FR-1.5)."""
 

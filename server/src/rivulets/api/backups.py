@@ -10,7 +10,7 @@ engine, for a live VACUUM INTO snapshot), not through the ORM.
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
-from rivulets.api.deps import CurrentWorkspaceId
+from rivulets.api.deps import CurrentWorkspaceId, OwnerGrant
 from rivulets.backup import (
     MANUAL_PREFIX,
     BackupInfo,
@@ -45,12 +45,12 @@ class BackupOut(BaseModel):
 
 
 @router.get("", response_model=list[BackupOut])
-async def get_backups(_: CurrentWorkspaceId) -> list[BackupOut]:
+async def get_backups(_: CurrentWorkspaceId, _o: OwnerGrant) -> list[BackupOut]:
     return [BackupOut.from_info(info) for info in list_backups(get_settings())]
 
 
 @router.post("", response_model=BackupOut, status_code=status.HTTP_201_CREATED)
-async def create_manual_backup(_: CurrentWorkspaceId) -> BackupOut:
+async def create_manual_backup(_: CurrentWorkspaceId, _o: OwnerGrant) -> BackupOut:
     settings = get_settings()
     try:
         path = await create_backup(settings, get_engine(), prefix=MANUAL_PREFIX)
@@ -61,7 +61,7 @@ async def create_manual_backup(_: CurrentWorkspaceId) -> BackupOut:
 
 
 @router.post("/{filename}/restore", status_code=status.HTTP_204_NO_CONTENT)
-async def restore_backup(filename: str, _: CurrentWorkspaceId) -> None:
+async def restore_backup(filename: str, _: CurrentWorkspaceId, _o: OwnerGrant) -> None:
     settings = get_settings()
     backup_path = resolve_backup_path(settings, filename)
     if backup_path is None:

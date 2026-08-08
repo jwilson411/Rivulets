@@ -24,6 +24,8 @@ nothing here writes a raw or derived key to disk. Callers own that
 discipline; this module just does the math.
 """
 
+import secrets
+
 import bcrypt
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -89,3 +91,21 @@ def hash_workspace_key(workspace_key: bytes) -> str:
 
 def verify_workspace_key(workspace_key: bytes, key_hash: str) -> bool:
     return bcrypt.checkpw(workspace_key, key_hash.encode("utf-8"))
+
+
+def generate_invite_secret() -> str:
+    """A random bearer secret for invite links (#15) — deliberately NOT
+    HKDF-derived, unlike everything else in this module: HKDF needs a seed
+    to derive *from*, and there's no shared seed an invite secret should
+    come from (it must be independent per invite, not re-derivable from
+    the mnemonic or from any other invite). Same bcrypt-hash-at-rest
+    treatment as the workspace key above — see hash_invite_secret."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_invite_secret(secret: str) -> str:
+    return bcrypt.hashpw(secret.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+
+def verify_invite_secret(secret: str, secret_hash: str) -> bool:
+    return bcrypt.checkpw(secret.encode("utf-8"), secret_hash.encode("utf-8"))

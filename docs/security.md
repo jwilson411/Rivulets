@@ -20,6 +20,20 @@ Layer 2: Workspace Key Authentication
      authentication weight: it's a per-session label on top of the one
      workspace-level credential above, not a separate per-user login.
 
+Layer 2b: Invite-Based Access
+  └─ A second human can join without ever seeing the workspace mnemonic.
+     The owner issues a scoped, revocable bearer secret (shown once);
+     redeeming it mints a session-claim JWT the same shape as Layer 2's,
+     but marked with an "invite" grant instead of "owner" — that grant is
+     checked server-side on sensitive routes (provider credentials,
+     backups, sync control, settings, further invites), which an
+     invite-redeemed session can never reach. Invites are never P2P mesh
+     credentials: redeeming one talks to the inviting node over plain
+     HTTP/JWT, never touching Layer 3's libp2p pre-shared key, so an
+     invited human's device never gains mesh membership. Redemption only
+     works while the inviting node already has an unlocked session, since
+     that's the only place the JWT signing key exists.
+
 Layer 3: P2P Encryption (libp2p noise)
   └─ All sync traffic is encrypted with the workspace key as a pre-shared key.
      Per-message nonces provide forward secrecy via the noise handshake.
@@ -72,6 +86,8 @@ All derived keys are computed at login time and held in memory only — they're 
 | MITM on LLM provider API calls | HTTPS enforced for all provider API traffic | Standard risk shared by any API consumer; depends on TLS integrity. |
 | An agent loop runs away and burns tokens | Turn limits, cycle detection, and timeouts, all configurable | An agent can still consume tokens up to the configured limit before being paused. |
 | Sync replay attack | The noise handshake provides forward secrecy; per-message nonces prevent replay | None, assuming a correct noise protocol implementation. |
+| An invite link is leaked or intercepted | Owner-configurable expiry and max-use count; owner can revoke at any time; the secret is bcrypt-hashed at rest, never stored or logged in plaintext | Between issuance and revocation, anyone with the link can join as an invite-grant session — treat an invite link with the same care as a one-time password. |
+| An invited human's device is later compromised | Invite-grant sessions are owner-gated out of provider credentials, backups, sync control, and further invites; they never gain P2P mesh membership, so there's nothing to exfiltrate beyond that session's own JWT | An attacker with that JWT can act as that human within the un-gated surface (channels, messages, agents) until the token expires; the owner can't remotely invalidate a single already-issued session token before then. |
 
 ## Reporting a vulnerability
 

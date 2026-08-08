@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import SyncConflict
 from rivulets.sync import get_sync_engine
@@ -91,7 +91,7 @@ def _peer_out(peer: EnginePeerInfo, capabilities: list[str]) -> PeerOut:
 
 
 @router.get("/status", response_model=SyncStatus)
-async def sync_status(_: CurrentWorkspaceId) -> SyncStatus:
+async def sync_status(_: CurrentWorkspaceId, _o: OwnerGrant) -> SyncStatus:
     engine = get_sync_engine()
     if not engine.running:
         return SyncStatus(running=False, node_id=None, peers=[], pending_changes=0)
@@ -106,12 +106,14 @@ async def sync_status(_: CurrentWorkspaceId) -> SyncStatus:
 
 
 @router.get("/capabilities", response_model=CapabilitiesOut)
-async def get_capabilities(_: CurrentWorkspaceId) -> CapabilitiesOut:
+async def get_capabilities(_: CurrentWorkspaceId, _o: OwnerGrant) -> CapabilitiesOut:
     return CapabilitiesOut(capabilities=load_capabilities(get_settings().sync_dir))
 
 
 @router.patch("/capabilities", response_model=CapabilitiesOut)
-async def set_capabilities(body: SetCapabilitiesRequest, _: CurrentWorkspaceId) -> CapabilitiesOut:
+async def set_capabilities(
+    body: SetCapabilitiesRequest, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> CapabilitiesOut:
     save_capabilities(get_settings().sync_dir, body.capabilities)
     engine = get_sync_engine()
     if engine.running:
@@ -120,7 +122,7 @@ async def set_capabilities(body: SetCapabilitiesRequest, _: CurrentWorkspaceId) 
 
 
 @router.post("/connect", response_model=PeerOut)
-async def sync_connect(body: ConnectRequest, _: CurrentWorkspaceId) -> PeerOut:
+async def sync_connect(body: ConnectRequest, _: CurrentWorkspaceId, _o: OwnerGrant) -> PeerOut:
     engine = get_sync_engine()
     if not engine.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "Sync engine is not running")
@@ -135,7 +137,7 @@ async def sync_connect(body: ConnectRequest, _: CurrentWorkspaceId) -> PeerOut:
 
 
 @router.post("/disconnect", status_code=status.HTTP_204_NO_CONTENT)
-async def sync_disconnect(body: DisconnectRequest, _: CurrentWorkspaceId) -> None:
+async def sync_disconnect(body: DisconnectRequest, _: CurrentWorkspaceId, _o: OwnerGrant) -> None:
     engine = get_sync_engine()
     if not engine.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "Sync engine is not running")
@@ -155,7 +157,7 @@ def _conflict_out(row: SyncConflict) -> ConflictOut:
 
 
 @router.get("/conflicts", response_model=list[ConflictOut])
-async def list_conflicts(db: DbSession, _: CurrentWorkspaceId) -> list[ConflictOut]:
+async def list_conflicts(db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant) -> list[ConflictOut]:
     result = await db.execute(select(SyncConflict).where(SyncConflict.resolved.is_(False)))
     return [_conflict_out(row) for row in result.scalars().all()]
 
@@ -166,6 +168,7 @@ async def resolve_conflict(
     body: ResolveConflictRequest,
     db: DbSession,
     _: CurrentWorkspaceId,
+    _o: OwnerGrant,
 ) -> ConflictOut:
     conflict = await db.get(SyncConflict, conflict_id)
     if conflict is None:

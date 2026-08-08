@@ -22,8 +22,14 @@ const authState = vi.hoisted(() => ({
 	grant: null as string | null
 }));
 
+const routeState = vi.hoisted(() => ({ pathname: '/' }));
+
 vi.mock('$app/state', () => ({
-	page: { url: new URL('http://localhost/') }
+	page: {
+		get url() {
+			return new URL('http://localhost' + routeState.pathname);
+		}
+	}
 }));
 
 vi.mock('$app/paths', () => ({
@@ -74,6 +80,7 @@ afterEach(() => {
 	authState.humanId = null;
 	authState.displayName = null;
 	authState.grant = null;
+	routeState.pathname = '/';
 });
 
 describe('routes/+layout.svelte', () => {
@@ -128,6 +135,18 @@ describe('routes/+layout.svelte', () => {
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
 		await expect.element(page.getByText('channel content')).toBeInTheDocument();
+		await expect
+			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.not.toBeInTheDocument();
+	});
+
+	it('renders routed children directly on an /invite/ route, bypassing auth entirely', async () => {
+		authState.isAuthenticated = false;
+		routeState.pathname = '/invite/inv-1.secret';
+
+		render(RootLayout, { children: childrenSnippet('accept invite form') });
+
+		await expect.element(page.getByText('accept invite form')).toBeInTheDocument();
 		await expect
 			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
 			.not.toBeInTheDocument();
