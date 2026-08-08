@@ -11,6 +11,7 @@ from rivulets.tools.builtin.files import read_attached_file
 from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
+from rivulets.tools.builtin.run_workflow import run_workflow
 from rivulets.tools.builtin.web_search import web_search
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "query_workspace_db",
     "read_attached_file",
     "read_file",
+    "run_workflow",
     "web_search",
     "write_file",
 ]

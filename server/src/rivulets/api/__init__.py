@@ -26,6 +26,7 @@ from rivulets.api import (
     tools,
     update,
     usage,
+    workflows,
 )
 from rivulets.api import (
     settings as settings_routes,
@@ -50,5 +51,6 @@ api_router.include_router(backups.router)
 api_router.include_router(usage.router)
 api_router.include_router(dispatch.router)
 api_router.include_router(update.router)
+api_router.include_router(workflows.router)
 
 __all__ = ["api_router"]

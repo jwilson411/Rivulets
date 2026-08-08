@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from rivulets.agentos.service import init_agentos, reset_agentos_for_testing  # noqa: E402
 from rivulets.app import create_app  # noqa: E402
+from rivulets.config import get_settings  # noqa: E402
 from rivulets.db.session import (  # noqa: E402
     get_engine,
     init_db,
@@ -63,7 +64,11 @@ from rivulets.security.rate_limit import (  # noqa: E402
     get_login_rate_limiter,
 )
 from rivulets.security.session import get_session_key_store  # noqa: E402
-from rivulets.sync.engine import SyncEngine, reset_sync_engine_for_testing  # noqa: E402
+from rivulets.sync.engine import (  # noqa: E402
+    SyncEngine,
+    init_sync_engine,
+    reset_sync_engine_for_testing,
+)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # noqa: ARG001
@@ -136,16 +141,34 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     sync_agents() after applying a remote "agent" change (issue #10 --
     without it, a node that only ever *receives* an Agent row via sync has
     no matching in-process AgentOS registration), which needs
-    get_agentos() to not raise "not initialized"."""
+    get_agentos() to not raise "not initialized".
+
+    Also resets/initializes the sync engine singleton: unlike the `client`
+    fixture (whose TestClient(app) triggers create_app()'s own
+    init_sync_engine() call), nothing else does that for a bare DB
+    session, so any code path exercised here that calls
+    sync/publish.py's publish_current_state (workflows/engine.py's
+    self-contained per-message publish, #24) would otherwise hit
+    get_sync_engine()'s "not initialized" RuntimeError -- and whether it
+    actually does depends on test *execution order* (a prior client-based
+    test's teardown may have already reset the process-wide singleton to
+    None), which is exactly the kind of order-dependent flake this
+    fixture should not leave to chance. Never started (`.start()` is
+    never called, matching client's own monkeypatch-to-noop), so
+    `.running` stays False and publish_current_state degrades to
+    recording a SyncPendingOutbound row, same as an offline node."""
     override_engine(make_engine(in_memory=True))
     await init_db()
     reset_agentos_for_testing()
     init_agentos()
+    reset_sync_engine_for_testing()
+    init_sync_engine(get_settings().sync_dir)
     async with session_scope() as session:
         yield session
     await get_engine().dispose()  # see client fixture's comment on why
     override_engine(None)
     reset_agentos_for_testing()
+    reset_sync_engine_for_testing()
 
 
 @pytest.fixture

@@ -6,6 +6,13 @@ request, publishing SSE events as it goes (FR-12.3) — a client with the
 stream endpoint open sees agent_token/agent_message/system_alert/error
 events live, in the same request cycle that's doing the dispatching.
 
+Before that, both message-posting endpoints below check whether the
+content is a `/workflow-name <input>` trigger (#24,
+workflows/trigger.py's find_triggered_workflow) — if so, the message runs
+that workflow (workflows/engine.py) instead of the dispatcher entirely; a
+slash-command-shaped message that doesn't match a real workflow name
+falls through to ordinary dispatch unchanged.
+
 Rivulets and messages are also synced (FR-9.1). This is the one place
 where getting the sync boundary right actually matters for correctness,
 not just data completeness: dispatch (agent invocation, LLM calls) only
@@ -40,6 +47,7 @@ from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from rivulets.streaming import subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
+from rivulets.workflows import find_triggered_workflow, run_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +240,22 @@ async def create_rivulet(
     db.add(human_message)
     await db.flush()  # populate human_message.id before attaching files to it
     attached_files = await _attach_files(db, human_message, body.files)
+
+    triggered = await find_triggered_workflow(db, body.content)
+    if triggered is not None:
+        workflow, workflow_input = triggered
+        await db.commit()
+        await db.refresh(rivulet)
+        await _publish_rivulet_change(db, rivulet)
+        await _publish_message_change(db, human_message)
+        for file_row in attached_files:
+            await publish_file_change(db, file_row)
+        await run_workflow(
+            db, workflow, rivulet, workflow_input, triggered_by="human", triggered_by_id=human.id
+        )
+        await db.refresh(rivulet)
+        return rivulet
+
     agent_messages = await dispatch_and_respond(
         db, rivulet, channel, body.content, triggering_message_id=human_message.id
     )
@@ -287,6 +311,21 @@ async def post_message(
     db.add(message)
     await db.flush()  # populate message.id before attaching files to it
     attached_files = await _attach_files(db, message, body.files)
+
+    triggered = await find_triggered_workflow(db, body.content)
+    if triggered is not None:
+        workflow, workflow_input = triggered
+        await db.commit()
+        await db.refresh(message)
+        await _publish_rivulet_change(db, rivulet)
+        await _publish_message_change(db, message)
+        for file_row in attached_files:
+            await publish_file_change(db, file_row)
+        await run_workflow(
+            db, workflow, rivulet, workflow_input, triggered_by="human", triggered_by_id=human.id
+        )
+        return _to_message_out(message, attached_files)
+
     # dispatch_and_respond resets RivuletGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
     agent_messages = await dispatch_and_respond(
