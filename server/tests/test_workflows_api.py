@@ -98,9 +98,12 @@ def test_create_node_rejects_unknown_node_type(
     assert resp.status_code == 400
 
 
-def test_second_outbound_connection_from_same_node_is_conflict(
+def test_second_outbound_connection_from_same_node_is_allowed(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
+    """#81: a node may fan out to multiple outbound edges now that the
+    engine walks a real graph — only the entry point stays singular (see
+    test_second_entry_connection_is_conflict)."""
     workflow_id = _create_workflow(client, auth_headers, "branchy")
     a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
     b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
@@ -112,7 +115,44 @@ def test_second_outbound_connection_from_same_node_is_conflict(
         json={"from_node_id": a, "to_node_id": c},
         headers=auth_headers,
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 201, resp.text
+
+    connections = client.get(
+        f"/api/v1/workflows/{workflow_id}/connections", headers=auth_headers
+    ).json()
+    outbound_from_a = [c for c in connections if c["from_node_id"] == a]
+    assert len(outbound_from_a) == 2
+
+
+def test_connection_condition_json_round_trips(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "conditioned")
+    a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
+    _connect(client, auth_headers, workflow_id, None, a)
+    resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/connections",
+        json={"from_node_id": a, "to_node_id": b, "condition_json": {"contains": "urgent"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["condition_json"] == {"contains": "urgent"}
+
+
+def test_connection_rejects_malformed_condition_json(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "bad-condition")
+    a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
+    _connect(client, auth_headers, workflow_id, None, a)
+    resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/connections",
+        json={"from_node_id": a, "to_node_id": b, "condition_json": {"contains": "x", "extra": 1}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
 
 
 def test_second_entry_connection_is_conflict(

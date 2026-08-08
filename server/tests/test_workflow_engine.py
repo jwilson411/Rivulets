@@ -24,7 +24,7 @@ from rivulets.db.models import (
     WorkflowNode,
     WorkflowNodeRun,
 )
-from rivulets.workflows.engine import run_workflow
+from rivulets.workflows.engine import MAX_NODE_VISITS_PER_RUN, run_workflow
 
 
 async def _make_rivulet(db: AsyncSession) -> Rivulet:
@@ -353,6 +353,170 @@ async def test_node_failure_exhausting_retries_stops_the_run(
     )
     alert = result.scalars().one()
     assert "doomed" in alert.content
+
+
+async def test_conditioned_edges_route_to_only_the_matching_branch(
+    db_session: AsyncSession,
+) -> None:
+    """#81: real branching -- an edge's own condition_json, not the node's
+    config, decides which of several outbound edges get followed."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="triage")
+    gate = _transform_node(workflow.id, "gate", "{input}")
+    urgent_path = _transform_node(workflow.id, "urgent-path", "PAGE: {input}")
+    normal_path = _transform_node(workflow.id, "normal-path", "queued: {input}")
+    db_session.add_all([gate, urgent_path, normal_path])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=gate.id),
+            WorkflowConnection(
+                workflow_id=workflow.id,
+                from_node_id=gate.id,
+                to_node_id=urgent_path.id,
+                condition_json=json.dumps({"contains": "urgent"}),
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id,
+                from_node_id=gate.id,
+                to_node_id=normal_path.id,
+                condition_json=json.dumps({"not_contains": "urgent"}),
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "URGENT: fix now", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    outputs = [m.content for m in result.scalars().all()]
+    assert outputs == ["URGENT: fix now", "PAGE: URGENT: fix now"]
+
+
+async def test_unconditioned_edges_fan_out_in_parallel(db_session: AsyncSession) -> None:
+    """#81: a node with multiple always-matching outbound edges runs all
+    of them, not just the first."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="fanout")
+    start = _transform_node(workflow.id, "start", "{input}")
+    branch_a = _transform_node(workflow.id, "branch-a", "A: {input}")
+    branch_b = _transform_node(workflow.id, "branch-b", "B: {input}")
+    db_session.add_all([start, branch_a, branch_b])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_a.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_b.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    outputs = {m.content for m in result.scalars().all()}
+    assert outputs == {"go", "A: go", "B: go"}
+
+
+async def test_unbounded_loop_trips_the_loop_guard(db_session: AsyncSession) -> None:
+    """#81: a node whose outbound edge points back at itself is a valid
+    graph shape (loops fall out of allowing any edge, not a dedicated
+    'loop node') but must be bounded -- MAX_NODE_VISITS_PER_RUN caps it."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="spin")
+    loop_node = _transform_node(workflow.id, "spin", "{input}")
+    db_session.add(loop_node)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=loop_node.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=loop_node.id, to_node_id=loop_node.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "loop guard" in (run.error_message or "")
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.workflow_run_id == run.id)
+    )
+    node_runs = list(result.scalars().all())
+    assert len(node_runs) == MAX_NODE_VISITS_PER_RUN
+
+    alerts = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    assert "loop guard" in alerts.scalars().one().content
+
+
+async def test_merge_node_reached_by_two_branches_runs_once_per_arrival(
+    db_session: AsyncSession,
+) -> None:
+    """#81's documented boundary (see workflows/nodes.py's
+    execute_merge_node docstring): real multi-input joining is #82's job.
+    Until then, a merge node reached by concurrent branches just runs
+    independently once per arrival."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="converge")
+    start = _transform_node(workflow.id, "start", "{input}")
+    branch_a = _transform_node(workflow.id, "branch-a", "A: {input}")
+    branch_b = _transform_node(workflow.id, "branch-b", "B: {input}")
+    merge = WorkflowNode(workflow_id=workflow.id, name="merge", node_type="merge")
+    db_session.add_all([start, branch_a, branch_b, merge])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_a.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_b.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=branch_a.id, to_node_id=merge.id
+            ),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=branch_b.id, to_node_id=merge.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == merge.id)
+    )
+    merge_runs = list(result.scalars().all())
+    assert len(merge_runs) == 2
+    assert {r.output_content for r in merge_runs} == {"A: go", "B: go"}
 
 
 async def test_merge_node_passes_input_through(db_session: AsyncSession) -> None:
