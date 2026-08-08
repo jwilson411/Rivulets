@@ -291,6 +291,140 @@ class MCPServer(Base):
     vector_clock: Mapped[int] = mapped_column(default=0)
 
 
+class Workflow(Base):
+    """A saved, reusable, node-based definition of how work flows between
+    agents and built-in utility nodes (#24). `name` doubles as the
+    triggering slash command (`/​{name} <input>` in a channel, api/
+    rivulets.py's slash-command interceptor) -- kept as one field rather
+    than a separate `slash_command` column since the issue's proposal
+    never distinguishes them and a second, possibly-diverging name would
+    just be a sync hazard for no benefit. Synced like Agent/Team: a
+    workflow definition is shared workspace content, not per-node state."""
+
+    __tablename__ = "workflow"
+    __table_args__ = (UniqueConstraint("name", name="idx_workflow_name"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str]
+    description: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+    nodes: Mapped[list["WorkflowNode"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan"
+    )
+    connections: Mapped[list["WorkflowConnection"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan"
+    )
+
+
+class WorkflowNode(Base):
+    """One step in a workflow (#24): either an existing `Agent` (node_type
+    'agent', `agent_id` set) or a built-in utility node ('summarize' |
+    'transform' | 'conditional' | 'merge', workflows/nodes.py). `agent_id`
+    uses ondelete='SET NULL' rather than CASCADE or the FK-less "looser
+    association" pattern (Channel.team_id) -- deleting an agent that a
+    workflow references shouldn't be blocked by that reference (unlike
+    TeamAgent, which really is meaningless without its agent), but the
+    node itself should survive as a now-misconfigured step an owner can
+    fix, not silently disappear along with its parent workflow. Ordering/
+    flow between nodes lives entirely in `WorkflowConnection`, not on this
+    row, so branching later doesn't need a schema change here (only a
+    change to how many outbound connections the engine follows)."""
+
+    __tablename__ = "workflow_node"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
+    name: Mapped[str]
+    node_type: Mapped[str]  # 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge'
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="SET NULL"), default=None
+    )
+    config_json: Mapped[str | None] = mapped_column(default=None)  # JSON, node-type-specific
+    retry_max_attempts: Mapped[int] = mapped_column(default=0)
+    retry_backoff_seconds: Mapped[int] = mapped_column(default=5)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+    workflow: Mapped["Workflow"] = relationship(back_populates="nodes")
+
+
+class WorkflowConnection(Base):
+    """An edge in a workflow's node graph (#24): `from_node_id` NULL marks
+    the workflow's entry point (the first node run); otherwise it's the
+    node whose output feeds `to_node_id`'s input. The MVP engine
+    (workflows/engine.py) executes a single linear chain and the API layer
+    (api/workflows.py) enforces at most one outbound connection per
+    from_node_id (including the NULL entry point) to keep that true --
+    but the table itself places no such limit, so a future branching
+    engine can allow multiple outbound edges (picked via `condition_json`)
+    without a schema migration, just a relaxed API validation rule and a
+    smarter engine walk."""
+
+    __tablename__ = "workflow_connection"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
+    from_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_node.id", ondelete="CASCADE"), default=None
+    )
+    to_node_id: Mapped[str] = mapped_column(ForeignKey("workflow_node.id", ondelete="CASCADE"))
+    condition_json: Mapped[str | None] = mapped_column(default=None)  # reserved for branching
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+    workflow: Mapped["Workflow"] = relationship(back_populates="connections")
+
+
+class WorkflowRun(Base):
+    """One end-to-end execution of a Workflow (#24), triggered by a slash
+    command or the `run_workflow` tool. Not synced -- like AgentRun/
+    DispatchDecision, this is local execution telemetry/state tied to
+    whichever node happened to run it, not shared workspace content; a
+    fresh peer doesn't need another node's workflow-run history to
+    function, and re-running the *definition* is all sync needs to carry."""
+
+    __tablename__ = "workflow_run"
+    __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
+    rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
+    triggered_by: Mapped[str]  # 'human' | 'agent'
+    triggered_by_id: Mapped[str | None] = mapped_column(default=None)  # human_id or agent_id
+    input_content: Mapped[str]
+    # 'running' | 'completed' | 'failed' | 'awaiting_human'
+    status: Mapped[str] = mapped_column(default="running")
+    current_node_id: Mapped[str | None] = mapped_column(default=None)
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
+
+
+class WorkflowNodeRun(Base):
+    """One node's execution within a WorkflowRun (#24), including retries
+    (WorkflowNode.retry_max_attempts) -- one row per attempt, not one row
+    updated in place, so a node's retry history stays inspectable after
+    the fact. Not synced, same reasoning as WorkflowRun."""
+
+    __tablename__ = "workflow_node_run"
+    __table_args__ = (Index("idx_workflow_node_run_run", "workflow_run_id", "started_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(ForeignKey("workflow_run.id", ondelete="CASCADE"))
+    node_id: Mapped[str] = mapped_column(ForeignKey("workflow_node.id", ondelete="CASCADE"))
+    attempt: Mapped[int] = mapped_column(default=1)
+    status: Mapped[str] = mapped_column(default="running")  # running|completed|failed|skipped
+    input_content: Mapped[str]
+    output_content: Mapped[str | None] = mapped_column(default=None)
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
+
+
 class Rivulet(Base):
     __tablename__ = "rivulet"
     __table_args__ = (Index("idx_rivulet_channel", "channel_id", "created_at"),)

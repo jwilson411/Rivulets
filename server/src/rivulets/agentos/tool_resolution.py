@@ -54,6 +54,7 @@ from rivulets.tools.builtin import (
     query_workspace_db,
     read_attached_file,
     read_file,
+    run_workflow,
     web_search,
     write_file,
 )
@@ -67,6 +68,7 @@ _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
     query_workspace_db,
     read_attached_file,
     read_file,
+    run_workflow,
     web_search,
     write_file,
 )

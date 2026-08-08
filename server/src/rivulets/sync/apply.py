@@ -89,6 +89,9 @@ from rivulets.db.models import (
     Tool,
     ToolVersion,
     VectorClockTracker,
+    Workflow,
+    WorkflowConnection,
+    WorkflowNode,
     WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
@@ -205,6 +208,30 @@ AGENT_PEER_PREFERENCE_SPEC = EntitySpec(
     "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_field="agent_id"
 )
 HUMAN_SPEC = EntitySpec("human", Human, ("display_name",))
+WORKFLOW_SPEC = EntitySpec("workflow", Workflow, ("name", "description"))
+# workflow_id has the same FK-ordering hazard as Rivulet.channel_id/
+# Message.rivulet_id (module docstring): included anyway because a node/
+# connection is meaningless without its parent workflow, and the
+# IntegrityError -> SyncPendingInbound retry queue closes the race window
+# the same way it does for rivulets/messages.
+WORKFLOW_NODE_SPEC = EntitySpec(
+    "workflow_node",
+    WorkflowNode,
+    (
+        "workflow_id",
+        "name",
+        "node_type",
+        "agent_id",
+        "config_json",
+        "retry_max_attempts",
+        "retry_backoff_seconds",
+    ),
+)
+WORKFLOW_CONNECTION_SPEC = EntitySpec(
+    "workflow_connection",
+    WorkflowConnection,
+    ("workflow_id", "from_node_id", "to_node_id", "condition_json"),
+)
 
 
 def _snapshot(instance: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -452,6 +479,9 @@ _DISPATCH: dict[str, EntitySpec] = {
     "workspace_setting": WORKSPACE_SETTING_SPEC,
     "agent_peer_preference": AGENT_PEER_PREFERENCE_SPEC,
     "human": HUMAN_SPEC,
+    "workflow": WORKFLOW_SPEC,
+    "workflow_node": WORKFLOW_NODE_SPEC,
+    "workflow_connection": WORKFLOW_CONNECTION_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields
@@ -538,8 +568,9 @@ async def handle_incoming_state_change(
     own DB session since it isn't running inside a FastAPI request.
 
     Covers FR-9.1's full sync scope: agent/channel/team/mcp_server/tool/
-    rivulet/message/file/workspace_setting. Anything else is logged and
-    dropped, matching this module's generalization path."""
+    rivulet/message/file/workspace_setting/workflow/workflow_node/
+    workflow_connection. Anything else is logged and dropped, matching
+    this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":
             result = await apply_remote_tool_change(

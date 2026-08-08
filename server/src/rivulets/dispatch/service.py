@@ -181,6 +181,21 @@ def _find_handoff_call(run_output: RunOutput) -> tuple[str, str] | None:
     return None
 
 
+def _find_run_workflow_call(run_output: RunOutput) -> tuple[str, str] | None:
+    """Same shape as _find_handoff_call, for the run_workflow tool
+    (tools/builtin/run_workflow.py, #24) — "a human typing '@some-agent
+    run this workflow' should let that agent launch it"."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "run_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("workflow_name")
+        workflow_input = args.get("workflow_input")
+        if isinstance(name, str) and isinstance(workflow_input, str):
+            return name, workflow_input
+    return None
+
+
 async def dispatch_and_respond(
     db: AsyncSession,
     rivulet: Rivulet,
@@ -574,6 +589,11 @@ async def _invoke_agent(
             )
         )
 
+    run_workflow_call = _find_run_workflow_call(run_output)
+    if run_workflow_call is not None:
+        workflow_name, workflow_input = run_workflow_call
+        await _handle_run_workflow_trigger(db, rivulet, agent, workflow_name, workflow_input)
+
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
@@ -640,3 +660,34 @@ async def _handle_handoff(
     )
     messages.extend(target_messages)
     return messages
+
+
+async def _handle_run_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, workflow_name: str, workflow_input: str
+) -> None:
+    """#24: an agent called the run_workflow tool — look up the named
+    workflow and actually execute it (workflows/engine.py). Imports
+    rivulets.workflows lazily: that package's node executors
+    (workflows/nodes.py) import dispatch/rule_generation.py for their
+    "summarize" node's model selection, so a module-level import here
+    would risk a circular import depending on which package happens to
+    get imported first at app startup — deferring it to call time (well
+    after both packages are fully loaded) sidesteps that entirely.
+    Doesn't return anything for the caller to persist: run_workflow is
+    self-contained the same way invoke_agent_remotely is, committing and
+    publishing each message it produces as it goes (see engine.py's
+    _post_message)."""
+    from rivulets.workflows import find_workflow_by_name, run_workflow
+
+    workflow = await find_workflow_by_name(db, workflow_name)
+    if workflow is None:
+        logger.warning(
+            "Agent %r tried to run unknown workflow %r in rivulet %r",
+            agent.name,
+            workflow_name,
+            rivulet.id,
+        )
+        return
+    await run_workflow(
+        db, workflow, rivulet, workflow_input, triggered_by="agent", triggered_by_id=agent.id
+    )
