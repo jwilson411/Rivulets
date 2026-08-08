@@ -16,9 +16,7 @@ def _login(client: TestClient) -> dict[str, str]:
 
 def test_claiming_a_new_display_name_creates_a_human(client: TestClient) -> None:
     headers = _login(client)
-    response = client.post(
-        "/api/v1/auth/identity", json={"display_name": "Ada"}, headers=headers
-    )
+    response = client.post("/api/v1/auth/identity", json={"display_name": "Ada"}, headers=headers)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["display_name"] == "Ada"
@@ -95,9 +93,7 @@ def test_posting_a_message_after_claiming_sets_real_sender_fields(client: TestCl
     ).json()
     claimed_headers = {"Authorization": f"Bearer {identity['token']}"}
 
-    channel = client.post(
-        "/api/v1/channels", json={"name": "general"}, headers=claimed_headers
-    )
+    channel = client.post("/api/v1/channels", json={"name": "general"}, headers=claimed_headers)
     rivulet = client.post(
         f"/api/v1/channels/{channel.json()['id']}/rivulets",
         json={"content": "hello"},
