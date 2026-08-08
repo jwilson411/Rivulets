@@ -7,7 +7,8 @@
 import { api } from './client';
 import { auth } from './auth.svelte';
 
-export type WorkflowNodeType = 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge';
+export type WorkflowNodeType =
+	'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input';
 
 export interface Workflow {
 	id: string;

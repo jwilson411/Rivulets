@@ -1,6 +1,7 @@
 """Workflow execution engine (#24, branching/parallel/loops via #81, real
-merge joining via #82): runs a saved `Workflow` definition end-to-end
-against a rivulet, following `WorkflowConnection` edges.
+merge joining via #82, pause/resume via #83): runs a saved `Workflow`
+definition end-to-end against a rivulet, following `WorkflowConnection`
+edges.
 
 A node may now have more than one outbound edge (api/workflows.py only
 enforces a single *entry* connection, from_node_id=None, since a workflow
@@ -81,6 +82,27 @@ usual (see above) and the merge waiting on it never runs; a sibling that
 instead dead-ends cleanly (an unmatched edge condition, or a conditional
 node's own gate) simply doesn't contribute — the merge still fires with
 however many of its group did arrive.
+
+Pause/resume (#83): a branch about to advance onto a 'human_input' node
+stops there too (`_advance` → `_pause_for_human_input`), the same
+interception point as a merge arrival, but there's nothing to later
+group -- it commits WorkflowRun.status='awaiting_human',
+current_node_id=that node, and Rivulet.status='paused' (mirroring
+dispatch/guards.py's loop-guard pause exactly, so the channel UI's
+existing paused banner needs no changes to pick this up) and stops.
+`resume_workflow` is the second, separate entry point api/rivulets.py
+calls once workflows/trigger.py's find_awaiting_workflow_run recognizes
+the next message in that rivulet as the reply (not run_workflow again --
+there's no fresh input_content, no new entry point, just picking the walk
+back up at `current_node_id` with the reply as that node's output). The
+original call's visit_counts/total_steps were local Python state, not
+persisted, so a resumed run's loop guard starts fresh. A pause inside a
+fan-out that also shares a merge point with sibling branches has one
+known gap: only the paused branch's own path is resumed -- a sibling that
+already reached the merge node before the pause isn't replayed, so that
+merge (if reached again on resume) fires with just the resumed branch's
+input. Pausing on a linear path, or in a fan-out with no shared merge
+downstream, has no such gap.
 """
 
 import asyncio
@@ -134,6 +156,30 @@ class _BranchOutcome:
     # (merge_node_id, this_branch's_output) — the branch stops there rather
     # than executing the merge node itself; see _resolve_merge_arrivals.
     arrived_at_merge: tuple[str, str] | None = None
+    # Set when this branch stopped at a 'human_input' node (#83) rather
+    # than finishing or failing — see _pause_for_human_input. Precedence
+    # in _resolve_merge_arrivals/run_workflow is failed > paused >
+    # completed: a hard error elsewhere in the run matters more than a
+    # pause, but a pause still needs to win over sibling branches that
+    # happened to complete cleanly.
+    paused: bool = False
+
+
+def _check_loop_guard(
+    node: WorkflowNode, visit_counts: dict[str, int], total_steps: list[int]
+) -> str | None:
+    """Shared by every node executor (_run_branch, _run_merge_node,
+    _pause_for_human_input): returns a detail message once `node` (or the
+    run overall) has been visited too many times, else None. See module
+    docstring's "Loops" section."""
+    visit_counts[node.id] = visit_counts.get(node.id, 0) + 1
+    total_steps[0] += 1
+    if visit_counts[node.id] > MAX_NODE_VISITS_PER_RUN or total_steps[0] > MAX_TOTAL_STEPS_PER_RUN:
+        return (
+            f"exceeded the workflow's loop guard ({MAX_NODE_VISITS_PER_RUN} visits to this step "
+            f"or {MAX_TOTAL_STEPS_PER_RUN} steps in this run) — likely an unbounded loop"
+        )
+    return None
 
 
 async def _post_message(db: AsyncSession, message: Message) -> Message:
@@ -355,11 +401,87 @@ async def run_workflow(
         total_steps,
     )
 
+    return await _finalize_run(db, run, outcome)
+
+
+async def _finalize_run(db: AsyncSession, run: WorkflowRun, outcome: _BranchOutcome) -> WorkflowRun:
+    """Shared by run_workflow and resume_workflow. A paused outcome's
+    status/current_node_id were already committed inside
+    _pause_for_human_input, possibly on a different (sibling) session --
+    refresh rather than reassign so the returned `run` reflects that write
+    instead of clobbering it with a stale in-memory value."""
+    if outcome.paused:
+        await db.refresh(run)
+        return run
+
     run.status = "failed" if outcome.failed else "completed"
     run.error_message = outcome.error_message
     run.completed_at = utcnow_iso()
     await db.commit()
     return run
+
+
+async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) -> WorkflowRun:
+    """Continues a WorkflowRun paused by a 'human_input' node (#83, see
+    _pause_for_human_input), called from api/rivulets.py's post_message
+    once workflows/trigger.py's find_awaiting_workflow_run identifies the
+    next message in that rivulet as the reply. `human_reply` becomes the
+    paused node's output — the same "a node's output becomes the next
+    node's input" contract every other node type honors (issue #24) — and
+    the walk continues from there via _follow_edges. The loop guard
+    starts fresh: visit_counts/total_steps were local to the original
+    run_workflow call and aren't persisted across a pause, so a run that
+    paused near its budget gets a clean one again on resume rather than
+    inheriting an exhausted one."""
+    assert run.current_node_id is not None  # set by _pause_for_human_input
+    workflow = await db.get(Workflow, run.workflow_id)
+    rivulet = await db.get(Rivulet, run.rivulet_id)
+    assert workflow is not None
+    assert rivulet is not None
+
+    nodes, connections = await _load_nodes_and_connections(db, workflow.id)
+    paused_node = nodes.get(run.current_node_id)
+    if paused_node is None:
+        return await _finalize_run(
+            db,
+            run,
+            _BranchOutcome(
+                failed=True, error_message="The paused step was deleted before you replied"
+            ),
+        )
+
+    paused_node_run = await db.scalar(
+        select(WorkflowNodeRun)
+        .where(
+            WorkflowNodeRun.workflow_run_id == run.id,
+            WorkflowNodeRun.node_id == paused_node.id,
+            WorkflowNodeRun.status == "awaiting_human",
+        )
+        .order_by(WorkflowNodeRun.started_at.desc())
+        .limit(1)
+    )
+    if paused_node_run is not None:
+        paused_node_run.status = "completed"
+        paused_node_run.output_content = human_reply
+        paused_node_run.completed_at = utcnow_iso()
+
+    rivulet.status = "active"
+    run.status = "running"
+    await db.commit()
+
+    outcome = await _follow_edges(
+        db,
+        run.id,
+        workflow,
+        rivulet.id,
+        nodes,
+        connections,
+        paused_node.id,
+        human_reply,
+        visit_counts={},
+        total_steps=[0],
+    )
+    return await _finalize_run(db, run, outcome)
 
 
 async def _run_branch(
@@ -385,13 +507,8 @@ async def _run_branch(
     if node is None:
         return _BranchOutcome(failed=False)  # edge to a since-deleted node: a quiet dead end
 
-    visit_counts[node_id] = visit_counts.get(node_id, 0) + 1
-    total_steps[0] += 1
-    if visit_counts[node_id] > MAX_NODE_VISITS_PER_RUN or total_steps[0] > MAX_TOTAL_STEPS_PER_RUN:
-        detail = (
-            f"exceeded the workflow's loop guard ({MAX_NODE_VISITS_PER_RUN} visits to this step "
-            f"or {MAX_TOTAL_STEPS_PER_RUN} steps in this run) — likely an unbounded loop"
-        )
+    detail = _check_loop_guard(node, visit_counts, total_steps)
+    if detail is not None:
         await _post_alert(db, rivulet_id, workflow, node, detail)
         return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
 
@@ -534,11 +651,16 @@ async def _advance(
     """The one place a branch is about to move onto a node: if that node
     is a 'merge', stop here and report the arrival instead of executing it
     (a merge node only ever runs via _run_merge_node, once per group of
-    siblings -- see _resolve_merge_arrivals). Otherwise just _run_branch
-    as normal."""
+    siblings -- see _resolve_merge_arrivals). If it's a 'human_input'
+    node, pause instead (#83, _pause_for_human_input). Otherwise just
+    _run_branch as normal."""
     target = nodes.get(node_id)
     if target is not None and target.node_type == "merge":
         return _BranchOutcome(failed=False, arrived_at_merge=(node_id, input_content))
+    if target is not None and target.node_type == "human_input":
+        return await _pause_for_human_input(
+            db, run_id, workflow, rivulet_id, target, input_content, visit_counts, total_steps
+        )
     return await _run_branch(
         db,
         run_id,
@@ -551,6 +673,67 @@ async def _advance(
         visit_counts,
         total_steps,
     )
+
+
+async def _pause_for_human_input(
+    db: AsyncSession,
+    run_id: str,
+    workflow: Workflow,
+    rivulet_id: str,
+    node: WorkflowNode,
+    input_content: str,
+    visit_counts: dict[str, int],
+    total_steps: list[int],
+) -> _BranchOutcome:
+    """#83: stops this branch at a 'human_input' node and waits. One
+    WorkflowNodeRun row is created now (status='awaiting_human',
+    output_content still unset) and *updated* in place by resume_workflow
+    once a reply arrives, rather than each attempt getting its own row
+    the way _run_node_with_retries does -- there's no attempt/retry
+    concept for a pause, just one wait that eventually resolves.
+    Rivulet.status='paused' + a system_alert mirrors dispatch/guards.py's
+    loop-guard pause exactly, so the existing paused-rivulet banner in the
+    channel UI picks this up with no UI changes needed."""
+    detail = _check_loop_guard(node, visit_counts, total_steps)
+    if detail is not None:
+        await _post_alert(db, rivulet_id, workflow, node, detail)
+        return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
+
+    rivulet = await db.get(Rivulet, rivulet_id)
+    assert rivulet is not None
+
+    node_run = WorkflowNodeRun(
+        workflow_run_id=run_id,
+        node_id=node.id,
+        attempt=1,
+        input_content=input_content,
+        status="awaiting_human",
+    )
+    db.add(node_run)
+    await db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == run_id)
+        .values(current_node_id=node.id, status="awaiting_human")
+    )
+    rivulet.status = "paused"
+    await db.commit()
+    await _post_message(db, _step_message(rivulet, workflow, node))
+    await _post_message(
+        db,
+        Message(
+            rivulet_id=rivulet_id,
+            sender_type="system",
+            sender_name="system",
+            content=f"⏸ Workflow /{workflow.name} is waiting for your reply at step {node.name!r}.",
+            content_type="system_alert",
+        ),
+    )
+    publish(
+        rivulet_id,
+        "system_alert",
+        {"type": "workflow_awaiting_human", "workflow_id": workflow.id, "node_id": node.id},
+    )
+    return _BranchOutcome(failed=False, paused=True, node_name=node.name)
 
 
 async def _resolve_merge_arrivals(
@@ -573,10 +756,23 @@ async def _resolve_merge_arrivals(
     in the graph that happen to reach the same merge node (see module
     docstring) -- reached some other way, a merge node still just runs
     once per independent arrival, unchanged from #81. Recurses because a
-    merge node's own next hop could be another merge node."""
+    merge node's own next hop could be another merge node.
+
+    A paused (#83) sibling takes priority over any unresolved merge
+    arrivals in the same batch (but not over an outright failure, checked
+    first) -- if one sibling is waiting on a human, a merge that also
+    needed *another* sibling's contribution can't fire yet either way, so
+    there's nothing to lose by not attempting it. Resuming re-enters at
+    the paused node specifically (resume_workflow), not this fan-out, so
+    any sibling that already reached a merge node before the pause won't
+    be replayed -- see module docstring's pause/resume section."""
     failed = next((o for o in outcomes if o.failed), None)
     if failed is not None:
         return failed
+
+    paused = next((o for o in outcomes if o.paused), None)
+    if paused is not None:
+        return paused
 
     merge_groups: dict[str, list[str]] = {}
     for outcome in outcomes:
@@ -653,16 +849,8 @@ async def _run_merge_node(
     if node is None:
         return _BranchOutcome(failed=False)
 
-    visit_counts[merge_node_id] = visit_counts.get(merge_node_id, 0) + 1
-    total_steps[0] += 1
-    if (
-        visit_counts[merge_node_id] > MAX_NODE_VISITS_PER_RUN
-        or total_steps[0] > MAX_TOTAL_STEPS_PER_RUN
-    ):
-        detail = (
-            f"exceeded the workflow's loop guard ({MAX_NODE_VISITS_PER_RUN} visits to this step "
-            f"or {MAX_TOTAL_STEPS_PER_RUN} steps in this run) — likely an unbounded loop"
-        )
+    detail = _check_loop_guard(node, visit_counts, total_steps)
+    if detail is not None:
         await _post_alert(db, rivulet_id, workflow, node, detail)
         return _BranchOutcome(failed=True, error_message=detail, node_name=node.name)
 

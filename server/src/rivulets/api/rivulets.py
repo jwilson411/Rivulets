@@ -13,6 +13,13 @@ that workflow (workflows/engine.py) instead of the dispatcher entirely; a
 slash-command-shaped message that doesn't match a real workflow name
 falls through to ordinary dispatch unchanged.
 
+post_message checks one more thing first, ahead of that: whether this
+rivulet has a workflow paused on a 'human_input' node (#83,
+find_awaiting_workflow_run) — if so, whatever the human just typed is
+unambiguously the reply (workflows/engine.py's resume_workflow), not a
+fresh trigger or a dispatcher message. create_rivulet doesn't need this
+check: a workflow can only pause on a rivulet that already exists.
+
 Rivulets and messages are also synced (FR-9.1). This is the one place
 where getting the sync boundary right actually matters for correctness,
 not just data completeness: dispatch (agent invocation, LLM calls) only
@@ -47,7 +54,12 @@ from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from rivulets.streaming import subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
-from rivulets.workflows import find_triggered_workflow, run_workflow
+from rivulets.workflows import (
+    find_awaiting_workflow_run,
+    find_triggered_workflow,
+    resume_workflow,
+    run_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +324,17 @@ async def post_message(
     await db.flush()  # populate message.id before attaching files to it
     attached_files = await _attach_files(db, message, body.files)
 
+    awaiting_run = await find_awaiting_workflow_run(db, rivulet_id)
+    if awaiting_run is not None:
+        await db.commit()
+        await db.refresh(message)
+        await resume_workflow(db, awaiting_run, body.content)
+        await _publish_rivulet_change(db, rivulet)
+        await _publish_message_change(db, message)
+        for file_row in attached_files:
+            await publish_file_change(db, file_row)
+        return _to_message_out(message, attached_files)
+
     triggered = await find_triggered_workflow(db, body.content)
     if triggered is not None:
         workflow, workflow_input = triggered
@@ -349,8 +372,18 @@ async def post_message(
 async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> Rivulet:
     """FR-7.5's explicit "Resume" affordance — equivalent to what posting
     any message already does, for when a human just wants to clear a
-    pause without saying anything yet."""
+    pause without saying anything yet. Refuses if a workflow is paused
+    here (#83): unlike a loop-guard pause, a 'human_input' node's pause
+    isn't clearable without an actual reply value to feed it as output --
+    flipping Rivulet.status back to 'active' without one would hide the
+    paused banner while the WorkflowRun stayed 'awaiting_human' underneath,
+    leaving the human with no visible way back to it."""
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    if await find_awaiting_workflow_run(db, rivulet_id) is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A workflow is waiting on a reply here — reply with a message instead of resuming",
+        )
     rivulet.status = "active"
     guard_state = await get_or_create_guard_state(db, rivulet_id)
     reset_guard_state(guard_state)

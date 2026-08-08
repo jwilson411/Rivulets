@@ -24,7 +24,7 @@ from rivulets.db.models import (
     WorkflowNode,
     WorkflowNodeRun,
 )
-from rivulets.workflows.engine import MAX_NODE_VISITS_PER_RUN, run_workflow
+from rivulets.workflows.engine import MAX_NODE_VISITS_PER_RUN, resume_workflow, run_workflow
 
 
 async def _make_rivulet(db: AsyncSession) -> Rivulet:
@@ -648,3 +648,129 @@ async def test_merge_node_with_single_arrival_still_wraps_as_json_array(
         select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
     )
     assert result.scalars().one().content == json.dumps(["unchanged"])
+
+
+async def test_human_input_node_pauses_the_run_and_rivulet(db_session: AsyncSession) -> None:
+    """#83: a 'human_input' node stops the run rather than executing --
+    WorkflowRun/WorkflowNodeRun both record 'awaiting_human', and
+    Rivulet.status='paused' mirrors dispatch/guards.py's loop-guard pause
+    exactly (so the channel UI's existing paused banner needs no changes
+    to surface it)."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="ask-flow")
+    ask = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
+    db_session.add(ask)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=ask.id)
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "please confirm", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "awaiting_human"
+    assert run.current_node_id == ask.id
+    assert run.completed_at is None
+    assert rivulet.status == "paused"
+
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.workflow_run_id == run.id)
+    )
+    node_runs = list(result.scalars().all())
+    assert len(node_runs) == 1
+    assert node_runs[0].status == "awaiting_human"
+    assert node_runs[0].output_content is None
+
+    result = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    alert = result.scalars().one()
+    assert "ask" in alert.content
+    assert "waiting for your reply" in alert.content
+
+
+async def test_resume_workflow_continues_with_the_reply_as_output(
+    db_session: AsyncSession,
+) -> None:
+    """#83: resume_workflow feeds the human's reply into the paused node's
+    outbound edges as if it were that node's own output -- the same "a
+    node's output becomes the next node's input" contract every other
+    node type honors."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="ask-then-echo")
+    ask = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
+    echo = _transform_node(workflow.id, "echo", "confirmed: {input}")
+    db_session.add_all([ask, echo])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=ask.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask.id, to_node_id=echo.id),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "please confirm", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "awaiting_human"
+
+    resumed = await resume_workflow(db_session, run, "yes please")
+
+    assert resumed.status == "completed"
+    assert resumed.completed_at is not None
+    assert rivulet.status == "active"
+
+    result = await db_session.execute(
+        select(WorkflowNodeRun)
+        .where(WorkflowNodeRun.node_id == ask.id)
+        .order_by(WorkflowNodeRun.started_at)
+    )
+    ask_run = result.scalars().one()
+    assert ask_run.status == "completed"
+    assert ask_run.output_content == "yes please"
+
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    assert result.scalars().one().content == "confirmed: yes please"
+
+
+async def test_resume_workflow_can_pause_again_at_a_second_human_input_node(
+    db_session: AsyncSession,
+) -> None:
+    """A resumed run can hit another 'human_input' node and pause again --
+    resume_workflow isn't a one-shot unwind, it's the same walk mechanism
+    as the original run, just re-entered at a different starting point."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="ask-twice")
+    ask1 = WorkflowNode(workflow_id=workflow.id, name="ask1", node_type="human_input")
+    ask2 = WorkflowNode(workflow_id=workflow.id, name="ask2", node_type="human_input")
+    db_session.add_all([ask1, ask2])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=ask1.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask1.id, to_node_id=ask2.id),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "start", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "awaiting_human"
+    assert run.current_node_id == ask1.id
+
+    run = await resume_workflow(db_session, run, "first reply")
+    assert run.status == "awaiting_human"
+    assert run.current_node_id == ask2.id
+    assert rivulet.status == "paused"
+
+    run = await resume_workflow(db_session, run, "second reply")
+    assert run.status == "completed"
+    assert rivulet.status == "active"
