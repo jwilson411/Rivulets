@@ -39,6 +39,7 @@ runs, not by this endpoint — see that module's docstring.
 import json
 import logging
 
+from croniter import CroniterError
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -46,14 +47,17 @@ from sqlalchemy import select
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.db.models import (
     Agent,
+    Channel,
     Workflow,
     WorkflowConnection,
     WorkflowNode,
     WorkflowNodeRun,
     WorkflowRun,
+    WorkflowSchedule,
 )
 from rivulets.sync.publish import publish_current_state
 from rivulets.workflows.nodes import NODE_TYPES
+from rivulets.workflows.scheduler import compute_next_fire_at
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +211,46 @@ class WorkflowNodeRunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class WorkflowScheduleCreate(BaseModel):
+    channel_id: str
+    cron_expression: str = Field(min_length=1, max_length=128)
+    input_content: str = Field(default="", max_length=4000)
+    enabled: bool = True
+
+
+class WorkflowScheduleUpdate(BaseModel):
+    channel_id: str | None = None
+    cron_expression: str | None = Field(default=None, min_length=1, max_length=128)
+    input_content: str | None = None
+    enabled: bool | None = None
+
+
+class WorkflowScheduleOut(BaseModel):
+    id: str
+    workflow_id: str
+    channel_id: str
+    cron_expression: str
+    input_content: str
+    enabled: bool
+    next_fire_at: str
+    last_fired_at: str | None
+    consecutive_failures: int
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class CronPreviewRequest(BaseModel):
+    cron_expression: str = Field(min_length=1, max_length=128)
+
+
+class CronPreviewOut(BaseModel):
+    valid: bool
+    next_fire_at: str | None
+    error: str | None
+
+
 async def _get_workflow_or_404(db: DbSession, workflow_id: str) -> Workflow:
     workflow = await db.get(Workflow, workflow_id)
     if workflow is None:
@@ -219,6 +263,22 @@ async def _get_node_or_404(db: DbSession, workflow_id: str, node_id: str) -> Wor
     if node is None or node.workflow_id != workflow_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow node not found")
     return node
+
+
+async def _get_schedule_or_404(
+    db: DbSession, workflow_id: str, schedule_id: str
+) -> WorkflowSchedule:
+    schedule = await db.get(WorkflowSchedule, schedule_id)
+    if schedule is None or schedule.workflow_id != workflow_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow schedule not found")
+    return schedule
+
+
+def _compute_next_fire_at_or_400(cron_expression: str) -> str:
+    try:
+        return compute_next_fire_at(cron_expression)
+    except CroniterError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid cron expression: {exc}") from exc
 
 
 async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workflow_id: str) -> None:
@@ -485,6 +545,109 @@ async def delete_connection(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow connection not found")
     await db.delete(connection)
     await db.commit()
+
+
+@router.post(
+    "/{workflow_id}/schedules",
+    response_model=WorkflowScheduleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_schedule(
+    workflow_id: str, body: WorkflowScheduleCreate, db: DbSession, _: CurrentWorkspaceId
+) -> WorkflowSchedule:
+    """#92: publish-state is deliberately NOT checked here -- same as
+    nodes, a schedule can be configured against a still-draft workflow;
+    only workflows/scheduler.py's _fire re-checks Workflow.published at
+    fire time, the single gate every trigger path shares."""
+    await _get_workflow_or_404(db, workflow_id)
+    if await db.get(Channel, body.channel_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
+    next_fire_at = _compute_next_fire_at_or_400(body.cron_expression)
+    schedule = WorkflowSchedule(
+        workflow_id=workflow_id,
+        channel_id=body.channel_id,
+        cron_expression=body.cron_expression,
+        input_content=body.input_content,
+        enabled=body.enabled,
+        next_fire_at=next_fire_at,
+    )
+    db.add(schedule)
+    await db.commit()
+    await db.refresh(schedule)
+    # Deliberately no publish_current_state call -- WorkflowSchedule is
+    # unsynced (see its own docstring / sync/apply.py's absence of it
+    # from _DISPATCH).
+    return schedule
+
+
+@router.get("/{workflow_id}/schedules", response_model=list[WorkflowScheduleOut])
+async def list_schedules(
+    workflow_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> list[WorkflowSchedule]:
+    await _get_workflow_or_404(db, workflow_id)
+    result = await db.execute(
+        select(WorkflowSchedule)
+        .where(WorkflowSchedule.workflow_id == workflow_id)
+        .order_by(WorkflowSchedule.created_at)
+    )
+    return list(result.scalars().all())
+
+
+@router.patch("/{workflow_id}/schedules/{schedule_id}", response_model=WorkflowScheduleOut)
+async def update_schedule(
+    workflow_id: str,
+    schedule_id: str,
+    body: WorkflowScheduleUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+) -> WorkflowSchedule:
+    schedule = await _get_schedule_or_404(db, workflow_id, schedule_id)
+    if body.channel_id is not None:
+        if await db.get(Channel, body.channel_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
+        schedule.channel_id = body.channel_id
+    if body.cron_expression is not None:
+        schedule.cron_expression = body.cron_expression
+        schedule.next_fire_at = _compute_next_fire_at_or_400(body.cron_expression)
+    if body.input_content is not None:
+        schedule.input_content = body.input_content
+    if body.enabled is not None:
+        # Re-enabling recomputes next_fire_at from *now* (not whatever
+        # stale value it had while disabled) and clears the failure
+        # streak -- a manual re-enable is an implicit "I fixed it, try
+        # again clean" signal.
+        if body.enabled and not schedule.enabled:
+            schedule.next_fire_at = _compute_next_fire_at_or_400(schedule.cron_expression)
+            schedule.consecutive_failures = 0
+        schedule.enabled = body.enabled
+    await db.commit()
+    await db.refresh(schedule)
+    return schedule
+
+
+@router.delete("/{workflow_id}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_schedule(
+    workflow_id: str, schedule_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> None:
+    schedule = await _get_schedule_or_404(db, workflow_id, schedule_id)
+    await db.delete(schedule)
+    await db.commit()
+
+
+@router.post("/{workflow_id}/schedules/preview", response_model=CronPreviewOut)
+async def preview_schedule(
+    workflow_id: str, body: CronPreviewRequest, db: DbSession, _: CurrentWorkspaceId
+) -> CronPreviewOut:
+    """No persistence -- lets the UI show a human-readable "next run" (or
+    a validation error) while someone is still typing a cron expression,
+    before they click Save."""
+    await _get_workflow_or_404(db, workflow_id)
+    try:
+        return CronPreviewOut(
+            valid=True, next_fire_at=compute_next_fire_at(body.cron_expression), error=None
+        )
+    except CroniterError as exc:
+        return CronPreviewOut(valid=False, next_fire_at=None, error=str(exc))
 
 
 @router.get("/{workflow_id}/runs", response_model=list[WorkflowRunOut])

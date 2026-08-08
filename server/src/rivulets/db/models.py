@@ -471,7 +471,13 @@ class WorkflowRun(Base):
     engine.py's module docstring) -- a nested child's own runs only show
     up under *its* workflow's run history, not folded into the parent's;
     `triggered_by`/`triggered_by_id` are what let a human trace one back
-    to the other."""
+    to the other.
+
+    triggered_by='schedule' (#92): this run was started by
+    workflows/scheduler.py's poll loop firing a WorkflowSchedule, not a
+    human or agent action -- `triggered_by_id` is that schedule's id, the
+    same "id of the thing that caused this" convention every other
+    triggered_by value already follows."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -479,8 +485,9 @@ class WorkflowRun(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
-    triggered_by: Mapped[str]  # 'human' | 'agent' | 'workflow'
-    # human_id / agent_id / (for 'workflow') the parent WorkflowRun's id
+    triggered_by: Mapped[str]  # 'human' | 'agent' | 'workflow' | 'schedule'
+    # human_id / agent_id / (for 'workflow') parent WorkflowRun's id /
+    # (for 'schedule') the firing WorkflowSchedule's id
     triggered_by_id: Mapped[str | None] = mapped_column(default=None)
     input_content: Mapped[str]
     # 'running' | 'completed' | 'failed' | 'awaiting_human'
@@ -517,6 +524,52 @@ class WorkflowNodeRun(Base):
     completed_at: Mapped[str | None] = mapped_column(default=None)
 
 
+class WorkflowSchedule(Base):
+    """Cron-based automatic triggering of a published workflow (#92) --
+    fully local/unsynced, unlike Workflow/WorkflowNode/WorkflowConnection:
+    each peer configures its own firing schedule independently (no
+    vector_clock, absent from sync/apply.py's _DISPATCH, same treatment
+    as WorkflowRun/WorkflowNodeRun above). Nothing here syncs, so there's
+    no cross-peer duplicate-fire risk to guard against.
+
+    `cron_expression` is a raw 5-field cron string interpreted in UTC,
+    same as every other timestamp in this schema (db/base.py's
+    utcnow_iso), not the host machine's local timezone.
+
+    `next_fire_at` is precomputed (workflows/scheduler.py's
+    compute_next_fire_at) rather than derived from cron_expression on
+    every poll tick, keeping the due-schedule query a plain indexed
+    `next_fire_at <= now` scan. It is *always* recomputed from wall-clock
+    now (never from the prior slot), which is what makes "skip missed
+    fires, never backfill" fall out automatically rather than being
+    logic the poll loop has to get right.
+
+    `consecutive_failures` mirrors engine.py's MAX_NODE_VISITS_PER_RUN /
+    MAX_TOTAL_STEPS_PER_RUN runaway-execution protection, but at the
+    schedule level: workflows/scheduler.py resets it to 0 on any
+    non-failed fire and clears `enabled` once it hits
+    MAX_CONSECUTIVE_FAILURES, so a permanently broken workflow can't
+    retry forever every poll interval."""
+
+    __tablename__ = "workflow_schedule"
+    __table_args__ = (
+        Index("idx_workflow_schedule_workflow", "workflow_id"),
+        Index("idx_workflow_schedule_due", "enabled", "next_fire_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channel.id", ondelete="CASCADE"))
+    cron_expression: Mapped[str]
+    input_content: Mapped[str] = mapped_column(default="")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    next_fire_at: Mapped[str]
+    last_fired_at: Mapped[str | None] = mapped_column(default=None)
+    consecutive_failures: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class Rivulet(Base):
     __tablename__ = "rivulet"
     __table_args__ = (Index("idx_rivulet_channel", "channel_id", "created_at"),)
@@ -526,7 +579,7 @@ class Rivulet(Base):
     title: Mapped[str | None] = mapped_column(default=None)
     agentos_session_id: Mapped[str | None] = mapped_column(default=None)
     status: Mapped[str] = mapped_column(default="active")  # active | paused | closed
-    created_by: Mapped[str]  # 'human' or agent_id
+    created_by: Mapped[str]  # 'human' or agent_id or workflow_schedule_id
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)

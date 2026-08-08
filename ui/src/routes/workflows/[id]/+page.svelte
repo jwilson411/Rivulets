@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import {
@@ -7,9 +8,11 @@
 		type WorkflowNode,
 		type WorkflowConnection,
 		type WorkflowRun,
-		type WorkflowNodeRun
+		type WorkflowNodeRun,
+		type WorkflowSchedule
 	} from '$lib/api/workflows';
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
+	import { channels as channelsApi, type Channel } from '$lib/api/channels';
 	import { timeAgo } from '$lib/format';
 	import Icon from '$lib/components/Icon.svelte';
 	import WorkflowNodeForm, {
@@ -31,6 +34,8 @@
 	let connectionList = $state<WorkflowConnection[]>([]);
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
+	let channelList = $state<Channel[]>([]);
+	let scheduleList = $state<WorkflowSchedule[]>([]);
 	let loadError = $state<string | null>(null);
 
 	// A workflow embedding itself is always a cycle -- excluded from the
@@ -85,19 +90,30 @@
 	async function load(workflowId: string) {
 		loadError = null;
 		try {
-			const [loadedWorkflow, loadedNodes, loadedConnections, loadedAgents, loadedWorkflows] =
-				await Promise.all([
-					workflows.get(workflowId),
-					workflows.listNodes(workflowId),
-					workflows.listConnections(workflowId),
-					agentsApi.list(),
-					workflows.list()
-				]);
+			const [
+				loadedWorkflow,
+				loadedNodes,
+				loadedConnections,
+				loadedAgents,
+				loadedWorkflows,
+				loadedChannels,
+				loadedSchedules
+			] = await Promise.all([
+				workflows.get(workflowId),
+				workflows.listNodes(workflowId),
+				workflows.listConnections(workflowId),
+				agentsApi.list(),
+				workflows.list(),
+				channelsApi.list(),
+				workflows.listSchedules(workflowId)
+			]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;
 			connectionList = loadedConnections;
 			agentList = loadedAgents;
 			workflowList = loadedWorkflows;
+			channelList = loadedChannels;
+			scheduleList = loadedSchedules;
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load workflow';
 		}
@@ -141,6 +157,95 @@
 			publishError = err instanceof Error ? err.message : 'Failed to update publish state';
 		} finally {
 			publishBusy = false;
+		}
+	}
+
+	let showAddSchedule = $state(false);
+	let scheduleCronDraft = $state('');
+	let scheduleChannelDraft = $state('');
+	let scheduleInputDraft = $state('');
+	let schedulePreview = $state<{ next_fire_at: string | null; error: string | null } | null>(null);
+	let scheduleBusy = $state(false);
+	let scheduleError = $state<string | null>(null);
+	let schedulePreviewTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function openAddSchedule() {
+		showAddSchedule = true;
+		scheduleCronDraft = '';
+		scheduleChannelDraft = channelList[0]?.id ?? '';
+		scheduleInputDraft = '';
+		schedulePreview = null;
+		scheduleError = null;
+	}
+
+	function closeAddSchedule() {
+		showAddSchedule = false;
+		clearTimeout(schedulePreviewTimer);
+	}
+
+	onDestroy(() => clearTimeout(schedulePreviewTimer));
+
+	function onCronDraftChange() {
+		schedulePreview = null;
+		clearTimeout(schedulePreviewTimer);
+		if (!workflow || !scheduleCronDraft.trim()) return;
+		const workflowId = workflow.id;
+		const cronExpression = scheduleCronDraft;
+		schedulePreviewTimer = setTimeout(async () => {
+			try {
+				schedulePreview = await workflows.previewSchedule(workflowId, cronExpression);
+			} catch (err) {
+				schedulePreview = {
+					next_fire_at: null,
+					error: err instanceof Error ? err.message : 'Failed to preview schedule'
+				};
+			}
+		}, 400);
+	}
+
+	async function handleAddSchedule() {
+		if (!workflow || !scheduleChannelDraft) return;
+		const workflowId = workflow.id;
+		scheduleError = null;
+		scheduleBusy = true;
+		try {
+			await workflows.createSchedule(workflowId, {
+				channel_id: scheduleChannelDraft,
+				cron_expression: scheduleCronDraft,
+				input_content: scheduleInputDraft
+			});
+			showAddSchedule = false;
+			scheduleList = await workflows.listSchedules(workflowId);
+		} catch (err) {
+			scheduleError = err instanceof Error ? err.message : 'Failed to create schedule';
+		} finally {
+			scheduleBusy = false;
+		}
+	}
+
+	async function toggleScheduleEnabled(schedule: WorkflowSchedule) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		scheduleError = null;
+		try {
+			const updated = await workflows.updateSchedule(workflowId, schedule.id, {
+				enabled: !schedule.enabled
+			});
+			scheduleList = scheduleList.map((s) => (s.id === updated.id ? updated : s));
+		} catch (err) {
+			scheduleError = err instanceof Error ? err.message : 'Failed to update schedule';
+		}
+	}
+
+	async function removeSchedule(scheduleId: string) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		scheduleError = null;
+		try {
+			await workflows.removeSchedule(workflowId, scheduleId);
+			scheduleList = scheduleList.filter((s) => s.id !== scheduleId);
+		} catch (err) {
+			scheduleError = err instanceof Error ? err.message : 'Failed to remove schedule';
 		}
 	}
 
@@ -383,6 +488,146 @@
 			{/if}
 		</header>
 
+		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
+			<div class="flex items-center justify-between">
+				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Schedules</h2>
+				<button
+					onclick={openAddSchedule}
+					class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+				>
+					+ Add schedule
+				</button>
+			</div>
+			{#if !workflow.published}
+				<p class="text-xs text-neutral-500">
+					Schedules won't fire until this workflow is published.
+				</p>
+			{/if}
+			{#if scheduleError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{scheduleError}</p>
+			{/if}
+			{#if scheduleList.length === 0 && !showAddSchedule}
+				<p class="text-sm text-neutral-500">No schedules configured.</p>
+			{:else}
+				<ul class="flex flex-col gap-2">
+					{#each scheduleList as schedule (schedule.id)}
+						<li
+							class="flex flex-col gap-1 rounded-md border border-ink/12 p-2 text-xs dark:border-white/10"
+						>
+							<div class="flex items-center justify-between">
+								<span class="font-mono text-sm text-ink dark:text-ink-dark">
+									{schedule.cron_expression}
+								</span>
+								<div class="flex items-center gap-2">
+									<button
+										onclick={() => toggleScheduleEnabled(schedule)}
+										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+									>
+										{schedule.enabled ? 'Disable' : 'Enable'}
+									</button>
+									<button
+										onclick={() => removeSchedule(schedule.id)}
+										class="text-neutral-500 hover:text-agent-magenta-600"
+									>
+										Remove
+									</button>
+								</div>
+							</div>
+							<p class="text-neutral-500">
+								Channel: {channelList.find((c) => c.id === schedule.channel_id)?.name ??
+									'Deleted channel'}
+							</p>
+							{#if schedule.enabled}
+								<p class="text-neutral-500">
+									Next run: {new Date(schedule.next_fire_at).toLocaleString()}
+								</p>
+							{/if}
+							<p class="text-neutral-500">
+								Last fired: {schedule.last_fired_at ? timeAgo(schedule.last_fired_at) : 'never'}
+							</p>
+							{#if !schedule.enabled && schedule.consecutive_failures >= 5}
+								<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
+									Disabled after {schedule.consecutive_failures} consecutive failures
+								</p>
+							{:else if schedule.consecutive_failures > 0}
+								<p class="text-amber-700 dark:text-amber-400">
+									⚠ {schedule.consecutive_failures} consecutive failure{schedule.consecutive_failures ===
+									1
+										? ''
+										: 's'}
+								</p>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if showAddSchedule}
+				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
+					<label class="flex flex-col gap-1 text-xs text-neutral-500">
+						Cron expression
+						<input
+							type="text"
+							bind:value={scheduleCronDraft}
+							oninput={onCronDraftChange}
+							placeholder="0 9 * * *"
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					</label>
+					{#if schedulePreview}
+						{#if schedulePreview.error}
+							<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+								{schedulePreview.error}
+							</p>
+						{:else if schedulePreview.next_fire_at}
+							<p class="text-xs text-neutral-500">
+								Next run: {new Date(schedulePreview.next_fire_at).toLocaleString()}
+							</p>
+						{/if}
+					{/if}
+					<label class="flex flex-col gap-1 text-xs text-neutral-500">
+						Channel
+						<select
+							bind:value={scheduleChannelDraft}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						>
+							{#each channelList as channel (channel.id)}
+								<option value={channel.id}>{channel.name}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="flex flex-col gap-1 text-xs text-neutral-500">
+						Input
+						<input
+							type="text"
+							bind:value={scheduleInputDraft}
+							placeholder="input passed to the entry step"
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					</label>
+					{#if scheduleError}
+						<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+							{scheduleError}
+						</p>
+					{/if}
+					<div class="flex gap-3">
+						<button
+							onclick={handleAddSchedule}
+							disabled={scheduleBusy || !scheduleCronDraft.trim() || !scheduleChannelDraft}
+							class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
+						>
+							{scheduleBusy ? 'Adding…' : 'Add schedule'}
+						</button>
+						<button
+							onclick={closeAddSchedule}
+							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+						>
+							Cancel
+						</button>
+					</div>
+				</div>
+			{/if}
+		</section>
+
 		{#if actionError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
 		{/if}
@@ -598,6 +843,8 @@
 									{timeAgo(run.started_at)}
 									{#if run.triggered_by === 'workflow'}
 										<span class="text-neutral-500">(nested)</span>
+									{:else if run.triggered_by === 'schedule'}
+										<span class="text-neutral-500">(scheduled)</span>
 									{/if}
 								</span>
 								<span class="rounded-sm px-2 py-0.5 text-xs {statusClass(run.status)}">

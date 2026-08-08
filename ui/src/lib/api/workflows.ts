@@ -99,6 +99,40 @@ export interface WorkflowConnectionCreateInput {
 	to_node_id: string;
 }
 
+export interface WorkflowSchedule {
+	id: string;
+	workflow_id: string;
+	channel_id: string;
+	cron_expression: string;
+	input_content: string;
+	enabled: boolean;
+	next_fire_at: string;
+	last_fired_at: string | null;
+	consecutive_failures: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface WorkflowScheduleCreateInput {
+	channel_id: string;
+	cron_expression: string;
+	input_content?: string;
+	enabled?: boolean;
+}
+
+export interface WorkflowScheduleUpdateInput {
+	channel_id?: string;
+	cron_expression?: string;
+	input_content?: string;
+	enabled?: boolean;
+}
+
+export interface CronPreview {
+	valid: boolean;
+	next_fire_at: string | null;
+	error: string | null;
+}
+
 export const workflows = {
 	list: () => api.get<Workflow[]>('/workflows', auth.token ?? undefined),
 	get: (id: string) => api.get<Workflow>(`/workflows/${id}`, auth.token ?? undefined),
@@ -136,6 +170,25 @@ export const workflows = {
 	removeConnection: (workflowId: string, connectionId: string) =>
 		api.delete<void>(
 			`/workflows/${workflowId}/connections/${connectionId}`,
+			auth.token ?? undefined
+		),
+
+	listSchedules: (workflowId: string) =>
+		api.get<WorkflowSchedule[]>(`/workflows/${workflowId}/schedules`, auth.token ?? undefined),
+	createSchedule: (workflowId: string, body: WorkflowScheduleCreateInput) =>
+		api.post<WorkflowSchedule>(`/workflows/${workflowId}/schedules`, body, auth.token ?? undefined),
+	updateSchedule: (workflowId: string, scheduleId: string, patch: WorkflowScheduleUpdateInput) =>
+		api.patch<WorkflowSchedule>(
+			`/workflows/${workflowId}/schedules/${scheduleId}`,
+			patch,
+			auth.token ?? undefined
+		),
+	removeSchedule: (workflowId: string, scheduleId: string) =>
+		api.delete<void>(`/workflows/${workflowId}/schedules/${scheduleId}`, auth.token ?? undefined),
+	previewSchedule: (workflowId: string, cronExpression: string) =>
+		api.post<CronPreview>(
+			`/workflows/${workflowId}/schedules/preview`,
+			{ cron_expression: cronExpression },
 			auth.token ?? undefined
 		),
 

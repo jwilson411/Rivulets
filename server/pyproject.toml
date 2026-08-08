@@ -14,6 +14,7 @@ dependencies = [
     "anthropic>=0.120.2",
     "bcrypt>=5.0.0",
     "cohere>=7.0.8",
+    "croniter>=2.0.5",
     "cryptography>=50.0.0",
     "fastapi>=0.115",
     "google-genai>=2.17.0",

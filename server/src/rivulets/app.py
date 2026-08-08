@@ -6,7 +6,9 @@ App Server binds to 127.0.0.1 — enforced in main.py, not here, since
 that's a listen-address concern rather than an app concern.
 """
 
+import asyncio
 import base64
+import contextlib
 import hashlib
 import re
 import sys
@@ -30,6 +32,7 @@ from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.publish import drain_pending_outbound
 from rivulets.version import APP_VERSION
+from rivulets.workflows.scheduler import run_scheduler_loop
 
 _BASE_CSP = "default-src 'self'; connect-src 'self' http://localhost:8484"
 _INLINE_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
@@ -118,7 +121,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         # agents created before a restart need to be re-registered since
         # AgentOS's in-process agent list isn't itself persisted.
         await sync_agents(db)
+    # #92: the app's first plain-asyncio recurring background task — see
+    # workflows/scheduler.py's module docstring for why this doesn't need
+    # the sync engine's trio-on-a-thread machinery below.
+    scheduler_task = asyncio.create_task(run_scheduler_loop())
     yield
+    scheduler_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await scheduler_task
     # The sync engine only actually starts on login (api/auth.py — it
     # needs the workspace PSK, not available until then), so stopping here
     # is a no-op if nobody ever logged in; otherwise it cleanly joins the
