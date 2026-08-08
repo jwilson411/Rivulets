@@ -11,9 +11,11 @@ import {
 	workflows,
 	type Workflow,
 	type WorkflowNode,
-	type WorkflowConnection
+	type WorkflowConnection,
+	type WorkflowSchedule
 } from '$lib/api/workflows';
 import { agents } from '$lib/api/agents';
+import { channels } from '$lib/api/channels';
 
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'wf-1' }, url: new URL('http://localhost/workflows/wf-1') }
@@ -43,6 +45,11 @@ vi.mock('$lib/api/workflows', () => ({
 		listConnections: vi.fn(),
 		createConnection: vi.fn(),
 		removeConnection: vi.fn(),
+		listSchedules: vi.fn(),
+		createSchedule: vi.fn(),
+		updateSchedule: vi.fn(),
+		removeSchedule: vi.fn(),
+		previewSchedule: vi.fn(),
 		listRuns: vi.fn(),
 		listNodeRuns: vi.fn()
 	}
@@ -50,6 +57,10 @@ vi.mock('$lib/api/workflows', () => ({
 
 vi.mock('$lib/api/agents', () => ({
 	agents: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/channels', () => ({
+	channels: { list: vi.fn() }
 }));
 
 const reviewFlow: Workflow = {
@@ -99,11 +110,22 @@ const chainConnection: WorkflowConnection = {
 	to_node_id: 'n2'
 };
 
+const digestChannel = {
+	id: 'ch-1',
+	name: 'digest-channel',
+	description: null,
+	team_id: null,
+	position: 0,
+	archived: false
+};
+
 function mockLoad() {
 	vi.mocked(workflows.get).mockResolvedValue(reviewFlow);
 	vi.mocked(workflows.list).mockResolvedValue([reviewFlow]);
 	vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode]);
 	vi.mocked(workflows.listConnections).mockResolvedValue([entryConnection, chainConnection]);
+	vi.mocked(workflows.listSchedules).mockResolvedValue([]);
+	vi.mocked(channels.list).mockResolvedValue([digestChannel]);
 	vi.mocked(agents.list).mockResolvedValue([
 		{
 			id: 'agent-1',
@@ -323,5 +345,88 @@ describe('workflows/[id]/+page.svelte', () => {
 
 		await page.getByText('completed').first().click();
 		await expect.element(page.getByText('fetched stuff')).toBeInTheDocument();
+	});
+
+	it('creates a schedule and shows it in the list', async () => {
+		mockLoad();
+		const created: WorkflowSchedule = {
+			id: 'sched-1',
+			workflow_id: 'wf-1',
+			channel_id: 'ch-1',
+			cron_expression: '0 9 * * *',
+			input_content: 'go',
+			enabled: true,
+			next_fire_at: '2026-08-09T09:00:00Z',
+			last_fired_at: null,
+			consecutive_failures: 0,
+			created_at: '2026-08-08T00:00:00Z',
+			updated_at: '2026-08-08T00:00:00Z'
+		};
+		vi.mocked(workflows.createSchedule).mockResolvedValueOnce(created);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// Initial load() already consumed mockLoad()'s `[]` default above --
+		// queue the post-creation response now so it lands on the *next*
+		// listSchedules call (inside handleAddSchedule), not the first one.
+		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([created]);
+
+		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		await page.getByPlaceholder('0 9 * * *').fill('0 9 * * *');
+		await page.getByPlaceholder('input passed to the entry step').fill('go');
+		await page.getByRole('button', { name: 'Add schedule', exact: true }).click();
+
+		expect(workflows.createSchedule).toHaveBeenCalledWith('wf-1', {
+			channel_id: 'ch-1',
+			cron_expression: '0 9 * * *',
+			input_content: 'go'
+		});
+		await expect.element(page.getByText('0 9 * * *')).toBeInTheDocument();
+		await expect.element(page.getByText('digest-channel', { exact: false })).toBeInTheDocument();
+	});
+
+	it('shows a validation error from the preview endpoint without saving', async () => {
+		mockLoad();
+		vi.mocked(workflows.previewSchedule).mockResolvedValueOnce({
+			valid: false,
+			next_fire_at: null,
+			error: 'Invalid cron expression'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		await page.getByPlaceholder('0 9 * * *').fill('nonsense');
+
+		await expect.element(page.getByText('Invalid cron expression')).toBeInTheDocument();
+		expect(workflows.createSchedule).not.toHaveBeenCalled();
+	});
+
+	it('labels a scheduled run "(scheduled)" in run history', async () => {
+		mockLoad();
+		vi.mocked(workflows.listRuns).mockResolvedValueOnce([
+			{
+				id: 'run-2',
+				workflow_id: 'wf-1',
+				rivulet_id: 'riv-2',
+				triggered_by: 'schedule',
+				triggered_by_id: 'sched-1',
+				status: 'completed',
+				current_node_id: null,
+				error_message: null,
+				final_output: 'digest sent',
+				started_at: '2026-08-08T09:00:00Z',
+				completed_at: '2026-08-08T09:00:05Z'
+			}
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Load runs' }).click();
+
+		await expect.element(page.getByText('(scheduled)')).toBeInTheDocument();
 	});
 });
