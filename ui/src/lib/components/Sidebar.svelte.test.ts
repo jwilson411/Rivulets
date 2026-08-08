@@ -15,6 +15,7 @@ import { teams } from '$lib/api/teams';
 import { providers } from '$lib/api/providers';
 import { mcpServers } from '$lib/api/mcpServers';
 import { tools } from '$lib/api/tools';
+import { workflows } from '$lib/api/workflows';
 import { sync } from '$lib/api/sync';
 import { update } from '$lib/api/update';
 import { theme } from '$lib/theme.svelte';
@@ -54,6 +55,7 @@ vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
 vi.mock('$lib/api/mcpServers', () => ({ mcpServers: { list: vi.fn() } }));
 vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn() } }));
+vi.mock('$lib/api/workflows', () => ({ workflows: { list: vi.fn() } }));
 vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
 vi.mock('$lib/api/update', () => ({ update: { status: vi.fn() } }));
 
@@ -206,6 +208,17 @@ describe('Sidebar.svelte', () => {
 		await expect.element(browserPage.getByRole('link', { name: /Teams/ })).toBeInTheDocument();
 	});
 
+	it('shows the Workflows link under Workspace', async () => {
+		routeState.pathname = '/agents';
+		vi.mocked(channels.list).mockResolvedValue([]);
+
+		render(Sidebar);
+
+		await expect
+			.element(browserPage.getByRole('link', { name: /Workflows/ }))
+			.toHaveAttribute('href', '/workflows');
+	});
+
 	it('links the ambient sync status readout to the sync page', async () => {
 		vi.mocked(channels.list).mockResolvedValue([]);
 
@@ -222,6 +235,7 @@ describe('Sidebar.svelte', () => {
 		vi.mocked(providers.list).mockResolvedValue([]);
 		vi.mocked(mcpServers.list).mockResolvedValue([]);
 		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(workflows.list).mockResolvedValue([]);
 		vi.mocked(sync.status).mockResolvedValue({
 			running: false,
 			node_id: null,

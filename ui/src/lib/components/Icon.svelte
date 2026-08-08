@@ -170,6 +170,19 @@
 			stroke-linecap="round"
 		/>
 	</svg>
+{:else if name === 'workflow'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<rect x="2" y="3" width="5" height="4" rx="1" stroke="currentColor" stroke-width="1.5" />
+		<rect x="13" y="3" width="5" height="4" rx="1" stroke="currentColor" stroke-width="1.5" />
+		<rect x="7.5" y="13" width="5" height="4" rx="1" stroke="currentColor" stroke-width="1.5" />
+		<path
+			d="M4.5 7v2.5a1 1 0 0 0 1 1H10m5.5-3.5v2.5a1 1 0 0 1-1 1H10m0 0V15"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+	</svg>
 {:else if name === 'wrench'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path
