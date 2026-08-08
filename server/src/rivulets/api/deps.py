@@ -1,5 +1,6 @@
 """Shared FastAPI dependencies: DB session + workspace-key JWT auth."""
 
+from dataclasses import dataclass
 from typing import Annotated
 
 import jwt
@@ -15,7 +16,25 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _decode_token(token: str) -> str:
+@dataclass(frozen=True, slots=True)
+class SessionClaims:
+    """A decoded session JWT's payload (#14/#15). `human_id` is None until
+    a browser session claims an identity via POST /auth/identity — it's a
+    lightweight claim, not a separate credential (see Human's docstring in
+    db/models.py). `grant` distinguishes an owner session (mnemonic-
+    authenticated at /auth/login) from an invite-redeemed one (#15,
+    /invites/accept) — it's server-decided at mint time, never
+    client-supplied, and is what makes an invited session genuinely scoped
+    rather than just differently labeled. Tokens minted before this claim
+    existed have no `grant` in their payload; defaulting to "owner" keeps
+    them valid rather than locking out anyone with a token in flight."""
+
+    workspace_id: str
+    human_id: str | None
+    grant: str
+
+
+def _decode_token(token: str) -> SessionClaims:
     try:
         signing_key = get_session_key_store().get_key()
     except RuntimeError as exc:
@@ -24,17 +43,27 @@ def _decode_token(token: str) -> str:
         payload = jwt.decode(token, signing_key, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token") from exc
-    return payload["sub"]
+    return SessionClaims(
+        workspace_id=payload["sub"],
+        human_id=payload.get("human_id"),
+        grant=payload.get("grant", "owner"),
+    )
 
 
-async def get_current_workspace_id(
+async def get_session_claims(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-) -> str:
-    """Validate the JWT issued at /auth/login and return the workspace ID
-    from its `sub` claim."""
+) -> SessionClaims:
     if credentials is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
     return _decode_token(credentials.credentials)
+
+
+async def get_current_workspace_id(
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> str:
+    """Validate the JWT issued at /auth/login and return the workspace ID
+    from its `sub` claim."""
+    return claims.workspace_id
 
 
 async def get_current_workspace_id_for_stream(
@@ -52,16 +81,47 @@ async def get_current_workspace_id_for_stream(
     token = credentials.credentials if credentials else request.query_params.get("token")
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
-    return _decode_token(token)
+    return _decode_token(token).workspace_id
+
+
+async def get_current_human_id(
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> str:
+    """The claimed Human for this session (#14). 401s rather than falling
+    back to some default identity — every message needs a real author, and
+    "no identity claimed yet" is a distinct state the UI handles via
+    IdentityPicker, not something to paper over here."""
+    if claims.human_id is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No identity claimed for this session")
+    return claims.human_id
+
+
+async def require_owner_grant(
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
+    """Gates routes an invited human (#15, grant="invite") shouldn't reach
+    — provider credentials, backups, sync config, invite management itself,
+    etc. See api/invites.py's module docstring for the full list of what's
+    owner-only vs. open to any grant."""
+    if claims.grant != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required")
 
 
 CurrentWorkspaceId = Annotated[str, Depends(get_current_workspace_id)]
 CurrentWorkspaceIdForStream = Annotated[str, Depends(get_current_workspace_id_for_stream)]
+CurrentHumanId = Annotated[str, Depends(get_current_human_id)]
+OwnerGrant = Annotated[None, Depends(require_owner_grant)]
 
 __all__ = [
+    "CurrentHumanId",
     "CurrentWorkspaceId",
     "CurrentWorkspaceIdForStream",
     "DbSession",
+    "OwnerGrant",
+    "SessionClaims",
+    "get_current_human_id",
     "get_current_workspace_id",
     "get_current_workspace_id_for_stream",
+    "get_session_claims",
+    "require_owner_grant",
 ]

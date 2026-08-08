@@ -28,9 +28,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, CurrentWorkspaceIdForStream, DbSession
+from rivulets.api.deps import (
+    CurrentHumanId,
+    CurrentWorkspaceId,
+    CurrentWorkspaceIdForStream,
+    DbSession,
+)
 from rivulets.api.files import publish_file_change
-from rivulets.db.models import Channel, File, Message, Rivulet
+from rivulets.db.models import Channel, File, Human, Message, Rivulet
 from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from rivulets.streaming import subscribe, unsubscribe
@@ -104,6 +109,13 @@ async def _get_rivulet_or_404(db: DbSession, rivulet_id: str) -> Rivulet:
     if rivulet is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Rivulet not found")
     return rivulet
+
+
+async def _get_human_or_404(db: DbSession, human_id: str) -> Human:
+    human = await db.get(Human, human_id)
+    if human is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Human not found")
+    return human
 
 
 async def _publish_rivulet_change(db: DbSession, rivulet: Rivulet) -> None:
@@ -197,18 +209,24 @@ async def list_rivulets(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -
     status_code=status.HTTP_201_CREATED,
 )
 async def create_rivulet(
-    channel_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
+    channel_id: str,
+    body: MessageCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    human_id: CurrentHumanId,
 ) -> Rivulet:
     """Posting to the channel creates a rivulet with the human message as its
     root (FR-5.1), then dispatches it to the channel's team (FR-4.1)."""
     channel = await _get_channel_or_404(db, channel_id)
+    human = await _get_human_or_404(db, human_id)
     rivulet = Rivulet(channel_id=channel_id, created_by="human")
     db.add(rivulet)
     await db.flush()
     human_message = Message(
         rivulet_id=rivulet.id,
         sender_type="human",
-        sender_name="You",
+        sender_id=human.id,
+        sender_name=human.display_name,
         content=body.content,
     )
     db.add(human_message)
@@ -250,12 +268,21 @@ async def list_messages(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -
     status_code=status.HTTP_201_CREATED,
 )
 async def post_message(
-    rivulet_id: str, body: MessageCreate, db: DbSession, _: CurrentWorkspaceId
+    rivulet_id: str,
+    body: MessageCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    human_id: CurrentHumanId,
 ) -> MessageOut:
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
     channel = await _get_channel_or_404(db, rivulet.channel_id)
+    human = await _get_human_or_404(db, human_id)
     message = Message(
-        rivulet_id=rivulet_id, sender_type="human", sender_name="You", content=body.content
+        rivulet_id=rivulet_id,
+        sender_type="human",
+        sender_id=human.id,
+        sender_name=human.display_name,
+        content=body.content,
     )
     db.add(message)
     await db.flush()  # populate message.id before attaching files to it

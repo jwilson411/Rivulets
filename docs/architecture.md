@@ -61,7 +61,9 @@ Rivulets is a **local-first, peer-to-peer-synced, single-binary application** ma
 
 ### Why not microservices?
 
-This is a single-user local application. Splitting it into microservices would add deployment complexity — orchestration, service discovery, inter-service auth — for no benefit at this scale. The App Server, AgentOS, and SQLite run together as one process group.
+This is a single-workspace local application — even with multiple humans sharing that workspace, there's exactly one App Server/AgentOS/SQLite process group per node, not one per person. Splitting it into microservices would add deployment complexity — orchestration, service discovery, inter-service auth — for no benefit at this scale. The App Server, AgentOS, and SQLite run together as one process group.
+
+Multiple humans can share a workspace: each browser session claims a display identity on top of the one real credential (the workspace recovery phrase), rather than getting a separate per-user login of its own. See [`security.md`](security.md) for how that claim fits into the auth model.
 
 ## Technology stack
 

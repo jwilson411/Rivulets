@@ -16,6 +16,7 @@ from rivulets.api import (
     dispatch,
     files,
     health,
+    humans,
     mcp_servers,
     providers,
     rivulets,
@@ -36,6 +37,7 @@ api_router.include_router(channels.router)
 api_router.include_router(teams.router)
 api_router.include_router(agents.router)
 api_router.include_router(rivulets.router)
+api_router.include_router(humans.router)
 api_router.include_router(tools.router)
 api_router.include_router(mcp_servers.router)
 api_router.include_router(files.router)

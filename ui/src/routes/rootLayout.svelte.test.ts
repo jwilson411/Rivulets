@@ -15,7 +15,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import RootLayout from './+layout.svelte';
 
-const authState = vi.hoisted(() => ({ isAuthenticated: false }));
+const authState = vi.hoisted(() => ({
+	isAuthenticated: false,
+	humanId: null as string | null,
+	displayName: null as string | null,
+	grant: null as string | null
+}));
 
 vi.mock('$app/state', () => ({
 	page: { url: new URL('http://localhost/') }
@@ -30,10 +35,22 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		get isAuthenticated() {
 			return authState.isAuthenticated;
 		},
-		logout: vi.fn()
+		get humanId() {
+			return authState.humanId;
+		},
+		get displayName() {
+			return authState.displayName;
+		},
+		get grant() {
+			return authState.grant;
+		},
+		logout: vi.fn(),
+		claimIdentity: vi.fn(),
+		clearIdentity: vi.fn()
 	}
 }));
 
+vi.mock('$lib/api/humans', () => ({ humans: { list: vi.fn() } }));
 vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
@@ -43,6 +60,7 @@ vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
 vi.mock('$lib/api/mcpServers', () => ({ mcpServers: { list: vi.fn() } }));
 vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn() } }));
 vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
+vi.mock('$lib/api/update', () => ({ update: { status: vi.fn() } }));
 
 function childrenSnippet(text: string) {
 	return createRawSnippet(() => ({
@@ -53,6 +71,9 @@ function childrenSnippet(text: string) {
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.isAuthenticated = false;
+	authState.humanId = null;
+	authState.displayName = null;
+	authState.grant = null;
 });
 
 describe('routes/+layout.svelte', () => {
@@ -67,8 +88,23 @@ describe('routes/+layout.svelte', () => {
 		await expect.element(page.getByText('channel content')).not.toBeInTheDocument();
 	});
 
-	it('renders the sidebar and routed children once authenticated', async () => {
+	it('shows the identity picker once authenticated but before an identity is claimed', async () => {
 		authState.isAuthenticated = true;
+		authState.humanId = null;
+		const { humans } = await import('$lib/api/humans');
+		vi.mocked(humans.list).mockResolvedValue([]);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await expect.element(page.getByText("Who's this?")).toBeInTheDocument();
+		await expect.element(page.getByText('channel content')).not.toBeInTheDocument();
+	});
+
+	it('renders the sidebar and routed children once an identity is claimed', async () => {
+		authState.isAuthenticated = true;
+		authState.humanId = 'human-1';
+		authState.displayName = 'Test User';
+		authState.grant = 'owner';
 		const { channels } = await import('$lib/api/channels');
 		const { agents } = await import('$lib/api/agents');
 		const { teams } = await import('$lib/api/teams');

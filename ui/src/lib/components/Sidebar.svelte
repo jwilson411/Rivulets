@@ -150,8 +150,19 @@
 			<img src="/logo.png" alt="" class="h-6 w-6" />
 			Rivulets<span class="text-agent-cyan-600 dark:text-agent-cyan-400">.</span>
 		</a>
-		<p class="mt-0.5 mb-2.5 font-mono text-[11px] text-neutral-600 dark:text-neutral-400">
-			{page.url.host} · unlocked
+		<p
+			class="mt-0.5 mb-2.5 flex items-center gap-1.5 font-mono text-[11px] text-neutral-600 dark:text-neutral-400"
+		>
+			<span>{page.url.host} · {auth.displayName}</span>
+			{#if auth.grant === 'owner'}
+				<button
+					type="button"
+					onclick={() => auth.clearIdentity()}
+					class="text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+				>
+					switch
+				</button>
+			{/if}
 		</p>
 		<div class="border-t-[3px] border-ink dark:border-ink-dark"></div>
 		<div class="mt-0.5 border-t border-ink dark:border-ink-dark"></div>

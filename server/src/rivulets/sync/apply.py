@@ -79,6 +79,7 @@ from rivulets.db.models import (
     AgentPeerPreference,
     Channel,
     File,
+    Human,
     MCPServer,
     Message,
     Rivulet,
@@ -203,6 +204,7 @@ WORKSPACE_SETTING_SPEC = EntitySpec(
 AGENT_PEER_PREFERENCE_SPEC = EntitySpec(
     "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_field="agent_id"
 )
+HUMAN_SPEC = EntitySpec("human", Human, ("display_name",))
 
 
 def _snapshot(instance: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -449,6 +451,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "message": MESSAGE_SPEC,
     "workspace_setting": WORKSPACE_SETTING_SPEC,
     "agent_peer_preference": AGENT_PEER_PREFERENCE_SPEC,
+    "human": HUMAN_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields

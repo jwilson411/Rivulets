@@ -13,8 +13,12 @@ Layer 1: Localhost Binding
 
 Layer 2: Workspace Key Authentication
   └─ JWT-based session auth. The workspace key (a BIP-39 mnemonic) is required
-     for initial login. The JWT is signed with an HKDF-derived key, never the
-     raw workspace key.
+     for initial login and remains the only real credential — the JWT is
+     signed with an HKDF-derived key, never the raw workspace key. A logged-in
+     session additionally claims a display identity (which human is posting)
+     via its `human_id` claim, but that claim carries no independent
+     authentication weight: it's a per-session label on top of the one
+     workspace-level credential above, not a separate per-user login.
 
 Layer 3: P2P Encryption (libp2p noise)
   └─ All sync traffic is encrypted with the workspace key as a pre-shared key.
