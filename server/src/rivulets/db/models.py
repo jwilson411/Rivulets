@@ -317,7 +317,13 @@ class Workflow(Base):
     publish endpoint refuses if the workflow has no entry connection, the
     same "can this even run" check the engine itself makes at trigger
     time (workflows/engine.py's "Workflow has no entry point" failure) --
-    published is meant to mean "ready", not just "flagged"."""
+    published is meant to mean "ready", not just "flagged".
+
+    Not required for a node_type='workflow' step (#85) to reference this
+    workflow as a nested child -- that's a structural reference chosen by
+    whoever built the parent, not an external trigger a stray message
+    could hit by accident, so the same "shouldn't be triggerable before
+    it's ready" concern `published` addresses doesn't apply the same way."""
 
     __tablename__ = "workflow"
     __table_args__ = (UniqueConstraint("name", name="idx_workflow_name"),)
@@ -331,7 +337,12 @@ class Workflow(Base):
     vector_clock: Mapped[int] = mapped_column(default=0)
 
     nodes: Mapped[list["WorkflowNode"]] = relationship(
-        back_populates="workflow", cascade="all, delete-orphan"
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+        # WorkflowNode has two FKs to workflow.id (workflow_id and, since
+        # #85, child_workflow_id) -- without this, SQLAlchemy can't infer
+        # which one defines "this workflow's own nodes".
+        foreign_keys="WorkflowNode.workflow_id",
     )
     connections: Mapped[list["WorkflowConnection"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan"
@@ -341,26 +352,43 @@ class Workflow(Base):
 class WorkflowNode(Base):
     """One step in a workflow (#24): either an existing `Agent` (node_type
     'agent', `agent_id` set) or a built-in utility node ('summarize' |
-    'transform' | 'conditional' | 'merge', workflows/nodes.py). `agent_id`
-    uses ondelete='SET NULL' rather than CASCADE or the FK-less "looser
-    association" pattern (Channel.team_id) -- deleting an agent that a
-    workflow references shouldn't be blocked by that reference (unlike
-    TeamAgent, which really is meaningless without its agent), but the
-    node itself should survive as a now-misconfigured step an owner can
-    fix, not silently disappear along with its parent workflow. Ordering/
-    flow between nodes lives entirely in `WorkflowConnection`, not on this
-    row, so branching later doesn't need a schema change here (only a
-    change to how many outbound connections the engine follows)."""
+    'transform' | 'conditional' | 'merge' | 'human_input' |'workflow',
+    workflows/nodes.py). `agent_id` uses ondelete='SET NULL' rather than
+    CASCADE or the FK-less "looser association" pattern (Channel.team_id)
+    -- deleting an agent that a workflow references shouldn't be blocked
+    by that reference (unlike TeamAgent, which really is meaningless
+    without its agent), but the node itself should survive as a
+    now-misconfigured step an owner can fix, not silently disappear along
+    with its parent workflow. Ordering/flow between nodes lives entirely
+    in `WorkflowConnection`, not on this row, so branching later doesn't
+    need a schema change here (only a change to how many outbound
+    connections the engine follows).
+
+    `child_workflow_id` (#85): the workflow node_type='workflow' invokes
+    as a step -- same ondelete='SET NULL' reasoning as `agent_id`, a
+    dedicated FK column rather than an id buried in `config_json` so it
+    gets the same referential-integrity and "survives a deletion as a
+    now-misconfigured step" treatment `agent_id` already has, not a
+    second, inconsistent way of referencing something. Cycle prevention
+    (workflow A embeds B embeds A) isn't enforced by the schema -- it's a
+    runtime check in workflows/engine.py's `_execute_workflow_node`
+    against the chain of workflow ids currently executing, the same
+    "structural, but checked live rather than validated at save time"
+    tradeoff Workflow's own docstring already made for the entry-point/
+    outbound-connection invariants."""
 
     __tablename__ = "workflow_node"
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     name: Mapped[str]
-    # 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input'
+    # 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input' | 'workflow'
     node_type: Mapped[str]
     agent_id: Mapped[str | None] = mapped_column(
         ForeignKey("agent.id", ondelete="SET NULL"), default=None
+    )
+    child_workflow_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow.id", ondelete="SET NULL"), default=None
     )
     config_json: Mapped[str | None] = mapped_column(default=None)  # JSON, node-type-specific
     retry_max_attempts: Mapped[int] = mapped_column(default=0)
@@ -369,7 +397,7 @@ class WorkflowNode(Base):
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
 
-    workflow: Mapped["Workflow"] = relationship(back_populates="nodes")
+    workflow: Mapped["Workflow"] = relationship(back_populates="nodes", foreign_keys=[workflow_id])
 
 
 class WorkflowConnection(Base):
@@ -426,7 +454,24 @@ class WorkflowRun(Base):
     per run_workflow call and holds it in memory for that call's
     duration), but every run gets one uniformly rather than only runs that
     turn out to pause -- simpler than a null column meaning "never
-    snapshotted" that engine.py would need to branch on."""
+    snapshotted" that engine.py would need to branch on.
+
+    triggered_by='workflow' (#85): this run is a nested invocation from a
+    node_type='workflow' step in *another* WorkflowRun, whose id is
+    `triggered_by_id` (a WorkflowRun id here, unlike the human_id/agent_id
+    triggered_by_id already holds for 'human'/'agent'). `final_output`
+    (#85) is what that parent node's own output becomes: the workflow
+    engine has never persisted a single "this run's result" anywhere --
+    each node's output only ever existed as a transient local value passed
+    to the next one -- so nesting needed *something* queryable a parent
+    can read back once its child run finishes. Set only when a run
+    actually completes (workflows/engine.py's `_finalize_run`); stays
+    None for a failed or still-paused run. Run history intentionally
+    stays flat and per-workflow rather than a cross-workflow tree (see
+    engine.py's module docstring) -- a nested child's own runs only show
+    up under *its* workflow's run history, not folded into the parent's;
+    `triggered_by`/`triggered_by_id` are what let a human trace one back
+    to the other."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -434,13 +479,15 @@ class WorkflowRun(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
-    triggered_by: Mapped[str]  # 'human' | 'agent'
-    triggered_by_id: Mapped[str | None] = mapped_column(default=None)  # human_id or agent_id
+    triggered_by: Mapped[str]  # 'human' | 'agent' | 'workflow'
+    # human_id / agent_id / (for 'workflow') the parent WorkflowRun's id
+    triggered_by_id: Mapped[str | None] = mapped_column(default=None)
     input_content: Mapped[str]
     # 'running' | 'completed' | 'failed' | 'awaiting_human'
     status: Mapped[str] = mapped_column(default="running")
     current_node_id: Mapped[str | None] = mapped_column(default=None)
     error_message: Mapped[str | None] = mapped_column(default=None)
+    final_output: Mapped[str | None] = mapped_column(default=None)
     graph_snapshot_json: Mapped[str] = mapped_column(default="{}")
     started_at: Mapped[str] = mapped_column(default=utcnow_iso)
     completed_at: Mapped[str | None] = mapped_column(default=None)

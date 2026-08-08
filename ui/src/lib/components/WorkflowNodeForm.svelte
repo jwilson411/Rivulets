@@ -5,6 +5,7 @@
 		name: string;
 		node_type: WorkflowNodeType;
 		agent_id: string | null;
+		child_workflow_id: string | null;
 		config: Record<string, unknown>;
 		retry_max_attempts: number;
 		retry_backoff_seconds: number;
@@ -14,6 +15,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Agent } from '$lib/api/agents';
+	import type { Workflow } from '$lib/api/workflows';
 
 	const NODE_TYPE_LABELS: Record<WorkflowNodeType, string> = {
 		agent: 'Agent',
@@ -21,15 +23,18 @@
 		summarize: 'Summarize',
 		conditional: 'Conditional',
 		merge: 'Merge',
-		human_input: 'Human input'
+		human_input: 'Human input',
+		workflow: 'Workflow'
 	};
 
 	let {
 		agentOptions,
+		workflowOptions,
 		initial = {
 			name: '',
 			node_type: 'agent',
 			agent_id: null,
+			child_workflow_id: null,
 			config: {},
 			retry_max_attempts: 0,
 			retry_backoff_seconds: 5
@@ -43,6 +48,11 @@
 		oncancel
 	}: {
 		agentOptions: Agent[];
+		// Callers exclude the workflow currently being edited -- a workflow
+		// referencing itself is always a cycle, so there's no reason to
+		// even offer the choice (the engine's own ancestry guard still
+		// catches it, but this avoids the round-trip to find out).
+		workflowOptions: Workflow[];
 		initial?: WorkflowNodeFormValues;
 		lockNodeType?: boolean;
 		submitLabel: string;
@@ -58,6 +68,7 @@
 	let name = $state(untrack(() => initial.name));
 	let nodeType = $state<WorkflowNodeType>(untrack(() => initial.node_type));
 	let agentId = $state(untrack(() => initial.agent_id ?? ''));
+	let childWorkflowId = $state(untrack(() => initial.child_workflow_id ?? ''));
 	let template = $state(untrack(() => (initial.config.template as string | undefined) ?? ''));
 	let contains = $state(untrack(() => (initial.config.contains as string | undefined) ?? ''));
 	let retryMaxAttempts = $state(untrack(() => initial.retry_max_attempts));
@@ -73,10 +84,12 @@
 		event.preventDefault();
 		if (!name.trim()) return;
 		if (nodeType === 'agent' && !agentId) return;
+		if (nodeType === 'workflow' && !childWorkflowId) return;
 		onsubmit({
 			name: name.trim(),
 			node_type: nodeType,
 			agent_id: nodeType === 'agent' ? agentId : null,
+			child_workflow_id: nodeType === 'workflow' ? childWorkflowId : null,
 			config: configFor(nodeType),
 			retry_max_attempts: retryMaxAttempts,
 			retry_backoff_seconds: retryBackoffSeconds
@@ -147,6 +160,19 @@
 		<p class="text-xs text-neutral-500">
 			Pauses the run and waits for a reply in the channel — whatever the human types next becomes
 			this step's output, and the rivulet is marked paused until then.
+		</p>
+	{:else if nodeType === 'workflow'}
+		<select
+			bind:value={childWorkflowId}
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+		>
+			<option value="" disabled>Select a workflow…</option>
+			{#each workflowOptions as workflow (workflow.id)}
+				<option value={workflow.id}>/{workflow.name}</option>
+			{/each}
+		</select>
+		<p class="text-xs text-neutral-500">
+			Runs the selected workflow as a nested step; its result becomes this step's output.
 		</p>
 	{/if}
 

@@ -55,6 +55,19 @@ def _add_human_input_node(
     return node_id
 
 
+def _add_workflow_node(
+    client: TestClient, headers: dict[str, str], workflow_id: str, name: str, child_workflow_id: str
+) -> str:
+    created = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": name, "node_type": "workflow", "child_workflow_id": child_workflow_id},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    node_id: str = created.json()["id"]
+    return node_id
+
+
 def _connect(
     client: TestClient,
     headers: dict[str, str],
@@ -114,6 +127,58 @@ def test_create_node_rejects_unknown_node_type(
         headers=auth_headers,
     )
     assert resp.status_code == 400
+
+
+def test_create_workflow_node_requires_child_workflow_id(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "needs-child")
+    resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "invoke", "node_type": "workflow"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_create_workflow_node_rejects_self_reference(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "self-ref")
+    resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "invoke-self", "node_type": "workflow", "child_workflow_id": workflow_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_create_workflow_node_rejects_unknown_child_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "dangling-ref")
+    resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={
+            "name": "invoke-missing",
+            "node_type": "workflow",
+            "child_workflow_id": "does-not-exist",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+def test_create_workflow_node_round_trips_child_workflow_id(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    child_id = _create_workflow(client, auth_headers, "child-flow")
+    parent_id = _create_workflow(client, auth_headers, "parent-flow")
+    node_id = _add_workflow_node(client, auth_headers, parent_id, "invoke-child", child_id)
+
+    got = client.get(f"/api/v1/workflows/{parent_id}/nodes", headers=auth_headers).json()
+    node = next(n for n in got if n["id"] == node_id)
+    assert node["child_workflow_id"] == child_id
 
 
 def test_second_outbound_connection_from_same_node_is_allowed(

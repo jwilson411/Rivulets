@@ -22,14 +22,21 @@
 		summarize: 'Summarize',
 		conditional: 'Conditional',
 		merge: 'Merge',
-		human_input: 'Human input'
+		human_input: 'Human input',
+		workflow: 'Workflow'
 	};
 
 	let workflow = $state<Workflow | null>(null);
 	let nodeList = $state<WorkflowNode[]>([]);
 	let connectionList = $state<WorkflowConnection[]>([]);
 	let agentList = $state<Agent[]>([]);
+	let workflowList = $state<Workflow[]>([]);
 	let loadError = $state<string | null>(null);
+
+	// A workflow embedding itself is always a cycle -- excluded from the
+	// picker so there's no reason to even offer it (the engine's own
+	// ancestry guard still catches it if something else got past this).
+	const workflowOptions = $derived(workflowList.filter((w) => w.id !== workflow?.id));
 
 	let renaming = $state(false);
 	let nameDraft = $state('');
@@ -78,16 +85,19 @@
 	async function load(workflowId: string) {
 		loadError = null;
 		try {
-			const [loadedWorkflow, loadedNodes, loadedConnections, loadedAgents] = await Promise.all([
-				workflows.get(workflowId),
-				workflows.listNodes(workflowId),
-				workflows.listConnections(workflowId),
-				agentsApi.list()
-			]);
+			const [loadedWorkflow, loadedNodes, loadedConnections, loadedAgents, loadedWorkflows] =
+				await Promise.all([
+					workflows.get(workflowId),
+					workflows.listNodes(workflowId),
+					workflows.listConnections(workflowId),
+					agentsApi.list(),
+					workflows.list()
+				]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;
 			connectionList = loadedConnections;
 			agentList = loadedAgents;
+			workflowList = loadedWorkflows;
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load workflow';
 		}
@@ -192,6 +202,7 @@
 			await workflows.updateNode(workflow.id, nodeId, {
 				name: values.name,
 				agent_id: values.node_type === 'agent' ? values.agent_id : undefined,
+				child_workflow_id: values.node_type === 'workflow' ? values.child_workflow_id : undefined,
 				config: values.config,
 				retry_max_attempts: values.retry_max_attempts,
 				retry_backoff_seconds: values.retry_backoff_seconds
@@ -391,6 +402,7 @@
 					{#key insertFormKey}
 						<WorkflowNodeForm
 							agentOptions={agentList}
+							{workflowOptions}
 							submitLabel="Add step"
 							busyLabel="Adding…"
 							busy={insertBusy}
@@ -411,11 +423,13 @@
 						{#key node.id}
 							<WorkflowNodeForm
 								agentOptions={agentList}
+								{workflowOptions}
 								lockNodeType
 								initial={{
 									name: node.name,
 									node_type: node.node_type,
 									agent_id: node.agent_id,
+									child_workflow_id: node.child_workflow_id,
 									config: node.config,
 									retry_max_attempts: node.retry_max_attempts,
 									retry_backoff_seconds: node.retry_backoff_seconds
@@ -448,6 +462,11 @@
 								{:else if node.node_type === 'conditional' && node.config.contains}
 									<p class="text-xs text-neutral-500">
 										stop unless input contains "{node.config.contains}"
+									</p>
+								{:else if node.node_type === 'workflow'}
+									<p class="text-xs text-neutral-500">
+										/{workflowList.find((w) => w.id === node.child_workflow_id)?.name ??
+											'Deleted workflow'}
 									</p>
 								{/if}
 							</div>
@@ -485,6 +504,7 @@
 						{#key insertFormKey}
 							<WorkflowNodeForm
 								agentOptions={agentList}
+								{workflowOptions}
 								submitLabel="Add step"
 								busyLabel="Adding…"
 								busy={insertBusy}
@@ -576,6 +596,9 @@
 											: ''}"
 									/>
 									{timeAgo(run.started_at)}
+									{#if run.triggered_by === 'workflow'}
+										<span class="text-neutral-500">(nested)</span>
+									{/if}
 								</span>
 								<span class="rounded-sm px-2 py-0.5 text-xs {statusClass(run.status)}">
 									{run.status}

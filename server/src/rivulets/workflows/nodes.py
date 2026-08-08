@@ -20,6 +20,14 @@ intercepts it before it would ever reach `_execute_node`, pausing that
 branch (WorkflowRun.status='awaiting_human') until a human replies in the
 rivulet; the reply becomes the paused node's output the same way any
 other node's return value would, via `resume_workflow`.
+
+'workflow' (#85) has no executor here either, for a different reason:
+invoking a nested workflow means calling `run_workflow` itself, which is
+defined in workflows/engine.py -- a module-level import of it here would
+be circular (engine.py already imports this module for every other
+executor). `_execute_workflow_node` lives in engine.py instead and is
+wired into `_execute_node`'s dispatch there directly, alongside (not
+through) this module's executors.
 """
 
 import json
@@ -31,7 +39,15 @@ from rivulets.agentos import run_agent
 from rivulets.agentos.models import resolve_model
 from rivulets.db.models import Agent, WorkflowNode
 
-NODE_TYPES = ("agent", "summarize", "transform", "conditional", "merge", "human_input")
+NODE_TYPES = (
+    "agent",
+    "summarize",
+    "transform",
+    "conditional",
+    "merge",
+    "human_input",
+    "workflow",
+)
 
 _SUMMARIZE_INSTRUCTIONS = (
     "Summarize the given text concisely, preserving the key points. "

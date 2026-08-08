@@ -26,6 +26,14 @@ run — see Workflow's own docstring for exactly what that does and
 doesn't protect. Editing nodes/connections isn't otherwise restricted by
 publish state; a published workflow can still be freely edited here,
 same as before this existed.
+
+A node_type='workflow' node's `child_workflow_id` (#85) only gets the
+cheap, always-correct check at save time -- rejecting a direct
+self-reference (`_validate_child_workflow`). A multi-hop cycle (workflow
+A embeds B, B embeds A) can't be fully ruled out here since it can appear
+later purely by editing a *different* workflow, so it's caught instead by
+workflows/engine.py's runtime ancestry check when the workflow actually
+runs, not by this endpoint — see that module's docstring.
 """
 
 import json
@@ -83,6 +91,7 @@ class WorkflowNodeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     node_type: str
     agent_id: str | None = None
+    child_workflow_id: str | None = None
     config: dict[str, object] = Field(default_factory=dict)
     retry_max_attempts: int = Field(default=0, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=5, ge=0, le=3600)
@@ -91,6 +100,7 @@ class WorkflowNodeCreate(BaseModel):
 class WorkflowNodeUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     agent_id: str | None = None
+    child_workflow_id: str | None = None
     config: dict[str, object] | None = None
     retry_max_attempts: int | None = Field(default=None, ge=0, le=10)
     retry_backoff_seconds: int | None = Field(default=None, ge=0, le=3600)
@@ -102,6 +112,7 @@ class WorkflowNodeOut(BaseModel):
     name: str
     node_type: str
     agent_id: str | None
+    child_workflow_id: str | None
     config: dict[str, object]
     retry_max_attempts: int
     retry_backoff_seconds: int
@@ -114,6 +125,7 @@ class WorkflowNodeOut(BaseModel):
             name=row.name,
             node_type=row.node_type,
             agent_id=row.agent_id,
+            child_workflow_id=row.child_workflow_id,
             config=json.loads(row.config_json) if row.config_json else {},
             retry_max_attempts=row.retry_max_attempts,
             retry_backoff_seconds=row.retry_backoff_seconds,
@@ -175,6 +187,7 @@ class WorkflowRunOut(BaseModel):
     status: str
     current_node_id: str | None
     error_message: str | None
+    final_output: str | None
     started_at: str
     completed_at: str | None
 
@@ -206,6 +219,20 @@ async def _get_node_or_404(db: DbSession, workflow_id: str, node_id: str) -> Wor
     if node is None or node.workflow_id != workflow_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow node not found")
     return node
+
+
+async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workflow_id: str) -> None:
+    """#85: only the cheap, always-correct static check -- a direct
+    self-reference (a workflow embedding itself). A multi-hop cycle
+    (A embeds B, B embeds A) can't be fully ruled out here: it can appear
+    later purely by editing a *different* workflow's nodes, so it's the
+    runtime ancestry check in workflows/engine.py's _execute_workflow_node
+    that actually guarantees safety, not this endpoint -- see that
+    module's docstring."""
+    if child_workflow_id == workflow_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A workflow can't embed itself as a step")
+    if await db.get(Workflow, child_workflow_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
 
 
 @router.post("", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
@@ -318,11 +345,19 @@ async def create_node(
             )
         if await db.get(Agent, body.agent_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+    if body.node_type == "workflow":
+        if body.child_workflow_id is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "child_workflow_id is required for node_type='workflow'",
+            )
+        await _validate_child_workflow(db, workflow_id, body.child_workflow_id)
     node = WorkflowNode(
         workflow_id=workflow_id,
         name=body.name,
         node_type=body.node_type,
         agent_id=body.agent_id if body.node_type == "agent" else None,
+        child_workflow_id=body.child_workflow_id if body.node_type == "workflow" else None,
         config_json=json.dumps(body.config) if body.config else None,
         retry_max_attempts=body.retry_max_attempts,
         retry_backoff_seconds=body.retry_backoff_seconds,
@@ -362,6 +397,14 @@ async def update_node(
         if await db.get(Agent, body.agent_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
         node.agent_id = body.agent_id
+    if body.child_workflow_id is not None:
+        if node.node_type != "workflow":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "child_workflow_id only applies to node_type='workflow'",
+            )
+        await _validate_child_workflow(db, workflow_id, body.child_workflow_id)
+        node.child_workflow_id = body.child_workflow_id
     if body.config is not None:
         node.config_json = json.dumps(body.config) if body.config else None
     if body.retry_max_attempts is not None:

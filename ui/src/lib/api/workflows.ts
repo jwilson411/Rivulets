@@ -8,7 +8,7 @@ import { api } from './client';
 import { auth } from './auth.svelte';
 
 export type WorkflowNodeType =
-	'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input';
+	'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input' | 'workflow';
 
 export interface Workflow {
 	id: string;
@@ -25,6 +25,7 @@ export interface WorkflowNode {
 	name: string;
 	node_type: WorkflowNodeType;
 	agent_id: string | null;
+	child_workflow_id: string | null;
 	config: Record<string, unknown>;
 	retry_max_attempts: number;
 	retry_backoff_seconds: number;
@@ -48,6 +49,7 @@ export interface WorkflowRun {
 	status: WorkflowRunStatus;
 	current_node_id: string | null;
 	error_message: string | null;
+	final_output: string | null;
 	started_at: string;
 	completed_at: string | null;
 }
@@ -77,6 +79,7 @@ export interface WorkflowNodeCreateInput {
 	name: string;
 	node_type: WorkflowNodeType;
 	agent_id?: string | null;
+	child_workflow_id?: string | null;
 	config?: Record<string, unknown>;
 	retry_max_attempts?: number;
 	retry_backoff_seconds?: number;
@@ -85,6 +88,7 @@ export interface WorkflowNodeCreateInput {
 export interface WorkflowNodeUpdateInput {
 	name?: string;
 	agent_id?: string | null;
+	child_workflow_id?: string | null;
 	config?: Record<string, unknown>;
 	retry_max_attempts?: number;
 	retry_backoff_seconds?: number;
