@@ -8,6 +8,7 @@
 	import { providers } from '$lib/api/providers';
 	import { mcpServers } from '$lib/api/mcpServers';
 	import { tools } from '$lib/api/tools';
+	import { workflows } from '$lib/api/workflows';
 	import { sync } from '$lib/api/sync';
 	import { update } from '$lib/api/update';
 	import { theme, type ThemePreference } from '$lib/theme.svelte';
@@ -29,6 +30,7 @@
 	let providerCount = $state<number | null>(null);
 	let mcpServerCount = $state<number | null>(null);
 	let toolCount = $state<number | null>(null);
+	let workflowCount = $state<number | null>(null);
 	let syncPeerCount = $state<number | null>(null);
 	let syncRunning = $state(false);
 	let updateAvailable = $state(false);
@@ -44,21 +46,31 @@
 
 	async function refreshCounts() {
 		try {
-			const [agentList, teamList, providerList, mcpServerList, toolList, syncStatus, updateStatus] =
-				await Promise.all([
-					agents.list(),
-					teams.list(),
-					providers.list(),
-					mcpServers.list(),
-					tools.list(),
-					sync.status(),
-					update.status()
-				]);
+			const [
+				agentList,
+				teamList,
+				providerList,
+				mcpServerList,
+				toolList,
+				workflowList,
+				syncStatus,
+				updateStatus
+			] = await Promise.all([
+				agents.list(),
+				teams.list(),
+				providers.list(),
+				mcpServers.list(),
+				tools.list(),
+				workflows.list(),
+				sync.status(),
+				update.status()
+			]);
 			agentCount = agentList.length;
 			teamCount = teamList.length;
 			providerCount = providerList.length;
 			mcpServerCount = mcpServerList.length;
 			toolCount = toolList.length;
+			workflowCount = workflowList.length;
 			syncRunning = syncStatus.running;
 			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
 			updateAvailable = updateStatus.update_available;
@@ -104,6 +116,7 @@
 		'/providers',
 		'/mcp-servers',
 		'/tools',
+		'/workflows',
 		'/usage',
 		'/settings',
 		'/invites'
@@ -262,6 +275,21 @@
 					Tools
 					{#if toolCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
 							>{toolCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/workflows')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/workflows')
+					)}"
+				>
+					<Icon
+						name="workflow"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Workflows
+					{#if workflowCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{workflowCount}</span
 						>{/if}
 				</a>
 				<a
