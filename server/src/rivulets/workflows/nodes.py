@@ -110,11 +110,33 @@ def execute_conditional_node(node: WorkflowNode, input_content: str) -> str:
     return input_content
 
 
-def execute_merge_node(input_content: str) -> str:
-    """Still a pass-through placeholder — parallel branch execution landed
-    in the engine (#81), but *combining* multiple branches' outputs into
-    one is #82's job. Until then, a merge node reached by several
-    concurrent branches (workflows/engine.py's fan-out) just runs once per
-    arriving branch, independently, each a no-op passthrough of that one
-    branch's input — not yet the multi-input join the node type implies."""
-    return input_content
+def execute_merge_node(node: WorkflowNode, inputs: list[str]) -> str:
+    """Combines the outputs of every sibling branch that joined at this
+    merge node (workflows/engine.py's `_resolve_merge_arrivals` — see its
+    module docstring for exactly which arrivals count as siblings). `inputs`
+    is already in a stable order (the joining edges' own creation order),
+    not arrival/completion order, so a merge's output doesn't depend on
+    which branch happened to finish first.
+
+    config: {"template": "..."} — like transform's "{input}", but one
+    placeholder per contributing branch ("{input0}", "{input1}", ...),
+    replaced verbatim (not str.format, same reasoning as transform: template
+    text with other brace characters can't raise or be misinterpreted). A
+    placeholder with no matching branch (more placeholders than inputs)
+    is left as literal text.
+
+    No template configured (the default): a JSON array of the branch
+    outputs, in that same order — always unambiguous and directly usable
+    by a downstream agent/transform node, regardless of how many branches
+    arrived. This applies even to a single arrival (a merge node reached
+    by only one live branch, e.g. because a sibling dead-ended elsewhere)
+    for predictability: the shape of a merge node's output never depends
+    on how many branches happened to survive to it."""
+    config = _load_config(node)
+    template = config.get("template")
+    if isinstance(template, str) and template:
+        result = template
+        for i, value in enumerate(inputs):
+            result = result.replace(f"{{input{i}}}", value)
+        return result
+    return json.dumps(inputs)
