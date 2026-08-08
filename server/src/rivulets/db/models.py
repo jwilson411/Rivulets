@@ -549,7 +549,29 @@ class WorkflowSchedule(Base):
     schedule level: workflows/scheduler.py resets it to 0 on any
     non-failed fire and clears `enabled` once it hits
     MAX_CONSECUTIVE_FAILURES, so a permanently broken workflow can't
-    retry forever every poll interval."""
+    retry forever every poll interval.
+
+    `run_once` (#93) distinguishes a single fire-at-a-specific-time
+    reminder from a recurring cron schedule -- `cron_expression` is
+    nullable specifically to accommodate this: a one-off schedule has
+    `next_fire_at` set directly (from the agent- or human-resolved
+    timestamp) and no cron expression to recompute from, so
+    workflows/scheduler.py's _fire disables it after firing instead of
+    calling compute_next_fire_at.
+
+    `created_by` (#93) is 'human' for anything made through the builder
+    UI/REST API, or an agent's id for a schedule an agent created via the
+    schedule_workflow tool (tools/builtin/schedules.py) -- same
+    'human'-or-id convention Rivulet.created_by already uses below. It's
+    the ownership boundary list_schedules/cancel_schedule enforce: an
+    agent can only see and cancel schedules it created itself, never
+    another agent's or a human's. Agent-created schedules also always
+    start with `enabled=False` regardless of what the tool call asked for
+    (dispatch/service.py's _handle_schedule_workflow_trigger forces it) --
+    #84's draft/published gate is the direct precedent for "an agent's
+    unilateral creation doesn't take effect until a human approves it",
+    reused here via the `enabled` flag rather than inventing a parallel
+    approval mechanism."""
 
     __tablename__ = "workflow_schedule"
     __table_args__ = (
@@ -560,12 +582,15 @@ class WorkflowSchedule(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     channel_id: Mapped[str] = mapped_column(ForeignKey("channel.id", ondelete="CASCADE"))
-    cron_expression: Mapped[str]
+    cron_expression: Mapped[str | None] = mapped_column(default=None)
+    run_once: Mapped[bool] = mapped_column(default=False)
     input_content: Mapped[str] = mapped_column(default="")
     enabled: Mapped[bool] = mapped_column(default=True)
     next_fire_at: Mapped[str]
     last_fired_at: Mapped[str | None] = mapped_column(default=None)
     consecutive_failures: Mapped[int] = mapped_column(default=0)
+    name: Mapped[str | None] = mapped_column(default=None)
+    created_by: Mapped[str] = mapped_column(default="human")  # 'human' or agent_id
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
 

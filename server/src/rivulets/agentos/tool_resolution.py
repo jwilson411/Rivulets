@@ -48,13 +48,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
 from rivulets.tools.builtin import (
+    cancel_schedule,
     execute_python,
     http_request,
     list_files,
+    list_schedules,
     query_workspace_db,
     read_attached_file,
     read_file,
     run_workflow,
+    schedule_workflow,
     web_search,
     write_file,
 )
@@ -62,13 +65,16 @@ from rivulets.tools.builtin import (
 logger = logging.getLogger(__name__)
 
 _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
+    cancel_schedule,
     execute_python,
     http_request,
     list_files,
+    list_schedules,
     query_workspace_db,
     read_attached_file,
     read_file,
     run_workflow,
+    schedule_workflow,
     web_search,
     write_file,
 )

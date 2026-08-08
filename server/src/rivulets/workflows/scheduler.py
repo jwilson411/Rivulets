@@ -75,11 +75,17 @@ async def _tick() -> None:
 
 
 async def _fire(db: AsyncSession, schedule: WorkflowSchedule) -> None:
-    """Fires one due schedule. Advances next_fire_at unconditionally and
-    first, before anything that could fail -- a workflow that's
-    unpublished/deleted, a missing channel, or a run that errors out must
-    still not re-trip this schedule on every single poll tick forever."""
-    schedule.next_fire_at = compute_next_fire_at(schedule.cron_expression)
+    """Fires one due schedule. Advances next_fire_at (or, for a #93
+    one-off `run_once` schedule with no cron_expression to recompute
+    from, disables it outright) unconditionally and first, before
+    anything that could fail -- a workflow that's unpublished/deleted, a
+    missing channel, or a run that errors out must still not re-trip this
+    schedule on every single poll tick forever."""
+    if schedule.run_once:
+        schedule.enabled = False
+    else:
+        assert schedule.cron_expression is not None
+        schedule.next_fire_at = compute_next_fire_at(schedule.cron_expression)
 
     # Same gate every other trigger path shares (workflows/trigger.py's
     # find_workflow_by_name) -- replicated by id here since a schedule

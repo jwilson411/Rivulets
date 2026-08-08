@@ -178,3 +178,37 @@ async def test_successful_fire_resets_consecutive_failures(db_session: AsyncSess
 
     await db_session.refresh(schedule)
     assert schedule.consecutive_failures == 0
+
+
+async def test_run_once_schedule_disables_itself_after_firing(db_session: AsyncSession) -> None:
+    """#93: a one-off schedule (no cron_expression to recompute a next
+    fire from) must disable itself rather than crash or re-fire forever
+    on every poll tick."""
+    channel = await _make_channel(db_session)
+    workflow = await _make_published_workflow(db_session, name="reminder")
+    schedule = WorkflowSchedule(
+        workflow_id=workflow.id,
+        channel_id=channel.id,
+        cron_expression=None,
+        run_once=True,
+        input_content="hello",
+        next_fire_at="2020-01-01T00:00:00Z",
+    )
+    db_session.add(schedule)
+    await db_session.commit()
+
+    await _tick()
+
+    await db_session.refresh(schedule)
+    assert schedule.enabled is False
+    assert schedule.last_fired_at is not None
+    assert schedule.next_fire_at == "2020-01-01T00:00:00Z"  # untouched, not recomputed
+
+    run = await db_session.scalar(select(WorkflowRun).where(WorkflowRun.workflow_id == workflow.id))
+    assert run is not None
+    assert run.status == "completed"
+
+    # A further tick must not fire it again now that it's disabled.
+    await _tick()
+    run_count = len((await db_session.scalars(select(WorkflowRun))).all())
+    assert run_count == 1

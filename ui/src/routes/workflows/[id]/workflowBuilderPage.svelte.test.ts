@@ -354,11 +354,14 @@ describe('workflows/[id]/+page.svelte', () => {
 			workflow_id: 'wf-1',
 			channel_id: 'ch-1',
 			cron_expression: '0 9 * * *',
+			run_once: false,
 			input_content: 'go',
 			enabled: true,
 			next_fire_at: '2026-08-09T09:00:00Z',
 			last_fired_at: null,
 			consecutive_failures: 0,
+			name: null,
+			created_by: 'human',
 			created_at: '2026-08-08T00:00:00Z',
 			updated_at: '2026-08-08T00:00:00Z'
 		};

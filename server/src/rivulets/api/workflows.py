@@ -229,12 +229,15 @@ class WorkflowScheduleOut(BaseModel):
     id: str
     workflow_id: str
     channel_id: str
-    cron_expression: str
+    cron_expression: str | None
+    run_once: bool
     input_content: str
     enabled: bool
     next_fire_at: str
     last_fired_at: str | None
     consecutive_failures: int
+    name: str | None
+    created_by: str
     created_at: str
     updated_at: str
 
@@ -615,9 +618,26 @@ async def update_schedule(
         # Re-enabling recomputes next_fire_at from *now* (not whatever
         # stale value it had while disabled) and clears the failure
         # streak -- a manual re-enable is an implicit "I fixed it, try
-        # again clean" signal.
+        # again clean" signal. A #93 one-off (run_once) schedule has no
+        # cron_expression to recompute from -- its next_fire_at is the
+        # specific timestamp it was created with (e.g. a human approving
+        # an agent-created "remind me in 20 minutes"), so re-enabling
+        # leaves it untouched instead of crashing on a None cron *as long
+        # as it hasn't fired yet* -- once it has (last_fired_at is set),
+        # that stale next_fire_at is necessarily in the past, and
+        # re-enabling would make the scheduler fire the same one-off
+        # reminder again on the very next poll tick. A one-off is done
+        # once it's fired; re-running it needs a new schedule, not a
+        # re-enable.
         if body.enabled and not schedule.enabled:
-            schedule.next_fire_at = _compute_next_fire_at_or_400(schedule.cron_expression)
+            if schedule.run_once and schedule.last_fired_at is not None:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "This one-time schedule already fired and can't be re-enabled — "
+                    "create a new schedule instead",
+                )
+            if schedule.cron_expression is not None:
+                schedule.next_fire_at = _compute_next_fire_at_or_400(schedule.cron_expression)
             schedule.consecutive_failures = 0
         schedule.enabled = body.enabled
     await db.commit()
