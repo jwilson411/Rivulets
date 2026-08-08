@@ -37,6 +37,19 @@ def _add_transform_node(
     return node_id
 
 
+def _add_human_input_node(
+    client: TestClient, headers: dict[str, str], workflow_id: str, name: str
+) -> str:
+    created = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": name, "node_type": "human_input"},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    node_id: str = created.json()["id"]
+    return node_id
+
+
 def _connect(
     client: TestClient,
     headers: dict[str, str],
@@ -215,6 +228,78 @@ def test_slash_command_triggers_workflow_instead_of_dispatch(
     assert len(runs) == 1
     assert runs[0]["status"] == "completed"
     assert runs[0]["triggered_by"] == "human"
+
+
+def test_reply_to_a_paused_workflow_resumes_it_instead_of_dispatching(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#83: a 'human_input' node pauses the run and the rivulet; the next
+    message posted there is treated as the reply (workflows/trigger.py's
+    find_awaiting_workflow_run), not run through ordinary dispatch."""
+    workflow_id = _create_workflow(client, auth_headers, "onboard")
+    ask_id = _add_human_input_node(client, auth_headers, workflow_id, "ask")
+    echo_id = _add_transform_node(client, auth_headers, workflow_id, "echo", "confirmed: {input}")
+    _connect(client, auth_headers, workflow_id, None, ask_id)
+    _connect(client, auth_headers, workflow_id, ask_id, echo_id)
+
+    channel_id = _create_channel(client, auth_headers, "onboard-channel")
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "/onboard start"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    got_rivulet = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert got_rivulet["status"] == "paused"
+
+    runs = client.get(f"/api/v1/workflows/{workflow_id}/runs", headers=auth_headers).json()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "awaiting_human"
+
+    reply = client.post(
+        f"/api/v1/rivulets/{rivulet_id}/messages", json={"content": "yes"}, headers=auth_headers
+    )
+    assert reply.status_code == 201, reply.text
+
+    got_rivulet = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert got_rivulet["status"] == "active"
+
+    runs = client.get(f"/api/v1/workflows/{workflow_id}/runs", headers=auth_headers).json()
+    assert runs[0]["status"] == "completed"
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    contents = [(m["sender_type"], m["content_type"], m["content"]) for m in messages]
+    # The reply is the literal human message, not run through dispatch --
+    # no extra agent messages appear from it.
+    assert ("human", "text", "yes") in contents
+    assert ("system", "text", "confirmed: yes") in contents
+
+
+def test_resume_rivulet_refuses_while_a_workflow_is_awaiting_human(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """A workflow's pause isn't clearable via the generic /resume endpoint
+    -- unlike a loop-guard pause, there's no reply value to supply without
+    an actual message."""
+    workflow_id = _create_workflow(client, auth_headers, "gatekeeper")
+    ask_id = _add_human_input_node(client, auth_headers, workflow_id, "ask")
+    _connect(client, auth_headers, workflow_id, None, ask_id)
+
+    channel_id = _create_channel(client, auth_headers, "gatekeeper-channel")
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "/gatekeeper start"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    resp = client.post(f"/api/v1/rivulets/{rivulet_id}/resume", headers=auth_headers)
+    assert resp.status_code == 400
+
+    got_rivulet = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert got_rivulet["status"] == "paused"
 
 
 def test_slash_shaped_message_with_no_matching_workflow_falls_through(

@@ -21,7 +21,8 @@
 		transform: 'Transform',
 		summarize: 'Summarize',
 		conditional: 'Conditional',
-		merge: 'Merge'
+		merge: 'Merge',
+		human_input: 'Human input'
 	};
 
 	let workflow = $state<Workflow | null>(null);
@@ -252,6 +253,8 @@
 			return 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400';
 		if (status === 'failed')
 			return 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400';
+		if (status === 'awaiting_human')
+			return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400';
 		return 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300';
 	}
 </script>

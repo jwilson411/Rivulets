@@ -13,6 +13,13 @@ Each executor takes the previous node's output as plain text and returns
 plain text — "a node's output becomes the next node's input, unmodified"
 (issue #24) applies uniformly whether that next node is an agent or
 another utility node.
+
+'human_input' (#83) has no executor here — unlike every other type, it
+never runs synchronously to completion. workflows/engine.py's `_advance`
+intercepts it before it would ever reach `_execute_node`, pausing that
+branch (WorkflowRun.status='awaiting_human') until a human replies in the
+rivulet; the reply becomes the paused node's output the same way any
+other node's return value would, via `resume_workflow`.
 """
 
 import json
@@ -24,7 +31,7 @@ from rivulets.agentos import run_agent
 from rivulets.agentos.models import resolve_model
 from rivulets.db.models import Agent, WorkflowNode
 
-NODE_TYPES = ("agent", "summarize", "transform", "conditional", "merge")
+NODE_TYPES = ("agent", "summarize", "transform", "conditional", "merge", "human_input")
 
 _SUMMARIZE_INSTRUCTIONS = (
     "Summarize the given text concisely, preserving the key points. "

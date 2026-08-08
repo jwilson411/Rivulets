@@ -338,7 +338,8 @@ class WorkflowNode(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     name: Mapped[str]
-    node_type: Mapped[str]  # 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge'
+    # 'agent' | 'summarize' | 'transform' | 'conditional' | 'merge' | 'human_input'
+    node_type: Mapped[str]
     agent_id: Mapped[str | None] = mapped_column(
         ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
@@ -385,7 +386,15 @@ class WorkflowRun(Base):
     DispatchDecision, this is local execution telemetry/state tied to
     whichever node happened to run it, not shared workspace content; a
     fresh peer doesn't need another node's workflow-run history to
-    function, and re-running the *definition* is all sync needs to carry."""
+    function, and re-running the *definition* is all sync needs to carry.
+
+    status='awaiting_human' (#83): a 'human_input' node paused this run --
+    `current_node_id` is that paused node, and the run resumes
+    (workflows/engine.py's `resume_workflow`) from the next human message
+    posted to `rivulet_id` (api/rivulets.py's post_message, via
+    workflows/trigger.py's find_awaiting_workflow_run), which becomes that
+    node's output. Rivulet.status is set to 'paused' alongside this, the
+    same surfacing dispatch/guards.py's loop-guard pause already uses."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -417,7 +426,10 @@ class WorkflowNodeRun(Base):
     workflow_run_id: Mapped[str] = mapped_column(ForeignKey("workflow_run.id", ondelete="CASCADE"))
     node_id: Mapped[str] = mapped_column(ForeignKey("workflow_node.id", ondelete="CASCADE"))
     attempt: Mapped[int] = mapped_column(default=1)
-    status: Mapped[str] = mapped_column(default="running")  # running|completed|failed|skipped
+    # running|completed|failed|skipped|awaiting_human (#83: a paused
+    # 'human_input' node -- updated to completed with the human's reply
+    # as output_content once resume_workflow runs, not a new row)
+    status: Mapped[str] = mapped_column(default="running")
     input_content: Mapped[str]
     output_content: Mapped[str | None] = mapped_column(default=None)
     error_message: Mapped[str | None] = mapped_column(default=None)

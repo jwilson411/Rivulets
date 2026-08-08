@@ -20,7 +20,8 @@
 		transform: 'Transform',
 		summarize: 'Summarize',
 		conditional: 'Conditional',
-		merge: 'Merge'
+		merge: 'Merge',
+		human_input: 'Human input'
 	};
 
 	let {
@@ -139,8 +140,13 @@
 		</p>
 	{:else if nodeType === 'merge'}
 		<p class="text-xs text-neutral-500">
-			Currently a pass-through placeholder — real multi-branch merging needs parallel execution
-			(#82), not yet supported by the linear engine.
+			Combines every branch that joins here into one output — a JSON array by default, or set a
+			template with {'{input0}'}, {'{input1}'}, … placeholders in the step's config.
+		</p>
+	{:else if nodeType === 'human_input'}
+		<p class="text-xs text-neutral-500">
+			Pauses the run and waits for a reply in the channel — whatever the human types next becomes
+			this step's output, and the rivulet is marked paused until then.
 		</p>
 	{/if}
 
