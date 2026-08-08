@@ -62,9 +62,7 @@ async def test_seed_starter_agents_assigns_expected_tools(db_session: AsyncSessi
     assistant = (
         await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
     ).scalar_one()
-    result = await db_session.execute(
-        select(AgentTool).where(AgentTool.agent_id == assistant.id)
-    )
+    result = await db_session.execute(select(AgentTool).where(AgentTool.agent_id == assistant.id))
     assert result.scalars().all() == []
 
 
