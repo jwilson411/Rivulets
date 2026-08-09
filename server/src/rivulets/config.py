@@ -28,6 +28,14 @@ class Settings(BaseSettings):
         return self.workspace_dir / "rivulets.db"
 
     @property
+    def credential_fallback_db_path(self) -> Path:
+        """A separate file from `db_path` (#118): provider keys must never
+        enter the synced app database (see security/credentials.py's
+        module docstring), so the encrypted-SQLite fallback gets its own
+        local-only file instead of a table in rivulets.db."""
+        return self.workspace_dir / "credentials.db"
+
+    @property
     def files_dir(self) -> Path:
         return self.workspace_dir / "files"
 

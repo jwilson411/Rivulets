@@ -8,6 +8,7 @@
                 -> HKDF(info="jwt-signing")   -> JWT Signing Key (HS256)
                 -> HKDF(info="p2p-psk")       -> libp2p PSK
                 -> HKDF(info="workspace-fingerprint") -> mDNS scoping tag
+                -> HKDF(info="credential-store") -> Credential Fallback Key (#118)
            -> optional BIP-39 passphrase applied before seed derivation
 
 The mDNS fingerprint deliberately isn't the `Workspace.id` DB row's UUID:
@@ -81,6 +82,15 @@ def derive_workspace_fingerprint(workspace_key: bytes) -> bytes:
     every node in the same workspace derives the same value from the same
     mnemonic, unlike `Workspace.id` (see module docstring)."""
     return _hkdf(workspace_key, "workspace-fingerprint")
+
+
+def derive_credential_store_key(workspace_key: bytes) -> bytes:
+    """Encryption key for the local, per-node encrypted-SQLite credential
+    fallback (#118, security/credential_fallback.py) used only when no OS
+    keychain backend is available (e.g. Docker/headless). Deliberately
+    reuses the workspace key's trust model instead of a second passphrase
+    — see that module's docstring for the accepted tradeoff this implies."""
+    return _hkdf(workspace_key, "credential-store")
 
 
 def hash_workspace_key(workspace_key: bytes) -> str:

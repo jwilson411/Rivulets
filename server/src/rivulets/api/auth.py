@@ -97,9 +97,11 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     jwt_signing_key = keys.derive_jwt_signing_key(workspace_key)
     p2p_psk = keys.derive_p2p_psk(workspace_key)
     workspace_fingerprint = keys.derive_workspace_fingerprint(workspace_key)
+    credential_store_key = keys.derive_credential_store_key(workspace_key)
     session_store = get_session_key_store()
     session_store.set_key(jwt_signing_key)
     session_store.set_p2p_psk(p2p_psk)
+    session_store.set_credential_store_key(credential_store_key)
 
     try:
         # workspace_fingerprint, not workspace.id: the DB row's id is a

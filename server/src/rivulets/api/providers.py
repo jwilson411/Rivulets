@@ -1,7 +1,8 @@
 """LLM provider configuration (FR-1.4, FR-1.5, NFR-3.3).
 
-Raw API keys never touch the database or a response body — they go
-straight to the OS keychain via security/credentials.py, and only the
+Raw API keys never touch the database or a response body — they go to the
+OS keychain via security/credentials.py (or its encrypted-SQLite fallback,
+#118, when no keychain backend is available), and only the
 `provider_config.api_key_ref` reference is ever persisted or returned.
 """
 
@@ -16,10 +17,24 @@ from rivulets.db.models import Agent, ProviderConfig
 from rivulets.security.credentials import (
     CredentialStoreError,
     delete_provider_key,
+    is_keyring_available,
     store_provider_key,
 )
 
 router = APIRouter(prefix="/providers", tags=["providers"])
+
+
+class CredentialStorageOut(BaseModel):
+    backend: str  # 'keychain' | 'fallback'
+
+
+@router.get("/credential-storage", response_model=CredentialStorageOut)
+async def get_credential_storage(_: CurrentWorkspaceId, _o: OwnerGrant) -> CredentialStorageOut:
+    """Lets the UI disclose, per #118's agreed design, when provider keys
+    are protected by the workspace mnemonic (via the encrypted-SQLite
+    fallback) rather than the OS keychain — informed acceptance of the
+    wider blast radius that implies, not a silent equivalence."""
+    return CredentialStorageOut(backend="keychain" if is_keyring_available() else "fallback")
 
 
 class ProviderCreate(BaseModel):

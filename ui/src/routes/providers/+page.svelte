@@ -18,6 +18,10 @@
 
 	let providerList = $state<Provider[]>([]);
 	let loadError = $state<string | null>(null);
+	// null while unknown (still loading, or the lookup failed) -- the
+	// warning below only renders once we positively know it's 'fallback',
+	// never as a default guess (#118).
+	let credentialBackend = $state<'keychain' | 'fallback' | null>(null);
 
 	let kind = $state<ProviderKind>('anthropic');
 	let label = $state('');
@@ -37,6 +41,14 @@
 	}
 
 	refresh();
+	providers
+		.credentialStorage()
+		.then((res) => (credentialBackend = res.backend))
+		.catch(() => {
+			// Leave credentialBackend null -- silently defaulting to
+			// "keychain" here would hide the exact disclosure this
+			// endpoint exists to surface.
+		});
 
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
@@ -82,12 +94,24 @@
 </script>
 
 <div class="mx-auto flex max-w-2xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Providers</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			LLM provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
-			once saved.
-		</p>
+	<header class="flex flex-col gap-3">
+		<div>
+			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Providers</h1>
+			<p class="text-sm text-neutral-600 dark:text-neutral-400">
+				LLM provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
+				once saved.
+			</p>
+		</div>
+		{#if credentialBackend === 'fallback'}
+			<p
+				class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
+			>
+				No OS keychain backend was found on this install (common under Docker), so provider keys
+				here are instead encrypted with a key derived from your workspace recovery phrase — not a
+				separate credential. This means anyone with your recovery phrase can also read these
+				provider keys, not just sync into your workspace. Keep it just as secret either way.
+			</p>
+		{/if}
 	</header>
 
 	<form

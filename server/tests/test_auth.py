@@ -123,3 +123,14 @@ def test_logout_clears_the_session_and_stops_the_sync_engine(
 
     # The session is gone, so the same bearer token is no longer accepted.
     assert client.get("/api/v1/channels", headers=auth_headers).status_code == 401
+
+
+def test_login_derives_a_credential_store_key(client: TestClient) -> None:
+    """#118: login always derives the encrypted-SQLite fallback's
+    encryption key alongside the JWT signing key and P2P PSK, even though
+    most nodes never end up reading it (session.py's module docstring) —
+    it's only used when the OS keychain has no usable backend."""
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+    assert response.status_code == 200
+
+    assert get_session_key_store().get_credential_store_key()

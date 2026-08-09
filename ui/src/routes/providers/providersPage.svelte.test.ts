@@ -4,7 +4,7 @@
 // that module makes no network calls of its own, so there's nothing to stub.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import ProvidersPage from './+page.svelte';
 import { providers, type Provider } from '$lib/api/providers';
@@ -15,7 +15,8 @@ vi.mock('$lib/api/providers', () => ({
 		list: vi.fn(),
 		create: vi.fn(),
 		update: vi.fn(),
-		remove: vi.fn()
+		remove: vi.fn(),
+		credentialStorage: vi.fn()
 	}
 }));
 
@@ -32,6 +33,13 @@ afterEach(() => {
 });
 
 describe('providers/+page.svelte', () => {
+	beforeEach(() => {
+		// Most tests here don't care about the credential-storage banner --
+		// default to the common (non-Docker) case so it stays hidden and
+		// existing assertions aren't affected by it.
+		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
+	});
+
 	it('lists configured providers with their kind badge', async () => {
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
 
@@ -148,5 +156,30 @@ describe('providers/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Remove' }).click();
 
 		await expect.element(page.getByText('cannot remove the default provider')).toBeInTheDocument();
+	});
+
+	it('shows the mnemonic-disclosure banner when keys are stored in the fallback (#118)', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'fallback' });
+
+		render(ProvidersPage);
+
+		await expect
+			.element(page.getByText('encrypted with a key derived from your workspace recovery phrase'))
+			.toBeInTheDocument();
+	});
+
+	it('does not show the disclosure banner when the OS keychain is available', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
+
+		render(ProvidersPage);
+		await expect
+			.element(page.getByText('No providers configured yet — add one above.'))
+			.toBeInTheDocument();
+
+		await expect
+			.element(page.getByText('encrypted with a key derived from your workspace recovery phrase'))
+			.not.toBeInTheDocument();
 	});
 });
