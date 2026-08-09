@@ -54,6 +54,11 @@ export interface WorkflowRun {
 	completed_at: string | null;
 }
 
+export interface FailedWorkflowRun extends WorkflowRun {
+	workflow_name: string;
+	channel_id: string;
+}
+
 export interface WorkflowNodeRun {
 	id: string;
 	node_id: string;
@@ -204,6 +209,8 @@ export const workflows = {
 
 	listRuns: (workflowId: string) =>
 		api.get<WorkflowRun[]>(`/workflows/${workflowId}/runs`, auth.token ?? undefined),
+	listFailedRuns: () =>
+		api.get<FailedWorkflowRun[]>('/workflows/runs/failed', auth.token ?? undefined),
 	listNodeRuns: (workflowId: string, runId: string) =>
 		api.get<WorkflowNodeRun[]>(
 			`/workflows/${workflowId}/runs/${runId}/node-runs`,

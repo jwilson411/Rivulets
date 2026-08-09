@@ -611,3 +611,68 @@ def test_agent_triggering_unknown_workflow_is_skipped_gracefully(
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert [m["sender_type"] for m in messages] == ["human", "agent"]
+
+
+def test_list_failed_runs_empty_when_none_failed(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    assert client.get("/api/v1/workflows/runs/failed", headers=auth_headers).json() == []
+
+
+def test_list_failed_runs_spans_workflows_and_excludes_completed(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#94: the cross-workflow observability endpoint -- a failed run shows
+    up here regardless of which workflow it belongs to, joined with the
+    workflow's name and the rivulet's channel_id (neither implied by the
+    URL the way they are for the per-workflow /runs endpoint), while a
+    completed run from a different workflow doesn't."""
+    ok_workflow_id = _create_workflow(client, auth_headers, "healthy-flow")
+    ok_node_id = _add_transform_node(client, auth_headers, ok_workflow_id, "echo", "{input}")
+    _connect(client, auth_headers, ok_workflow_id, None, ok_node_id)
+    _publish_workflow(client, auth_headers, ok_workflow_id)
+
+    doomed_workflow_id = _create_workflow(client, auth_headers, "doomed-flow")
+    agent_id = _create_agent(client, auth_headers, "DoomedAgent")
+    added = client.post(
+        f"/api/v1/workflows/{doomed_workflow_id}/nodes",
+        json={"name": "call-agent", "node_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    doomed_node_id = added.json()["id"]
+    _connect(client, auth_headers, doomed_workflow_id, None, doomed_node_id)
+    _publish_workflow(client, auth_headers, doomed_workflow_id)
+
+    async def always_fails(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", always_fails)
+
+    channel_id = _create_channel(client, auth_headers, "obs-channel")
+
+    ok_rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "/healthy-flow hi"},
+        headers=auth_headers,
+    )
+    assert ok_rivulet.status_code == 201, ok_rivulet.text
+
+    failed_rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "/doomed-flow hi"},
+        headers=auth_headers,
+    )
+    assert failed_rivulet.status_code == 201, failed_rivulet.text
+    failed_rivulet_id = failed_rivulet.json()["id"]
+
+    failed = client.get("/api/v1/workflows/runs/failed", headers=auth_headers)
+    assert failed.status_code == 200, failed.text
+    body = failed.json()
+    assert len(body) == 1
+    assert body[0]["workflow_id"] == doomed_workflow_id
+    assert body[0]["workflow_name"] == "doomed-flow"
+    assert body[0]["channel_id"] == channel_id
+    assert body[0]["rivulet_id"] == failed_rivulet_id
+    assert body[0]["status"] == "failed"
+    assert "provider is down" in (body[0]["error_message"] or "")

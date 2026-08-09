@@ -1,24 +1,31 @@
 // Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
 // route depends on $lib/api/workflows and $app/paths' resolve() for the
-// per-workflow link, so both are mocked.
+// per-workflow and per-rivulet links, so both are mocked.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import WorkflowsPage from './+page.svelte';
-import { workflows, type Workflow } from '$lib/api/workflows';
+import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 
 vi.mock('$lib/api/workflows', () => ({
 	workflows: {
 		list: vi.fn(),
 		create: vi.fn(),
-		remove: vi.fn()
+		remove: vi.fn(),
+		listFailedRuns: vi.fn()
 	}
 }));
 
 vi.mock('$app/paths', () => ({
-	resolve: (path: string, params?: Record<string, string>) =>
-		params ? path.replace('[id]', params.id) : path
+	resolve: (path: string, params?: Record<string, string>) => {
+		if (!params) return path;
+		let resolved = path;
+		for (const [key, value] of Object.entries(params)) {
+			resolved = resolved.replace(`[${key}]`, value);
+		}
+		return resolved;
+	}
 }));
 
 const reviewFlow: Workflow = {
@@ -29,6 +36,29 @@ const reviewFlow: Workflow = {
 	created_at: '2026-08-01T00:00:00Z',
 	updated_at: '2026-08-01T00:00:00Z'
 };
+
+const doomedRun: FailedWorkflowRun = {
+	id: 'run-1',
+	workflow_id: 'wf-2',
+	workflow_name: 'doomed-flow',
+	rivulet_id: 'riv-1',
+	channel_id: 'chan-1',
+	triggered_by: 'schedule',
+	triggered_by_id: 'sched-1',
+	status: 'failed',
+	current_node_id: null,
+	error_message: 'provider is down',
+	final_output: null,
+	started_at: '2026-08-09T06:00:00Z',
+	completed_at: '2026-08-09T06:00:05Z'
+};
+
+beforeEach(() => {
+	// #94: every test renders the failed-runs panel on mount -- default it
+	// to empty so existing scenarios that don't care about it don't have
+	// to stub a resolved value themselves.
+	vi.mocked(workflows.listFailedRuns).mockResolvedValue([]);
+});
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -99,5 +129,30 @@ describe('workflows/+page.svelte', () => {
 
 		expect(workflows.remove).toHaveBeenCalledWith('wf-1');
 		await expect.element(page.getByText(/No workflows yet/)).toBeInTheDocument();
+	});
+
+	it('shows no failed-runs panel when nothing has failed', async () => {
+		vi.mocked(workflows.list).mockResolvedValue([]);
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText(/No workflows yet/)).toBeInTheDocument();
+
+		await expect.element(page.getByText(/Failed runs/)).not.toBeInTheDocument();
+	});
+
+	it('surfaces failed runs across workflows with a link to the rivulet', async () => {
+		vi.mocked(workflows.list).mockResolvedValue([]);
+		vi.mocked(workflows.listFailedRuns).mockResolvedValue([doomedRun]);
+
+		render(WorkflowsPage);
+
+		await expect.element(page.getByText('Failed runs (1)')).toBeInTheDocument();
+		await expect.element(page.getByText('provider is down')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('link', { name: '/doomed-flow' }))
+			.toHaveAttribute('href', '/workflows/wf-2');
+		await expect
+			.element(page.getByRole('link', { name: 'View rivulet' }))
+			.toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
 	});
 });
