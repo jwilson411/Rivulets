@@ -323,7 +323,25 @@ class Workflow(Base):
     workflow as a nested child -- that's a structural reference chosen by
     whoever built the parent, not an external trigger a stray message
     could hit by accident, so the same "shouldn't be triggerable before
-    it's ready" concern `published` addresses doesn't apply the same way."""
+    it's ready" concern `published` addresses doesn't apply the same way.
+
+    `on_failure_workflow_id` (#94 layer 2): an optional remediation
+    workflow, invoked automatically (workflows/engine.py's
+    `_maybe_trigger_remediation`) whenever a run of *this* workflow
+    finishes `failed`, with the failing run's input/error as its input --
+    the same "one workflow invoking another" plumbing #85's
+    node_type='workflow' step already established
+    (`_execute_workflow_node`), just triggered by a run's finalize
+    instead of a graph node. Unlike `child_workflow_id`, a self-reference
+    here is left unrejected rather than validated against at save time:
+    "on failure, retry this same workflow once" is a legitimate
+    remediation shape, not a mistake, and it's safe without that
+    validation because `WorkflowRun.triggered_by == 'remediation'` never
+    triggers further remediation (see that method's docstring) -- a
+    structural, depth-1 cap that doesn't need the reference itself
+    forbidden. Not required to be `published` for the same reason
+    `child_workflow_id` isn't: a deliberate structural reference, not
+    something a stray message could hit by accident."""
 
     __tablename__ = "workflow"
     __table_args__ = (UniqueConstraint("name", name="idx_workflow_name"),)
@@ -332,6 +350,9 @@ class Workflow(Base):
     name: Mapped[str]
     description: Mapped[str | None] = mapped_column(default=None)
     published: Mapped[bool] = mapped_column(default=False)
+    on_failure_workflow_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow.id", ondelete="SET NULL"), default=None
+    )
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
@@ -477,7 +498,17 @@ class WorkflowRun(Base):
     workflows/scheduler.py's poll loop firing a WorkflowSchedule, not a
     human or agent action -- `triggered_by_id` is that schedule's id, the
     same "id of the thing that caused this" convention every other
-    triggered_by value already follows."""
+    triggered_by value already follows.
+
+    triggered_by='remediation' (#94 layer 2): this run was started
+    automatically by `workflows/engine.py`'s `_maybe_trigger_remediation`
+    because a *different* WorkflowRun -- `triggered_by_id` here -- just
+    finished `failed` and its workflow had `Workflow.on_failure_workflow_id`
+    set. The one triggered_by value that also feeds back into triggering
+    logic itself: a run whose own triggered_by is already 'remediation'
+    is never eligible to trigger further remediation, the depth-1 cap
+    that keeps a remediation workflow referencing (directly or via a
+    cycle) the workflow it's remediating from ping-ponging forever."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)

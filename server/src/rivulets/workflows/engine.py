@@ -59,6 +59,11 @@ back to the human, no automatic escalation. If any branch of a run fails
 (or trips a loop guard), the whole WorkflowRun is marked 'failed' with
 that branch's error, even if sibling branches completed cleanly — a
 partially-successful fan-out is still a run a human should look at.
+"No automatic escalation" gained one narrow, opt-in exception in #94
+layer 2: `_finalize_run` calls `_maybe_trigger_remediation`, which fires
+`Workflow.on_failure_workflow_id` (if set) as a fresh top-level
+run_workflow call — see that function's own docstring for the depth-1
+cap that keeps it from looping.
 
 Merge nodes (#82): a branch that's about to advance onto a 'merge' node
 stops there instead (`_advance`) and reports the arrival rather than
@@ -633,10 +638,16 @@ async def run_workflow(
         [entry_outcome], db, run.id, workflow, rivulet.id, nodes, connections, ctx
     )
 
-    return await _finalize_run(db, run, outcome)
+    return await _finalize_run(db, workflow, rivulet, run, outcome)
 
 
-async def _finalize_run(db: AsyncSession, run: WorkflowRun, outcome: _BranchOutcome) -> WorkflowRun:
+async def _finalize_run(
+    db: AsyncSession,
+    workflow: Workflow,
+    rivulet: Rivulet,
+    run: WorkflowRun,
+    outcome: _BranchOutcome,
+) -> WorkflowRun:
     """Shared by run_workflow and resume_workflow. A paused outcome's
     status/current_node_id were already committed inside
     _pause_for_human_input, possibly on a different (sibling) session --
@@ -651,7 +662,74 @@ async def _finalize_run(db: AsyncSession, run: WorkflowRun, outcome: _BranchOutc
     run.final_output = outcome.output if not outcome.failed else None
     run.completed_at = utcnow_iso()
     await db.commit()
+
+    if run.status == "failed":
+        await _maybe_trigger_remediation(db, workflow, rivulet, run)
+
     return run
+
+
+async def _maybe_trigger_remediation(
+    db: AsyncSession, workflow: Workflow, rivulet: Rivulet, failed_run: WorkflowRun
+) -> None:
+    """#94 layer 2: `Workflow.on_failure_workflow_id`, when set, fires
+    automatically whenever a run of `workflow` finishes `failed` --
+    reusing the same "one workflow invoking another" plumbing #85's
+    node_type='workflow' step already established (`_execute_workflow_node`
+    calls this same `run_workflow`), just triggered by a run's finalize
+    instead of a graph node. Runs as a *fresh top-level* run_workflow call
+    (default `ancestry`), not a nested node execution -- #85's
+    ancestry-based cycle guard only ever sees a single call chain's stack,
+    which doesn't exist here since this fires after the failing run has
+    already fully finished and committed.
+
+    That's why the depth-1 cap has to be a separate, simpler mechanism:
+    `failed_run.triggered_by == 'remediation'` refuses to trigger further
+    remediation, so a remediation workflow that references (directly, or
+    via a longer cycle) the very workflow it's remediating can ping-pong
+    at most once before stopping on its own -- no unbounded loop, and no
+    need to reject a *self*-referencing on_failure_workflow_id at save
+    time the way child_workflow_id rejects a self-referencing node_type=
+    'workflow' step (see Workflow.on_failure_workflow_id's docstring):
+    "on failure, retry this same workflow once" is a legitimate shape,
+    and this cap already makes it safe.
+
+    Deliberately not wired into run_workflow's own "no entry point"
+    early-return failure -- that's a configuration error a remediation
+    attempt can't possibly fix, exactly the kind of failure #94 itself
+    calls out as not worth auto-remediating."""
+    if workflow.on_failure_workflow_id is None or failed_run.triggered_by == "remediation":
+        return
+    remediation_workflow = await db.get(Workflow, workflow.on_failure_workflow_id)
+    if remediation_workflow is None:
+        return
+
+    await _post_message(
+        db,
+        Message(
+            rivulet_id=rivulet.id,
+            sender_type="system",
+            sender_name="system",
+            content=(
+                f"Workflow /{workflow.name} failed — triggering remediation workflow "
+                f"/{remediation_workflow.name}."
+            ),
+            content_type="system_alert",
+        ),
+    )
+    remediation_input = (
+        f"Workflow /{workflow.name} run failed.\n"
+        f"Original input: {failed_run.input_content}\n"
+        f"Error: {failed_run.error_message}"
+    )
+    await run_workflow(
+        db,
+        remediation_workflow,
+        rivulet,
+        remediation_input,
+        triggered_by="remediation",
+        triggered_by_id=failed_run.id,
+    )
 
 
 async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) -> WorkflowRun:
@@ -684,6 +762,8 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     if paused_node is None:
         return await _finalize_run(
             db,
+            workflow,
+            rivulet,
             run,
             _BranchOutcome(
                 failed=True, error_message="The paused step was deleted before you replied"
@@ -713,7 +793,7 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     outcome = await _follow_edges(
         db, run.id, workflow, rivulet.id, nodes, connections, paused_node.id, human_reply, ctx
     )
-    return await _finalize_run(db, run, outcome)
+    return await _finalize_run(db, workflow, rivulet, run, outcome)
 
 
 async def _run_branch(

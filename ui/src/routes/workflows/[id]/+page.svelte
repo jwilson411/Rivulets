@@ -160,6 +160,27 @@
 		}
 	}
 
+	let remediationBusy = $state(false);
+	let remediationError = $state<string | null>(null);
+
+	// #94 layer 2: saved immediately on selection change, same
+	// "no separate edit mode" pattern togglePublish uses -- `value` is
+	// '' for the "None" option, mapped to null to clear remediation.
+	async function updateRemediation(value: string) {
+		if (!workflow) return;
+		remediationError = null;
+		remediationBusy = true;
+		try {
+			workflow = await workflows.update(workflow.id, {
+				on_failure_workflow_id: value || null
+			});
+		} catch (err) {
+			remediationError = err instanceof Error ? err.message : 'Failed to update remediation';
+		} finally {
+			remediationBusy = false;
+		}
+	}
+
 	let showAddSchedule = $state(false);
 	let scheduleCronDraft = $state('');
 	let scheduleChannelDraft = $state('');
@@ -508,6 +529,30 @@
 				</p>
 			{/if}
 		</header>
+
+		<section class="flex flex-col gap-2 rounded-lg border border-ink/12 p-4 dark:border-white/10">
+			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">On failure</h2>
+			<p class="text-xs text-neutral-500">
+				Automatically trigger another workflow when a run of this one fails, with the failure's
+				input and error as its input. The original run still shows as failed either way.
+			</p>
+			<select
+				value={workflow.on_failure_workflow_id ?? ''}
+				onchange={(e) => updateRemediation(e.currentTarget.value)}
+				disabled={remediationBusy}
+				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+			>
+				<option value="">None</option>
+				{#each workflowList as candidate (candidate.id)}
+					<option value={candidate.id}>/{candidate.name}</option>
+				{/each}
+			</select>
+			{#if remediationError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+					{remediationError}
+				</p>
+			{/if}
+		</section>
 
 		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
 			<div class="flex items-center justify-between">
@@ -876,6 +921,8 @@
 										<span class="text-neutral-500">(nested)</span>
 									{:else if run.triggered_by === 'schedule'}
 										<span class="text-neutral-500">(scheduled)</span>
+									{:else if run.triggered_by === 'remediation'}
+										<span class="text-neutral-500">(remediation)</span>
 									{/if}
 								</span>
 								<span class="rounded-sm px-2 py-0.5 text-xs {statusClass(run.status)}">

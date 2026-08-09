@@ -15,6 +15,9 @@ export interface Workflow {
 	name: string;
 	description: string | null;
 	published: boolean;
+	// #94 layer 2: remediation workflow triggered automatically when a run
+	// of this workflow fails. null = no remediation configured.
+	on_failure_workflow_id: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -78,6 +81,10 @@ export interface WorkflowCreateInput {
 export interface WorkflowUpdateInput {
 	name?: string;
 	description?: string | null;
+	// Omit entirely to leave unchanged; include (even as null, to clear
+	// remediation) to update -- mirrors api/workflows.py's WorkflowUpdate,
+	// the one field there distinguishing "not provided" from "set to null".
+	on_failure_workflow_id?: string | null;
 }
 
 export interface WorkflowNodeCreateInput {
