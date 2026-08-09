@@ -106,6 +106,72 @@ describe('teams/+page.svelte', () => {
 		await expect.element(page.getByText('Support')).not.toBeInTheDocument();
 	});
 
+	it('unchecking an agent checkbox calls teams.update with it removed from agent_ids', async () => {
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.update).mockResolvedValueOnce({ ...supportTeam, agent_ids: [] });
+
+		render(TeamsPage);
+
+		const checkbox = page.getByRole('checkbox', { name: 'Researcher' });
+		await expect.element(checkbox).toBeChecked();
+		await checkbox.click();
+
+		expect(teams.update).toHaveBeenCalledWith('team-1', { agent_ids: [] });
+	});
+
+	it('shows an empty state when a team has no agents to assign', async () => {
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+		vi.mocked(agents.list).mockResolvedValue([]);
+
+		render(TeamsPage);
+
+		await expect.element(page.getByText(/No agents yet/)).toBeInTheDocument();
+	});
+
+	it('surfaces a server-rejected create instead of failing silently', async () => {
+		vi.mocked(teams.list).mockResolvedValue([]);
+		vi.mocked(agents.list).mockResolvedValue([]);
+		vi.mocked(teams.create).mockRejectedValueOnce(
+			new Error("A team named 'Support' already exists")
+		);
+
+		render(TeamsPage);
+		await page.getByPlaceholder('Team name').fill('Support');
+		await page.getByRole('button', { name: 'Create' }).click();
+
+		await expect
+			.element(page.getByText("A team named 'Support' already exists"))
+			.toBeInTheDocument();
+	});
+
+	it('surfaces a failed agent toggle instead of failing silently', async () => {
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.update).mockRejectedValueOnce(new Error('Failed to update team'));
+
+		render(TeamsPage);
+		await page.getByRole('checkbox', { name: 'Researcher' }).click();
+
+		await expect.element(page.getByText('Failed to update team')).toBeInTheDocument();
+	});
+
+	it('surfaces a failed delete instead of failing silently', async () => {
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.remove).mockRejectedValueOnce(new Error('Team still assigned to a channel'));
+
+		render(TeamsPage);
+		await expect.element(page.getByText('Support')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Team still assigned to a channel')).toBeInTheDocument();
+	});
+
 	it('shows an error when the initial load fails', async () => {
 		vi.mocked(teams.list).mockRejectedValueOnce(new Error('Failed to load teams'));
 		vi.mocked(agents.list).mockResolvedValue([]);

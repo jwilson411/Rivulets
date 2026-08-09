@@ -143,6 +143,65 @@ describe('mcp-servers/+page.svelte', () => {
 		expect(mcpServers.reconnect).toHaveBeenCalledWith('mcp-1');
 	});
 
+	it('does not submit while name or url is blank', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+	});
+
+	it('shows an error when the initial load fails', async () => {
+		vi.mocked(mcpServers.list).mockRejectedValueOnce(new Error('Failed to load MCP servers'));
+
+		render(McpServersPage);
+
+		await expect.element(page.getByText('Failed to load MCP servers')).toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when reconnecting a server fails', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.reconnect).mockRejectedValueOnce(
+			new ApiError(502, 'Server refused connection')
+		);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Reconnect' }).click();
+
+		await expect.element(page.getByText('Server refused connection')).toBeInTheDocument();
+	});
+
+	it('removes a server via mcpServers.remove', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValueOnce([fsServerSummary]).mockResolvedValueOnce([]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.remove).mockResolvedValueOnce(undefined);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		expect(mcpServers.remove).toHaveBeenCalledWith('mcp-1');
+		await expect
+			.element(page.getByText('No MCP servers registered yet — add one above.'))
+			.toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when removing a server fails', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.remove).mockRejectedValueOnce(new ApiError(409, 'Server still in use'));
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		await expect.element(page.getByText('Server still in use')).toBeInTheDocument();
+	});
+
 	it('shows an ApiError message when registering a server fails', async () => {
 		vi.mocked(mcpServers.list).mockResolvedValue([]);
 		vi.mocked(mcpServers.create).mockRejectedValueOnce(
