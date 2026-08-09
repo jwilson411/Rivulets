@@ -41,7 +41,10 @@ selection and graceful-degradation behavior.
 
 import json
 import logging
+import re
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -132,6 +135,8 @@ async def _record_agent_run(
     tier: ModelTier | None,
     status: str,
     run_output: RunOutput,
+    *,
+    requested_model: str | None = None,
 ) -> None:
     """Persist one row of run/token/cost accounting (FR-3.5, #28's usage
     dashboard). `model` may be the AUTO_MODEL sentinel itself (auto mode
@@ -139,7 +144,12 @@ async def _record_agent_run(
     already-registered cheap-tier model — agentos/service.py's
     `_build_agno_agent`) rather than a real 'provider:model_name' string;
     cost just can't be estimated for that row, same as any other unpriced
-    model."""
+    model.
+
+    `requested_model` (#103) is set only when a fallback chain served this
+    run instead of the model that was actually asked for — `model` is
+    then the one that answered, `requested_model` the one that failed
+    first."""
     # getattr, not run_output.metrics: dispatch tests monkeypatch run_agent
     # with a plain SimpleNamespace duck-typing only .status/.tools/
     # .get_content_as_string() (test_rivulet_dispatch.py), which has no
@@ -158,6 +168,7 @@ async def _record_agent_run(
         AgentRun(
             agent_id=agent.id,
             model=model,
+            requested_model=requested_model,
             tier=tier,
             status=status,
             input_tokens=input_tokens,
@@ -476,6 +487,146 @@ async def invoke_agent_remotely(request: AgentDispatchRequest) -> None:
         publish(rivulet.id, "done", {"rivulet_id": rivulet.id})
 
 
+_RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+_RETRYABLE_KEYWORDS = (
+    "timeout",
+    "timed out",
+    "connection",
+    "unreachable",
+    "temporarily unavailable",
+    "overloaded",
+)
+_ERROR_CODE_PATTERN = re.compile(r"[Ee]rror code:\s*(\d{3})")
+
+
+def _is_retryable_error(text: str) -> bool:
+    """Classify a failed provider call as worth retrying against a
+    fallback model (#103), vs. one any other provider would fail
+    identically on. Rate limits (429) and upstream outages (5xx, request
+    timeouts) are transient and provider-specific — a different provider
+    or model has no reason to hit the same wall. Auth/config errors (401,
+    403) and bad-request errors (400, 404, 422) are not: they'd fail the
+    same way against the fallback too, so retrying just spends tokens on
+    a doomed second attempt.
+
+    agno doesn't raise on a provider HTTP error — it retries internally
+    (agent.py's own num_attempts) then gives up and sets `RunOutput.content`
+    to `str(exc)` (see test_run_status_error_posts_system_alert_not_raw_
+    error_text). Both openai-python and anthropic-python format that as
+    "Error code: NNN - ...", which is what's matched here. Failures that
+    never reached a provider at all (network errors, our own "not
+    registered") carry no status code, so those fall back to a keyword
+    match instead.
+    """
+    match = _ERROR_CODE_PATTERN.search(text)
+    if match:
+        return int(match.group(1)) in _RETRYABLE_STATUS_CODES
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _RETRYABLE_KEYWORDS)
+
+
+def _fallback_candidates(agent: Agent) -> list[str]:
+    """Parse `Agent.fallback_models` (ordered JSON array of
+    'provider:model_name' strings) into a plain list. Malformed or empty
+    values quietly become no fallback chain rather than an error — a
+    corrupt value here shouldn't take an agent offline, same spirit as
+    NFR-2.4."""
+    if not agent.fallback_models:
+        return []
+    try:
+        raw = json.loads(agent.fallback_models)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    items = cast(list[object], raw)
+    result: list[str] = []
+    for item in items:
+        if isinstance(item, str) and item and item != AUTO_MODEL:
+            result.append(item)
+    return result
+
+
+async def _run_agent_with_fallback(
+    db: AsyncSession,
+    session_id: str,
+    agent: Agent,
+    message_content: str,
+    on_token: Callable[[str], None],
+    on_status: Callable[[str, str | None], None],
+    *,
+    model_used: str | None,
+) -> tuple[RunOutput | None, Exception | None, str, bool]:
+    """Try `agent`'s primary model, then each entry in its configured
+    fallback chain in order (#103), stopping at the first success or the
+    first non-retryable failure. Returns
+    (run_output, exception, served_model, fallback_used) — exactly one of
+    run_output/exception is set on return; served_model is always the
+    last model attempted.
+    """
+    primary_model = model_used or agent.model
+    chain = [primary_model, *_fallback_candidates(agent)]
+    seen: set[str] = set()
+    ordered = [c for c in chain if c and not (c in seen or seen.add(c))]
+
+    run_output: RunOutput | None = None
+    last_exc: Exception | None = None
+    served_model = ordered[0]
+
+    for i, candidate in enumerate(ordered):
+        is_last = i == len(ordered) - 1
+        served_model = candidate
+        try:
+            # The primary attempt of a non-auto agent reuses AgentOS's
+            # already-registered model exactly as before fallback chains
+            # existed (no extra resolve/keychain round-trip on the common
+            # no-fallback path) — only auto mode and fallback attempts
+            # need a per-call override.
+            model_override = None if (i == 0 and model_used is None) else await resolve_model(
+                db, candidate
+            )
+            run_output = await run_agent(
+                db,
+                agent.id,
+                message_content,
+                session_id=session_id,
+                user_id="human",
+                on_token=on_token,
+                on_status=on_status,
+                model_override=model_override,
+            )
+        except Exception as exc:
+            last_exc = exc
+            run_output = None
+            if not is_last and _is_retryable_error(str(exc)):
+                logger.info(
+                    "Agent %r: model %r failed (%s); trying fallback %r",
+                    agent.name,
+                    candidate,
+                    exc,
+                    ordered[i + 1],
+                )
+                continue
+            break
+
+        last_exc = None
+        if (
+            run_output.status is RunStatus.error
+            and not is_last
+            and _is_retryable_error(str(run_output.content))
+        ):
+            logger.info(
+                "Agent %r: model %r returned a retryable error; trying fallback %r",
+                agent.name,
+                candidate,
+                ordered[i + 1],
+            )
+            continue
+        break
+
+    return run_output, last_exc, served_model, served_model != ordered[0]
+
+
 async def _invoke_agent(
     db: AsyncSession,
     rivulet: Rivulet,
@@ -533,25 +684,29 @@ async def _invoke_agent(
         model_used = await resolve_tier_model(db, model_tier)
 
     assert rivulet.agentos_session_id is not None  # set by the top-level call before any agent runs
-    try:
-        model_override = await resolve_model(db, model_used) if model_used is not None else None
-        run_output = await run_agent(
-            db,
-            agent.id,
-            message_content,
-            session_id=rivulet.agentos_session_id,
-            user_id="human",
-            on_token=on_token,
-            on_status=on_status,
-            model_override=model_override,
-        )
-    except Exception as exc:
+    run_output, exc, served_model, fallback_used = await _run_agent_with_fallback(
+        db,
+        rivulet.agentos_session_id,
+        agent,
+        message_content,
+        on_token,
+        on_status,
+        model_used=model_used,
+    )
+    # The model that was actually asked for, before any fallback -- kept
+    # for accounting (AgentRun.requested_model) below. Only differs from
+    # served_model when fallback_used.
+    requested_model = model_used or agent.model
+
+    if run_output is None:
         # NFR-2.4: one agent's provider being unreachable doesn't stop
         # others in the same dispatch from responding. Covers failures in
         # our own run_agent() (e.g. "not registered") that happen before
-        # agno even gets a chance to run.
+        # agno even gets a chance to run, and the case where every entry
+        # in the fallback chain (#103) was exhausted without success.
+        assert exc is not None
         logger.warning(
-            "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=True
+            "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=exc
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
         return []
@@ -568,7 +723,13 @@ async def _invoke_agent(
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
         await _record_agent_run(
-            db, agent, model_used or agent.model, model_tier, "error", run_output
+            db,
+            agent,
+            served_model,
+            model_tier,
+            "error",
+            run_output,
+            requested_model=requested_model if fallback_used else None,
         )
         message = Message(
             rivulet_id=rivulet.id,
@@ -587,12 +748,15 @@ async def _invoke_agent(
     # previously-unused, already-synced metadata_json column -- no schema/
     # sync work needed for either. executed_node_id is always attached
     # (None when the sync engine isn't running), unlike model_used/tier
-    # which stay None for non-auto agents.
+    # which stay None for non-auto agents. served_model (#103) is the same
+    # idiom: only set when a fallback actually served this reply, so a
+    # normal run's metadata looks exactly like it did before #103.
     engine = get_sync_engine()
     message_metadata = {
         "model_used": model_used,
         "tier": model_tier,
         "executed_node_id": engine.node_id if engine.running else None,
+        "served_model": served_model if fallback_used else None,
     }
     message = Message(
         rivulet_id=rivulet.id,
@@ -604,7 +768,13 @@ async def _invoke_agent(
     )
     db.add(message)
     await _record_agent_run(
-        db, agent, model_used or agent.model, model_tier, "completed", run_output
+        db,
+        agent,
+        served_model,
+        model_tier,
+        "completed",
+        run_output,
+        requested_model=requested_model if fallback_used else None,
     )
     await db.flush()  # populate message.id for the agent_message event below
     new_messages: list[Message] = [message]

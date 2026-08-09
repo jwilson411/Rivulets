@@ -29,6 +29,7 @@ const researcher: Agent = {
 	description: 'Looks things up',
 	instructions: 'Be thorough',
 	model: 'anthropic:claude-haiku-4-5-20251001',
+	fallback_models: [],
 	agentos_agent_id: 'agentos-1'
 };
 

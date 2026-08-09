@@ -183,7 +183,9 @@ class EntitySpec:
     pk_field: str = "id"
 
 
-AGENT_SPEC = EntitySpec("agent", Agent, ("name", "description", "instructions", "model"))
+AGENT_SPEC = EntitySpec(
+    "agent", Agent, ("name", "description", "instructions", "model", "fallback_models")
+)
 CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
 MCP_SERVER_SPEC = EntitySpec("mcp_server", MCPServer, ("name", "url"))

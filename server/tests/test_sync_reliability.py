@@ -116,6 +116,7 @@ async def test_build_entity_payload_reconstructs_current_state(db_session: Async
         "description": _AGENT_FIELDS["description"],
         "instructions": _AGENT_FIELDS["instructions"],
         "model": _AGENT_FIELDS["model"],
+        "fallback_models": None,
     }
 
 

@@ -4,6 +4,7 @@
 		description: string;
 		instructions: string;
 		model: string;
+		fallback_models: string[];
 	}
 </script>
 
@@ -14,7 +15,7 @@
 
 	let {
 		providers,
-		initial = { name: '', description: '', instructions: '', model: '' },
+		initial = { name: '', description: '', instructions: '', model: '', fallback_models: [] },
 		submitLabel,
 		busyLabel,
 		busy = false,
@@ -39,6 +40,20 @@
 	let description = $state(untrack(() => initial.description));
 	let instructions = $state(untrack(() => initial.instructions));
 	let model = $state(untrack(() => initial.model));
+	// Each entry gets its own reactive box so a keyed #each can bind a
+	// ModelPicker to it directly (ModelPicker takes a single bindable
+	// string, not an array + index).
+	let fallbackModels = $state(
+		untrack(() => initial.fallback_models.map((m) => ({ id: crypto.randomUUID(), value: m })))
+	);
+
+	function addFallback() {
+		fallbackModels.push({ id: crypto.randomUUID(), value: '' });
+	}
+
+	function removeFallback(id: string) {
+		fallbackModels = fallbackModels.filter((f) => f.id !== id);
+	}
 
 	function handleSubmit(event: SubmitEvent) {
 		event.preventDefault();
@@ -47,7 +62,8 @@
 			name: name.trim(),
 			description: description.trim(),
 			instructions: instructions.trim(),
-			model: model.trim()
+			model: model.trim(),
+			fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== '')
 		});
 	}
 </script>
@@ -72,6 +88,38 @@
 		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 	></textarea>
 	<ModelPicker {providers} bind:value={model} />
+
+	<div class="flex flex-col gap-2">
+		<div class="flex items-center justify-between">
+			<span class="text-xs font-medium text-neutral-600 dark:text-neutral-400">
+				Fallback models (tried in order if the model above fails)
+			</span>
+			<button
+				type="button"
+				onclick={addFallback}
+				class="text-xs font-medium text-agent-cyan-600 hover:underline"
+			>
+				+ Add fallback
+			</button>
+		</div>
+		{#each fallbackModels as fallback, index (fallback.id)}
+			<div class="flex items-start gap-2">
+				<span class="mt-2 text-xs text-neutral-500">{index + 1}.</span>
+				<div class="flex-1">
+					<ModelPicker {providers} bind:value={fallback.value} showAuto={false} />
+				</div>
+				<button
+					type="button"
+					onclick={() => removeFallback(fallback.id)}
+					class="mt-1 text-xs text-neutral-500 hover:text-agent-magenta-700 dark:hover:text-agent-magenta-400"
+					aria-label="Remove fallback model"
+				>
+					Remove
+				</button>
+			</div>
+		{/each}
+	</div>
+
 	<div class="flex items-center gap-3">
 		<button
 			type="submit"

@@ -386,6 +386,14 @@
 											· ran on {shortNodeId(message.executed_node_id)}
 										</span>
 									{/if}
+									{#if message.served_model}
+										<span
+											class="text-agent-magenta-700 dark:text-agent-magenta-400"
+											title="The configured model failed with a retryable error; this reply came from its fallback chain instead."
+										>
+											· fallback: {message.served_model}
+										</span>
+									{/if}
 								</div>
 								{#if message.sender_type === 'system'}
 									<p

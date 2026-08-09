@@ -170,7 +170,8 @@
 								name: agent.name,
 								description: agent.description,
 								instructions: agent.instructions,
-								model: agent.model
+								model: agent.model,
+								fallback_models: agent.fallback_models
 							}}
 							submitLabel="Save changes"
 							busyLabel="Saving…"
@@ -185,6 +186,11 @@
 								<p class="font-medium text-ink dark:text-ink-dark">{agent.name}</p>
 								<p class="text-sm text-neutral-600 dark:text-neutral-400">{agent.description}</p>
 								<p class="mt-1 font-mono text-xs text-neutral-500">{agent.model}</p>
+								{#if agent.fallback_models.length > 0}
+									<p class="font-mono text-xs text-neutral-400">
+										fallback: {agent.fallback_models.join(' → ')}
+									</p>
+								{/if}
 							</div>
 							<div class="flex items-center gap-2">
 								<span

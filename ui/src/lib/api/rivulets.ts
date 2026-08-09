@@ -40,6 +40,10 @@ export interface Message {
 	// message -- null for human messages, or when the sync engine wasn't
 	// running at reply time.
 	executed_node_id: string | null;
+	// #103: set only when the agent's configured fallback chain served
+	// this reply because its primary model's call failed with a
+	// retryable-looking error -- the model that actually answered.
+	served_model: string | null;
 }
 
 export const rivulets = {

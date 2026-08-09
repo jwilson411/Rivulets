@@ -147,6 +147,7 @@ function mockLoad() {
 			description: 'd',
 			instructions: 'i',
 			model: 'm',
+			fallback_models: [],
 			agentos_agent_id: null
 		}
 	]);

@@ -116,7 +116,8 @@ const humanMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const agentMessage: Message = {
@@ -131,7 +132,8 @@ const agentMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const attachedMessage: Message = {
@@ -148,7 +150,8 @@ const attachedMessage: Message = {
 	],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const handoffMessage: Message = {
@@ -163,7 +166,8 @@ const handoffMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const systemAlertMessage: Message = {
@@ -178,7 +182,8 @@ const systemAlertMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const autoModeMessage: Message = {
@@ -429,6 +434,24 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 
 		await expect
 			.element(page.getByText('via claude-haiku-4-5', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it("shows a fallback badge when a reply came from the agent's fallback chain (#103)", async () => {
+		const fallbackMessage: Message = {
+			...agentMessage,
+			id: 'msg-fallback',
+			content: 'Answered via backup',
+			served_model: 'openai:gpt-4o-mini'
+		};
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, fallbackMessage]);
+
+		render(RivuletPage);
+
+		await expect
+			.element(page.getByText('fallback: openai:gpt-4o-mini', { exact: false }))
 			.toBeInTheDocument();
 	});
 

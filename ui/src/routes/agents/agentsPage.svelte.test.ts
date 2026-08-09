@@ -32,6 +32,7 @@ const researcher: Agent = {
 	description: 'Looks things up',
 	instructions: 'Be thorough',
 	model: 'anthropic:claude-haiku-4-5-20251001',
+	fallback_models: [],
 	agentos_agent_id: 'agentos-1'
 };
 
@@ -87,7 +88,8 @@ describe('agents/+page.svelte', () => {
 			name: 'Deep Researcher',
 			description: 'Looks things up',
 			instructions: 'Be thorough',
-			model: 'anthropic:claude-haiku-4-5-20251001'
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: []
 		});
 		await expect
 			.element(page.getByRole('button', { name: 'Save changes' }))
@@ -139,7 +141,8 @@ describe('agents/+page.svelte', () => {
 			name: 'Researcher',
 			description: 'Looks things up',
 			instructions: 'Be thorough',
-			model: 'anthropic:claude-haiku-4-5-20251001'
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: []
 		});
 		await expect
 			.element(page.getByRole('heading', { level: 1, name: 'Agents' }))

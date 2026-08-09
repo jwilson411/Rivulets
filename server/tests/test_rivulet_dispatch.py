@@ -53,6 +53,36 @@ def _create_agent_with_always_rule(client: TestClient, headers: dict[str, str], 
     return agent_id
 
 
+def _create_agent_with_fallback(
+    client: TestClient, headers: dict[str, str], name: str, fallback_models: list[str]
+) -> str:
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": name,
+            "description": "An agent that responds to widget questions, for testing.",
+            "instructions": "Say OK.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+            "fallback_models": fallback_models,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    agent_id: str = created.json()["id"]
+
+    # A keyword rule (not "always") matching the trigger message only, not
+    # its own reply -- an "always" rule would make a successful reply
+    # re-trigger itself via dispatch's recursion (FR-5.6), which is a
+    # distinct guard-limit scenario these fallback tests aren't about.
+    rules = client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": '["widget"]', "priority": 10}]},
+        headers=headers,
+    )
+    assert rules.status_code == 200, rules.text
+    return agent_id
+
+
 def _create_channel_with_team(
     client: TestClient, headers: dict[str, str], agent_ids: list[str]
 ) -> str:
@@ -233,6 +263,100 @@ def test_run_status_error_posts_system_alert_not_raw_error_text(
     assert messages[1]["content_type"] == "system_alert"
     assert "401" not in messages[1]["content"]
     assert "Broken Agent" in messages[1]["content"]
+
+
+def test_fallback_used_when_primary_hits_retryable_error(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#103: a 429 on the primary model falls through to the next entry
+    in the agent's configured fallback chain rather than failing outright."""
+    calls: list[str | None] = []
+
+    async def fake_resolve_model(_db: object, provider_model: str) -> Any:
+        return SimpleNamespace(id=provider_model)
+
+    async def fake_run_agent(*_args: object, model_override: Any = None, **_kwargs: object) -> Any:
+        calls.append(getattr(model_override, "id", None))
+        if len(calls) == 1:
+            return SimpleNamespace(
+                status=RunStatus.error,
+                content="Error code: 429 - rate limit exceeded",
+                get_content_as_string=lambda: "Error code: 429 - rate limit exceeded",
+            )
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK from fallback"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    agent_id = _create_agent_with_fallback(
+        client, auth_headers, "Resilient Agent", ["openai:gpt-4o-mini"]
+    )
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "tell me about the widget"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["content"] == "OK from fallback"
+    assert messages[1]["served_model"] == "openai:gpt-4o-mini"
+    # First call is the primary attempt (no override -- the already-
+    # registered agno model), second is the fallback candidate.
+    assert calls == [None, "openai:gpt-4o-mini"]
+
+    runs = client.get(f"/api/v1/agents/{agent_id}/runs", headers=auth_headers).json()
+    assert len(runs) == 1
+    assert runs[0]["model"] == "openai:gpt-4o-mini"
+    assert runs[0]["requested_model"] == "anthropic:claude-3-5-haiku-latest"
+    assert runs[0]["status"] == "completed"
+
+
+def test_fallback_not_used_for_non_retryable_error(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#103: an auth/config error (401) would fail identically against any
+    other provider, so it isn't retried against the fallback chain -- the
+    agent fails on its first and only attempt, same as before #103."""
+    calls: list[str | None] = []
+
+    async def fake_resolve_model(_db: object, provider_model: str) -> Any:
+        return SimpleNamespace(id=provider_model)
+
+    async def fake_run_agent(*_args: object, model_override: Any = None, **_kwargs: object) -> Any:
+        calls.append(getattr(model_override, "id", None))
+        return SimpleNamespace(
+            status=RunStatus.error,
+            content="Error code: 401 - invalid x-api-key",
+            get_content_as_string=lambda: "Error code: 401 - invalid x-api-key",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    agent_id = _create_agent_with_fallback(
+        client, auth_headers, "Auth Broken Agent", ["openai:gpt-4o-mini"]
+    )
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "tell me about the widget"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "system"]
+    assert messages[1]["content_type"] == "system_alert"
+    assert len(calls) == 1  # never tried the fallback
 
 
 def test_channel_with_no_team_gets_no_dispatch(
