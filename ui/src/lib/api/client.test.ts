@@ -45,6 +45,52 @@ describe('api client', () => {
 		});
 	});
 
+	it('turns a Pydantic 422 pattern-mismatch array into a friendly workflow-name message', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						detail: [
+							{
+								type: 'string_pattern_mismatch',
+								loc: ['body', 'name'],
+								msg: "String should match pattern '^[a-z][a-z0-9-]{1,63}$'",
+								input: 'Test Workflow'
+							}
+						]
+					}),
+					{ status: 422 }
+				)
+			)
+		);
+
+		await expect(api.post('/workflows', { name: 'Test Workflow' })).rejects.toMatchObject({
+			status: 422,
+			message:
+				'Name must be lowercase letters, numbers, and hyphens only, starting with a letter (e.g. test-workflow).'
+		});
+	});
+
+	it('falls back to a generic per-field message for other 422 validation errors', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						detail: [{ type: 'missing', loc: ['body', 'description'], msg: 'Field required' }]
+					}),
+					{ status: 422 }
+				)
+			)
+		);
+
+		await expect(api.post('/workflows', {})).rejects.toMatchObject({
+			status: 422,
+			message: 'Description: Field required'
+		});
+	});
+
 	it('falls back to the raw response body when it is not JSON', async () => {
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Bad Gateway', { status: 502 })));
 
