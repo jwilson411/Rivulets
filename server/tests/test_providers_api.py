@@ -30,6 +30,28 @@ def test_list_providers_starts_empty(client: TestClient, auth_headers: dict[str,
     assert response.json() == []
 
 
+def test_credential_storage_reports_keychain_when_available(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """conftest.py's in-memory keyring fixture always resolves as a real
+    backend, so this reflects the normal (non-Docker) case."""
+    response = client.get("/api/v1/providers/credential-storage", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"backend": "keychain"}
+
+
+def test_credential_storage_reports_fallback_when_no_keychain_backend(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#118: this is what the UI polls to decide whether to show the
+    mnemonic-also-protects-provider-keys disclosure."""
+    monkeypatch.setattr("rivulets.api.providers.is_keyring_available", lambda: False)
+
+    response = client.get("/api/v1/providers/credential-storage", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"backend": "fallback"}
+
+
 def test_add_provider_success_never_returns_raw_key(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

@@ -18,15 +18,25 @@ def test_get_p2p_psk_raises_when_no_session_is_active() -> None:
         store.get_p2p_psk()
 
 
+def test_get_credential_store_key_raises_when_no_session_is_active() -> None:
+    store = SessionKeyStore()
+    with pytest.raises(RuntimeError, match="No active session"):
+        store.get_credential_store_key()
+
+
 def test_set_and_clear_round_trip() -> None:
     store = SessionKeyStore()
     store.set_key(b"jwt-key")
     store.set_p2p_psk(b"psk")
+    store.set_credential_store_key(b"cred-key")
     assert store.get_key() == b"jwt-key"
     assert store.get_p2p_psk() == b"psk"
+    assert store.get_credential_store_key() == b"cred-key"
 
     store.clear()
     with pytest.raises(RuntimeError):
         store.get_key()
     with pytest.raises(RuntimeError):
         store.get_p2p_psk()
+    with pytest.raises(RuntimeError):
+        store.get_credential_store_key()

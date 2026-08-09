@@ -44,7 +44,12 @@ Layer 4: Tailscale/WireGuard (cross-network sync only)
 
 Layer 5: Credential Isolation
   └─ LLM provider keys live in the OS keychain, never in the database.
-     Provider keys are excluded from sync payloads entirely.
+     Provider keys are excluded from sync payloads entirely. When no OS
+     keychain backend is available (headless/Docker installs, #118), keys
+     fall back to a local encrypted-SQLite store, still excluded from the
+     database and sync, but encrypted with a key derived from the
+     workspace mnemonic instead of the OS keychain — the UI discloses
+     this so the tradeoff (below) is informed, not silent.
 
 Layer 6: Sandboxed Code Execution
   └─ The code execution tool runs inside firejail (Linux) or sandbox-exec
@@ -60,7 +65,9 @@ BIP-39 Mnemonic (12 words)
        ├─ HKDF (info="workspace-key") → Workspace Key (256 bits)
        │    ├─ bcrypt → stored hash (for local login verification)
        │    ├─ HKDF (info="jwt-signing") → JWT Signing Key (HS256)
-       │    └─ HKDF (info="p2p-psk") → libp2p pre-shared key
+       │    ├─ HKDF (info="p2p-psk") → libp2p pre-shared key
+       │    └─ HKDF (info="credential-store") → provider-key fallback
+       │         encryption key (#118, used only without an OS keychain)
        └─ (optional BIP-39 passphrase applied before seed derivation)
 ```
 
@@ -80,6 +87,7 @@ All derived keys are computed at login time and held in memory only — they're 
 |---|---|---|
 | Attacker on the same LAN intercepts sync traffic | libp2p noise encryption with the workspace key as PSK | An attacker who has the workspace key can decrypt — keep it secret. |
 | Attacker gets physical access to the machine | OS filesystem permissions on key material; OS keychain for provider keys | A root-level attacker can read memory or the keychain directly — out of scope for any local application. |
+| Workspace mnemonic is compromised, on an install with no OS keychain backend (#118) | The encrypted-SQLite provider-key fallback is only used when the OS keychain is unavailable; the UI discloses when it's active | Unlike the normal (keychain) case, the mnemonic now also decrypts provider API keys, not just workspace/sync access — an accepted tradeoff for keeping Docker/headless installs functional, not an oversight. Treat the mnemonic with the same care as your provider keys on those installs. |
 | Malicious tool code reads user files | firejail/sandbox-exec restricts execution to the workspace directory | A sandbox escape vulnerability would defeat this — sandbox versions should be kept current. |
 | XSS in the web UI reads the session token | JWT held in memory, not `localStorage`; CSP headers; Svelte's compile-time output escaping | A DOM-based XSS via a vulnerable dependency is still possible — keep dependencies current. |
 | Workspace key is lost | BIP-39 mnemonic (+ optional passphrase) is human-writable and recoverable by the user | There is no server-side recovery. Losing both the mnemonic and passphrase means permanent loss of that workspace. |

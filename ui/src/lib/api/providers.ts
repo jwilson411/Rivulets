@@ -33,11 +33,22 @@ export interface ProviderCreateInput {
 	base_url?: string;
 }
 
+// 'fallback' means no OS keychain backend was available (e.g. Docker) and
+// keys are instead encrypted with a key derived from the workspace
+// recovery phrase (#118) — the UI must disclose this, not treat it as
+// equivalent to keychain storage.
+export type CredentialStorageBackend = 'keychain' | 'fallback';
+
 export const providers = {
 	list: () => api.get<Provider[]>('/providers', auth.token ?? undefined),
 	create: (body: ProviderCreateInput) =>
 		api.post<Provider>('/providers', body, auth.token ?? undefined),
 	update: (id: string, patch: { label?: string; api_key?: string; base_url?: string }) =>
 		api.patch<Provider>(`/providers/${id}`, patch, auth.token ?? undefined),
-	remove: (id: string) => api.delete<void>(`/providers/${id}`, auth.token ?? undefined)
+	remove: (id: string) => api.delete<void>(`/providers/${id}`, auth.token ?? undefined),
+	credentialStorage: () =>
+		api.get<{ backend: CredentialStorageBackend }>(
+			'/providers/credential-storage',
+			auth.token ?? undefined
+		)
 };

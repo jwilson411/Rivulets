@@ -66,4 +66,15 @@ describe('providers', () => {
 		expect(url).toBe('/api/v1/providers/p1');
 		expect(init.method).toBe('DELETE');
 	});
+
+	it('credentialStorage() GETs /providers/credential-storage', async () => {
+		const fetchMock = mockFetch({ backend: 'fallback' });
+
+		const result = await providers.credentialStorage();
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/providers/credential-storage');
+		expect(init.method).toBe('GET');
+		expect(result).toEqual({ backend: 'fallback' });
+	});
 });

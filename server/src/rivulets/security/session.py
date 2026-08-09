@@ -11,7 +11,11 @@ the only thing the user persists themselves (per the BIP-39 recovery
 design, OQ-7). The p2p PSK (FR-9.4, see sync/engine.py's module docstring
 for what it actually gates) lives here alongside the JWT signing key for
 the same reason: it's only available once the workspace key has been
-derived at login.
+derived at login. The credential-store key (#118,
+security/credential_fallback.py) is set here for the same reason too,
+even though most nodes never end up using it — it's cheap to derive
+alongside the others, and only actually gets read when the OS keychain
+has no usable backend.
 """
 
 import threading
@@ -22,6 +26,7 @@ class SessionKeyStore:
         self._lock = threading.Lock()
         self._jwt_signing_key: bytes | None = None
         self._p2p_psk: bytes | None = None
+        self._credential_store_key: bytes | None = None
 
     def set_key(self, key: bytes) -> None:
         with self._lock:
@@ -31,10 +36,15 @@ class SessionKeyStore:
         with self._lock:
             self._p2p_psk = psk
 
+    def set_credential_store_key(self, key: bytes) -> None:
+        with self._lock:
+            self._credential_store_key = key
+
     def clear(self) -> None:
         with self._lock:
             self._jwt_signing_key = None
             self._p2p_psk = None
+            self._credential_store_key = None
 
     def get_key(self) -> bytes:
         with self._lock:
@@ -47,6 +57,12 @@ class SessionKeyStore:
             if self._p2p_psk is None:
                 raise RuntimeError("No active session — login required")
             return self._p2p_psk
+
+    def get_credential_store_key(self) -> bytes:
+        with self._lock:
+            if self._credential_store_key is None:
+                raise RuntimeError("No active session — login required")
+            return self._credential_store_key
 
 
 _store = SessionKeyStore()
