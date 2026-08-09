@@ -90,6 +90,61 @@ def test_create_and_get_workflow(client: TestClient, auth_headers: dict[str, str
     assert got.json()["name"] == "release-checklist"
 
 
+def test_set_and_clear_on_failure_workflow_id(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#94 layer 2: on_failure_workflow_id is settable, and -- unlike every
+    other WorkflowUpdate field -- explicitly clearable back to null."""
+    workflow_id = _create_workflow(client, auth_headers, "flaky")
+    fixer_id = _create_workflow(client, auth_headers, "fixer")
+
+    set_resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": fixer_id},
+        headers=auth_headers,
+    )
+    assert set_resp.status_code == 200, set_resp.text
+    assert set_resp.json()["on_failure_workflow_id"] == fixer_id
+
+    got = client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers)
+    assert got.json()["on_failure_workflow_id"] == fixer_id
+
+    clear_resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": None},
+        headers=auth_headers,
+    )
+    assert clear_resp.status_code == 200, clear_resp.text
+    assert clear_resp.json()["on_failure_workflow_id"] is None
+
+
+def test_on_failure_workflow_id_allows_self_reference(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Unlike child_workflow_id (#85), a workflow retrying itself once on
+    failure is a legitimate shape, not rejected -- see #94's depth-1 cap."""
+    workflow_id = _create_workflow(client, auth_headers, "self-retry")
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": workflow_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["on_failure_workflow_id"] == workflow_id
+
+
+def test_on_failure_workflow_id_rejects_unknown_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "flaky2")
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": "does-not-exist"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
 def test_create_workflow_rejects_duplicate_name(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

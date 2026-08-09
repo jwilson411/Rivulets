@@ -68,6 +68,7 @@ const reviewFlow: Workflow = {
 	name: 'review-pr',
 	description: 'Runs a PR through review',
 	published: true,
+	on_failure_workflow_id: null,
 	created_at: '2026-08-01T00:00:00Z',
 	updated_at: '2026-08-01T00:00:00Z'
 };
@@ -175,7 +176,9 @@ describe('workflows/[id]/+page.svelte', () => {
 		// index 1 is the one between Fetch (n1) and Format (n2).
 		await page.getByRole('button', { name: '+ Add step' }).nth(1).click();
 		await page.getByPlaceholder('Step name').fill('Recap');
-		await page.getByRole('combobox').first().selectOptions('summarize');
+		// Combobox 0 is the page-level "On failure" remediation picker
+		// (#94 layer 2) -- combobox 1 is this form's node-type select.
+		await page.getByRole('combobox').nth(1).selectOptions('summarize');
 		await page.getByRole('button', { name: 'Add step', exact: true }).click();
 
 		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
@@ -219,9 +222,11 @@ describe('workflows/[id]/+page.svelte', () => {
 
 		await page.getByRole('button', { name: '+ Add step' }).first().click();
 		await page.getByPlaceholder('Step name').fill('Invoke other');
-		await page.getByRole('combobox').first().selectOptions('workflow');
+		// Combobox 0 is the page-level "On failure" remediation picker
+		// (#94 layer 2) -- combobox 1 is this form's node-type select.
+		await page.getByRole('combobox').nth(1).selectOptions('workflow');
 
-		const workflowPicker = page.getByRole('combobox').nth(1);
+		const workflowPicker = page.getByRole('combobox').nth(2);
 		await expect
 			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
 			.toBeInTheDocument();
@@ -491,5 +496,65 @@ describe('workflows/[id]/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Load runs' }).click();
 
 		await expect.element(page.getByText('(scheduled)')).toBeInTheDocument();
+	});
+
+	it('labels a remediation run "(remediation)" in run history', async () => {
+		mockLoad();
+		vi.mocked(workflows.listRuns).mockResolvedValueOnce([
+			{
+				id: 'run-3',
+				workflow_id: 'wf-1',
+				rivulet_id: 'riv-3',
+				triggered_by: 'remediation',
+				triggered_by_id: 'run-1',
+				status: 'completed',
+				current_node_id: null,
+				error_message: null,
+				final_output: 'recovered',
+				started_at: '2026-08-08T09:05:00Z',
+				completed_at: '2026-08-08T09:05:05Z'
+			}
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Load runs' }).click();
+
+		await expect.element(page.getByText('(remediation)')).toBeInTheDocument();
+	});
+
+	it('sets and clears the on-failure remediation workflow, including itself as an option', async () => {
+		mockLoad();
+		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
+		vi.mocked(workflows.update).mockResolvedValueOnce({
+			...reviewFlow,
+			on_failure_workflow_id: 'wf-1'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// Unlike the nested-workflow-step picker (which excludes the
+		// current workflow), remediation allows a workflow to reference
+		// itself -- "retry once on failure" is a legitimate shape (#94).
+		const remediationPicker = page.getByRole('combobox').first();
+		await expect
+			.element(remediationPicker.getByRole('option', { name: '/review-pr' }))
+			.toBeInTheDocument();
+		await expect
+			.element(remediationPicker.getByRole('option', { name: '/other-flow' }))
+			.toBeInTheDocument();
+
+		await remediationPicker.selectOptions('wf-1');
+		expect(workflows.update).toHaveBeenCalledWith('wf-1', { on_failure_workflow_id: 'wf-1' });
+
+		vi.mocked(workflows.update).mockResolvedValueOnce({
+			...reviewFlow,
+			on_failure_workflow_id: null
+		});
+		await remediationPicker.selectOptions('');
+		expect(workflows.update).toHaveBeenLastCalledWith('wf-1', { on_failure_workflow_id: null });
 	});
 });

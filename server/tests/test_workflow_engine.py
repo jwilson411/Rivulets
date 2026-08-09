@@ -369,6 +369,125 @@ async def test_node_failure_exhausting_retries_stops_the_run(
     assert "doomed" in alert.content
 
 
+async def test_on_failure_workflow_id_triggers_remediation_run(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#94 layer 2: a failed run of a workflow with `on_failure_workflow_id`
+    set automatically triggers a fresh top-level run of that remediation
+    workflow, with the failure's context as its input."""
+    from rivulets.db.models import Agent
+
+    agent = Agent(
+        name="AlwaysFails2",
+        description="An agent whose fake run_agent always raises, for remediation tests.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    rivulet = await _make_rivulet(db_session)
+    fixer = await _make_workflow(db_session, name="fixer")
+    fixer_node = _transform_node(fixer.id, "recover", "recovered: {input}")
+    db_session.add(fixer_node)
+    await db_session.flush()
+    await _entry_connect(db_session, fixer.id, fixer_node.id)
+
+    doomed = await _make_workflow(db_session, name="doomed-flow-2")
+    doomed.on_failure_workflow_id = fixer.id
+    doomed_node = WorkflowNode(
+        workflow_id=doomed.id, name="doomed", node_type="agent", agent_id=agent.id
+    )
+    db_session.add(doomed_node)
+    await db_session.flush()
+    await _entry_connect(db_session, doomed.id, doomed_node.id)
+    await db_session.commit()
+
+    async def always_fails(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", always_fails)
+
+    run = await run_workflow(
+        db_session, doomed, rivulet, "hi", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "failed"
+
+    result = await db_session.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == fixer.id)
+    )
+    remediation_runs = list(result.scalars().all())
+    assert len(remediation_runs) == 1
+    remediation_run = remediation_runs[0]
+    assert remediation_run.triggered_by == "remediation"
+    assert remediation_run.triggered_by_id == run.id
+    assert remediation_run.status == "completed"
+    assert remediation_run.final_output is not None
+    assert "recovered: Workflow /doomed-flow-2 run failed." in remediation_run.final_output
+    assert "provider is down" in remediation_run.final_output
+
+    result = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    alerts = [m.content for m in result.scalars().all()]
+    assert any("triggering remediation workflow /fixer" in a for a in alerts)
+
+
+async def test_on_failure_workflow_id_does_not_chain_past_one_remediation_attempt(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#94 layer 2's depth-1 cap: a self-referencing (or cyclically
+    referencing) on_failure_workflow_id can trigger at most one
+    remediation attempt -- a run whose own triggered_by is already
+    'remediation' never triggers further remediation, so this doesn't
+    ping-pong forever."""
+    from rivulets.db.models import Agent
+
+    agent = Agent(
+        name="AlwaysFails3",
+        description="An agent whose fake run_agent always raises, for the depth-cap test.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="self-doomed")
+    node = WorkflowNode(
+        workflow_id=workflow.id, name="doomed", node_type="agent", agent_id=agent.id
+    )
+    db_session.add(node)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow.id, node.id)
+    workflow.on_failure_workflow_id = workflow.id  # retries itself once on failure
+    await db_session.commit()
+
+    async def always_fails(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("still down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", always_fails)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "hi", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "failed"
+
+    result = await db_session.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == workflow.id)
+    )
+    all_runs = list(result.scalars().all())
+    # The original human-triggered run plus exactly one remediation
+    # attempt -- not a third, chained remediation-of-the-remediation.
+    assert len(all_runs) == 2
+    assert {r.triggered_by for r in all_runs} == {"human", "remediation"}
+    remediation_run = next(r for r in all_runs if r.triggered_by == "remediation")
+    assert remediation_run.status == "failed"
+    assert remediation_run.triggered_by_id == run.id
+
+
 async def test_conditioned_edges_route_to_only_the_matching_branch(
     db_session: AsyncSession,
 ) -> None:

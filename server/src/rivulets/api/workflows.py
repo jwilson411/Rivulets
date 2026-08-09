@@ -35,11 +35,20 @@ later purely by editing a *different* workflow, so it's caught instead by
 workflows/engine.py's runtime ancestry check when the workflow actually
 runs, not by this endpoint — see that module's docstring.
 
-`list_failed_runs` (#94, observability layer only — see that issue for the
-deferred auto-remediation layers) is the one endpoint here that isn't
-scoped to a single `workflow_id`: a failed run was previously only
-discoverable per-workflow via `list_runs`, with no way to see "what's
-failing right now" across all of them.
+`list_failed_runs` (#94 layer 1, observability) is the one endpoint here
+that isn't scoped to a single `workflow_id`: a failed run was previously
+only discoverable per-workflow via `list_runs`, with no way to see
+"what's failing right now" across all of them.
+
+`Workflow.on_failure_workflow_id` (#94 layer 2, auto-remediation) is the
+one field on `WorkflowUpdate` that can be explicitly cleared back to
+null via PATCH -- `update_workflow` checks `body.model_fields_set`
+rather than the `is not None` shortcut every other field here uses,
+since a remediation workflow, once configured, needs a way to be turned
+back off. `_validate_on_failure_workflow` only checks existence, not
+self-reference, unlike `_validate_child_workflow` -- see
+Workflow.on_failure_workflow_id's own docstring for why a self-reference
+here is a legitimate "retry once" shape rather than a mistake.
 """
 
 import json
@@ -85,6 +94,13 @@ class WorkflowCreate(BaseModel):
 class WorkflowUpdate(BaseModel):
     name: str | None = Field(default=None, pattern=_NAME_PATTERN)
     description: str | None = None
+    # #94 layer 2: unlike every other field here, this one needs to be
+    # clearable back to "no remediation" -- `update_workflow` checks
+    # `model_fields_set` for this field specifically instead of the
+    # `is not None` shortcut every other field uses, since `None` is a
+    # meaningful, settable value here rather than only meaning "not
+    # provided".
+    on_failure_workflow_id: str | None = None
 
 
 class WorkflowOut(BaseModel):
@@ -92,6 +108,7 @@ class WorkflowOut(BaseModel):
     name: str
     description: str | None
     published: bool
+    on_failure_workflow_id: str | None
     created_at: str
     updated_at: str
 
@@ -316,6 +333,15 @@ async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workfl
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
 
 
+async def _validate_on_failure_workflow(db: DbSession, on_failure_workflow_id: str) -> None:
+    """#94 layer 2: existence only -- unlike `_validate_child_workflow`, a
+    self-reference is deliberately *not* rejected here (see
+    Workflow.on_failure_workflow_id's docstring for why "retry this same
+    workflow once on failure" is safe without that check)."""
+    if await db.get(Workflow, on_failure_workflow_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Remediation workflow not found")
+
+
 @router.post("", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
 async def create_workflow(body: WorkflowCreate, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
     existing = await db.scalar(select(Workflow).where(Workflow.name == body.name))
@@ -356,6 +382,10 @@ async def update_workflow(
         workflow.name = body.name
     if body.description is not None:
         workflow.description = body.description
+    if "on_failure_workflow_id" in body.model_fields_set:
+        if body.on_failure_workflow_id is not None:
+            await _validate_on_failure_workflow(db, body.on_failure_workflow_id)
+        workflow.on_failure_workflow_id = body.on_failure_workflow_id
     await db.commit()
     await db.refresh(workflow)
     await publish_current_state(db, "workflow", workflow.id)
