@@ -40,6 +40,14 @@ _DEFAULTS: dict[str, object] = {
     "sync.eager_files_lan": True,
     "sync.eager_files_wan": False,
     "ui.port": 8484,
+    # #94 layer 3: workspace-wide fallback when a Workflow's own
+    # on_call_agent_id is unset -- an agent id (string) or None. Not
+    # validated against the agent table here, unlike Workflow.
+    # on_call_agent_id's own PATCH validation -- every other key in this
+    # table is an opaque JSON value already, and workflows/engine.py's
+    # _maybe_notify_on_call_agent already tolerates a stale/deleted
+    # agent id gracefully (skips notifying rather than erroring).
+    "workflows.default_on_call_agent_id": None,
 }
 
 _NOT_SYNCED_KEYS = frozenset({"ui.port"})

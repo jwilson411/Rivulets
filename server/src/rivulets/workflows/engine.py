@@ -59,11 +59,14 @@ back to the human, no automatic escalation. If any branch of a run fails
 (or trips a loop guard), the whole WorkflowRun is marked 'failed' with
 that branch's error, even if sibling branches completed cleanly — a
 partially-successful fan-out is still a run a human should look at.
-"No automatic escalation" gained one narrow, opt-in exception in #94
-layer 2: `_finalize_run` calls `_maybe_trigger_remediation`, which fires
-`Workflow.on_failure_workflow_id` (if set) as a fresh top-level
-run_workflow call — see that function's own docstring for the depth-1
-cap that keeps it from looping.
+"No automatic escalation" gained two narrow, opt-in, independently
+configurable exceptions: #94 layer 2's `_maybe_trigger_remediation`
+(`Workflow.on_failure_workflow_id`, a fresh top-level run_workflow call —
+see that function's own docstring for the depth-1 cap that keeps it from
+looping) and #94 layer 3's `_maybe_notify_on_call_agent`
+(`Workflow.on_call_agent_id` / the workspace-wide default, `@mention`ed
+via the ordinary dispatch path). `_finalize_run` calls both on a failed
+run; neither depends on or excludes the other.
 
 Merge nodes (#82): a branch that's about to advance onto a 'merge' node
 stops there instead (`_advance`) and reports the arrival rather than
@@ -184,6 +187,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
+    Agent,
+    Channel,
     Message,
     Rivulet,
     Workflow,
@@ -191,6 +196,7 @@ from rivulets.db.models import (
     WorkflowNode,
     WorkflowNodeRun,
     WorkflowRun,
+    WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
 from rivulets.streaming import publish
@@ -665,6 +671,7 @@ async def _finalize_run(
 
     if run.status == "failed":
         await _maybe_trigger_remediation(db, workflow, rivulet, run)
+        await _maybe_notify_on_call_agent(db, workflow, rivulet, run)
 
     return run
 
@@ -730,6 +737,85 @@ async def _maybe_trigger_remediation(
         triggered_by="remediation",
         triggered_by_id=failed_run.id,
     )
+
+
+async def _resolve_on_call_agent_id(db: AsyncSession, workflow: Workflow) -> str | None:
+    """`Workflow.on_call_agent_id` if set; otherwise the workspace-wide
+    'workflows.default_on_call_agent_id' setting (api/settings.py),
+    unvalidated JSON like every other row in that table -- a stale/typo'd
+    id there just means `_maybe_notify_on_call_agent`'s own `db.get`
+    finds nothing and skips notifying, not an error here."""
+    if workflow.on_call_agent_id is not None:
+        return workflow.on_call_agent_id
+    setting = await db.get(WorkspaceSetting, "workflows.default_on_call_agent_id")
+    if setting is None:
+        return None
+    value = json.loads(setting.value)
+    return value if isinstance(value, str) else None
+
+
+async def _maybe_notify_on_call_agent(
+    db: AsyncSession, workflow: Workflow, rivulet: Rivulet, failed_run: WorkflowRun
+) -> None:
+    """#94 layer 3: an alternative or complement to `_maybe_trigger_
+    remediation` -- for a failure where what's needed is an agent's
+    judgment rather than a deterministic recovery routine, `@mention`s
+    the resolved on-call agent (`_resolve_on_call_agent_id`) instead of
+    (or, since the two are independently configurable, alongside)
+    triggering a fixed remediation workflow.
+
+    Reuses the ordinary human-message dispatch path
+    (`dispatch.dispatch_and_respond`) rather than a separate notification
+    mechanism: the alert is posted as a real Message whose content
+    contains an `@mention`, then run through the exact same two-stage
+    dispatcher (dispatch/engine.py's `match_mentions`) a human typing
+    that text in this rivulet's channel would hit -- including its
+    existing "only an agent on this channel's own team is ever matched"
+    gate. An on-call agent configured for a channel its own team doesn't
+    cover silently doesn't get dispatched, the same as an ordinary
+    `@mention` of someone off the team would -- not special-cased here.
+    Local import of `dispatch_and_respond`: `dispatch/service.py` already
+    imports `run_workflow` from this module lazily inside its own
+    run_workflow-tool handling for the identical circular-import reason
+    (that module docstring's own note on `_handle_run_workflow_trigger`).
+
+    Deliberately no attempt/frequency cap here unlike `_maybe_trigger_
+    remediation`'s depth-1 guard: a chronically-failing *scheduled*
+    workflow is already bounded by WorkflowSchedule's own consecutive-
+    failure auto-disable (#92/#93), and a human/agent-triggered run
+    failing repeatedly requires someone actively re-triggering it each
+    time -- neither is the kind of self-sustaining loop that guard
+    exists to stop."""
+    agent_id = await _resolve_on_call_agent_id(db, workflow)
+    if agent_id is None:
+        return
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return
+    channel = await db.get(Channel, rivulet.channel_id)
+    if channel is None:
+        return
+
+    alert_content = f"@{agent.name} workflow /{workflow.name} failed: {failed_run.error_message}"
+    message = await _post_message(
+        db,
+        Message(
+            rivulet_id=rivulet.id,
+            sender_type="system",
+            sender_name="system",
+            content=alert_content,
+            content_type="system_alert",
+        ),
+    )
+
+    from rivulets.dispatch import dispatch_and_respond
+
+    agent_messages = await dispatch_and_respond(
+        db, rivulet, channel, alert_content, triggering_message_id=message.id
+    )
+    await db.commit()
+    for agent_message in agent_messages:
+        await publish_current_state(db, "message", agent_message.id)
 
 
 async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) -> WorkflowRun:

@@ -9,9 +9,11 @@ for `rivulets.dispatch.service.run_agent`.
 """
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -486,6 +488,85 @@ async def test_on_failure_workflow_id_does_not_chain_past_one_remediation_attemp
     remediation_run = next(r for r in all_runs if r.triggered_by == "remediation")
     assert remediation_run.status == "failed"
     assert remediation_run.triggered_by_id == run.id
+
+
+async def test_on_call_agent_falls_back_to_workspace_default(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#94 layer 3: with Workflow.on_call_agent_id left unset, a failed run
+    still @mentions the workspace-wide 'workflows.default_on_call_agent_id'
+    setting -- and, since that's a real @mention run through the ordinary
+    dispatch path, the mentioned agent's own reply lands in the rivulet
+    too, not just the alert."""
+    from rivulets.db.models import Agent, Team, TeamAgent, WorkspaceSetting
+
+    oncall = Agent(
+        name="OncallDefault",
+        description="Workspace-default on-call agent for the fallback test.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    doomed_agent = Agent(
+        name="AlwaysFails4",
+        description="An agent whose fake run_agent always raises, for the on-call test.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add_all([oncall, doomed_agent])
+    await db_session.flush()
+
+    team = Team(name="Oncall Team")
+    db_session.add(team)
+    await db_session.flush()
+    db_session.add(TeamAgent(team_id=team.id, agent_id=oncall.id))
+    db_session.add(
+        WorkspaceSetting(key="workflows.default_on_call_agent_id", value=json.dumps(oncall.id))
+    )
+
+    channel = Channel(name="wf-oncall-test", team_id=team.id)
+    db_session.add(channel)
+    await db_session.flush()
+    rivulet = Rivulet(channel_id=channel.id, created_by="human")
+    db_session.add(rivulet)
+    await db_session.flush()
+
+    workflow = await _make_workflow(db_session, name="flaky-default")
+    node = WorkflowNode(
+        workflow_id=workflow.id, name="doomed", node_type="agent", agent_id=doomed_agent.id
+    )
+    db_session.add(node)
+    await db_session.flush()
+    await _entry_connect(db_session, workflow.id, node.id)
+    await db_session.commit()
+    # workflow.on_call_agent_id stays None -- must fall back to the
+    # workspace default set above.
+
+    async def doomed_run_agent(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("upstream is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", doomed_run_agent)
+
+    async def oncall_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[],
+            get_content_as_string=lambda: "Looking into it.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", oncall_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "failed"
+
+    result = await db_session.execute(select(Message).where(Message.rivulet_id == rivulet.id))
+    contents = [(m.sender_type, m.sender_name, m.content) for m in result.scalars().all()]
+    assert any(
+        sender_type == "system" and "@OncallDefault" in content
+        for sender_type, _, content in contents
+    )
+    assert ("agent", "OncallDefault", "Looking into it.") in contents
 
 
 async def test_conditioned_edges_route_to_only_the_matching_branch(

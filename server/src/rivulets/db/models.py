@@ -341,7 +341,20 @@ class Workflow(Base):
     structural, depth-1 cap that doesn't need the reference itself
     forbidden. Not required to be `published` for the same reason
     `child_workflow_id` isn't: a deliberate structural reference, not
-    something a stray message could hit by accident."""
+    something a stray message could hit by accident.
+
+    `on_call_agent_id` (#94 layer 3): an optional agent to `@mention`
+    automatically (workflows/engine.py's `_maybe_notify_on_call_agent`)
+    whenever a run of this workflow fails -- independently configurable
+    alongside `on_failure_workflow_id`, not a replacement for it: a fixed
+    remediation workflow and an agent narrating/investigating aren't
+    really in tension, so both fire if both are set. When null, falls
+    back to the workspace-wide 'workflows.default_on_call_agent_id'
+    setting (api/settings.py) -- this field is only the per-workflow
+    override, not the sole place an on-call agent can be configured.
+    ondelete='SET NULL' -- same "survives as a now-misconfigured
+    reference rather than disappearing" treatment `agent_id` and
+    `child_workflow_id` already get elsewhere in this file."""
 
     __tablename__ = "workflow"
     __table_args__ = (UniqueConstraint("name", name="idx_workflow_name"),)
@@ -352,6 +365,9 @@ class Workflow(Base):
     published: Mapped[bool] = mapped_column(default=False)
     on_failure_workflow_id: Mapped[str | None] = mapped_column(
         ForeignKey("workflow.id", ondelete="SET NULL"), default=None
+    )
+    on_call_agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)

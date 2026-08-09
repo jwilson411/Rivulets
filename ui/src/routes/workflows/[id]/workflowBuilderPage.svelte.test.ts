@@ -69,6 +69,7 @@ const reviewFlow: Workflow = {
 	description: 'Runs a PR through review',
 	published: true,
 	on_failure_workflow_id: null,
+	on_call_agent_id: null,
 	created_at: '2026-08-01T00:00:00Z',
 	updated_at: '2026-08-01T00:00:00Z'
 };
@@ -176,9 +177,10 @@ describe('workflows/[id]/+page.svelte', () => {
 		// index 1 is the one between Fetch (n1) and Format (n2).
 		await page.getByRole('button', { name: '+ Add step' }).nth(1).click();
 		await page.getByPlaceholder('Step name').fill('Recap');
-		// Combobox 0 is the page-level "On failure" remediation picker
-		// (#94 layer 2) -- combobox 1 is this form's node-type select.
-		await page.getByRole('combobox').nth(1).selectOptions('summarize');
+		// Combobox 0 is the page-level remediation picker (#94 layer 2),
+		// combobox 1 is the on-call agent picker (#94 layer 3) -- combobox
+		// 2 is this form's node-type select.
+		await page.getByRole('combobox').nth(2).selectOptions('summarize');
 		await page.getByRole('button', { name: 'Add step', exact: true }).click();
 
 		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
@@ -222,11 +224,12 @@ describe('workflows/[id]/+page.svelte', () => {
 
 		await page.getByRole('button', { name: '+ Add step' }).first().click();
 		await page.getByPlaceholder('Step name').fill('Invoke other');
-		// Combobox 0 is the page-level "On failure" remediation picker
-		// (#94 layer 2) -- combobox 1 is this form's node-type select.
-		await page.getByRole('combobox').nth(1).selectOptions('workflow');
+		// Combobox 0 is the page-level remediation picker (#94 layer 2),
+		// combobox 1 is the on-call agent picker (#94 layer 3) -- combobox
+		// 2 is this form's node-type select.
+		await page.getByRole('combobox').nth(2).selectOptions('workflow');
 
-		const workflowPicker = page.getByRole('combobox').nth(2);
+		const workflowPicker = page.getByRole('combobox').nth(3);
 		await expect
 			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
 			.toBeInTheDocument();
@@ -556,5 +559,35 @@ describe('workflows/[id]/+page.svelte', () => {
 		});
 		await remediationPicker.selectOptions('');
 		expect(workflows.update).toHaveBeenLastCalledWith('wf-1', { on_failure_workflow_id: null });
+	});
+
+	it('sets and clears the on-call agent, independently of remediation', async () => {
+		mockLoad();
+		vi.mocked(workflows.update).mockResolvedValueOnce({
+			...reviewFlow,
+			on_call_agent_id: 'agent-1'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// Combobox 0 is the remediation picker -- combobox 1 is on-call.
+		const onCallPicker = page.getByRole('combobox').nth(1);
+		await expect
+			.element(onCallPicker.getByRole('option', { name: 'Researcher' }))
+			.toBeInTheDocument();
+		await expect
+			.element(onCallPicker.getByRole('option', { name: 'Workspace default' }))
+			.toBeInTheDocument();
+
+		await onCallPicker.selectOptions('agent-1');
+		expect(workflows.update).toHaveBeenCalledWith('wf-1', { on_call_agent_id: 'agent-1' });
+
+		vi.mocked(workflows.update).mockResolvedValueOnce({
+			...reviewFlow,
+			on_call_agent_id: null
+		});
+		await onCallPicker.selectOptions('');
+		expect(workflows.update).toHaveBeenLastCalledWith('wf-1', { on_call_agent_id: null });
 	});
 });
