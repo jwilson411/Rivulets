@@ -2,6 +2,8 @@
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
 	import { update, type UpdateStatus } from '$lib/api/update';
+	import { providers as providersApi, type Provider } from '$lib/api/providers';
+	import ModelPicker from '$lib/components/ModelPicker.svelte';
 
 	let loaded = $state<WorkspaceSettings | null>(null);
 	let loadError = $state<string | null>(null);
@@ -18,6 +20,9 @@
 
 	let hitRate = $state<HitRate | null>(null);
 	let hitRateError = $state<string | null>(null);
+
+	let providersList = $state<Provider[]>([]);
+	let providersError = $state<string | null>(null);
 
 	let updateStatus = $state<UpdateStatus | null>(null);
 	let updateError = $state<string | null>(null);
@@ -37,6 +42,15 @@
 			eagerFilesWan = loaded['sync.eager_files_wan'];
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load settings';
+		}
+	}
+
+	async function refreshProviders() {
+		providersError = null;
+		try {
+			providersList = await providersApi.list();
+		} catch (err) {
+			providersError = err instanceof Error ? err.message : 'Failed to load providers';
 		}
 	}
 
@@ -72,6 +86,7 @@
 	}
 
 	refresh();
+	refreshProviders();
 	refreshHitRate();
 	refreshUpdateStatus();
 
@@ -233,15 +248,15 @@
 			>
 				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Dispatcher</h2>
 				<p class="text-xs text-neutral-600 dark:text-neutral-400">
-					Override the model the dispatcher uses to route messages (OQ-2). Leave blank to let it
-					auto-pick from your configured providers.
+					Override the model the dispatcher uses to route messages (OQ-2). Leave unselected to let
+					it auto-pick from your configured providers.
 				</p>
-				<input
-					type="text"
-					bind:value={modelOverride}
-					placeholder="provider:model_name (e.g. anthropic:claude-3-5-haiku-latest)"
-					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				/>
+				{#if providersError}
+					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+						{providersError}
+					</p>
+				{/if}
+				<ModelPicker providers={providersList} bind:value={modelOverride} showAuto={false} />
 
 				<div class="mt-2 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
 					<h3 class="text-xs font-medium text-ink dark:text-ink-dark">

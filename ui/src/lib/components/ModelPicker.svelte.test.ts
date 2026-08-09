@@ -72,6 +72,14 @@ describe('ModelPicker.svelte', () => {
 			.toBeInTheDocument();
 	});
 
+	it('hides the Auto option when showAuto is false', async () => {
+		render(ModelPicker, { providers: [anthropicProvider], value: '', showAuto: false });
+
+		await expect
+			.element(page.getByRole('option', { name: 'Auto — picks cheap or capable per message' }))
+			.not.toBeInTheDocument();
+	});
+
 	it('shows a hint instead of options when no provider is configured', async () => {
 		render(ModelPicker, { providers: [], value: '' });
 
