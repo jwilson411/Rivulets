@@ -723,6 +723,10 @@ class File(Base):
     size_bytes: Mapped[int]
     message_id: Mapped[str | None] = mapped_column(default=None)
     local_path: Mapped[str]
+    # JSON list of node_ids known to have this content -- populated by
+    # sync/apply.py's _remember_known_source whenever a remote file
+    # change is applied, so a lazily-deferred (issue #123) fetch can
+    # still be completed later, on demand.
     synced_to_nodes: Mapped[str | None] = mapped_column(default=None)  # JSON
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)

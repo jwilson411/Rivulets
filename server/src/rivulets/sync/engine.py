@@ -62,6 +62,7 @@ below.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import struct
@@ -125,6 +126,43 @@ class PeerInfo:
     peer_id: str
     address: str
     connected: bool
+
+
+def _peer_ip(address: str) -> str | None:
+    """Extracts the ip4/ip6 host component from a peer's stored multiaddr
+    string (e.g. "/ip4/192.168.1.5/tcp/4001/p2p/Qm..."). Returns None for
+    an empty/malformed address (see _PeerConnectionNotifee's docstring on
+    why a connected peer's address can be a best-effort empty string)."""
+    if not address:
+        return None
+    try:
+        maddr = Multiaddr(address)
+    except Exception:
+        return None
+    for proto in ("ip4", "ip6"):
+        try:
+            value = maddr.value_for_protocol(proto)
+        except Exception:  # noqa: S112 - not every addr has this protocol, just try the next one
+            continue
+        if value:
+            return str(value)
+    return None
+
+
+def _is_lan_address(address: str) -> bool:
+    """LAN vs WAN classification for issue #123's eager-sync settings:
+    private/loopback/link-local ranges (RFC1918, RFC4193 IPv6 ULA, mDNS-
+    discovered peers are always in one of these) count as LAN; anything
+    else — including an address we couldn't parse at all — is treated as
+    WAN, matching sync.eager_files_wan's more conservative default
+    (False) rather than silently eager-pushing to an unknown network."""
+    ip = _peer_ip(address)
+    if ip is None:
+        return False
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 def _bound_port(host: IHost) -> int:
@@ -511,6 +549,13 @@ class SyncEngine:
             PeerInfo(peer_id=pid, address=addr, connected=True)
             for pid, addr in self._connected_peers.items()
         ]
+
+    def peer_is_lan(self, peer_id: str) -> bool:
+        """Used by sync/apply.py to decide which of sync.eager_files_lan/
+        _wan (issue #123) governs a given incoming file. An unconnected/
+        unknown peer_id (empty address) classifies as WAN — see
+        _is_lan_address."""
+        return _is_lan_address(self._connected_peers.get(peer_id, ""))
 
     async def list_peer_capabilities(self) -> dict[str, list[str]]:
         return dict(self._peer_capabilities)

@@ -404,12 +404,17 @@ async def apply_remote_file_change(
     gossipsub is sized for small state-change messages, not that (see
     file_transfer.py's module docstring). Once metadata is applied, if
     this node doesn't already have a local copy of the bytes (by content
-    hash), it fetches them from remote_node_id over the dedicated stream
-    protocol. `local_path` is always recomputed from this node's own
-    files_dir, never copied verbatim from the sender, matching Tool's
-    source_path handling. `File.message_id` has no FK constraint (see
-    db/models.py), so unlike Rivulet/Message there's no ordering hazard to
-    guard against here."""
+    hash), whether it fetches them from remote_node_id right away (over
+    the dedicated stream protocol) or defers is governed by
+    sync.eager_files_lan/_wan (issue #123) via _should_eager_fetch --
+    either way remote_node_id is remembered as a known source
+    (_remember_known_source) so a deferred fetch can still happen later,
+    on demand (fetch_file_content_from_known_sources, used by
+    api/files.py's download_file). `local_path` is always recomputed from
+    this node's own files_dir, never copied verbatim from the sender,
+    matching Tool's source_path handling. `File.message_id` has no FK
+    constraint (see db/models.py), so unlike Rivulet/Message there's no
+    ordering hazard to guard against here."""
     local_vc = await _load_vector_clock(db, "file", entity_id)
     comparison = compare_vector_clocks(local_vc, remote_vector_clock)
 
@@ -451,9 +456,49 @@ async def apply_remote_file_change(
     await db.commit()
 
     if not local_path.exists():
-        await _fetch_file_content(remote_node_id, content_hash, local_path)
+        await _remember_known_source(db, file_row, remote_node_id)
+        if await _should_eager_fetch(db, remote_node_id):
+            await _fetch_file_content(remote_node_id, content_hash, local_path)
 
     return ApplyResult(applied=True, conflict=False)
+
+
+# WorkspaceSetting keys and defaults for issue #123's eager-sync policy --
+# duplicated from api/settings.py's _DEFAULTS rather than imported, since
+# api/settings.py imports sync/publish.py which imports this module; an
+# import the other way would be a cycle.
+_EAGER_SETTING_DEFAULTS = {"sync.eager_files_lan": True, "sync.eager_files_wan": False}
+
+
+async def _should_eager_fetch(db: AsyncSession, remote_node_id: str) -> bool:
+    """Whether apply_remote_file_change should fetch this file's bytes
+    right now (eager) or leave it for a later on-demand fetch (lazy) --
+    the branch issue #123 found missing entirely (both toggles eagerly
+    fetched, unconditionally). Governed by sync.eager_files_lan/_wan,
+    keyed off whether the node that told us about this file is reachable
+    over the LAN or not (SyncEngine.peer_is_lan)."""
+    engine = get_sync_engine()
+    if not engine.running:
+        return False
+    key = "sync.eager_files_lan" if engine.peer_is_lan(remote_node_id) else "sync.eager_files_wan"
+    row = await db.get(WorkspaceSetting, key)
+    if row is None:
+        return _EAGER_SETTING_DEFAULTS[key]
+    return bool(json.loads(row.value))
+
+
+async def _remember_known_source(db: AsyncSession, file_row: File, node_id: str) -> None:
+    """Records node_id as a peer known to have this file's content, so a
+    lazy (non-eager) file can still be fetched on demand later --
+    api/files.py's download_file does exactly that when local_path is
+    still missing at download time. Appends rather than overwrites: a
+    file can accumulate multiple known sources across repeated syncs."""
+    known = set(json.loads(file_row.synced_to_nodes)) if file_row.synced_to_nodes else set()
+    if node_id in known:
+        return
+    known.add(node_id)
+    file_row.synced_to_nodes = json.dumps(sorted(known))
+    await db.commit()
 
 
 async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path) -> None:
@@ -467,6 +512,30 @@ async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(data)
     logger.info("Fetched file content (%d bytes) from %s", len(data), peer_id)
+
+
+async def fetch_file_content_from_known_sources(file_row: File) -> bool:
+    """On-demand counterpart to the eager path above -- api/files.py's
+    download_file calls this when local_path is missing (either lazy sync
+    deferred the fetch, or an eager fetch failed transiently) rather than
+    serving a 404 for content a peer already has. Tries every node
+    recorded by _remember_known_source until one has the bytes. Returns
+    whether local_path exists afterwards."""
+    local_path = Path(file_row.local_path)
+    if local_path.exists():
+        return True
+    if not file_row.synced_to_nodes:
+        return False
+    engine = get_sync_engine()
+    if not engine.running:
+        return False
+    for node_id in json.loads(file_row.synced_to_nodes):
+        data = await engine.request_file(node_id, file_row.content_hash)
+        if data is not None:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(data)
+            return True
+    return False
 
 
 _DISPATCH: dict[str, EntitySpec] = {

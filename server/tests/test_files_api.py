@@ -2,7 +2,14 @@
 ever exercises upload + attach-to-message, never GET /files/{id} or
 GET /files/{id}/info directly."""
 
+import json
+
+import pytest
 from fastapi.testclient import TestClient
+
+from rivulets.config import get_settings
+from rivulets.db.models import File as FileRow
+from rivulets.db.session import session_scope
 
 
 def _upload(
@@ -33,6 +40,54 @@ def test_download_file_returns_404_for_unknown_file(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     response = client.get("/api/v1/files/does-not-exist", headers=auth_headers)
+    assert response.status_code == 404
+
+
+async def test_download_file_lazily_fetches_from_a_known_source_when_missing_locally(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issue #123: a file whose bytes aren't on disk yet (lazy sync
+    deferred the fetch, or it was otherwise lost) is still fetchable on
+    demand from a peer recorded in File.synced_to_nodes, rather than
+    404ing outright."""
+    uploaded = _upload(client, auth_headers, "notes.txt", b"lazy content")
+    content_hash = uploaded["content_hash"]
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert local_path.exists()
+    local_path.unlink()  # simulate the bytes never having landed locally
+
+    async with session_scope() as db:
+        row = await db.get(FileRow, uploaded["file_id"])
+        assert row is not None
+        row.synced_to_nodes = json.dumps(["node-b"])
+        await db.commit()
+
+    class _FakeEngine:
+        running = True
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            assert peer_id == "node-b"
+            assert requested_hash == content_hash
+            return b"lazy content"
+
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+
+    response = client.get(f"/api/v1/files/{uploaded['file_id']}", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.content == b"lazy content"
+
+
+async def test_download_file_returns_404_when_content_missing_and_no_known_source(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    uploaded = _upload(client, auth_headers, "notes.txt", b"gone")
+    content_hash = uploaded["content_hash"]
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    local_path.unlink()
+
+    response = client.get(f"/api/v1/files/{uploaded['file_id']}", headers=auth_headers)
+
     assert response.status_code == 404
 
 
