@@ -125,6 +125,110 @@ describe('sync/+page.svelte', () => {
 		await expect.element(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
 	});
 
+	it('shows an error when the initial load fails', async () => {
+		vi.mocked(sync.status).mockRejectedValueOnce(new Error('Failed to load sync status'));
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('Failed to load sync status')).toBeInTheDocument();
+	});
+
+	it('shows a peer with capabilities and no peers otherwise', async () => {
+		vi.mocked(sync.status).mockResolvedValue({
+			...runningStatus,
+			peers: [{ ...runningStatus.peers[0], capabilities: ['gpu', 'cpu-heavy'] }]
+		});
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('gpu, cpu-heavy')).toBeInTheDocument();
+	});
+
+	it('shows a no-peers message when nothing is connected', async () => {
+		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, peers: [] });
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('No peers connected.')).toBeInTheDocument();
+	});
+
+	it('saves capabilities via sync.setCapabilities, splitting and trimming the draft', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.setCapabilities).mockResolvedValueOnce({ capabilities: ['gpu', 'cpu-heavy'] });
+
+		render(SyncPage);
+		await page.getByPlaceholder(/My capabilities/).fill(' gpu ,cpu-heavy, ');
+		await page.getByRole('button', { name: 'Save capabilities' }).click();
+
+		expect(sync.setCapabilities).toHaveBeenCalledWith(['gpu', 'cpu-heavy']);
+	});
+
+	it('shows the ApiError message when saving capabilities fails', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.setCapabilities).mockRejectedValueOnce(
+			new ApiError(422, 'invalid capability tag')
+		);
+
+		render(SyncPage);
+		await page.getByPlaceholder(/My capabilities/).fill('bad tag!');
+		await page.getByRole('button', { name: 'Save capabilities' }).click();
+
+		await expect.element(page.getByText('invalid capability tag')).toBeInTheDocument();
+	});
+
+	it('does not connect while the address is blank', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+		await page.getByRole('button', { name: 'Connect', exact: true }).click();
+
+		expect(sync.connect).not.toHaveBeenCalled();
+	});
+
+	it('shows the ApiError message when connecting fails', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.connect).mockRejectedValueOnce(new ApiError(502, 'peer refused connection'));
+
+		render(SyncPage);
+		await page.getByPlaceholder(/Multiaddr/).fill('/ip4/9.9.9.9/tcp/5000/p2p/peer-2');
+		await page.getByRole('button', { name: 'Connect', exact: true }).click();
+
+		await expect.element(page.getByText('peer refused connection')).toBeInTheDocument();
+	});
+
+	it('resolves a conflict by keeping the local version', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([conflict]);
+		vi.mocked(sync.resolveConflict).mockResolvedValueOnce(conflict);
+
+		render(SyncPage);
+		await expect.element(page.getByText('Conflicts (1)')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Keep local' }).click();
+
+		expect(sync.resolveConflict).toHaveBeenCalledWith('conf-1', 'local');
+	});
+
+	it('shows the ApiError message when resolving a conflict fails', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([conflict]);
+		vi.mocked(sync.resolveConflict).mockRejectedValueOnce(
+			new ApiError(409, 'conflict already resolved')
+		);
+
+		render(SyncPage);
+		await page.getByRole('button', { name: 'Keep remote' }).click();
+
+		await expect.element(page.getByText('conflict already resolved')).toBeInTheDocument();
+	});
+
 	it('shows the ApiError message when disconnecting fails', async () => {
 		vi.mocked(sync.status).mockResolvedValue(runningStatus);
 		vi.mocked(sync.conflicts).mockResolvedValue([]);

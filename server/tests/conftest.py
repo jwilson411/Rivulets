@@ -97,6 +97,19 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # each one — real behavior worth its own tests (test_backup.py), but
     # pure overhead here against an ephemeral in-memory DB nobody restores.
     monkeypatch.setattr("rivulets.app.run_startup_backup_checks", _noop_async)
+    # #92's scheduler_task is started as a bare asyncio.create_task at
+    # lifespan startup, with no ordering guarantee against the test's own
+    # first request. Since the in-memory test DB uses StaticPool (all
+    # sessions share one literal SQLite connection), the scheduler's own
+    # session_scope() opening/closing on that shared connection can land
+    # in the middle of an unrelated request's own commit()/refresh() pair
+    # and invalidate it -- surfaced as an intermittent
+    # `sqlalchemy.exc.InvalidRequestError: Could not refresh instance`
+    # around login()'s Workspace bootstrap. The real scheduling behavior
+    # is covered by tests/test_scheduler.py against `_tick()` directly,
+    # not through this fixture, so no-op it here the same way
+    # SyncEngine.start/.stop are above.
+    monkeypatch.setattr("rivulets.app.run_scheduler_loop", _noop_async)
 
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()

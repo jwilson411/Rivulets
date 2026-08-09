@@ -32,6 +32,16 @@ describe('workflows', () => {
 		expect(result).toEqual([{ id: 'w1' }]);
 	});
 
+	it('get() GETs /workflows/:id', async () => {
+		const fetchMock = mockFetch({ id: 'w1', name: 'my-flow' });
+
+		const result = await workflows.get('w1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/workflows/w1');
+		expect(result).toEqual({ id: 'w1', name: 'my-flow' });
+	});
+
 	it('create() POSTs the input to /workflows', async () => {
 		const fetchMock = mockFetch({ id: 'w1' });
 		const input = { name: 'my-flow', description: 'does things' };
@@ -160,6 +170,71 @@ describe('workflows', () => {
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/v1/workflows/w1/connections/c1');
 		expect(init.method).toBe('DELETE');
+	});
+
+	it('listSchedules() GETs /workflows/:id/schedules', async () => {
+		const fetchMock = mockFetch([{ id: 's1' }]);
+
+		const result = await workflows.listSchedules('w1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/workflows/w1/schedules');
+		expect(result).toEqual([{ id: 's1' }]);
+	});
+
+	it('createSchedule() POSTs to /workflows/:id/schedules', async () => {
+		const fetchMock = mockFetch({ id: 's1' });
+		const input = { channel_id: 'c1', cron_expression: '0 * * * *' };
+
+		await workflows.createSchedule('w1', input);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/schedules');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify(input));
+	});
+
+	it('updateSchedule() PATCHes /workflows/:id/schedules/:scheduleId', async () => {
+		const fetchMock = mockFetch({ id: 's1', enabled: false });
+
+		await workflows.updateSchedule('w1', 's1', { enabled: false });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/schedules/s1');
+		expect(init.method).toBe('PATCH');
+		expect(init.body).toBe(JSON.stringify({ enabled: false }));
+	});
+
+	it('removeSchedule() DELETEs /workflows/:id/schedules/:scheduleId', async () => {
+		const fetchMock = mockFetch(null, 204);
+
+		await workflows.removeSchedule('w1', 's1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/schedules/s1');
+		expect(init.method).toBe('DELETE');
+	});
+
+	it('previewSchedule() POSTs the cron expression to /workflows/:id/schedules/preview', async () => {
+		const fetchMock = mockFetch({ valid: true, next_fire_at: '2026-01-01T00:00:00Z', error: null });
+
+		const result = await workflows.previewSchedule('w1', '0 * * * *');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/schedules/preview');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify({ cron_expression: '0 * * * *' }));
+		expect(result).toEqual({ valid: true, next_fire_at: '2026-01-01T00:00:00Z', error: null });
+	});
+
+	it('listFailedRuns() GETs /workflows/runs/failed', async () => {
+		const fetchMock = mockFetch([{ id: 'r1', workflow_id: 'w1' }]);
+
+		const result = await workflows.listFailedRuns();
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/workflows/runs/failed');
+		expect(result).toEqual([{ id: 'r1', workflow_id: 'w1' }]);
 	});
 
 	it('listRuns() GETs /workflows/:id/runs', async () => {

@@ -133,6 +133,34 @@ describe('workflows/+page.svelte', () => {
 		await expect.element(page.getByText(/No workflows yet/)).toBeInTheDocument();
 	});
 
+	it('surfaces a failed workflow list load instead of failing silently', async () => {
+		vi.mocked(workflows.list).mockRejectedValue(new Error('Server unreachable'));
+
+		render(WorkflowsPage);
+
+		await expect.element(page.getByText('Server unreachable')).toBeInTheDocument();
+	});
+
+	it('surfaces a failed delete instead of failing silently', async () => {
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow]);
+		vi.mocked(workflows.remove).mockRejectedValueOnce(new Error('Workflow is still published'));
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText('review-pr')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Workflow is still published')).toBeInTheDocument();
+	});
+
+	it('surfaces a failed failed-runs load instead of failing silently', async () => {
+		vi.mocked(workflows.list).mockResolvedValue([]);
+		vi.mocked(workflows.listFailedRuns).mockRejectedValue(new Error('Failed runs unavailable'));
+
+		render(WorkflowsPage);
+
+		await expect.element(page.getByText('Failed runs unavailable')).toBeInTheDocument();
+	});
+
 	it('shows no failed-runs panel when nothing has failed', async () => {
 		vi.mocked(workflows.list).mockResolvedValue([]);
 
