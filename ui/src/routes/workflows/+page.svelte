@@ -1,10 +1,27 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { workflows, type Workflow } from '$lib/api/workflows';
+	import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 	import { timeAgo } from '$lib/format';
 
 	let workflowList = $state<Workflow[]>([]);
 	let loadError = $state<string | null>(null);
+
+	// #94 (observability layer): failed runs across every workflow, not
+	// just the one a human happens to be looking at -- see
+	// api/workflows.py's list_failed_runs docstring for why this exists.
+	let failedRuns = $state<FailedWorkflowRun[]>([]);
+	let failedRunsError = $state<string | null>(null);
+
+	async function refreshFailedRuns() {
+		failedRunsError = null;
+		try {
+			failedRuns = await workflows.listFailedRuns();
+		} catch (err) {
+			failedRunsError = err instanceof Error ? err.message : 'Failed to load failed runs';
+		}
+	}
+
+	refreshFailedRuns();
 
 	let newName = $state('');
 	let newDescription = $state('');
@@ -66,6 +83,49 @@
 			<code class="font-mono">/&#123;name&#125; &lt;input&gt;</code>.
 		</p>
 	</header>
+
+	{#if failedRunsError}
+		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{failedRunsError}</p>
+	{:else if failedRuns.length > 0}
+		<section
+			class="bg-agent-magenta-50 dark:bg-agent-magenta-950/20 flex flex-col gap-3 rounded-lg border border-agent-magenta-300 p-4 dark:border-agent-magenta-900/50"
+		>
+			<h2 class="text-sm font-medium text-agent-magenta-800 dark:text-agent-magenta-400">
+				Failed runs ({failedRuns.length})
+			</h2>
+			<ul class="flex flex-col gap-2">
+				{#each failedRuns as run (run.id)}
+					<li class="flex items-start justify-between gap-3 text-sm">
+						<div class="min-w-0 flex-1">
+							<a
+								href={resolve('/workflows/[id]', { id: run.workflow_id })}
+								class="font-medium text-ink hover:underline dark:text-ink-dark"
+							>
+								/{run.workflow_name}
+							</a>
+							{#if run.error_message}
+								<p class="truncate text-neutral-600 dark:text-neutral-400">
+									{run.error_message}
+								</p>
+							{/if}
+						</div>
+						<div class="flex flex-none items-center gap-3 text-xs text-neutral-500">
+							<span>{timeAgo(run.started_at)}</span>
+							<a
+								href={resolve('/channels/[id]/rivulets/[rivuletId]', {
+									id: run.channel_id,
+									rivuletId: run.rivulet_id
+								})}
+								class="text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+							>
+								View rivulet
+							</a>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
 
 	<form
 		onsubmit={handleCreate}

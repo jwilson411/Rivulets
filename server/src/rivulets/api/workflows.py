@@ -34,13 +34,19 @@ A embeds B, B embeds A) can't be fully ruled out here since it can appear
 later purely by editing a *different* workflow, so it's caught instead by
 workflows/engine.py's runtime ancestry check when the workflow actually
 runs, not by this endpoint — see that module's docstring.
+
+`list_failed_runs` (#94, observability layer only — see that issue for the
+deferred auto-remediation layers) is the one endpoint here that isn't
+scoped to a single `workflow_id`: a failed run was previously only
+discoverable per-workflow via `list_runs`, with no way to see "what's
+failing right now" across all of them.
 """
 
 import json
 import logging
 
 from croniter import CroniterError
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -48,6 +54,7 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.db.models import (
     Agent,
     Channel,
+    Rivulet,
     Workflow,
     WorkflowConnection,
     WorkflowNode,
@@ -196,6 +203,17 @@ class WorkflowRunOut(BaseModel):
     completed_at: str | None
 
     model_config = {"from_attributes": True}
+
+
+class FailedWorkflowRunOut(WorkflowRunOut):
+    """A WorkflowRunOut plus the two things a cross-workflow failure list
+    (#94's "make failures actually observable" layer) needs that the
+    per-workflow /runs endpoint doesn't, since the workflow is implied by
+    the URL there: which workflow this run belongs to, and which channel
+    to jump into (via rivulet_id) to see what actually happened."""
+
+    workflow_name: str
+    channel_id: str
 
 
 class WorkflowNodeRunOut(BaseModel):
@@ -668,6 +686,37 @@ async def preview_schedule(
         )
     except CroniterError as exc:
         return CronPreviewOut(valid=False, next_fire_at=None, error=str(exc))
+
+
+@router.get("/runs/failed", response_model=list[FailedWorkflowRunOut])
+async def list_failed_runs(
+    db: DbSession, _: CurrentWorkspaceId, limit: int = Query(default=50, ge=1, le=200)
+) -> list[FailedWorkflowRunOut]:
+    """#94: a failed WorkflowRun today is only discoverable by scrolling to
+    the right rivulet at the right time or opening that one workflow's own
+    run history (list_runs, below) — there's no cross-workflow view of
+    "what's failing right now". This is that view: every failed run across
+    every workflow, newest first, joined against Workflow for a display
+    name and Rivulet for the channel a human would jump into to see what
+    happened. Deliberately just a read — no acknowledgment/resolution
+    state, no auto-remediation (#94's later layers); those need their own
+    design pass and aren't blocked on this landing first."""
+    result = await db.execute(
+        select(WorkflowRun, Workflow.name, Rivulet.channel_id)
+        .join(Workflow, WorkflowRun.workflow_id == Workflow.id)
+        .join(Rivulet, WorkflowRun.rivulet_id == Rivulet.id)
+        .where(WorkflowRun.status == "failed")
+        .order_by(WorkflowRun.started_at.desc())
+        .limit(limit)
+    )
+    return [
+        FailedWorkflowRunOut(
+            **WorkflowRunOut.model_validate(run).model_dump(),
+            workflow_name=workflow_name,
+            channel_id=channel_id,
+        )
+        for run, workflow_name, channel_id in result.all()
+    ]
 
 
 @router.get("/{workflow_id}/runs", response_model=list[WorkflowRunOut])
