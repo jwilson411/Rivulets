@@ -181,6 +181,26 @@
 		}
 	}
 
+	let onCallBusy = $state(false);
+	let onCallError = $state<string | null>(null);
+
+	// #94 layer 3: same immediate-save pattern as updateRemediation --
+	// independently configurable, not a replacement for it.
+	async function updateOnCallAgent(value: string) {
+		if (!workflow) return;
+		onCallError = null;
+		onCallBusy = true;
+		try {
+			workflow = await workflows.update(workflow.id, {
+				on_call_agent_id: value || null
+			});
+		} catch (err) {
+			onCallError = err instanceof Error ? err.message : 'Failed to update on-call agent';
+		} finally {
+			onCallBusy = false;
+		}
+	}
+
 	let showAddSchedule = $state(false);
 	let scheduleCronDraft = $state('');
 	let scheduleChannelDraft = $state('');
@@ -550,6 +570,29 @@
 			{#if remediationError}
 				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
 					{remediationError}
+				</p>
+			{/if}
+
+			<h3 class="mt-2 text-sm font-medium text-ink dark:text-ink-dark">On-call agent</h3>
+			<p class="text-xs text-neutral-500">
+				@mention an agent when a run fails, alongside (or instead of) a remediation workflow. It
+				only responds if it's on this channel's team. Leave as "Workspace default" to use the
+				default configured in Settings.
+			</p>
+			<select
+				value={workflow.on_call_agent_id ?? ''}
+				onchange={(e) => updateOnCallAgent(e.currentTarget.value)}
+				disabled={onCallBusy}
+				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+			>
+				<option value="">Workspace default</option>
+				{#each agentList as agent (agent.id)}
+					<option value={agent.id}>{agent.name}</option>
+				{/each}
+			</select>
+			{#if onCallError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+					{onCallError}
 				</p>
 			{/if}
 		</section>

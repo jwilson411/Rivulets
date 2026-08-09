@@ -18,6 +18,10 @@ export interface Workflow {
 	// #94 layer 2: remediation workflow triggered automatically when a run
 	// of this workflow fails. null = no remediation configured.
 	on_failure_workflow_id: string | null;
+	// #94 layer 3: agent @mentioned automatically when a run of this
+	// workflow fails. null = falls back to the workspace-wide default
+	// ('workflows.default_on_call_agent_id' in settings), not "disabled".
+	on_call_agent_id: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -82,9 +86,11 @@ export interface WorkflowUpdateInput {
 	name?: string;
 	description?: string | null;
 	// Omit entirely to leave unchanged; include (even as null, to clear
-	// remediation) to update -- mirrors api/workflows.py's WorkflowUpdate,
-	// the one field there distinguishing "not provided" from "set to null".
+	// remediation/on-call) to update -- mirrors api/workflows.py's
+	// WorkflowUpdate, the two fields there distinguishing "not provided"
+	// from "set to null".
 	on_failure_workflow_id?: string | null;
+	on_call_agent_id?: string | null;
 }
 
 export interface WorkflowNodeCreateInput {

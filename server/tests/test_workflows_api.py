@@ -145,6 +145,105 @@ def test_on_failure_workflow_id_rejects_unknown_workflow(
     assert resp.status_code == 404
 
 
+def test_set_and_clear_on_call_agent_id(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """#94 layer 3: on_call_agent_id, like on_failure_workflow_id, is
+    settable and explicitly clearable back to null via PATCH."""
+    workflow_id = _create_workflow(client, auth_headers, "flaky3")
+    oncall_id = _create_agent(client, auth_headers, "Oncall1")
+
+    set_resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_call_agent_id": oncall_id},
+        headers=auth_headers,
+    )
+    assert set_resp.status_code == 200, set_resp.text
+    assert set_resp.json()["on_call_agent_id"] == oncall_id
+
+    clear_resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_call_agent_id": None},
+        headers=auth_headers,
+    )
+    assert clear_resp.status_code == 200, clear_resp.text
+    assert clear_resp.json()["on_call_agent_id"] is None
+
+
+def test_on_call_agent_id_rejects_unknown_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "flaky4")
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_call_agent_id": "does-not-exist"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+def test_on_call_agent_is_mentioned_and_responds_when_a_run_fails(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#94 layer 3: a failed run @mentions Workflow.on_call_agent_id
+    through the ordinary dispatch path (not a separate notification
+    mechanism) -- the alert message and the on-call agent's reply both
+    land in the same rivulet the failure happened in."""
+    workflow_id = _create_workflow(client, auth_headers, "flaky-service")
+    doomed_agent_id = _create_agent(client, auth_headers, "DoomedWorker")
+    node_created = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": doomed_agent_id},
+        headers=auth_headers,
+    )
+    assert node_created.status_code == 201, node_created.text
+    node_id = node_created.json()["id"]
+    _connect(client, auth_headers, workflow_id, None, node_id)
+    _publish_workflow(client, auth_headers, workflow_id)
+
+    oncall_id = _create_agent(client, auth_headers, "Oncall2")
+    team = client.post("/api/v1/teams", json={"name": "Oncall Team"}, headers=auth_headers)
+    team_id = team.json()["id"]
+    client.patch(f"/api/v1/teams/{team_id}", json={"agent_ids": [oncall_id]}, headers=auth_headers)
+    channel_id = _create_channel(client, auth_headers, "flaky-channel")
+    client.patch(f"/api/v1/channels/{channel_id}", json={"team_id": team_id}, headers=auth_headers)
+
+    set_resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_call_agent_id": oncall_id},
+        headers=auth_headers,
+    )
+    assert set_resp.status_code == 200, set_resp.text
+
+    async def doomed_run_agent(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("upstream is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", doomed_run_agent)
+
+    async def oncall_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[],
+            get_content_as_string=lambda: "On it, investigating.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", oncall_run_agent)
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "/flaky-service go"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    contents = [(m["sender_type"], m["sender_name"], m["content"]) for m in messages]
+    assert any(
+        sender_type == "system" and "@Oncall2" in content and "/flaky-service" in content
+        for sender_type, _, content in contents
+    )
+    assert ("agent", "Oncall2", "On it, investigating.") in contents
+
+
 def test_create_workflow_rejects_duplicate_name(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
