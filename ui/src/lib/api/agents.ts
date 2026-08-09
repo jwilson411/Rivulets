@@ -9,6 +9,9 @@ export interface Agent {
 	description: string;
 	instructions: string;
 	model: string;
+	// Ordered 'provider:model_name' strings (#103): tried in turn if
+	// `model`'s call fails with a retryable-looking error.
+	fallback_models: string[];
 	agentos_agent_id: string | null;
 }
 
@@ -26,6 +29,7 @@ export interface AgentCreateInput {
 	description: string;
 	instructions: string;
 	model: string;
+	fallback_models?: string[];
 	tool_ids?: string[];
 	team_ids?: string[];
 }
@@ -35,6 +39,7 @@ export interface AgentUpdateInput {
 	description?: string;
 	instructions?: string;
 	model?: string;
+	fallback_models?: string[];
 	tool_ids?: string[];
 	team_ids?: string[];
 }

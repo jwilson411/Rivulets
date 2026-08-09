@@ -142,6 +142,14 @@ class Agent(Base):
     description: Mapped[str]  # used by dispatcher, 10-500 chars
     instructions: Mapped[str]  # system prompt
     model: Mapped[str]  # 'provider:model_name'
+    # Ordered JSON array of 'provider:model_name' strings (#103): tried in
+    # order if `model`'s call fails with a retryable-looking error (rate
+    # limit, 5xx, timeout). None/empty means no fallback configured, the
+    # original single-model behavior. JSON-in-TEXT, same convention as
+    # AgentRoutingRule.pattern below -- no live migration tooling in this
+    # project, so a new typed column would be just as much schema churn
+    # for no benefit over reusing that pattern.
+    fallback_models: Mapped[str | None] = mapped_column(default=None)
     agentos_agent_id: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
@@ -204,6 +212,12 @@ class AgentRun(Base):
     agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
     source: Mapped[str] = mapped_column(default="agent_run")  # 'agent_run' | 'dispatcher_call'
     model: Mapped[str]  # 'provider:model_name' — the concrete model that actually ran
+    # Set only when a fallback chain (#103) served this run instead of the
+    # originally-requested model -- `model` above then holds the model
+    # that actually answered, and this holds the one that was asked for
+    # first but failed. None on every run that didn't fall back, so a
+    # normal run's accounting looks exactly like it did before #103.
+    requested_model: Mapped[str | None] = mapped_column(default=None)
     tier: Mapped[str | None] = mapped_column(default=None)  # 'cheap'|'capable'|None (fixed model)
     status: Mapped[str]  # 'completed' | 'error'
     input_tokens: Mapped[int] = mapped_column(default=0)

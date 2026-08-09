@@ -102,6 +102,11 @@ class MessageOut(BaseModel):
     # running at reply time. Parsed from the same metadata_json bag as
     # model_used/tier above.
     executed_node_id: str | None = None
+    # #103: set only when this agent's configured fallback chain served
+    # the reply because its primary model's call failed with a
+    # retryable-looking error -- the model that actually answered. None
+    # on every reply that didn't need to fall back.
+    served_model: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -197,6 +202,7 @@ def _to_message_out(message: Message, attachments: list[File]) -> MessageOut:
         model_used=metadata.get("model_used"),
         tier=metadata.get("tier"),
         executed_node_id=metadata.get("executed_node_id"),
+        served_model=metadata.get("served_model"),
     )
 
 

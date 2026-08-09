@@ -14,8 +14,11 @@ peers. Publishing is best-effort — a peer being unreachable, or the sync
 engine not running at all, must never fail the request (FR-9.5).
 """
 
+import json
+from typing import cast
+
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 
 from rivulets.agentos import get_agentos, sync_agents
@@ -39,6 +42,9 @@ class AgentCreate(BaseModel):
     description: str = Field(min_length=10, max_length=500)
     instructions: str
     model: str  # "provider:model_name"
+    # Ordered "provider:model_name" strings (#103): tried in turn if
+    # `model`'s call fails with a retryable-looking error.
+    fallback_models: list[str] = Field(default_factory=list)
     tool_ids: list[str] = Field(default_factory=list)
     team_ids: list[str] = Field(default_factory=list)
 
@@ -48,6 +54,7 @@ class AgentUpdate(BaseModel):
     description: str | None = None
     instructions: str | None = None
     model: str | None = None
+    fallback_models: list[str] | None = None
     tool_ids: list[str] | None = None
     team_ids: list[str] | None = None
 
@@ -58,14 +65,36 @@ class AgentOut(BaseModel):
     description: str
     instructions: str
     model: str
+    fallback_models: list[str] = Field(default_factory=list)
     agentos_agent_id: str | None
 
     model_config = {"from_attributes": True}
+
+    @field_validator("fallback_models", mode="before")
+    @classmethod
+    def _parse_fallback_models(cls, value: object) -> list[str]:
+        # Agent.fallback_models is stored as a JSON string (same
+        # convention as AgentRoutingRule.pattern) -- unpack it into the
+        # list the API actually exposes.
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                return []
+            if not isinstance(parsed, list):
+                return []
+            return [item for item in cast(list[object], parsed) if isinstance(item, str)]
+        if isinstance(value, list):
+            return [item for item in cast(list[object], value) if isinstance(item, str)]
+        return []
 
 
 class AgentRunOut(BaseModel):
     id: str
     model: str
+    # Set only when a fallback chain (#103) served this run instead of
+    # the model that was actually asked for.
+    requested_model: str | None
     tier: str | None
     status: str
     input_tokens: int
@@ -165,6 +194,7 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
         description=body.description,
         instructions=body.instructions,
         model=body.model,
+        fallback_models=json.dumps(body.fallback_models) if body.fallback_models else None,
     )
     db.add(agent)
     await db.flush()  # populate agent.id before using it in join rows
@@ -190,11 +220,15 @@ async def update_agent(
 ) -> Agent:
     agent = await _get_or_404(db, agent_id)
     rule_regen_fields = {"description", "instructions"}
-    updates = body.model_dump(exclude_unset=True, exclude={"tool_ids", "team_ids"})
+    updates = body.model_dump(
+        exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models"}
+    )
     needs_rule_regen = rule_regen_fields & updates.keys()
 
     for field, value in updates.items():
         setattr(agent, field, value)
+    if body.fallback_models is not None:
+        agent.fallback_models = json.dumps(body.fallback_models) if body.fallback_models else None
     if body.tool_ids is not None:
         await _set_tools(db, agent_id, body.tool_ids)
     if body.team_ids is not None:

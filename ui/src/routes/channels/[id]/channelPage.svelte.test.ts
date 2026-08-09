@@ -76,7 +76,8 @@ const humanMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 const agentMessage: Message = {
@@ -91,7 +92,8 @@ const agentMessage: Message = {
 	attachments: [],
 	model_used: null,
 	tier: null,
-	executed_node_id: null
+	executed_node_id: null,
+	served_model: null
 };
 
 afterEach(() => {

@@ -76,6 +76,54 @@ def test_create_agent_with_tools_and_teams(
     assert team_detail["agent_ids"] == [agent["id"]]
 
 
+def test_create_agent_defaults_to_no_fallback_models(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    assert agent["fallback_models"] == []
+
+
+def test_create_agent_with_fallback_models(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Resilient",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "fallback_models": ["openai:gpt-4o-mini", "deepseek:deepseek-chat"],
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    agent = response.json()
+    assert agent["fallback_models"] == ["openai:gpt-4o-mini", "deepseek:deepseek-chat"]
+
+    fetched = client.get(f"/api/v1/agents/{agent['id']}", headers=auth_headers).json()
+    assert fetched["fallback_models"] == ["openai:gpt-4o-mini", "deepseek:deepseek-chat"]
+
+
+def test_update_agent_fallback_models(client: TestClient, auth_headers: dict[str, str]) -> None:
+    agent = _create_agent(client, auth_headers)
+    assert agent["fallback_models"] == []
+
+    updated = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"fallback_models": ["openai:gpt-4o-mini"]},
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["fallback_models"] == ["openai:gpt-4o-mini"]
+
+    cleared = client.patch(
+        f"/api/v1/agents/{agent['id']}", json={"fallback_models": []}, headers=auth_headers
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["fallback_models"] == []
+
+
 def test_update_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.patch(
         "/api/v1/agents/nonexistent", json={"name": "New name"}, headers=auth_headers

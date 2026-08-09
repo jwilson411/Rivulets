@@ -39,7 +39,8 @@ describe('AgentForm.svelte', () => {
 			name: 'Researcher',
 			description: 'Looks things up',
 			instructions: 'Be thorough',
-			model: 'anthropic:claude-haiku-4-5-20251001'
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: []
 		});
 	});
 
@@ -70,7 +71,8 @@ describe('AgentForm.svelte', () => {
 				name: 'Researcher',
 				description: 'Looks things up',
 				instructions: 'Be thorough',
-				model: 'anthropic:claude-haiku-4-5-20251001'
+				model: 'anthropic:claude-haiku-4-5-20251001',
+				fallback_models: []
 			},
 			submitLabel: 'Save changes',
 			busyLabel: 'Saving…',
@@ -85,6 +87,41 @@ describe('AgentForm.svelte', () => {
 
 		await page.getByRole('button', { name: 'Cancel' }).click();
 		expect(oncancel).toHaveBeenCalled();
+	});
+
+	it('adds and removes fallback models, submitting them in order (#103)', async () => {
+		const onsubmit = vi.fn();
+		render(AgentForm, {
+			providers: [anthropicProvider],
+			submitLabel: 'Create agent',
+			busyLabel: 'Creating…',
+			onsubmit
+		});
+
+		await page.getByPlaceholder('Name').fill('Researcher');
+		await page
+			.getByPlaceholder('Description (used by the dispatcher for routing)')
+			.fill('Looks things up');
+		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByRole('combobox').first().selectOptions('anthropic:claude-haiku-4-5-20251001');
+
+		await page.getByRole('button', { name: '+ Add fallback' }).click();
+		await page.getByRole('button', { name: '+ Add fallback' }).click();
+		const comboboxes = page.getByRole('combobox');
+		await comboboxes.nth(1).selectOptions('anthropic:claude-3-5-haiku-latest');
+		await comboboxes.nth(2).selectOptions('anthropic:claude-opus-4-1');
+
+		await page.getByRole('button', { name: 'Remove' }).first().click();
+
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(onsubmit).toHaveBeenCalledWith({
+			name: 'Researcher',
+			description: 'Looks things up',
+			instructions: 'Be thorough',
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: ['anthropic:claude-opus-4-1']
+		});
 	});
 
 	it('shows the passed error message', async () => {
