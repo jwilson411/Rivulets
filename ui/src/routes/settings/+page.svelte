@@ -297,11 +297,17 @@
 					Eager sync pushes file attachments to peers immediately; lazy sync waits until a peer asks
 					for them (OQ-5). Set independently per network.
 				</p>
-				<label class="flex items-center gap-2 text-sm text-ink dark:text-ink-dark">
+				<label
+					class="flex items-center gap-2 text-sm text-ink dark:text-ink-dark"
+					title="LAN = peers your node discovered on your local network (mDNS). On: file attachments are pushed to LAN peers as soon as you upload/attach them. Off: LAN peers only fetch a file's bytes the moment they actually need it."
+				>
 					<input type="checkbox" bind:checked={eagerFilesLan} class="h-4 w-4" />
 					Eager sync on LAN
 				</label>
-				<label class="flex items-center gap-2 text-sm text-ink dark:text-ink-dark">
+				<label
+					class="flex items-center gap-2 text-sm text-ink dark:text-ink-dark"
+					title="WAN = peers connected over the internet rather than your local network. On: file attachments are pushed to WAN peers immediately, which can use significant bandwidth on a slow or metered connection. Off (default): WAN peers only fetch a file's bytes when they actually need it."
+				>
 					<input type="checkbox" bind:checked={eagerFilesWan} class="h-4 w-4" />
 					Eager sync on WAN
 				</label>

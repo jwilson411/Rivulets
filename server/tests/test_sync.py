@@ -79,6 +79,7 @@ from rivulets.sync.engine import (
     PeerInfo,
     SyncEngine,
     _bound_port,  # pyright: ignore[reportPrivateUsage]
+    _is_lan_address,  # pyright: ignore[reportPrivateUsage]
     _PeerConnectionNotifee,  # pyright: ignore[reportPrivateUsage]
     get_sync_engine,
     init_sync_engine,
@@ -542,11 +543,17 @@ async def test_apply_remote_file_change_creates_file_metadata(
 async def test_apply_remote_file_change_fetches_content_when_missing_locally(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """node-b is a LAN peer here, and sync.eager_files_lan defaults to
+    True (unset in the DB), so this exercises the eager path end to end."""
     content = b"fetched over the wire"
     content_hash = "b" * 64
 
     class _FakeEngine:
         running = True
+
+        def peer_is_lan(self, peer_id: str) -> bool:
+            assert peer_id == "node-b"
+            return True
 
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             assert peer_id == "node-b"
@@ -572,6 +579,93 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
     )
     assert result.applied is True
 
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert local_path.read_bytes() == content
+
+    file_row = await db_session.get(File, "file-1")
+    assert file_row is not None
+    assert json.loads(file_row.synced_to_nodes) == ["node-b"]
+
+
+async def test_apply_remote_file_change_defers_fetch_for_wan_peer_by_default(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """issue #123: sync.eager_files_wan defaults to False, so a file whose
+    metadata arrived from a non-LAN peer should NOT be fetched immediately
+    -- only remembered as a known source for a later on-demand fetch."""
+    content_hash = "d" * 64
+
+    class _FakeEngine:
+        running = True
+
+        def peer_is_lan(self, peer_id: str) -> bool:
+            return False
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            raise AssertionError("should not eager-fetch from a WAN peer by default")
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 5,
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert not local_path.exists()
+
+    file_row = await db_session.get(File, "file-1")
+    assert file_row is not None
+    assert json.loads(file_row.synced_to_nodes) == ["node-b"]
+
+
+async def test_apply_remote_file_change_fetches_wan_content_when_eager_wan_enabled(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    content = b"pushed over WAN"
+    content_hash = "e" * 64
+    db_session.add(WorkspaceSetting(key="sync.eager_files_wan", value="true"))
+    await db_session.commit()
+
+    class _FakeEngine:
+        running = True
+
+        def peer_is_lan(self, peer_id: str) -> bool:
+            return False
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            return content
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": len(content),
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
     local_path = get_settings().files_dir / content_hash[:2] / content_hash
     assert local_path.read_bytes() == content
 
@@ -1302,6 +1396,9 @@ async def test_apply_remote_file_change_logs_when_peer_also_lacks_content(
     class _FakeEngineNoContent:
         running = True
 
+        def peer_is_lan(self, peer_id: str) -> bool:
+            return True
+
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             assert peer_id == "node-b"
             assert requested_hash == content_hash
@@ -1507,6 +1604,33 @@ def test_bound_port_raises_when_host_has_no_tcp_port() -> None:
 
     with pytest.raises(RuntimeError, match="no bound TCP port"):
         _bound_port(_FakeHost())  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "address,expected",
+    [
+        ("/ip4/192.168.1.5/tcp/4001", True),
+        ("/ip4/10.0.0.7/tcp/4001", True),
+        ("/ip4/127.0.0.1/tcp/4001", True),
+        ("/ip6/fc00::1/tcp/4001", True),
+        ("/ip4/8.8.8.8/tcp/4001", False),
+        ("/ip4/1.1.1.1/tcp/4001", False),
+        ("", False),  # no address recorded (best-effort gap, see notifee docstring)
+        ("not-a-multiaddr", False),
+    ],
+)
+def test_is_lan_address_classifies_private_ranges_as_lan(address: str, expected: bool) -> None:
+    assert _is_lan_address(address) is expected  # pyright: ignore[reportPrivateUsage]
+
+
+def test_sync_engine_peer_is_lan_reads_connected_peers_address(tmp_path: Path) -> None:
+    engine = SyncEngine(tmp_path / "sync")
+    engine._connected_peers["lan-peer"] = "/ip4/192.168.1.9/tcp/4001"  # pyright: ignore[reportPrivateUsage]
+    engine._connected_peers["wan-peer"] = "/ip4/8.8.8.8/tcp/4001"  # pyright: ignore[reportPrivateUsage]
+
+    assert engine.peer_is_lan("lan-peer") is True
+    assert engine.peer_is_lan("wan-peer") is False
+    assert engine.peer_is_lan("never-connected") is False
 
 
 async def test_notifee_connected_handles_transport_address_lookup_failure() -> None:

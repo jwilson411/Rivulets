@@ -10,6 +10,7 @@ message-attach path needs to republish the same File row again with its
 now-current message_id, not just the upload path."""
 
 import hashlib
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.config import get_settings
 from rivulets.db.models import File as FileRow
+from rivulets.sync.apply import fetch_file_content_from_known_sources
 from rivulets.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -93,6 +95,13 @@ async def upload_file(upload: UploadFile, db: DbSession, _: CurrentWorkspaceId) 
 @router.get("/{file_id}")
 async def download_file(file_id: str, db: DbSession, _: CurrentWorkspaceId) -> FileResponse:
     row = await _get_or_404(db, file_id)
+    if not Path(row.local_path).exists():
+        # Lazy sync (sync.eager_files_lan/_wan, issue #123) may have
+        # deferred fetching this file's bytes when its metadata synced in
+        # -- try now, on demand, before giving up.
+        await fetch_file_content_from_known_sources(row)
+    if not Path(row.local_path).exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File content not available locally yet")
     return FileResponse(row.local_path, media_type=row.mime_type, filename=row.filename)
 
 
