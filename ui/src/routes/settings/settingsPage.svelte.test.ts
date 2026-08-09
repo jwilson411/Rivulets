@@ -9,6 +9,7 @@ import SettingsPage from './+page.svelte';
 import { settings, type WorkspaceSettings } from '$lib/api/settings';
 import { dispatch, type HitRate } from '$lib/api/dispatch';
 import { update, type UpdateStatus } from '$lib/api/update';
+import { providers as providersApi, type Provider } from '$lib/api/providers';
 
 vi.mock('$lib/api/settings', () => ({
 	settings: { get: vi.fn(), update: vi.fn() }
@@ -21,6 +22,18 @@ vi.mock('$lib/api/dispatch', () => ({
 vi.mock('$lib/api/update', () => ({
 	update: { status: vi.fn(), apply: vi.fn() }
 }));
+
+vi.mock('$lib/api/providers', () => ({
+	providers: { list: vi.fn() }
+}));
+
+const anthropicProvider: Provider = {
+	id: 'prov-1',
+	provider: 'anthropic',
+	label: 'My Anthropic key',
+	base_url: null,
+	is_default: true
+};
 
 const emptyHitRate: HitRate = {
 	range: 'week',
@@ -57,10 +70,12 @@ const upToDateStatus: UpdateStatus = {
 };
 
 beforeEach(() => {
-	// Tests that don't care about the hit-rate/update panels just need them
-	// to settle without erroring; those that do override these per-test.
+	// Tests that don't care about the hit-rate/update/providers panels just
+	// need them to settle without erroring; those that do override these
+	// per-test.
 	vi.mocked(dispatch.hitRate).mockResolvedValue(emptyHitRate);
 	vi.mocked(update.status).mockResolvedValue(upToDateStatus);
+	vi.mocked(providersApi.list).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -127,6 +142,67 @@ describe('settings/+page.svelte', () => {
 		render(SettingsPage);
 
 		await expect.element(page.getByText('Failed to load settings')).toBeInTheDocument();
+	});
+
+	it('offers a provider-model picker for the dispatcher override instead of a freeform text field', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(providersApi.list).mockResolvedValue([anthropicProvider]);
+
+		render(SettingsPage);
+
+		const select = page.getByRole('combobox');
+		await expect
+			.element(select.getByRole('option', { name: /Claude Haiku 4\.5/ }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('option', { name: 'Auto — picks cheap or capable per message' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('saves a picked dispatcher override as provider:model', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(providersApi.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(settings.update).mockResolvedValueOnce({
+			...loadedSettings,
+			'dispatcher.model_override': 'anthropic:claude-haiku-4-5-20251001'
+		});
+
+		render(SettingsPage);
+		await expect
+			.element(page.getByRole('combobox').getByRole('option', { name: /Claude Haiku 4\.5/ }))
+			.toBeInTheDocument();
+
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('button', { name: 'Save changes' }).click();
+
+		expect(settings.update).toHaveBeenCalledWith({
+			'dispatcher.model_override': 'anthropic:claude-haiku-4-5-20251001'
+		});
+	});
+
+	it('seeds the picker from an existing provider:model override', async () => {
+		vi.mocked(settings.get).mockResolvedValue({
+			...loadedSettings,
+			'dispatcher.model_override': 'anthropic:claude-haiku-4-5-20251001'
+		});
+		vi.mocked(providersApi.list).mockResolvedValue([anthropicProvider]);
+
+		render(SettingsPage);
+
+		const select = page.getByRole('combobox');
+		await expect.element(select).toBeInTheDocument();
+		expect((select.element() as HTMLSelectElement).value).toBe(
+			'anthropic:claude-haiku-4-5-20251001'
+		);
+	});
+
+	it('shows an error when loading providers fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(providersApi.list).mockRejectedValueOnce(new Error('Failed to load providers'));
+
+		render(SettingsPage);
+
+		await expect.element(page.getByText('Failed to load providers')).toBeInTheDocument();
 	});
 
 	it('shows the dispatcher hit rate once loaded', async () => {

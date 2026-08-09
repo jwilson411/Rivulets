@@ -8,7 +8,11 @@
 		MODEL_CATALOG
 	} from '$lib/modelCatalog';
 
-	let { providers, value = $bindable('') }: { providers: Provider[]; value: string } = $props();
+	let {
+		providers,
+		value = $bindable(''),
+		showAuto = true
+	}: { providers: Provider[]; value: string; showAuto?: boolean } = $props();
 
 	function parse(raw: string): { provider: string; modelName: string } {
 		const idx = raw.indexOf(':');
@@ -27,7 +31,7 @@
 		: [];
 	const initialKnown = initialCatalog.some((m) => m.id === initial.modelName);
 
-	let selectedIsAuto = $state(untrack(() => value === AUTO_MODEL));
+	let selectedIsAuto = $state(untrack(() => showAuto && value === AUTO_MODEL));
 	let selectedProvider = $state(initial.provider);
 	let selectedIsCustom = $state(initial.provider !== '' && !initialKnown);
 	let selectedCatalogId = $state(initialKnown ? initial.modelName : '');
@@ -84,7 +88,9 @@
 		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 	>
 		<option value="" disabled selected={selectValue === ''}>Select a model…</option>
-		<option value={AUTO_MODEL_VALUE}>Auto — picks cheap or capable per message</option>
+		{#if showAuto}
+			<option value={AUTO_MODEL_VALUE}>Auto — picks cheap or capable per message</option>
+		{/if}
 		{#each providers as provider (provider.id)}
 			<optgroup label="{provider.label} ({provider.provider})">
 				{#each MODEL_CATALOG[provider.provider] as model (model.id)}
