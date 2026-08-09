@@ -37,8 +37,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
+from rivulets.config import get_settings
 from rivulets.db.models import Human, Invite, Workspace
 from rivulets.security import keys
+from rivulets.security.network import detect_lan_address, is_loopback_host
 from rivulets.security.rate_limit import get_invite_accept_rate_limiter
 from rivulets.security.session import get_session_key_store
 from rivulets.sync.publish import publish_current_state
@@ -61,6 +63,12 @@ class InviteCreated(BaseModel):
     invite_id: str
     url: str
     expires_at: str
+    # #121: `url` is only ever reachable off this machine if the owner's own
+    # browser request already came in on a non-loopback host. When it
+    # didn't (the common case -- NFR-3.4's loopback-only default), these
+    # let the UI warn instead of silently handing out a dead link.
+    loopback_only: bool
+    lan_url: str | None = None
 
 
 class InviteOut(BaseModel):
@@ -107,7 +115,23 @@ async def create_invite(
     # bcrypt hash is) -- same shown-once UX as the workspace mnemonic itself.
     base_url = str(request.base_url).rstrip("/")
     url = f"{base_url}/invite/{invite.id}.{secret}"
-    return InviteCreated(invite_id=invite.id, url=url, expires_at=invite.expires_at)
+
+    host = request.url.hostname or ""
+    loopback_only = is_loopback_host(host)
+    lan_url = None
+    if loopback_only:
+        lan_ip = detect_lan_address()
+        if lan_ip and not is_loopback_host(lan_ip):
+            port = request.url.port or get_settings().app_server_port
+            lan_url = f"http://{lan_ip}:{port}/invite/{invite.id}.{secret}"
+
+    return InviteCreated(
+        invite_id=invite.id,
+        url=url,
+        expires_at=invite.expires_at,
+        loopback_only=loopback_only,
+        lan_url=lan_url,
+    )
 
 
 @router.get("", response_model=list[InviteOut])

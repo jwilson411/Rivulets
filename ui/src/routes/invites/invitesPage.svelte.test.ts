@@ -72,7 +72,9 @@ describe('invites/+page.svelte', () => {
 		vi.mocked(invites.create).mockResolvedValueOnce({
 			invite_id: 'inv-1',
 			url: 'http://localhost:8484/invite/inv-1.secret',
-			expires_at: '2099-01-01T00:00:00.000Z'
+			expires_at: '2099-01-01T00:00:00.000Z',
+			loopback_only: false,
+			lan_url: null
 		});
 
 		render(InvitesPage);
@@ -97,7 +99,9 @@ describe('invites/+page.svelte', () => {
 		vi.mocked(invites.create).mockResolvedValueOnce({
 			invite_id: 'inv-1',
 			url: 'http://localhost:8484/invite/inv-1.secret',
-			expires_at: '2099-01-01T00:00:00.000Z'
+			expires_at: '2099-01-01T00:00:00.000Z',
+			loopback_only: false,
+			lan_url: null
 		});
 
 		render(InvitesPage);
@@ -108,6 +112,47 @@ describe('invites/+page.svelte', () => {
 
 		expect(writeTextMock).toHaveBeenCalledWith('http://localhost:8484/invite/inv-1.secret');
 		await expect.element(page.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
+	});
+
+	it('warns and offers a LAN link when the created invite is loopback-only', async () => {
+		vi.mocked(invites.list).mockResolvedValue([]);
+		vi.mocked(invites.create).mockResolvedValueOnce({
+			invite_id: 'inv-1',
+			url: 'http://127.0.0.1:8484/invite/inv-1.secret',
+			expires_at: '2099-01-01T00:00:00.000Z',
+			loopback_only: true,
+			lan_url: 'http://192.168.1.42:8484/invite/inv-1.secret'
+		});
+
+		render(InvitesPage);
+		await page.getByRole('button', { name: 'Create invite' }).click();
+
+		await expect.element(page.getByText(/only works on this machine/)).toBeInTheDocument();
+		await expect
+			.element(page.getByText('http://192.168.1.42:8484/invite/inv-1.secret'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Copy LAN link' }).click();
+		expect(writeTextMock).toHaveBeenCalledWith('http://192.168.1.42:8484/invite/inv-1.secret');
+	});
+
+	it('warns without a LAN link when no local network address was detected', async () => {
+		vi.mocked(invites.list).mockResolvedValue([]);
+		vi.mocked(invites.create).mockResolvedValueOnce({
+			invite_id: 'inv-1',
+			url: 'http://127.0.0.1:8484/invite/inv-1.secret',
+			expires_at: '2099-01-01T00:00:00.000Z',
+			loopback_only: true,
+			lan_url: null
+		});
+
+		render(InvitesPage);
+		await page.getByRole('button', { name: 'Create invite' }).click();
+
+		await expect.element(page.getByText(/only works on this machine/)).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Copy LAN link' }))
+			.not.toBeInTheDocument();
 	});
 
 	it('shows an error when creating an invite fails', async () => {

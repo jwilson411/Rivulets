@@ -17,6 +17,7 @@
 	let createError = $state<string | null>(null);
 	let created = $state<InviteCreated | null>(null);
 	let copied = $state(false);
+	let lanCopied = $state(false);
 
 	let rowError = $state<string | null>(null);
 
@@ -36,6 +37,7 @@
 		createError = null;
 		created = null;
 		copied = false;
+		lanCopied = false;
 		creating = true;
 		try {
 			created = await invites.create({
@@ -56,6 +58,12 @@
 		if (!created) return;
 		await navigator.clipboard.writeText(created.url);
 		copied = true;
+	}
+
+	async function handleCopyLanUrl() {
+		if (!created?.lan_url) return;
+		await navigator.clipboard.writeText(created.lan_url);
+		lanCopied = true;
 	}
 
 	async function handleRevoke(invite: Invite) {
@@ -159,6 +167,36 @@
 						{copied ? 'Copied' : 'Copy'}
 					</button>
 				</div>
+
+				{#if created.loopback_only}
+					<p
+						class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+					>
+						This link only works on this machine (127.0.0.1) — a device elsewhere can't reach it.
+						{#if created.lan_url}
+							If this device and the invitee's are on the same local network <strong>and</strong>
+							you've deliberately exposed this port beyond localhost (see docs/security.md), try the link
+							below instead. It still won't work over the public internet.
+						{:else}
+							We couldn't detect a local network address to offer as an alternative.
+						{/if}
+					</p>
+				{/if}
+
+				{#if created.lan_url}
+					<div class="flex items-center gap-2">
+						<code class="min-w-0 flex-1 truncate text-xs text-ink dark:text-ink-dark"
+							>{created.lan_url}</code
+						>
+						<button
+							type="button"
+							onclick={handleCopyLanUrl}
+							class="shrink-0 rounded-md border border-ink/15 px-3 py-1 text-xs font-medium text-ink dark:border-white/15 dark:text-ink-dark"
+						>
+							{lanCopied ? 'Copied' : 'Copy LAN link'}
+						</button>
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</section>

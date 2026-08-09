@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.security.rate_limit import get_invite_accept_rate_limiter
@@ -17,6 +18,50 @@ def test_create_invite_requires_owner_grant(
     assert response.status_code == 201, response.text
     assert response.json()["url"]
     assert response.json()["invite_id"]
+
+
+def test_create_invite_over_a_non_loopback_host_is_not_flagged(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The `client` fixture's default base URL (http://testserver) isn't a
+    loopback host, so this exercises the "already reachable" branch -- no
+    warning, no LAN detection attempted."""
+    response = client.post("/api/v1/invites", json={}, headers=auth_headers)
+    body = response.json()
+    assert body["loopback_only"] is False
+    assert body["lan_url"] is None
+
+
+def test_create_invite_over_loopback_offers_a_detected_lan_url(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("rivulets.api.invites.detect_lan_address", lambda: "192.168.1.42")
+
+    response = client.post(
+        "/api/v1/invites",
+        json={},
+        headers={**auth_headers, "host": "127.0.0.1:8484"},
+    )
+    body = response.json()
+    assert body["loopback_only"] is True
+    assert body["lan_url"] is not None
+    assert body["lan_url"].startswith("http://192.168.1.42:8484/invite/")
+    assert body["lan_url"].rsplit("/", 1)[-1] == body["url"].rsplit("/", 1)[-1]
+
+
+def test_create_invite_over_loopback_with_no_lan_address_detected_omits_lan_url(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("rivulets.api.invites.detect_lan_address", lambda: None)
+
+    response = client.post(
+        "/api/v1/invites",
+        json={},
+        headers={**auth_headers, "host": "localhost:8484"},
+    )
+    body = response.json()
+    assert body["loopback_only"] is True
+    assert body["lan_url"] is None
 
 
 def test_create_invite_is_forbidden_for_an_invite_grant_session(
