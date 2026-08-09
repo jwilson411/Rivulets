@@ -20,6 +20,11 @@ export interface InviteCreated {
 	invite_id: string;
 	url: string;
 	expires_at: string;
+	// #121: `url` is dead-on-arrival off this machine when it was built from
+	// a loopback request host (the default). `lan_url` is a best-effort
+	// alternate, only ever populated alongside loopback_only === true.
+	loopback_only: boolean;
+	lan_url: string | null;
 }
 
 export const invites = {
