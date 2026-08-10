@@ -9,7 +9,9 @@
 		type WorkflowConnection,
 		type WorkflowRun,
 		type WorkflowNodeRun,
-		type WorkflowSchedule
+		type WorkflowSchedule,
+		type WorkflowWebhook,
+		type WorkflowWebhookCreated
 	} from '$lib/api/workflows';
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
 	import { channels as channelsApi, type Channel } from '$lib/api/channels';
@@ -36,6 +38,7 @@
 	let workflowList = $state<Workflow[]>([]);
 	let channelList = $state<Channel[]>([]);
 	let scheduleList = $state<WorkflowSchedule[]>([]);
+	let webhookList = $state<WorkflowWebhook[]>([]);
 	let loadError = $state<string | null>(null);
 
 	// A workflow embedding itself is always a cycle -- excluded from the
@@ -97,7 +100,8 @@
 				loadedAgents,
 				loadedWorkflows,
 				loadedChannels,
-				loadedSchedules
+				loadedSchedules,
+				loadedWebhooks
 			] = await Promise.all([
 				workflows.get(workflowId),
 				workflows.listNodes(workflowId),
@@ -105,7 +109,8 @@
 				agentsApi.list(),
 				workflows.list(),
 				channelsApi.list(),
-				workflows.listSchedules(workflowId)
+				workflows.listSchedules(workflowId),
+				workflows.listWebhooks(workflowId)
 			]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;
@@ -114,6 +119,7 @@
 			workflowList = loadedWorkflows;
 			channelList = loadedChannels;
 			scheduleList = loadedSchedules;
+			webhookList = loadedWebhooks;
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load workflow';
 		}
@@ -308,6 +314,90 @@
 			scheduleList = scheduleList.filter((s) => s.id !== scheduleId);
 		} catch (err) {
 			scheduleError = err instanceof Error ? err.message : 'Failed to remove schedule';
+		}
+	}
+
+	let showAddWebhook = $state(false);
+	let webhookChannelDraft = $state('');
+	let webhookNameDraft = $state('');
+	let webhookBusy = $state(false);
+	let webhookError = $state<string | null>(null);
+	// Set only right after create/rotate -- the secret is shown exactly
+	// once (same UX as an invite link) and cleared the moment the human
+	// navigates away from this reveal panel.
+	let revealedWebhook = $state<WorkflowWebhookCreated | null>(null);
+
+	function webhookTriggerUrl(webhookId: string): string {
+		return `${window.location.origin}/api/v1/webhooks/${webhookId}`;
+	}
+
+	function openAddWebhook() {
+		showAddWebhook = true;
+		webhookChannelDraft = channelList[0]?.id ?? '';
+		webhookNameDraft = '';
+		webhookError = null;
+	}
+
+	function closeAddWebhook() {
+		showAddWebhook = false;
+	}
+
+	async function handleAddWebhook() {
+		if (!workflow || !webhookChannelDraft) return;
+		const workflowId = workflow.id;
+		webhookError = null;
+		webhookBusy = true;
+		try {
+			const created = await workflows.createWebhook(workflowId, {
+				channel_id: webhookChannelDraft,
+				name: webhookNameDraft || undefined
+			});
+			showAddWebhook = false;
+			revealedWebhook = created;
+			webhookList = await workflows.listWebhooks(workflowId);
+		} catch (err) {
+			webhookError = err instanceof Error ? err.message : 'Failed to create webhook';
+		} finally {
+			webhookBusy = false;
+		}
+	}
+
+	async function toggleWebhookEnabled(webhook: WorkflowWebhook) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		webhookError = null;
+		try {
+			const updated = await workflows.updateWebhook(workflowId, webhook.id, {
+				enabled: !webhook.enabled
+			});
+			webhookList = webhookList.map((w) => (w.id === updated.id ? updated : w));
+		} catch (err) {
+			webhookError = err instanceof Error ? err.message : 'Failed to update webhook';
+		}
+	}
+
+	async function rotateWebhookSecret(webhookId: string) {
+		if (!workflow) return;
+		webhookError = null;
+		try {
+			const rotated = await workflows.rotateWebhookSecret(workflow.id, webhookId);
+			revealedWebhook = rotated;
+			webhookList = webhookList.map((w) => (w.id === rotated.id ? rotated : w));
+		} catch (err) {
+			webhookError = err instanceof Error ? err.message : 'Failed to rotate secret';
+		}
+	}
+
+	async function removeWebhook(webhookId: string) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		webhookError = null;
+		try {
+			await workflows.removeWebhook(workflowId, webhookId);
+			webhookList = webhookList.filter((w) => w.id !== webhookId);
+			if (revealedWebhook?.id === webhookId) revealedWebhook = null;
+		} catch (err) {
+			webhookError = err instanceof Error ? err.message : 'Failed to remove webhook';
 		}
 	}
 
@@ -738,6 +828,157 @@
 						</button>
 						<button
 							onclick={closeAddSchedule}
+							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+						>
+							Cancel
+						</button>
+					</div>
+				</div>
+			{/if}
+		</section>
+
+		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
+			<div class="flex items-center justify-between">
+				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Webhooks</h2>
+				<button
+					onclick={openAddWebhook}
+					class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+				>
+					+ Add webhook
+				</button>
+			</div>
+			{#if !workflow.published}
+				<p class="text-xs text-neutral-500">
+					Webhooks won't fire until this workflow is published.
+				</p>
+			{/if}
+			<p class="text-xs text-neutral-500">
+				An external system can POST to a webhook's URL to trigger this workflow, signed with its
+				secret (see the docs for the signing headers). Only reachable from outside this machine
+				if you've deliberately exposed it beyond localhost — same caveat as an invite link.
+			</p>
+			{#if webhookError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{webhookError}</p>
+			{/if}
+
+			{#if revealedWebhook}
+				<div
+					class="flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 bg-agent-cyan-50 p-3 text-xs dark:bg-agent-cyan-950/20"
+				>
+					<p class="font-medium text-ink dark:text-ink-dark">
+						Save this secret now — it won't be shown again.
+					</p>
+					<label class="flex flex-col gap-1 text-neutral-500">
+						URL
+						<input
+							readonly
+							value={webhookTriggerUrl(revealedWebhook.id)}
+							onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					</label>
+					<label class="flex flex-col gap-1 text-neutral-500">
+						Secret
+						<input
+							readonly
+							value={revealedWebhook.secret}
+							onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					</label>
+					<button
+						onclick={() => (revealedWebhook = null)}
+						class="self-start text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+					>
+						Done
+					</button>
+				</div>
+			{/if}
+
+			{#if webhookList.length === 0 && !showAddWebhook}
+				<p class="text-sm text-neutral-500">No webhooks configured.</p>
+			{:else}
+				<ul class="flex flex-col gap-2">
+					{#each webhookList as webhook (webhook.id)}
+						<li
+							class="flex flex-col gap-1 rounded-md border border-ink/12 p-2 text-xs dark:border-white/10"
+						>
+							<div class="flex items-center justify-between">
+								<span class="font-mono text-sm text-ink dark:text-ink-dark">
+									{webhook.name ?? webhook.id.slice(0, 8)}
+								</span>
+								<div class="flex items-center gap-2">
+									<button
+										onclick={() => toggleWebhookEnabled(webhook)}
+										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+									>
+										{webhook.enabled ? 'Disable' : 'Enable'}
+									</button>
+									<button
+										onclick={() => rotateWebhookSecret(webhook.id)}
+										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+									>
+										Rotate secret
+									</button>
+									<button
+										onclick={() => removeWebhook(webhook.id)}
+										class="text-neutral-500 hover:text-agent-magenta-600"
+									>
+										Remove
+									</button>
+								</div>
+							</div>
+							<p class="text-neutral-500">
+								Channel: {channelList.find((c) => c.id === webhook.channel_id)?.name ??
+									'Deleted channel'}
+							</p>
+							<p class="text-neutral-500">
+								Last triggered: {webhook.last_triggered_at
+									? timeAgo(webhook.last_triggered_at)
+									: 'never'}
+							</p>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+
+			{#if showAddWebhook}
+				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
+					<label class="flex flex-col gap-1 text-xs text-neutral-500">
+						Name (optional)
+						<input
+							type="text"
+							bind:value={webhookNameDraft}
+							placeholder="e.g. GitHub"
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					</label>
+					<label class="flex flex-col gap-1 text-xs text-neutral-500">
+						Channel
+						<select
+							bind:value={webhookChannelDraft}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						>
+							{#each channelList as channel (channel.id)}
+								<option value={channel.id}>{channel.name}</option>
+							{/each}
+						</select>
+					</label>
+					{#if webhookError}
+						<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+							{webhookError}
+						</p>
+					{/if}
+					<div class="flex gap-3">
+						<button
+							onclick={handleAddWebhook}
+							disabled={webhookBusy || !webhookChannelDraft}
+							class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
+						>
+							{webhookBusy ? 'Adding…' : 'Add webhook'}
+						</button>
+						<button
+							onclick={closeAddWebhook}
 							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
 						>
 							Cancel

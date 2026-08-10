@@ -161,6 +161,43 @@ export interface CronPreview {
 	error: string | null;
 }
 
+// #99: an external system's HMAC-signed POST fires this workflow. Never
+// carries the signing secret -- that's returned exactly once, from
+// createWebhook/rotateWebhookSecret, as WorkflowWebhookCreated below.
+export interface WorkflowWebhook {
+	id: string;
+	workflow_id: string;
+	channel_id: string;
+	name: string | null;
+	// "{input}" substitution, same convention as a transform node's
+	// template. null passes the raw request body through unchanged.
+	input_template: string | null;
+	enabled: boolean;
+	last_triggered_at: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+// Only ever returned from create/rotate -- shown once, like an invite
+// link, then never retrievable again.
+export interface WorkflowWebhookCreated extends WorkflowWebhook {
+	secret: string;
+}
+
+export interface WorkflowWebhookCreateInput {
+	channel_id: string;
+	name?: string;
+	input_template?: string;
+	enabled?: boolean;
+}
+
+export interface WorkflowWebhookUpdateInput {
+	channel_id?: string;
+	name?: string;
+	input_template?: string;
+	enabled?: boolean;
+}
+
 export const workflows = {
 	list: () => api.get<Workflow[]>('/workflows', auth.token ?? undefined),
 	get: (id: string) => api.get<Workflow>(`/workflows/${id}`, auth.token ?? undefined),
@@ -217,6 +254,29 @@ export const workflows = {
 		api.post<CronPreview>(
 			`/workflows/${workflowId}/schedules/preview`,
 			{ cron_expression: cronExpression },
+			auth.token ?? undefined
+		),
+
+	listWebhooks: (workflowId: string) =>
+		api.get<WorkflowWebhook[]>(`/workflows/${workflowId}/webhooks`, auth.token ?? undefined),
+	createWebhook: (workflowId: string, body: WorkflowWebhookCreateInput) =>
+		api.post<WorkflowWebhookCreated>(
+			`/workflows/${workflowId}/webhooks`,
+			body,
+			auth.token ?? undefined
+		),
+	updateWebhook: (workflowId: string, webhookId: string, patch: WorkflowWebhookUpdateInput) =>
+		api.patch<WorkflowWebhook>(
+			`/workflows/${workflowId}/webhooks/${webhookId}`,
+			patch,
+			auth.token ?? undefined
+		),
+	removeWebhook: (workflowId: string, webhookId: string) =>
+		api.delete<void>(`/workflows/${workflowId}/webhooks/${webhookId}`, auth.token ?? undefined),
+	rotateWebhookSecret: (workflowId: string, webhookId: string) =>
+		api.post<WorkflowWebhookCreated>(
+			`/workflows/${workflowId}/webhooks/${webhookId}/rotate-secret`,
+			{},
 			auth.token ?? undefined
 		),
 

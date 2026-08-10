@@ -50,6 +50,11 @@ vi.mock('$lib/api/workflows', () => ({
 		updateSchedule: vi.fn(),
 		removeSchedule: vi.fn(),
 		previewSchedule: vi.fn(),
+		listWebhooks: vi.fn(),
+		createWebhook: vi.fn(),
+		updateWebhook: vi.fn(),
+		removeWebhook: vi.fn(),
+		rotateWebhookSecret: vi.fn(),
 		listRuns: vi.fn(),
 		listNodeRuns: vi.fn()
 	}
@@ -139,6 +144,7 @@ function mockLoad() {
 	vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode]);
 	vi.mocked(workflows.listConnections).mockResolvedValue([entryConnection, chainConnection]);
 	vi.mocked(workflows.listSchedules).mockResolvedValue([]);
+	vi.mocked(workflows.listWebhooks).mockResolvedValue([]);
 	vi.mocked(channels.list).mockResolvedValue([digestChannel]);
 	vi.mocked(agents.list).mockResolvedValue([
 		{

@@ -608,7 +608,7 @@ async def _execute_workflow_node(
     return child_run.final_output or ""
 
 
-_UNATTENDED_TRIGGERS = frozenset({"schedule", "remediation"})
+_UNATTENDED_TRIGGERS = frozenset({"schedule", "remediation", "webhook"})
 
 
 async def run_workflow(

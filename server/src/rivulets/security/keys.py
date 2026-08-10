@@ -93,6 +93,16 @@ def derive_credential_store_key(workspace_key: bytes) -> bytes:
     return _hkdf(workspace_key, "credential-store")
 
 
+def derive_webhook_secret_key(workspace_key: bytes) -> bytes:
+    """Encryption key for WorkflowWebhook.secret_ciphertext (#99,
+    security/webhook_secret_store.py) -- same HKDF-from-workspace-key
+    trust model as derive_credential_store_key above, but for a different
+    reason: a webhook's HMAC signing secret must be recoverable in full to
+    verify an inbound request's signature, not just compared like a
+    password, so it can't be bcrypt-hashed the way Invite.secret_hash is."""
+    return _hkdf(workspace_key, "webhook-secret")
+
+
 def hash_workspace_key(workspace_key: bytes) -> str:
     """bcrypt hash — the only persistent derivative of the workspace key
     (NFR-3.1). Stored as `workspace.key_hash`."""
@@ -119,3 +129,12 @@ def hash_invite_secret(secret: str) -> str:
 
 def verify_invite_secret(secret: str, secret_hash: str) -> bool:
     return bcrypt.checkpw(secret.encode("utf-8"), secret_hash.encode("utf-8"))
+
+
+def generate_webhook_secret() -> str:
+    """A random HMAC signing secret for a workflow webhook (#99) --
+    independent per webhook and not HKDF-derived, same reasoning and
+    treatment as generate_invite_secret above. Unlike an invite secret,
+    this one is encrypted (not hashed) at rest -- see
+    derive_webhook_secret_key and security/webhook_secret_store.py."""
+    return secrets.token_urlsafe(32)

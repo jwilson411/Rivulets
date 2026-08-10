@@ -76,7 +76,11 @@ from rivulets.db.models import (
     WorkflowNodeRun,
     WorkflowRun,
     WorkflowSchedule,
+    WorkflowWebhook,
 )
+from rivulets.security import keys
+from rivulets.security.session import get_session_key_store
+from rivulets.security.webhook_secret_store import encrypt_webhook_secret
 from rivulets.sync.publish import publish_current_state
 from rivulets.workflows.nodes import NODE_TYPES
 from rivulets.workflows.scheduler import compute_next_fire_at
@@ -296,6 +300,47 @@ class CronPreviewOut(BaseModel):
     error: str | None
 
 
+class WorkflowWebhookCreate(BaseModel):
+    channel_id: str
+    name: str | None = None
+    # "{input}" substitution, same convention as a transform node's
+    # template (workflows/nodes.py) -- None passes the raw request body
+    # through unchanged.
+    input_template: str | None = Field(default=None, max_length=4000)
+    enabled: bool = True
+
+
+class WorkflowWebhookUpdate(BaseModel):
+    channel_id: str | None = None
+    name: str | None = None
+    input_template: str | None = None
+    enabled: bool | None = None
+
+
+class WorkflowWebhookOut(BaseModel):
+    id: str
+    workflow_id: str
+    channel_id: str
+    name: str | None
+    input_template: str | None
+    enabled: bool
+    last_triggered_at: str | None
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowWebhookCreated(WorkflowWebhookOut):
+    """Returned only from create_webhook (and rotate_webhook_secret) --
+    the plaintext secret is shown exactly once, the same shown-once UX as
+    an invite link (api/invites.py's create_invite) and the workspace
+    mnemonic itself. It's never persisted or returned again; only its
+    encrypted form (WorkflowWebhook.secret_ciphertext) lives in the DB."""
+
+    secret: str
+
+
 async def _get_workflow_or_404(db: DbSession, workflow_id: str) -> Workflow:
     workflow = await db.get(Workflow, workflow_id)
     if workflow is None:
@@ -317,6 +362,13 @@ async def _get_schedule_or_404(
     if schedule is None or schedule.workflow_id != workflow_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow schedule not found")
     return schedule
+
+
+async def _get_webhook_or_404(db: DbSession, workflow_id: str, webhook_id: str) -> WorkflowWebhook:
+    webhook = await db.get(WorkflowWebhook, webhook_id)
+    if webhook is None or webhook.workflow_id != workflow_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow webhook not found")
+    return webhook
 
 
 def _compute_next_fire_at_or_400(cron_expression: str) -> str:
@@ -737,6 +789,110 @@ async def preview_schedule(
         )
     except CroniterError as exc:
         return CronPreviewOut(valid=False, next_fire_at=None, error=str(exc))
+
+
+@router.post(
+    "/{workflow_id}/webhooks",
+    response_model=WorkflowWebhookCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_webhook(
+    workflow_id: str, body: WorkflowWebhookCreate, db: DbSession, _: CurrentWorkspaceId
+) -> WorkflowWebhookCreated:
+    """#99: publish-state is deliberately NOT checked here, same as
+    create_schedule above -- a webhook can be configured against a
+    still-draft workflow; only api/webhooks.py's trigger endpoint
+    re-checks Workflow.published at invocation time, the single gate
+    every trigger path shares (workflows/trigger.py)."""
+    await _get_workflow_or_404(db, workflow_id)
+    if await db.get(Channel, body.channel_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
+
+    secret = keys.generate_webhook_secret()
+    encryption_key = get_session_key_store().get_webhook_secret_key()
+    nonce, ciphertext = encrypt_webhook_secret(secret, encryption_key)
+    webhook = WorkflowWebhook(
+        workflow_id=workflow_id,
+        channel_id=body.channel_id,
+        name=body.name,
+        input_template=body.input_template,
+        enabled=body.enabled,
+        secret_nonce=nonce,
+        secret_ciphertext=ciphertext,
+    )
+    db.add(webhook)
+    await db.commit()
+    await db.refresh(webhook)
+    # Deliberately no publish_current_state call -- WorkflowWebhook is
+    # unsynced (see its own docstring / sync/apply.py's absence of it
+    # from _DISPATCH).
+    return WorkflowWebhookCreated(**WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret)
+
+
+@router.get("/{workflow_id}/webhooks", response_model=list[WorkflowWebhookOut])
+async def list_webhooks(
+    workflow_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> list[WorkflowWebhook]:
+    await _get_workflow_or_404(db, workflow_id)
+    result = await db.execute(
+        select(WorkflowWebhook)
+        .where(WorkflowWebhook.workflow_id == workflow_id)
+        .order_by(WorkflowWebhook.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.patch("/{workflow_id}/webhooks/{webhook_id}", response_model=WorkflowWebhookOut)
+async def update_webhook(
+    workflow_id: str,
+    webhook_id: str,
+    body: WorkflowWebhookUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+) -> WorkflowWebhook:
+    webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
+    if body.channel_id is not None:
+        if await db.get(Channel, body.channel_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
+        webhook.channel_id = body.channel_id
+    if body.name is not None:
+        webhook.name = body.name
+    if body.input_template is not None:
+        webhook.input_template = body.input_template
+    if body.enabled is not None:
+        webhook.enabled = body.enabled
+    await db.commit()
+    await db.refresh(webhook)
+    return webhook
+
+
+@router.delete("/{workflow_id}/webhooks/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_webhook(
+    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> None:
+    webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
+    await db.delete(webhook)
+    await db.commit()
+
+
+@router.post(
+    "/{workflow_id}/webhooks/{webhook_id}/rotate-secret", response_model=WorkflowWebhookCreated
+)
+async def rotate_webhook_secret(
+    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> WorkflowWebhookCreated:
+    """Mints a fresh secret for an existing webhook (its id/URL stays the
+    same) -- the recovery path if a secret leaks, without having to
+    reconfigure the sender's URL. Same shown-once treatment as create."""
+    webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
+    secret = keys.generate_webhook_secret()
+    encryption_key = get_session_key_store().get_webhook_secret_key()
+    nonce, ciphertext = encrypt_webhook_secret(secret, encryption_key)
+    webhook.secret_nonce = nonce
+    webhook.secret_ciphertext = ciphertext
+    await db.commit()
+    await db.refresh(webhook)
+    return WorkflowWebhookCreated(**WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret)
 
 
 @router.get("/runs/failed", response_model=list[FailedWorkflowRunOut])

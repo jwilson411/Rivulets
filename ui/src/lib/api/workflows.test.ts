@@ -227,6 +227,61 @@ describe('workflows', () => {
 		expect(result).toEqual({ valid: true, next_fire_at: '2026-01-01T00:00:00Z', error: null });
 	});
 
+	it('listWebhooks() GETs /workflows/:id/webhooks', async () => {
+		const fetchMock = mockFetch([{ id: 'wh1' }]);
+
+		const result = await workflows.listWebhooks('w1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/workflows/w1/webhooks');
+		expect(result).toEqual([{ id: 'wh1' }]);
+	});
+
+	it('createWebhook() POSTs to /workflows/:id/webhooks', async () => {
+		const fetchMock = mockFetch({ id: 'wh1', secret: 'shh' });
+		const input = { channel_id: 'c1', name: 'GitHub' };
+
+		const result = await workflows.createWebhook('w1', input);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/webhooks');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify(input));
+		expect(result).toEqual({ id: 'wh1', secret: 'shh' });
+	});
+
+	it('updateWebhook() PATCHes /workflows/:id/webhooks/:webhookId', async () => {
+		const fetchMock = mockFetch({ id: 'wh1', enabled: false });
+
+		await workflows.updateWebhook('w1', 'wh1', { enabled: false });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/webhooks/wh1');
+		expect(init.method).toBe('PATCH');
+		expect(init.body).toBe(JSON.stringify({ enabled: false }));
+	});
+
+	it('removeWebhook() DELETEs /workflows/:id/webhooks/:webhookId', async () => {
+		const fetchMock = mockFetch(null, 204);
+
+		await workflows.removeWebhook('w1', 'wh1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/webhooks/wh1');
+		expect(init.method).toBe('DELETE');
+	});
+
+	it('rotateWebhookSecret() POSTs to /workflows/:id/webhooks/:webhookId/rotate-secret', async () => {
+		const fetchMock = mockFetch({ id: 'wh1', secret: 'new-shh' });
+
+		const result = await workflows.rotateWebhookSecret('w1', 'wh1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/workflows/w1/webhooks/wh1/rotate-secret');
+		expect(init.method).toBe('POST');
+		expect(result).toEqual({ id: 'wh1', secret: 'new-shh' });
+	});
+
 	it('listFailedRuns() GETs /workflows/runs/failed', async () => {
 		const fetchMock = mockFetch([{ id: 'r1', workflow_id: 'w1' }]);
 

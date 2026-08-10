@@ -31,6 +31,7 @@ from rivulets.api import (
     tools,
     update,
     usage,
+    webhooks,
     workflows,
 )
 from rivulets.api import (
@@ -57,6 +58,7 @@ api_router.include_router(usage.router)
 api_router.include_router(dispatch.router)
 api_router.include_router(update.router)
 api_router.include_router(workflows.router)
+api_router.include_router(webhooks.router)
 api_router.include_router(evals.router)
 api_router.include_router(budgets.router)
 api_router.include_router(runs.router)
