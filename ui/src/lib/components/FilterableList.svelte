@@ -77,7 +77,7 @@
 </script>
 
 <div class="flex flex-col gap-3">
-	{#if searchPredicate || filters.length > 0}
+	{#if items.length > 0 && (searchPredicate || filters.length > 0)}
 		<div class="flex flex-wrap items-center gap-2">
 			{#if searchPredicate}
 				<input
