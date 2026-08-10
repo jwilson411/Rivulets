@@ -203,6 +203,16 @@
 		/>
 		<path d="M6.3 11.5h7.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 	</svg>
+{:else if name === 'inbox-check'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M3 11.5 5 4h10l2 7.5M3 11.5v3a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 17 14.5v-3M3 11.5h4.2c.3 0 .6.2.7.5l.4 1c.1.3.4.5.7.5h2c.3 0 .6-.2.7-.5l.4-1c.1-.3.4-.5.7-.5H17"
+			stroke="currentColor"
+			stroke-width="1.4"
+			stroke-linejoin="round"
+			stroke-linecap="round"
+		/>
+	</svg>
 {:else if name === 'book'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path

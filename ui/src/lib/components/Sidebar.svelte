@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { auth } from '$lib/api/auth.svelte';
+	import { approvals } from '$lib/api/approvals';
 	import { channels, type Channel } from '$lib/api/channels';
 	import { agents } from '$lib/api/agents';
 	import { teams } from '$lib/api/teams';
@@ -38,6 +39,7 @@
 	let syncPeerCount = $state<number | null>(null);
 	let syncRunning = $state(false);
 	let updateAvailable = $state(false);
+	let pendingApprovalCount = $state<number | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -60,7 +62,8 @@
 				workflowList,
 				evalSuiteList,
 				syncStatus,
-				updateStatus
+				updateStatus,
+				approvalList
 			] = await Promise.all([
 				agents.list(),
 				teams.list(),
@@ -71,7 +74,8 @@
 				workflows.list(),
 				evals.listSuites(),
 				sync.status(),
-				update.status()
+				update.status(),
+				approvals.list()
 			]);
 			agentCount = agentList.length;
 			teamCount = teamList.length;
@@ -84,6 +88,7 @@
 			syncRunning = syncStatus.running;
 			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
 			updateAvailable = updateStatus.update_available;
+			pendingApprovalCount = approvalList.filter((a) => a.status === 'pending').length;
 		} catch {
 			// Sidebar counts are a convenience, not load-bearing — leave them
 			// blank rather than surfacing a second error UI alongside `loadError`.
@@ -131,6 +136,7 @@
 		'/evals',
 		'/usage',
 		'/runs',
+		'/approvals',
 		'/settings',
 		'/invites'
 	];
@@ -358,6 +364,22 @@
 						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
 					/>
 					Runs
+				</a>
+				<a
+					href={resolve('/approvals')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/approvals')
+					)}"
+				>
+					<Icon
+						name="inbox-check"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Approvals
+					{#if pendingApprovalCount}<span
+							class="ml-auto rounded-full bg-agent-magenta-600 px-1.5 py-0.5 text-[10.5px] font-semibold text-white"
+							>{pendingApprovalCount}</span
+						>{/if}
 				</a>
 				{#if auth.grant === 'owner'}
 					<a

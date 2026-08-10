@@ -1138,6 +1138,95 @@ class BudgetCapState(Base):
     override_at: Mapped[str | None] = mapped_column(default=None)
 
 
+class PendingApproval(Base):
+    """Unified "needs a human's OK first" queue (#102), replacing three
+    independently-invented gates that each reused a different pre-existing
+    field for the same underlying primitive:
+
+      - 'schedule' (#93): an agent-created WorkflowSchedule starts
+        `enabled=False` (see that model's docstring) -- approving here sets
+        it True, same recompute-next_fire_at-from-now logic
+        api/workflows.py's update_schedule already applies on a manual
+        re-enable.
+      - 'budget' (#97): a tripped hard_stop BudgetCap needs the same
+        BudgetCapState.override_active write api/budgets.py's
+        POST /budgets/{id}/override already performs -- approving here
+        does exactly that, for the remainder of the current period only.
+      - 'tool_guardrail' (#100): an unattended run hit
+        agentos/tool_audit.py's ensure_unattended_tools_allowed with the
+        agent not yet approved -- approving here sets
+        Agent.approved_for_unattended_tools, the same flag the agent's own
+        settings toggle already writes. Unlike the other two sources, the
+        run this gate blocked has already failed by the time this row
+        exists (tool_audit.py's docstring: a hard pre-flight refusal, not
+        a pause-and-wait) -- approving unblocks the *next* attempt, it
+        doesn't resume the one that failed.
+
+    `ck_pending_approval_source` enforces exactly one of
+    schedule_id/budget_cap_id/agent_id is set, matching source_type --
+    same discriminator+CHECK shape as BudgetCap's own ck_budget_cap_scope.
+
+    Deliberately NOT synced, unlike the issue's own "presumably
+    workspace-shared" framing -- two of the three things a row can point
+    at (WorkflowSchedule, BudgetCapState) are themselves local-only per
+    peer (see their docstrings), so a synced approval row would dangle a
+    foreign key on every peer that isn't the one that created it. Same
+    local-only treatment as WorkflowSchedule/BudgetCapState/ToolCallLog
+    themselves: this is an enforcement-time event tied to whichever node's
+    gate actually tripped, not shared workspace policy -- only the
+    *outcome* of approving it (Agent.approved_for_unattended_tools, a
+    BudgetCap's definition) is workspace policy, and those already sync
+    through their own synced rows.
+
+    `title`/`detail` are captured at creation time rather than derived
+    live from the source row when listing -- so the inbox still reads
+    sensibly for a 'tool_guardrail' row whose triggering run has already
+    failed and scrolled out of view, and so a later edit to the source
+    (e.g. the schedule's cron_expression) doesn't retroactively change
+    what a still-open approval says it's asking for.
+
+    `resolved_by`/`resolved_at` are set once, on the terminal transition
+    into 'approved' or 'rejected' -- a row never moves out of a terminal
+    status, so unlike BudgetCapState's override bookkeeping there's
+    nothing here that auto-expires or needs to be re-checked against a
+    rolling period."""
+
+    __tablename__ = "pending_approval"
+    __table_args__ = (
+        CheckConstraint(
+            "(source_type = 'schedule' AND schedule_id IS NOT NULL "
+            "AND budget_cap_id IS NULL AND agent_id IS NULL) OR "
+            "(source_type = 'budget' AND budget_cap_id IS NOT NULL "
+            "AND schedule_id IS NULL AND agent_id IS NULL) OR "
+            "(source_type = 'tool_guardrail' AND agent_id IS NOT NULL "
+            "AND schedule_id IS NULL AND budget_cap_id IS NULL)",
+            name="ck_pending_approval_source",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')", name="ck_pending_approval_status"
+        ),
+        Index("idx_pending_approval_status", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    source_type: Mapped[str]  # 'schedule' | 'budget' | 'tool_guardrail'
+    schedule_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_schedule.id", ondelete="CASCADE"), default=None
+    )
+    budget_cap_id: Mapped[str | None] = mapped_column(
+        ForeignKey("budget_cap.id", ondelete="CASCADE"), default=None
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), default=None
+    )
+    title: Mapped[str]
+    detail: Mapped[str]
+    status: Mapped[str] = mapped_column(default="pending")  # 'pending' | 'approved' | 'rejected'
+    resolved_by: Mapped[str | None] = mapped_column(default=None)  # Human.id
+    resolved_at: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class RivuletSummary(Base):
     __tablename__ = "rivulet_summary"
     __table_args__ = (Index("idx_summary_rivulet", "rivulet_id", "level"),)
