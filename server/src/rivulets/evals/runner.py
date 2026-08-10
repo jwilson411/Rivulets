@@ -19,8 +19,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
 from rivulets.db.base import utcnow_iso, uuid7
-from rivulets.db.models import Channel, EvalCase, EvalCaseResult, EvalRun, EvalSuite, Rivulet, Workflow
-from rivulets.evals.judge import JudgeVerdict, ToolCallDict, judge_exact, judge_llm, judge_structural, judge_substring
+from rivulets.db.models import (
+    Channel,
+    EvalCase,
+    EvalCaseResult,
+    EvalRun,
+    EvalSuite,
+    Rivulet,
+    Workflow,
+)
+from rivulets.evals.judge import (
+    JudgeVerdict,
+    ToolCallDict,
+    judge_exact,
+    judge_llm,
+    judge_structural,
+    judge_substring,
+)
 from rivulets.sync.publish import publish_current_state
 from rivulets.workflows import run_workflow
 

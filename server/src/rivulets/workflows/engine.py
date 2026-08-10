@@ -191,6 +191,7 @@ from rivulets.db.models import (
     Channel,
     Message,
     Rivulet,
+    RunSpan,
     Workflow,
     WorkflowConnection,
     WorkflowNode,
@@ -201,6 +202,7 @@ from rivulets.db.models import (
 from rivulets.db.session import session_scope
 from rivulets.streaming import publish
 from rivulets.sync.publish import publish_current_state
+from rivulets.tracing import TraceContext, finish_span, start_span
 from rivulets.workflows.nodes import (
     ConditionNotMetError,
     execute_agent_node,
@@ -239,6 +241,16 @@ class _RunContext:
     # Workflow ids currently executing up this call chain, including the
     # current one -- #85's cycle guard for nested 'workflow' node types.
     ancestry: frozenset[str]
+    # #96: None on every untraced run (the default -- see tracing.py's
+    # module docstring). When set, `trace_ctx.parent_span_id` is this
+    # run's own workflow_run span -- every node execution in
+    # _run_node_with_retries nests its workflow_node_run span there, flat
+    # under the run rather than chained node-to-node, which is simple and
+    # still reads as "everything this run did" in the trace UI.
+    # `run_span_id` is that same span's id, kept alongside trace_ctx so
+    # _finalize_run (which doesn't otherwise see `ctx`) can close it out.
+    trace_ctx: TraceContext | None = None
+    run_span_id: str | None = None
 
 
 @dataclass
@@ -494,9 +506,10 @@ async def _execute_node(
     rivulet_id: str,
     run_id: str,
     ctx: _RunContext,
+    node_trace_ctx: TraceContext | None = None,
 ) -> str:
     if node.node_type == "agent":
-        return await execute_agent_node(db, node, session_id, input_content)
+        return await execute_agent_node(db, node, session_id, input_content, node_trace_ctx)
     if node.node_type == "transform":
         return execute_transform_node(node, input_content)
     if node.node_type == "summarize":
@@ -509,7 +522,9 @@ async def _execute_node(
         # passes a JSON-encoded list, never a bare string.
         return execute_merge_node(node, json.loads(input_content))
     if node.node_type == "workflow":
-        return await _execute_workflow_node(db, node, rivulet_id, run_id, input_content, ctx)
+        return await _execute_workflow_node(
+            db, node, rivulet_id, run_id, input_content, ctx, node_trace_ctx
+        )
     raise ValueError(f"Unknown node_type {node.node_type!r}")
 
 
@@ -520,11 +535,18 @@ async def _execute_workflow_node(
     run_id: str,
     input_content: str,
     ctx: _RunContext,
+    node_trace_ctx: TraceContext | None = None,
 ) -> str:
     """#85: invokes `node.child_workflow_id` as a nested run and returns
     its final_output as this node's own output. See module docstring's
     "Nested workflows" section for the ancestry-based cycle guard and why
-    a nested pause becomes a failure here rather than propagating."""
+    a nested pause becomes a failure here rather than propagating.
+
+    #96: `node_trace_ctx` (this node's own workflow_node_run span, from
+    _run_node_with_retries) becomes the child run's *parent* span, not
+    `ctx.trace_ctx` (this run's own root span) -- so a nested run's spans
+    show up a level deeper than its sibling nodes, under the specific
+    'workflow' node that invoked it."""
     if node.child_workflow_id is None:
         raise ValueError(f"Node {node.name!r} has no workflow selected")
     if node.child_workflow_id in ctx.ancestry:
@@ -546,6 +568,7 @@ async def _execute_workflow_node(
         triggered_by="workflow",
         triggered_by_id=run_id,
         ancestry=ctx.ancestry,
+        trace_ctx=node_trace_ctx,
     )
     if child_run.status == "awaiting_human":
         detail = (
@@ -580,6 +603,7 @@ async def run_workflow(
     triggered_by: str,
     triggered_by_id: str | None,
     ancestry: frozenset[str] = frozenset(),
+    trace_ctx: TraceContext | None = None,
 ) -> WorkflowRun:
     """Run `workflow` against `rivulet`, starting with `input_content` as
     the entry node's input. `triggered_by`/`triggered_by_id` record who
@@ -594,6 +618,12 @@ async def run_workflow(
     committed) regardless of outcome — callers inspect `.status` rather
     than this raising, mirroring dispatch_and_respond's "failures are
     recorded, not propagated" style.
+
+    `trace_ctx` (#96) is None on every untraced call site (the default) --
+    see tracing.py's module docstring. When set, this run gets its own
+    workflow_run span nested under `trace_ctx.parent_span_id`, and every
+    node this run executes nests under *that* span (see _RunContext's
+    docstring).
     """
     nodes, connections = await _load_nodes_and_connections(db, workflow.id)
 
@@ -610,6 +640,12 @@ async def run_workflow(
     )
     db.add(run)
     await db.flush()
+    run_span_id = await start_span(
+        db, trace_ctx, span_type="workflow_run", entity_id=run.id, name=f"/{workflow.name}"
+    )
+    run_trace_ctx = (
+        TraceContext(trace_ctx.trace_id, run_span_id) if trace_ctx is not None else None
+    )
 
     if rivulet.agentos_session_id is None:
         rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
@@ -619,6 +655,7 @@ async def run_workflow(
         run.status = "failed"
         run.error_message = "Workflow has no entry point"
         run.completed_at = utcnow_iso()
+        await finish_span(db, run_span_id, status="error")
         await db.commit()
         await _post_message(
             db,
@@ -636,7 +673,13 @@ async def run_workflow(
     # fan-out opens below can see this run and rivulet immediately.
     await db.commit()
 
-    ctx = _RunContext(visit_counts={}, total_steps=[0], ancestry=ancestry | {workflow.id})
+    ctx = _RunContext(
+        visit_counts={},
+        total_steps=[0],
+        ancestry=ancestry | {workflow.id},
+        trace_ctx=run_trace_ctx,
+        run_span_id=run_span_id,
+    )
     entry_outcome = await _advance(
         db, run.id, workflow, rivulet.id, nodes, connections, entry_node_id, input_content, ctx
     )
@@ -644,7 +687,7 @@ async def run_workflow(
         [entry_outcome], db, run.id, workflow, rivulet.id, nodes, connections, ctx
     )
 
-    return await _finalize_run(db, workflow, rivulet, run, outcome)
+    return await _finalize_run(db, workflow, rivulet, run, outcome, run_span_id, run_trace_ctx)
 
 
 async def _finalize_run(
@@ -653,6 +696,8 @@ async def _finalize_run(
     rivulet: Rivulet,
     run: WorkflowRun,
     outcome: _BranchOutcome,
+    run_span_id: str | None = None,
+    trace_ctx: TraceContext | None = None,
 ) -> WorkflowRun:
     """Shared by run_workflow and resume_workflow. A paused outcome's
     status/current_node_id were already committed inside
@@ -668,7 +713,16 @@ async def _finalize_run(
     reach _maybe_notify_on_call_agent, so a human finds out) -- an eval
     run has no legitimate reason to trigger either, so it's excluded at
     this single outer gate instead of threading a second guard into both
-    helpers."""
+    helpers.
+
+    #96: `run_span_id`/`trace_ctx` describe *this* run's own span -- a
+    paused outcome leaves it open (unfinished) rather than closing it, the
+    same way `run.status` itself is left at 'running'/'awaiting_human'
+    rather than finalized here; resume_workflow re-attaches to it later
+    (see that function's own docstring). Remediation/on-call notification
+    spans nest under this run's own span (`trace_ctx`, whose
+    parent_span_id is `run_span_id`), reading as "this run's failure
+    caused this" in the trace tree."""
     if outcome.paused:
         await db.refresh(run)
         return run
@@ -677,17 +731,22 @@ async def _finalize_run(
     run.error_message = outcome.error_message
     run.final_output = outcome.output if not outcome.failed else None
     run.completed_at = utcnow_iso()
+    await finish_span(db, run_span_id, status="error" if outcome.failed else "completed")
     await db.commit()
 
     if run.status == "failed" and run.triggered_by != "eval":
-        await _maybe_trigger_remediation(db, workflow, rivulet, run)
-        await _maybe_notify_on_call_agent(db, workflow, rivulet, run)
+        await _maybe_trigger_remediation(db, workflow, rivulet, run, trace_ctx)
+        await _maybe_notify_on_call_agent(db, workflow, rivulet, run, trace_ctx)
 
     return run
 
 
 async def _maybe_trigger_remediation(
-    db: AsyncSession, workflow: Workflow, rivulet: Rivulet, failed_run: WorkflowRun
+    db: AsyncSession,
+    workflow: Workflow,
+    rivulet: Rivulet,
+    failed_run: WorkflowRun,
+    trace_ctx: TraceContext | None = None,
 ) -> None:
     """#94 layer 2: `Workflow.on_failure_workflow_id`, when set, fires
     automatically whenever a run of `workflow` finishes `failed` --
@@ -746,6 +805,7 @@ async def _maybe_trigger_remediation(
         remediation_input,
         triggered_by="remediation",
         triggered_by_id=failed_run.id,
+        trace_ctx=trace_ctx,
     )
 
 
@@ -765,7 +825,11 @@ async def _resolve_on_call_agent_id(db: AsyncSession, workflow: Workflow) -> str
 
 
 async def _maybe_notify_on_call_agent(
-    db: AsyncSession, workflow: Workflow, rivulet: Rivulet, failed_run: WorkflowRun
+    db: AsyncSession,
+    workflow: Workflow,
+    rivulet: Rivulet,
+    failed_run: WorkflowRun,
+    trace_ctx: TraceContext | None = None,
 ) -> None:
     """#94 layer 3: an alternative or complement to `_maybe_trigger_
     remediation` -- for a failure where what's needed is an agent's
@@ -821,7 +885,12 @@ async def _maybe_notify_on_call_agent(
     from rivulets.dispatch import dispatch_and_respond
 
     agent_messages = await dispatch_and_respond(
-        db, rivulet, channel, alert_content, triggering_message_id=message.id
+        db,
+        rivulet,
+        channel,
+        alert_content,
+        triggering_message_id=message.id,
+        trace_ctx=trace_ctx,
     )
     await db.commit()
     for agent_message in agent_messages:
@@ -846,12 +915,24 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     #84: hydrates the graph from `run.graph_snapshot_json` rather than
     re-querying the live WorkflowNode/WorkflowConnection rows -- a
     workflow edited in the builder while a run sits paused shouldn't
-    change what that run does when it resumes."""
+    change what that run does when it resumes.
+
+    #96: doesn't accept or continue a trace_ctx -- tracing intentionally
+    doesn't span a pause/resume boundary (RunTrace's docstring), so no new
+    spans are recorded for anything this resumed run goes on to execute.
+    It does look up and re-attach to the *original* run_span (if this run
+    was traced when it started), purely so that span -- left 'running' by
+    _finalize_run's paused early-return -- eventually gets closed with the
+    run's real final status instead of showing 'running' forever."""
     assert run.current_node_id is not None  # set by _pause_for_human_input
     workflow = await db.get(Workflow, run.workflow_id)
     rivulet = await db.get(Rivulet, run.rivulet_id)
     assert workflow is not None
     assert rivulet is not None
+
+    run_span_id = await db.scalar(
+        select(RunSpan.id).where(RunSpan.span_type == "workflow_run", RunSpan.entity_id == run.id)
+    )
 
     nodes, connections = _deserialize_graph(run.graph_snapshot_json)
     paused_node = nodes.get(run.current_node_id)
@@ -864,6 +945,7 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
             _BranchOutcome(
                 failed=True, error_message="The paused step was deleted before you replied"
             ),
+            run_span_id,
         )
 
     paused_node_run = await db.scalar(
@@ -879,6 +961,16 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     if paused_node_run is not None:
         paused_node_run.status = "completed"
         paused_node_run.output_content = human_reply
+        # #96: closes out the span _pause_for_human_input opened and left
+        # 'running' -- the only span-affecting thing resume_workflow does
+        # (no new spans for whatever runs after this; see this function's
+        # own docstring).
+        paused_span_id = await db.scalar(
+            select(RunSpan.id).where(
+                RunSpan.span_type == "workflow_node_run", RunSpan.entity_id == paused_node_run.id
+            )
+        )
+        await finish_span(db, paused_span_id, status="completed")
         paused_node_run.completed_at = utcnow_iso()
 
     rivulet.status = "active"
@@ -889,7 +981,7 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     outcome = await _follow_edges(
         db, run.id, workflow, rivulet.id, nodes, connections, paused_node.id, human_reply, ctx
     )
-    return await _finalize_run(db, workflow, rivulet, run, outcome)
+    return await _finalize_run(db, workflow, rivulet, run, outcome, run_span_id)
 
 
 async def _run_branch(
@@ -1074,6 +1166,13 @@ async def _pause_for_human_input(
         status="awaiting_human",
     )
     db.add(node_run)
+    await db.flush()
+    # #96: left 'running' -- resume_workflow finishes it once a reply
+    # arrives, mirroring WorkflowNodeRun's own updated-in-place (not a new
+    # row) treatment of a pause.
+    await start_span(
+        db, ctx.trace_ctx, span_type="workflow_node_run", entity_id=node_run.id, name=node.name
+    )
     await db.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id == run_id)
@@ -1231,7 +1330,13 @@ async def _run_node_with_retries(
     one WorkflowNodeRun row per attempt (db/models.py's docstring on why:
     keeps retry history inspectable). A ConditionNotMetError is never
     retried — it isn't a transient failure, it's the node behaving exactly
-    as configured."""
+    as configured.
+
+    #96: one workflow_node_run span per attempt too, nested under
+    `ctx.run_span_id` (all of a run's nodes sit flat under its own root
+    span rather than chained node-to-node — see _RunContext's docstring).
+    An 'agent' or 'workflow' node type nests further under *this specific
+    attempt's* span (see _execute_node/_execute_workflow_node)."""
     max_attempts = max(1, node.retry_max_attempts + 1)
     last_error: Exception | None = None
 
@@ -1241,14 +1346,23 @@ async def _run_node_with_retries(
         )
         db.add(node_run)
         await db.flush()
+        node_span_id = await start_span(
+            db, ctx.trace_ctx, span_type="workflow_node_run", entity_id=node_run.id, name=node.name
+        )
+        node_trace_ctx = (
+            TraceContext(ctx.trace_ctx.trace_id, node_span_id)
+            if ctx.trace_ctx is not None
+            else None
+        )
         try:
             output = await _execute_node(
-                db, node, session_id, input_content, rivulet_id, run_id, ctx
+                db, node, session_id, input_content, rivulet_id, run_id, ctx, node_trace_ctx
             )
         except ConditionNotMetError as exc:
             node_run.status = "skipped"
             node_run.error_message = str(exc)
             node_run.completed_at = utcnow_iso()
+            await finish_span(db, node_span_id, status="completed")
             await db.commit()
             return None, exc
         except Exception as exc:  # noqa: BLE001 — any node failure is retried/reported uniformly
@@ -1256,6 +1370,7 @@ async def _run_node_with_retries(
             node_run.status = "failed"
             node_run.error_message = str(exc)
             node_run.completed_at = utcnow_iso()
+            await finish_span(db, node_span_id, status="error")
             await db.commit()
             logger.warning(
                 "Workflow node %r (attempt %d/%d) failed",
@@ -1271,6 +1386,7 @@ async def _run_node_with_retries(
             node_run.status = "completed"
             node_run.output_content = output
             node_run.completed_at = utcnow_iso()
+            await finish_span(db, node_span_id, status="completed")
             await db.commit()
             return output, None
 

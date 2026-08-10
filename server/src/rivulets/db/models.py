@@ -810,13 +810,11 @@ class BudgetCap(Base):
     reason EvalSuite's do -- a cap on a deleted agent/team has nothing left
     to cap.
 
-    Known, pre-existing scope gap this issue doesn't fix: workflows/nodes.py's
-    agent node calls agentos.run_agent directly, bypassing
-    dispatch/service.py's _invoke_agent/_record_agent_run entirely, so it
-    never writes an AgentRun row. Workflow-node agent spend is therefore
-    already invisible to api/usage.py's dashboard, and is equally invisible
-    to budget enforcement here -- a pre-existing gap, not one #97 introduces.
-    """
+    A workflow's 'agent' node now also writes an AgentRun row (#96's
+    agentos/accounting.py, shared with dispatch/service.py's _invoke_agent),
+    so workflow-node agent spend counts toward these caps too -- unlike the
+    gap that existed before #96 landed, there's no longer a blind spot
+    here."""
 
     __tablename__ = "budget_cap"
     __table_args__ = (
@@ -848,6 +846,128 @@ class BudgetCap(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
+
+
+class RunTrace(Base):
+    """The root of one causal chain of execution (#96): a human message, a
+    slash command, or a scheduled workflow fire. Everything that chain goes
+    on to do -- dispatch decisions, agent runs, workflow runs and their
+    nodes, however deeply nested or re-dispatched -- is recorded as a
+    `RunSpan` under this same `id`, so a human can view one end-to-end
+    timeline instead of piecing it together from AgentRun/DispatchDecision/
+    WorkflowRun/WorkflowNodeRun's separate, previously-unlinked tables (see
+    those models' own docstrings -- this is deliberately a thin linking
+    layer over them, not a replacement).
+
+    Not synced -- local telemetry tied to whichever node actually did the
+    work, same reasoning as AgentRun/DispatchDecision/WorkflowRun: a fresh
+    peer doesn't need another node's trace history to function. Also
+    deliberately local-only in a second sense (#101's "who coordinates
+    workspace-singleton state" question doesn't apply here): a trace never
+    spans two peers even when a run does (a remote-dispatched agent call,
+    sync/agent_dispatch.py) -- the remote peer's own share of that work
+    shows up only in *its* trace history, invisible from here. Tracing that
+    across peers is explicitly out of scope for v1 (see issue #96's own
+    "leaning toward local-only" open question).
+
+    `label` is a short, human-readable summary of what triggered this trace
+    (the leading slice of the triggering message's content, or the
+    workflow name for a schedule fire) -- set once at creation so the
+    trace-list UI has something to show without joining back to Message/
+    WorkflowSchedule for every row.
+
+    `span_count`/`total_cost_usd`/`total_tokens` are denormalized off this
+    trace's own RunSpan rows at `finish_trace` time, the same convenience
+    EvalRun.pass_count/fail_count/error_count provides over re-deriving a
+    summary from EvalCaseResult every time the UI wants to show one.
+
+    A trace left `status='running'` with no completed_at is either still
+    genuinely in flight, or -- v1's one known gap -- a WorkflowRun that
+    paused for human input and was later resumed (workflows/engine.py's
+    `resume_workflow` docstring): tracing intentionally doesn't span a
+    pause/resume boundary, so a resumed run's remaining node executions
+    aren't added as spans, and this trace is left open rather than closed
+    prematurely. Retention (tracing.py's prune loop) sweeps these up by
+    `started_at` age regardless of status, so a stuck-open trace doesn't
+    accumulate forever."""
+
+    __tablename__ = "run_trace"
+    __table_args__ = (Index("idx_run_trace_started", "started_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    trigger_type: Mapped[str]  # 'message' | 'schedule'
+    label: Mapped[str]
+    rivulet_id: Mapped[str | None] = mapped_column(
+        ForeignKey("rivulet.id", ondelete="SET NULL"), default=None
+    )
+    channel_id: Mapped[str | None] = mapped_column(
+        ForeignKey("channel.id", ondelete="SET NULL"), default=None
+    )
+    status: Mapped[str] = mapped_column(default="running")  # 'running' | 'completed' | 'error'
+    span_count: Mapped[int] = mapped_column(default=0)
+    total_cost_usd: Mapped[float | None] = mapped_column(default=None)
+    total_tokens: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
+
+
+class RunSpan(Base):
+    """One step within a RunTrace (#96): either an existing AgentRun,
+    DispatchDecision, WorkflowRun, or WorkflowNodeRun row (`entity_id`
+    points at it; `span_type` says which table) given start/end timestamps
+    and a place in the parent/child tree via `parent_span_id`. This table
+    doesn't replace any of those four -- it's created alongside them, at
+    the same call sites that already record them, purely to link what was
+    previously only correlatable by `created_at` proximity (see those
+    models' own docstrings, and issue #96's "zero structural link between
+    a parent and child execution" framing).
+
+    `parent_span_id` NULL marks a trace's root span (the first dispatch
+    decision or workflow run a trace's trigger produced); everything else
+    nests under the span that caused it -- an agent_run span's own
+    recursive re-dispatch or handoff nests its dispatch_decision/agent_run
+    spans under that agent_run span, a workflow_run's node executions nest
+    under that workflow_run span, and a 'workflow'-type node's nested child
+    run nests under that node's own workflow_node_run span.
+
+    `model`/`cost_usd`/`total_tokens` are denormalized off the underlying
+    AgentRun row for agent_run spans only (null for every other span_type)
+    -- convenience for rendering a trace's cost/token breakdown, and for
+    `finish_trace` aggregating RunTrace.total_cost_usd/total_tokens,
+    without a join back to AgentRun for every span.
+
+    `duration_ms` is computed once at `finish_span` time from
+    started_at/completed_at -- which, like every other timestamp in this
+    schema (db/base.py's utcnow_iso), only has one-second resolution, so
+    this is accurate to the nearest second, not truly millisecond-precise.
+    That's an acceptable v1 tradeoff (most spans of interest -- an LLM
+    call, a workflow node -- run for multiple seconds) rather than adding
+    a separate sub-second timing channel just for this one field.
+
+    Not synced, same reasoning as RunTrace."""
+
+    __tablename__ = "run_span"
+    __table_args__ = (
+        Index("idx_run_span_trace", "trace_id", "started_at"),
+        Index("idx_run_span_parent", "parent_span_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    trace_id: Mapped[str] = mapped_column(ForeignKey("run_trace.id", ondelete="CASCADE"))
+    parent_span_id: Mapped[str | None] = mapped_column(
+        ForeignKey("run_span.id", ondelete="CASCADE"), default=None
+    )
+    # 'dispatch_decision' | 'agent_run' | 'workflow_run' | 'workflow_node_run'
+    span_type: Mapped[str]
+    entity_id: Mapped[str | None] = mapped_column(default=None)
+    name: Mapped[str]
+    status: Mapped[str] = mapped_column(default="running")  # 'running' | 'completed' | 'error'
+    model: Mapped[str | None] = mapped_column(default=None)
+    cost_usd: Mapped[float | None] = mapped_column(default=None)
+    total_tokens: Mapped[int | None] = mapped_column(default=None)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
+    duration_ms: Mapped[int | None] = mapped_column(default=None)
 
 
 class Rivulet(Base):
