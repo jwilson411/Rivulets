@@ -14,7 +14,9 @@ from rivulets.db.models import Agent, EvalCase, EvalCaseResult, EvalRun, EvalSui
 
 
 async def _make_agent(db: AsyncSession, name: str = "Grader") -> Agent:
-    agent = Agent(name=name, description="d", instructions="i", model="anthropic:claude-haiku-4-5-20251001")
+    agent = Agent(
+        name=name, description="d", instructions="i", model="anthropic:claude-haiku-4-5-20251001"
+    )
     db.add(agent)
     await db.flush()
     return agent
@@ -58,7 +60,9 @@ async def test_deleting_agent_cascades_suite_and_cases(db_session: AsyncSession)
     suite = EvalSuite(name="cascade-agent", agent_id=agent.id)
     db_session.add(suite)
     await db_session.flush()
-    case = EvalCase(suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi")
+    case = EvalCase(
+        suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi"
+    )
     db_session.add(case)
     await db_session.commit()
     # Captured before the delete: SQLite's ON DELETE CASCADE happens purely
@@ -85,7 +89,9 @@ async def test_deleting_suite_cascades_runs_and_results(db_session: AsyncSession
     suite = EvalSuite(name="cascade-run", agent_id=agent.id)
     db_session.add(suite)
     await db_session.flush()
-    case = EvalCase(suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi")
+    case = EvalCase(
+        suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi"
+    )
     db_session.add(case)
     await db_session.flush()
     run = EvalRun(suite_id=suite.id, case_count=1)
@@ -109,7 +115,9 @@ async def test_deleting_case_cascades_results_but_not_run(db_session: AsyncSessi
     suite = EvalSuite(name="cascade-case", agent_id=agent.id)
     db_session.add(suite)
     await db_session.flush()
-    case = EvalCase(suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi")
+    case = EvalCase(
+        suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi"
+    )
     db_session.add(case)
     await db_session.flush()
     run = EvalRun(suite_id=suite.id, case_count=1)
@@ -133,7 +141,15 @@ async def test_suite_cases_relationship_orders_none_implied(db_session: AsyncSes
     suite = EvalSuite(name="rel-check", agent_id=agent.id)
     db_session.add(suite)
     await db_session.flush()
-    db_session.add(EvalCase(suite_id=suite.id, name="c1", input_content="hi", judge_type="exact", expected_output="hi"))
+    db_session.add(
+        EvalCase(
+            suite_id=suite.id,
+            name="c1",
+            input_content="hi",
+            judge_type="exact",
+            expected_output="hi",
+        )
+    )
     await db_session.commit()
 
     reloaded = (await db_session.scalars(select(EvalSuite).where(EvalSuite.id == suite.id))).one()

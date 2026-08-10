@@ -133,13 +133,17 @@ async def _run_judge_generator(model: Model, prompt: str) -> JudgeVerdictSchema 
     return content if isinstance(content, JudgeVerdictSchema) else None
 
 
-async def judge_llm(db: AsyncSession, case_input: str, rubric: str, actual_output: str) -> JudgeVerdict:
+async def judge_llm(
+    db: AsyncSession, case_input: str, rubric: str, actual_output: str
+) -> JudgeVerdict:
     """NFR-2.4-style graceful degradation, matching rule_generation.py/
     llm_fallback.py: no provider configured, or the call failing for any
     reason, becomes an 'error' verdict rather than raising."""
     provider_model = await resolve_tier_model(db, "cheap")
     if provider_model is None:
-        return JudgeVerdict(status="error", error_message="No provider configured for LLM-judge scoring")
+        return JudgeVerdict(
+            status="error", error_message="No provider configured for LLM-judge scoring"
+        )
 
     try:
         model = await resolve_model(db, provider_model)
@@ -151,7 +155,9 @@ async def judge_llm(db: AsyncSession, case_input: str, rubric: str, actual_outpu
         return JudgeVerdict(status="error", error_message=str(exc))
 
     if verdict is None:
-        return JudgeVerdict(status="error", error_message="Judge model returned no structured output")
+        return JudgeVerdict(
+            status="error", error_message="Judge model returned no structured output"
+        )
 
     return JudgeVerdict(
         status="passed" if verdict.passed else "failed",

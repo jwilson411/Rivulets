@@ -208,9 +208,7 @@ async def prune_old_traces(db: AsyncSession, *, retention_days: int) -> int:
     # CursorResult.rowcount isn't part of AsyncSession.execute()'s statically
     # known Result[Any] return type, and this composes just as cheaply into
     # one extra indexed query (idx_run_trace_started).
-    stale_ids = (
-        await db.scalars(select(RunTrace.id).where(RunTrace.started_at < cutoff))
-    ).all()
+    stale_ids = (await db.scalars(select(RunTrace.id).where(RunTrace.started_at < cutoff))).all()
     if not stale_ids:
         return 0
     await db.execute(delete(RunTrace).where(RunTrace.id.in_(stale_ids)))

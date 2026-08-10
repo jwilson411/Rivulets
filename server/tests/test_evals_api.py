@@ -40,7 +40,12 @@ def _create_workflow(client: TestClient, headers: dict[str, str], name: str) -> 
 
 
 def _create_suite(
-    client: TestClient, headers: dict[str, str], name: str, *, agent_id: str | None = None, workflow_id: str | None = None
+    client: TestClient,
+    headers: dict[str, str],
+    name: str,
+    *,
+    agent_id: str | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"name": name}
     if agent_id is not None:
@@ -73,12 +78,16 @@ def test_create_workflow_suite(client: TestClient, auth_headers: dict[str, str])
     assert suite["workflow_id"] == workflow_id
 
 
-def test_create_suite_rejects_neither_subject(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_create_suite_rejects_neither_subject(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     resp = client.post("/api/v1/evals/suites", json={"name": "no-subject"}, headers=auth_headers)
     assert resp.status_code == 422
 
 
-def test_create_suite_rejects_both_subjects(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_create_suite_rejects_both_subjects(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     agent_id = _create_agent(client, auth_headers)
     workflow_id = _create_workflow(client, auth_headers, "both-flow")
     resp = client.post(
@@ -89,14 +98,20 @@ def test_create_suite_rejects_both_subjects(client: TestClient, auth_headers: di
     assert resp.status_code == 422
 
 
-def test_create_suite_rejects_unknown_agent(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_create_suite_rejects_unknown_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     resp = client.post(
-        "/api/v1/evals/suites", json={"name": "ghost", "agent_id": "does-not-exist"}, headers=auth_headers
+        "/api/v1/evals/suites",
+        json={"name": "ghost", "agent_id": "does-not-exist"},
+        headers=auth_headers,
     )
     assert resp.status_code == 404
 
 
-def test_list_suites_spans_both_subject_types(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_list_suites_spans_both_subject_types(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     agent_id = _create_agent(client, auth_headers, "AgentX")
     workflow_id = _create_workflow(client, auth_headers, "flow-x")
     _create_suite(client, auth_headers, "agent-suite", agent_id=agent_id)
@@ -122,7 +137,9 @@ def test_delete_suite(client: TestClient, auth_headers: dict[str, str]) -> None:
     suite = _create_suite(client, auth_headers, "deletable", agent_id=agent_id)
     resp = client.delete(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers)
     assert resp.status_code == 204
-    assert client.get(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers).status_code == 404
+    assert (
+        client.get(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers).status_code == 404
+    )
 
 
 def test_create_exact_case_requires_expected_output(
@@ -175,7 +192,9 @@ def test_create_structural_case_on_workflow_suite_rejected(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     workflow_id = _create_workflow(client, auth_headers, "structural-flow")
-    suite = _create_suite(client, auth_headers, "structural-workflow-suite", workflow_id=workflow_id)
+    suite = _create_suite(
+        client, auth_headers, "structural-workflow-suite", workflow_id=workflow_id
+    )
     resp = client.post(
         f"/api/v1/evals/suites/{suite['id']}/cases",
         json={
@@ -207,11 +226,15 @@ def test_list_and_delete_case(client: TestClient, auth_headers: dict[str, str]) 
         f"/api/v1/evals/suites/{suite['id']}/cases/{case_id}", headers=auth_headers
     )
     assert deleted.status_code == 204
-    listed_after = client.get(f"/api/v1/evals/suites/{suite['id']}/cases", headers=auth_headers).json()
+    listed_after = client.get(
+        f"/api/v1/evals/suites/{suite['id']}/cases", headers=auth_headers
+    ).json()
     assert listed_after == []
 
 
-def test_run_suite_with_no_cases_returns_400(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_run_suite_with_no_cases_returns_400(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     agent_id = _create_agent(client, auth_headers)
     suite = _create_suite(client, auth_headers, "empty-suite", agent_id=agent_id)
     resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=auth_headers)
@@ -253,7 +276,9 @@ def test_run_agent_suite_end_to_end(
     assert run["case_count"] == 1
     assert run["pass_count"] == 1
 
-    runs_listed = client.get(f"/api/v1/evals/suites/{suite['id']}/runs", headers=auth_headers).json()
+    runs_listed = client.get(
+        f"/api/v1/evals/suites/{suite['id']}/runs", headers=auth_headers
+    ).json()
     assert [r["id"] for r in runs_listed] == [run["id"]]
 
     results = client.get(
@@ -270,4 +295,6 @@ def test_deleting_agent_cascades_suite(client: TestClient, auth_headers: dict[st
 
     resp = client.delete(f"/api/v1/agents/{agent_id}", headers=auth_headers)
     assert resp.status_code == 204, resp.text
-    assert client.get(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers).status_code == 404
+    assert (
+        client.get(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers).status_code == 404
+    )

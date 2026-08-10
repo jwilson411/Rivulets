@@ -283,12 +283,16 @@ async def delete_suite(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> N
     await db.commit()
 
 
-@router.post("/suites/{suite_id}/cases", response_model=EvalCaseOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/suites/{suite_id}/cases", response_model=EvalCaseOut, status_code=status.HTTP_201_CREATED
+)
 async def create_case(
     suite_id: str, body: EvalCaseCreate, db: DbSession, _: CurrentWorkspaceId
 ) -> EvalCaseOut:
     suite = await _get_suite_or_404(db, suite_id)
-    _validate_case_fields(body.judge_type, body.expected_output, body.rubric, body.expected_tool_name)
+    _validate_case_fields(
+        body.judge_type, body.expected_output, body.rubric, body.expected_tool_name
+    )
     if body.judge_type == "structural" and suite.workflow_id is not None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -331,7 +335,9 @@ async def update_case(
     case = await _get_case_or_404(db, suite_id, case_id)
 
     judge_type = body.judge_type if body.judge_type is not None else case.judge_type
-    expected_output = body.expected_output if body.expected_output is not None else case.expected_output
+    expected_output = (
+        body.expected_output if body.expected_output is not None else case.expected_output
+    )
     rubric = body.rubric if body.rubric is not None else case.rubric
     expected_tool_name = (
         body.expected_tool_name if body.expected_tool_name is not None else case.expected_tool_name
@@ -387,17 +393,24 @@ async def run_suite(
 async def list_runs(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[EvalRun]:
     await _get_suite_or_404(db, suite_id)
     result = await db.execute(
-        select(EvalRun).where(EvalRun.suite_id == suite_id).order_by(EvalRun.started_at.desc()).limit(50)
+        select(EvalRun)
+        .where(EvalRun.suite_id == suite_id)
+        .order_by(EvalRun.started_at.desc())
+        .limit(50)
     )
     return list(result.scalars().all())
 
 
 @router.get("/suites/{suite_id}/runs/{run_id}/results", response_model=list[EvalCaseResultOut])
-async def list_results(suite_id: str, run_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[EvalCaseResultOut]:
+async def list_results(
+    suite_id: str, run_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> list[EvalCaseResultOut]:
     run = await db.get(EvalRun, run_id)
     if run is None or run.suite_id != suite_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Eval run not found")
     result = await db.execute(
-        select(EvalCaseResult).where(EvalCaseResult.run_id == run_id).order_by(EvalCaseResult.started_at)
+        select(EvalCaseResult)
+        .where(EvalCaseResult.run_id == run_id)
+        .order_by(EvalCaseResult.started_at)
     )
     return [EvalCaseResultOut.from_row(row) for row in result.scalars().all()]

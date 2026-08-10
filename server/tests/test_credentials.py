@@ -14,6 +14,8 @@ get_session_key_store() to exercise the fallback path in isolation,
 without going through a full login.
 """
 
+from collections.abc import Iterator
+
 import keyring.errors
 import pytest
 
@@ -27,7 +29,7 @@ from rivulets.security.session import get_session_key_store
 
 
 @pytest.fixture(autouse=True)
-def _credential_store_key() -> None:
+def _credential_store_key() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     """Every test in this file may hit the fallback path (keyring failures
     are monkeypatched per-test below), so a session key is always present
     — mirroring login() always deriving one regardless of whether a given

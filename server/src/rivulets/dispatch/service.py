@@ -560,8 +560,8 @@ async def _run_agent_with_fallback(
             # existed (no extra resolve/keychain round-trip on the common
             # no-fallback path) — only auto mode and fallback attempts
             # need a per-call override.
-            model_override = None if (i == 0 and model_used is None) else await resolve_model(
-                db, candidate
+            model_override = (
+                None if (i == 0 and model_used is None) else await resolve_model(db, candidate)
             )
             run_output = await run_agent(
                 db,

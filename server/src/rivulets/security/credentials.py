@@ -19,6 +19,7 @@ when keyring itself reports no usable backend.
 """
 
 import keyring
+import keyring.backends.fail
 import keyring.errors
 
 from rivulets.config import get_settings
