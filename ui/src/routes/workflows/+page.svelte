@@ -2,6 +2,20 @@
 	import { resolve } from '$app/paths';
 	import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 	import { timeAgo } from '$lib/format';
+	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+
+	const workflowFilters: ListFilter<Workflow>[] = [
+		{
+			id: 'status',
+			label: 'Status',
+			options: [
+				{ value: 'published', label: 'Published' },
+				{ value: 'draft', label: 'Draft' }
+			],
+			predicate: (workflow, value) =>
+				value === 'published' ? workflow.published : !workflow.published
+		}
+	];
 
 	let workflowList = $state<Workflow[]>([]);
 	let loadError = $state<string | null>(null);
@@ -164,43 +178,45 @@
 		{#if actionError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
 		{/if}
-		{#if workflowList.length === 0}
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				No workflows yet — create one above to start chaining agents and steps together.
-			</p>
-		{:else}
-			<ul class="flex flex-col gap-3">
-				{#each workflowList as workflow (workflow.id)}
-					<li
-						class="flex items-start justify-between rounded-lg border border-ink/12 p-4 dark:border-white/10"
-					>
-						<a href={resolve('/workflows/[id]', { id: workflow.id })} class="min-w-0 flex-1">
-							<p class="flex items-center gap-2 font-medium text-ink dark:text-ink-dark">
-								<span class="text-neutral-500">/</span>{workflow.name}
-								<span
-									class="rounded-sm px-1.5 py-0.5 text-[11px] font-normal {workflow.published
-										? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-										: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
-								>
-									{workflow.published ? 'Published' : 'Draft'}
-								</span>
+		<FilterableList
+			items={workflowList}
+			getKey={(workflow) => workflow.id}
+			searchPlaceholder="Search workflows…"
+			searchPredicate={(workflow, q) => workflow.name.toLowerCase().includes(q.toLowerCase())}
+			filters={workflowFilters}
+			emptyMessage="No workflows yet — create one above to start chaining agents and steps together."
+			noMatchMessage="No workflows match your search or filter."
+		>
+			{#snippet item(workflow)}
+				<li
+					class="flex items-start justify-between rounded-lg border border-ink/12 p-4 dark:border-white/10"
+				>
+					<a href={resolve('/workflows/[id]', { id: workflow.id })} class="min-w-0 flex-1">
+						<p class="flex items-center gap-2 font-medium text-ink dark:text-ink-dark">
+							<span class="text-neutral-500">/</span>{workflow.name}
+							<span
+								class="rounded-sm px-1.5 py-0.5 text-[11px] font-normal {workflow.published
+									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+									: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
+							>
+								{workflow.published ? 'Published' : 'Draft'}
+							</span>
+						</p>
+						{#if workflow.description}
+							<p class="text-sm text-neutral-600 dark:text-neutral-400">
+								{workflow.description}
 							</p>
-							{#if workflow.description}
-								<p class="text-sm text-neutral-600 dark:text-neutral-400">
-									{workflow.description}
-								</p>
-							{/if}
-							<p class="mt-1 text-xs text-neutral-500">Updated {timeAgo(workflow.updated_at)}</p>
-						</a>
-						<button
-							onclick={() => handleDelete(workflow.id)}
-							class="ml-3 flex-none text-xs text-neutral-500 hover:text-agent-magenta-600"
-						>
-							Delete
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{/if}
+						{/if}
+						<p class="mt-1 text-xs text-neutral-500">Updated {timeAgo(workflow.updated_at)}</p>
+					</a>
+					<button
+						onclick={() => handleDelete(workflow.id)}
+						class="ml-3 flex-none text-xs text-neutral-500 hover:text-agent-magenta-600"
+					>
+						Delete
+					</button>
+				</li>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>

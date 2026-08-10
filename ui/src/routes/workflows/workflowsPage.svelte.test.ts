@@ -185,4 +185,32 @@ describe('workflows/+page.svelte', () => {
 			.element(page.getByRole('link', { name: 'View rivulet' }))
 			.toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
 	});
+
+	it('filters the workflow list by name via the search box', async () => {
+		const deployFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'deploy-service' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, deployFlow]);
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText('review-pr')).toBeInTheDocument();
+		await expect.element(page.getByText('deploy-service')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search workflows…').fill('deploy');
+
+		await expect.element(page.getByText('deploy-service')).toBeInTheDocument();
+		await expect.element(page.getByText('review-pr')).not.toBeInTheDocument();
+	});
+
+	it('filters the workflow list by draft/published status', async () => {
+		const draftFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'wip-flow', published: false };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, draftFlow]);
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText('review-pr')).toBeInTheDocument();
+		await expect.element(page.getByText('wip-flow')).toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Status' }).selectOptions('draft');
+
+		await expect.element(page.getByText('wip-flow')).toBeInTheDocument();
+		await expect.element(page.getByText('review-pr')).not.toBeInTheDocument();
+	});
 });
