@@ -38,6 +38,7 @@ const researcher: Agent = {
 	instructions: 'Be thorough',
 	model: 'anthropic:claude-haiku-4-5-20251001',
 	fallback_models: [],
+	approved_for_unattended_tools: false,
 	agentos_agent_id: 'agentos-1'
 };
 
@@ -48,6 +49,7 @@ const writer: Agent = {
 	instructions: 'Be concise',
 	model: 'anthropic:claude-haiku-4-5-20251001',
 	fallback_models: [],
+	approved_for_unattended_tools: false,
 	agentos_agent_id: 'agentos-2'
 };
 

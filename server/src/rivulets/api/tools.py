@@ -76,6 +76,12 @@ class ToolOut(BaseModel):
     description: str
     tool_type: str
     source_path: str | None
+    # #100: real blast radius (code exec, outbound HTTP, filesystem
+    # writes, DB access) -- read-only here, not in ToolCreate/ToolUpdate;
+    # v1 only marks the fixed builtin set (tool_resolution.py's
+    # SENSITIVE_BUILTIN_TOOL_NAMES), no UI to mark a custom/mcp tool
+    # sensitive yet.
+    sensitive: bool = False
     available: bool = True
 
     model_config = {"from_attributes": True}

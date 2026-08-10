@@ -12,6 +12,10 @@ export interface Agent {
 	// Ordered 'provider:model_name' strings (#103): tried in turn if
 	// `model`'s call fails with a retryable-looking error.
 	fallback_models: string[];
+	// #100: one-time approval to run this agent's sensitive tools (if any
+	// are assigned) unattended -- schedules, remediation runs. Doesn't
+	// affect ordinary chat/slash-command tool use at all.
+	approved_for_unattended_tools: boolean;
 	agentos_agent_id: string | null;
 }
 
@@ -42,6 +46,7 @@ export interface AgentUpdateInput {
 	fallback_models?: string[];
 	tool_ids?: string[];
 	team_ids?: string[];
+	approved_for_unattended_tools?: boolean;
 }
 
 export const agents = {

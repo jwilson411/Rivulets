@@ -6,7 +6,7 @@ import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import RunsPage from './+page.svelte';
-import { runs, type RunTrace, type RunTraceDetail } from '$lib/api/runs';
+import { runs, type RunTrace, type RunTraceDetail, type ToolCall } from '$lib/api/runs';
 
 vi.mock('$lib/api/runs', () => ({
 	runs: {
@@ -40,6 +40,17 @@ const messageTrace: RunTrace = {
 	completed_at: '2026-08-09T06:00:02Z'
 };
 
+const toolCall: ToolCall = {
+	id: 'call-1',
+	tool_name: 'execute_python',
+	sensitive: true,
+	status: 'success',
+	arguments_json: '{"code": "print(1)"}',
+	result_summary: '1',
+	duration_ms: 250,
+	created_at: '2026-08-09T06:00:01Z'
+};
+
 const traceDetail: RunTraceDetail = {
 	...messageTrace,
 	spans: [
@@ -55,7 +66,8 @@ const traceDetail: RunTraceDetail = {
 			total_tokens: null,
 			started_at: '2026-08-09T06:00:00Z',
 			completed_at: '2026-08-09T06:00:02Z',
-			duration_ms: 2000
+			duration_ms: 2000,
+			tool_calls: []
 		},
 		{
 			id: 'span-2',
@@ -67,6 +79,7 @@ const traceDetail: RunTraceDetail = {
 			model: 'anthropic:claude-haiku-4-5-20251001',
 			cost_usd: 0.0032,
 			total_tokens: 120,
+			tool_calls: [toolCall],
 			started_at: '2026-08-09T06:00:00Z',
 			completed_at: '2026-08-09T06:00:02Z',
 			duration_ms: 1800
@@ -124,6 +137,17 @@ describe('runs/+page.svelte', () => {
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 		await expect.element(page.getByText('1.8s', { exact: false })).toBeInTheDocument();
 		expect(runs.get).toHaveBeenCalledWith('trace-1');
+	});
+
+	it('shows a tool call nested under its agent_run span, flagged sensitive', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue(traceDetail);
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('execute_python')).toBeInTheDocument();
+		await expect.element(page.getByText('sensitive')).toBeInTheDocument();
 	});
 
 	it('links an expanded trace back to its rivulet', async () => {

@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.agentos import run_agent
 from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model
+from rivulets.agentos.tool_audit import ensure_unattended_tools_allowed
 from rivulets.db.models import Agent, WorkflowNode
 from rivulets.tracing import TraceContext, finish_span, start_span
 
@@ -77,6 +78,7 @@ async def execute_agent_node(
     session_id: str,
     input_content: str,
     trace_ctx: TraceContext | None = None,
+    unattended: bool = False,
 ) -> str:
     """#96: also records an AgentRun row (agentos/accounting.py's
     record_agent_run, the same helper dispatch/service.py uses) and an
@@ -86,7 +88,15 @@ async def execute_agent_node(
     built from AgentRun data. No tier/fallback-chain support here (unlike
     dispatch/service.py's `_invoke_agent`) -- workflow agent nodes have
     never done auto-tier classification or fallback-model retries, and
-    this doesn't add either, just accounting for what already runs."""
+    this doesn't add either, just accounting for what already runs.
+
+    `unattended` (#100, from WorkflowRun.unattended via the engine's
+    `_RunContext`) gates this node before it ever calls `run_agent` at all
+    when `agent` has an unapproved sensitive tool assigned -- see
+    tool_audit.py's `ensure_unattended_tools_allowed`. Checked inside the
+    span's try/except like any other failure this function can raise, so
+    a blocked node shows up in the trace/run history the same way a
+    genuine agent error would, not as something invisible."""
     if node.agent_id is None:
         raise ValueError(f"Node {node.name!r} has no agent assigned")
     agent = await db.get(Agent, node.agent_id)
@@ -97,6 +107,8 @@ async def execute_agent_node(
         db, trace_ctx, span_type="agent_run", entity_id=None, name=agent.name
     )
     try:
+        if unattended:
+            await ensure_unattended_tools_allowed(db, agent)
         run_output = await run_agent(
             db, agent.id, input_content, session_id=session_id, user_id="workflow"
         )

@@ -251,6 +251,13 @@ class _RunContext:
     # _finalize_run (which doesn't otherwise see `ctx`) can close it out.
     trace_ctx: TraceContext | None = None
     run_span_id: str | None = None
+    # #100: WorkflowRun.unattended, carried alongside the rest of this
+    # run's shared state so execute_agent_node can read it without every
+    # node executor in the call chain growing its own parameter for it
+    # (the same reasoning ancestry/trace_ctx are here rather than loose
+    # args). See that column's own docstring for what "unattended" means
+    # and how it's derived/inherited.
+    unattended: bool = False
 
 
 @dataclass
@@ -509,7 +516,9 @@ async def _execute_node(
     node_trace_ctx: TraceContext | None = None,
 ) -> str:
     if node.node_type == "agent":
-        return await execute_agent_node(db, node, session_id, input_content, node_trace_ctx)
+        return await execute_agent_node(
+            db, node, session_id, input_content, node_trace_ctx, unattended=ctx.unattended
+        )
     if node.node_type == "transform":
         return execute_transform_node(node, input_content)
     if node.node_type == "summarize":
@@ -569,6 +578,11 @@ async def _execute_workflow_node(
         triggered_by_id=run_id,
         ancestry=ctx.ancestry,
         trace_ctx=node_trace_ctx,
+        # #100: a nested run inherits this run's unattended-ness rather
+        # than being derived from the literal 'workflow' trigger string --
+        # a workflow node inside a scheduled run is still unattended, and
+        # one inside a live human-triggered run still isn't.
+        unattended=ctx.unattended,
     )
     if child_run.status == "awaiting_human":
         detail = (
@@ -594,6 +608,9 @@ async def _execute_workflow_node(
     return child_run.final_output or ""
 
 
+_UNATTENDED_TRIGGERS = frozenset({"schedule", "remediation"})
+
+
 async def run_workflow(
     db: AsyncSession,
     workflow: Workflow,
@@ -604,6 +621,7 @@ async def run_workflow(
     triggered_by_id: str | None,
     ancestry: frozenset[str] = frozenset(),
     trace_ctx: TraceContext | None = None,
+    unattended: bool | None = None,
 ) -> WorkflowRun:
     """Run `workflow` against `rivulet`, starting with `input_content` as
     the entry node's input. `triggered_by`/`triggered_by_id` record who
@@ -624,7 +642,17 @@ async def run_workflow(
     workflow_run span nested under `trace_ctx.parent_span_id`, and every
     node this run executes nests under *that* span (see _RunContext's
     docstring).
+
+    `unattended` (#100, WorkflowRun.unattended's docstring): every
+    top-level call site (scheduler.py, dispatch/service.py, api/
+    rivulets.py, evals/runner.py, this module's own remediation trigger)
+    leaves this at its default of None, which derives it from
+    `triggered_by` (_UNATTENDED_TRIGGERS) -- only `_execute_workflow_node`
+    passes it explicitly, inheriting the parent run's value rather than
+    letting a nested run's literal 'workflow' trigger derive to False.
     """
+    if unattended is None:
+        unattended = triggered_by in _UNATTENDED_TRIGGERS
     nodes, connections = await _load_nodes_and_connections(db, workflow.id)
 
     run = WorkflowRun(
@@ -632,6 +660,7 @@ async def run_workflow(
         rivulet_id=rivulet.id,
         triggered_by=triggered_by,
         triggered_by_id=triggered_by_id,
+        unattended=unattended,
         input_content=input_content,
         # #84: freezes the graph this run executes against -- a later
         # resume_workflow reads it back rather than re-querying the live
@@ -677,6 +706,7 @@ async def run_workflow(
         ancestry=ancestry | {workflow.id},
         trace_ctx=run_trace_ctx,
         run_span_id=run_span_id,
+        unattended=unattended,
     )
     entry_outcome = await _advance(
         db, run.id, workflow, rivulet.id, nodes, connections, entry_node_id, input_content, ctx
@@ -975,7 +1005,16 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     run.status = "running"
     await db.commit()
 
-    ctx = _RunContext(visit_counts={}, total_steps=[0], ancestry=frozenset({workflow.id}))
+    ctx = _RunContext(
+        visit_counts={},
+        total_steps=[0],
+        ancestry=frozenset({workflow.id}),
+        # #100: restores what run_workflow derived/inherited at this run's
+        # original start -- a fresh _RunContext here has no other way to
+        # know it, since a pause/resume boundary doesn't carry the old one
+        # forward (this function's own docstring).
+        unattended=run.unattended,
+    )
     outcome = await _follow_edges(
         db, run.id, workflow, rivulet.id, nodes, connections, paused_node.id, human_reply, ctx
     )

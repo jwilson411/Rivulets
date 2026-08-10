@@ -12,6 +12,11 @@ export interface Tool {
 	description: string;
 	tool_type: 'builtin' | 'mcp' | 'custom';
 	source_path: string | null;
+	// #100: real blast radius (code exec, outbound HTTP, filesystem
+	// writes, DB access) -- gates unattended use via an agent's
+	// approved_for_unattended_tools flag. Read-only; v1 only marks the
+	// fixed builtin set, not user-created custom/mcp tools.
+	sensitive: boolean;
 	available: boolean;
 }
 
