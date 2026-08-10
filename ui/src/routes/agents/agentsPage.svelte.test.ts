@@ -8,6 +8,7 @@ import { render } from 'vitest-browser-svelte';
 import AgentsPage from './+page.svelte';
 import { agents, type Agent } from '$lib/api/agents';
 import { providers } from '$lib/api/providers';
+import { teams, type TeamDetail } from '$lib/api/teams';
 
 vi.mock('$lib/api/agents', () => ({
 	agents: {
@@ -26,6 +27,10 @@ vi.mock('$lib/api/providers', () => ({
 	providers: { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() }
 }));
 
+vi.mock('$lib/api/teams', () => ({
+	teams: { list: vi.fn(), get: vi.fn() }
+}));
+
 const researcher: Agent = {
 	id: 'agent-1',
 	name: 'Researcher',
@@ -36,6 +41,16 @@ const researcher: Agent = {
 	agentos_agent_id: 'agentos-1'
 };
 
+const writer: Agent = {
+	id: 'agent-2',
+	name: 'Writer',
+	description: 'Drafts copy',
+	instructions: 'Be concise',
+	model: 'anthropic:claude-haiku-4-5-20251001',
+	fallback_models: [],
+	agentos_agent_id: 'agentos-2'
+};
+
 const anthropicProvider = {
 	id: 'prov-1',
 	provider: 'anthropic' as const,
@@ -44,12 +59,23 @@ const anthropicProvider = {
 	is_default: true
 };
 
+const editorial: TeamDetail = {
+	id: 'team-1',
+	name: 'Editorial',
+	description: null,
+	agent_ids: ['agent-2']
+};
+
 afterEach(() => {
 	vi.clearAllMocks();
 });
 
 beforeEach(() => {
 	vi.mocked(agents.getPeerPreference).mockResolvedValue({ capability_tag: null });
+	// Most tests don't care about team membership -- default to no teams so
+	// the "on a team" filter has nothing to match unless a test opts in.
+	vi.mocked(teams.list).mockResolvedValue([]);
+	vi.mocked(teams.get).mockResolvedValue(editorial);
 });
 
 describe('agents/+page.svelte', () => {
@@ -343,5 +369,43 @@ describe('agents/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Delete' }).click();
 
 		await expect.element(page.getByText('Failed to delete agent')).toBeInTheDocument();
+	});
+
+	it('filters the agent list by name via the search box', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher, writer]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		await expect.element(page.getByText('Writer')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search agents…').fill('writ');
+
+		await expect.element(page.getByText('Writer')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher')).not.toBeInTheDocument();
+	});
+
+	it('filters the agent list by team membership', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher, writer]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(teams.list).mockResolvedValue([
+			{ id: 'team-1', name: 'Editorial', description: null }
+		]);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		await expect.element(page.getByText('Writer')).toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Team' }).selectOptions('yes');
+
+		await expect.element(page.getByText('Writer')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher')).not.toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Team' }).selectOptions('no');
+
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		await expect.element(page.getByText('Writer')).not.toBeInTheDocument();
 	});
 });
