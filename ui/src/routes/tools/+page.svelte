@@ -1,6 +1,20 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
 	import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
+	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+
+	const toolFilters: ListFilter<Tool>[] = [
+		{
+			id: 'type',
+			label: 'Type',
+			options: [
+				{ value: 'builtin', label: 'Built-in' },
+				{ value: 'mcp', label: 'MCP' },
+				{ value: 'custom', label: 'Custom' }
+			],
+			predicate: (tool, value) => tool.tool_type === value
+		}
+	];
 
 	let toolList = $state<Tool[]>([]);
 	let versionsByTool = $state<Record<string, ToolVersion[]>>({});
@@ -194,11 +208,17 @@
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else if toolList.length === 0}
-		<p class="text-sm text-neutral-500 italic">No tools yet — add one above.</p>
 	{:else}
-		<ul class="flex flex-col gap-3">
-			{#each toolList as tool (tool.id)}
+		<FilterableList
+			items={toolList}
+			getKey={(tool) => tool.id}
+			searchPlaceholder="Search tools…"
+			searchPredicate={(tool, q) => tool.name.toLowerCase().includes(q.toLowerCase())}
+			filters={toolFilters}
+			emptyMessage="No tools yet — add one above."
+			noMatchMessage="No tools match your search or filter."
+		>
+			{#snippet item(tool)}
 				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
 					<div class="flex items-start justify-between">
 						<div>
@@ -298,7 +318,7 @@
 						</div>
 					{/if}
 				</li>
-			{/each}
-		</ul>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>
