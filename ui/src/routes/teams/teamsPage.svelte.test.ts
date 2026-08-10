@@ -181,4 +181,27 @@ describe('teams/+page.svelte', () => {
 
 		await expect.element(page.getByText('Failed to load teams')).toBeInTheDocument();
 	});
+
+	it('filters the team list by name via the search box', async () => {
+		const billingTeam: TeamDetail = {
+			id: 'team-2',
+			name: 'Billing',
+			description: null,
+			agent_ids: []
+		};
+		vi.mocked(teams.list).mockResolvedValue([supportTeam, billingTeam]);
+		vi.mocked(teams.get).mockImplementation((id) =>
+			Promise.resolve(id === 'team-1' ? supportTeam : billingTeam)
+		);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+
+		render(TeamsPage);
+		await expect.element(page.getByText('Support')).toBeInTheDocument();
+		await expect.element(page.getByText('Billing')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search teams…').fill('bill');
+
+		await expect.element(page.getByText('Billing')).toBeInTheDocument();
+		await expect.element(page.getByText('Support')).not.toBeInTheDocument();
+	});
 });
