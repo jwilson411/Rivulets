@@ -213,6 +213,12 @@
 			stroke-linecap="round"
 		/>
 	</svg>
+{:else if name === 'info'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" />
+		<path d="M10 9v4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+		<circle cx="10" cy="6.4" r=".9" fill="currentColor" />
+	</svg>
 {:else if name === 'book'}
 	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
 		<path

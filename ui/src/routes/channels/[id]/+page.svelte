@@ -127,8 +127,14 @@
 		<h1 class="text-[26px] font-semibold text-ink dark:text-ink-dark">
 			<span class="text-neutral-400 dark:text-neutral-600">#</span>{channel?.name ?? '…'}
 		</h1>
-		<span class="text-[12.5px] text-neutral-600 dark:text-neutral-400">
+		<span class="flex items-center gap-1 text-[12.5px] text-neutral-600 dark:text-neutral-400">
 			{rivuletList.length} rivulet{rivuletList.length === 1 ? '' : 's'}
+			<span
+				class="cursor-help text-neutral-400 dark:text-neutral-600"
+				title="A rivulet is a single conversation thread in this channel — like a message thread, but between you and your AI agents."
+			>
+				<Icon name="info" class="h-3.5 w-3.5" />
+			</span>
 		</span>
 		{#if channel?.description}
 			<span class="text-[12.5px] text-neutral-500">· {channel.description}</span>
