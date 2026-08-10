@@ -21,6 +21,25 @@
 
 	let peerPreferenceDrafts = $state<Record<string, string>>({});
 
+	// Draft rule-type selection per agent, driving the exclusive radio group
+	// below. Kept separate from `rulesByAgent` so picking a different type
+	// doesn't apply anything until the user confirms via applyRuleType.
+	let ruleTypeDrafts = $state<Record<string, RuleType>>({});
+
+	const RULE_TYPE_LABELS: Partial<Record<RuleType, string>> = {
+		always: 'Always respond',
+		mention_only: '@mention only',
+		keyword: 'Keyword match'
+	};
+
+	function activeRuleType(agentId: string): RuleType {
+		return rulesByAgent[agentId]?.[0]?.rule_type ?? 'mention_only';
+	}
+
+	function ruleTypeLabel(type: RuleType): string {
+		return RULE_TYPE_LABELS[type] ?? type;
+	}
+
 	async function refresh() {
 		loadError = null;
 		try {
@@ -29,6 +48,18 @@
 				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
 			);
 			rulesByAgent = Object.fromEntries(entries);
+			ruleTypeDrafts = Object.fromEntries(
+				entries.map(([id, rules]) => [id, rules[0]?.rule_type ?? 'mention_only'])
+			);
+			for (const [id, rules] of entries) {
+				if (rules[0]?.rule_type === 'keyword' && keywordDrafts[id] === undefined) {
+					try {
+						keywordDrafts[id] = (JSON.parse(rules[0].pattern) as string[]).join(', ');
+					} catch {
+						keywordDrafts[id] = rules[0].pattern;
+					}
+				}
+			}
 			const preferenceEntries = await Promise.all(
 				agentList.map(
 					async (a) => [a.id, (await agents.getPeerPreference(a.id)).capability_tag ?? ''] as const
@@ -98,7 +129,15 @@
 			.map((k) => k.trim())
 			.filter(Boolean);
 		await setRule(agentId, 'keyword', JSON.stringify(keywords));
-		keywordDrafts[agentId] = '';
+	}
+
+	async function applyRuleType(agentId: string) {
+		const type = ruleTypeDrafts[agentId] ?? activeRuleType(agentId);
+		if (type === 'keyword') {
+			await setKeywordRule(agentId);
+		} else {
+			await setRule(agentId, type, '');
+		}
 	}
 
 	async function savePeerPreference(agentId: string) {
@@ -220,47 +259,101 @@
 						<p class="text-xs text-neutral-600 dark:text-neutral-400">
 							Routing: <span class="font-mono">{ruleSummary(rulesByAgent[agent.id])}</span>
 						</p>
-						<div class="mt-2 flex flex-wrap items-center gap-2">
-							<button
-								onclick={() => setRule(agent.id, 'always', '')}
-								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+						<div class="mt-2">
+							<p
+								id="rule-type-label-{agent.id}"
+								class="text-xs font-medium text-neutral-600 dark:text-neutral-400"
 							>
-								Always respond
-							</button>
-							<button
-								onclick={() => setRule(agent.id, 'mention_only', '')}
-								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+								Routing rule (only one can be active at a time)
+							</p>
+							<div
+								role="radiogroup"
+								aria-labelledby="rule-type-label-{agent.id}"
+								class="mt-1 flex flex-wrap items-center gap-3"
 							>
-								@mention only
-							</button>
-							<input
-								type="text"
-								bind:value={keywordDrafts[agent.id]}
-								placeholder="keyword, keyword, ..."
-								class="w-40 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							/>
+								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
+									<input
+										type="radio"
+										name="rule-type-{agent.id}"
+										value="always"
+										bind:group={ruleTypeDrafts[agent.id]}
+									/>
+									Always respond
+								</label>
+								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
+									<input
+										type="radio"
+										name="rule-type-{agent.id}"
+										value="mention_only"
+										bind:group={ruleTypeDrafts[agent.id]}
+									/>
+									@mention only
+								</label>
+								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
+									<input
+										type="radio"
+										name="rule-type-{agent.id}"
+										value="keyword"
+										bind:group={ruleTypeDrafts[agent.id]}
+									/>
+									Keyword match
+								</label>
+								{#if ruleTypeDrafts[agent.id] === 'keyword'}
+									<input
+										type="text"
+										bind:value={keywordDrafts[agent.id]}
+										placeholder="keyword, keyword, ..."
+										class="w-40 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+									/>
+								{/if}
+							</div>
+							{#if ruleTypeDrafts[agent.id] && ruleTypeDrafts[agent.id] !== activeRuleType(agent.id)}
+								<p
+									class="mt-1 text-xs text-agent-magenta-700 dark:text-agent-magenta-400"
+									role="alert"
+								>
+									Switching to "{ruleTypeLabel(ruleTypeDrafts[agent.id])}" will replace the current
+									rule ("{ruleTypeLabel(activeRuleType(agent.id))}"). Nothing changes until you
+									apply.
+								</p>
+							{/if}
 							<button
-								onclick={() => setKeywordRule(agent.id)}
-								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+								onclick={() => applyRuleType(agent.id)}
+								disabled={ruleTypeDrafts[agent.id] === 'keyword' &&
+									!keywordDrafts[agent.id]?.trim()}
+								class="mt-2 rounded-md border border-ink/15 px-2 py-1 text-xs text-ink disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-ink-dark"
 							>
-								Set keywords
+								Apply routing rule
 							</button>
 						</div>
-						<div class="mt-2 flex flex-wrap items-center gap-2">
-							<span class="text-xs text-neutral-500">Preferred peer capability:</span>
-							<input
-								type="text"
-								bind:value={peerPreferenceDrafts[agent.id]}
-								placeholder="e.g. gpu (blank = no preference)"
-								class="w-56 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							/>
-							<button
-								onclick={() => savePeerPreference(agent.id)}
-								class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+						<details class="mt-3">
+							<summary
+								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
 							>
-								Save
-							</button>
-						</div>
+								Advanced: peer capability preference
+							</summary>
+							<div class="mt-2 flex flex-col gap-2">
+								<p class="text-xs text-neutral-500">
+									Only matters when this agent syncs across multiple machines (P2P) — it prefers to
+									run on a peer advertising this capability tag.
+								</p>
+								<div class="flex flex-wrap items-center gap-2">
+									<span class="text-xs text-neutral-500">Preferred peer capability:</span>
+									<input
+										type="text"
+										bind:value={peerPreferenceDrafts[agent.id]}
+										placeholder="e.g. gpu (blank = no preference)"
+										class="w-56 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+									/>
+									<button
+										onclick={() => savePeerPreference(agent.id)}
+										class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+									>
+										Save
+									</button>
+								</div>
+							</div>
+						</details>
 					</div>
 				</li>
 			{/each}

@@ -75,18 +75,28 @@
 		placeholder="Name"
 		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 	/>
-	<input
-		type="text"
-		bind:value={description}
-		placeholder="Description (used by the dispatcher for routing)"
-		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-	/>
-	<textarea
-		bind:value={instructions}
-		placeholder="Instructions (system prompt)"
-		rows="3"
-		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-	></textarea>
+	<div class="flex flex-col gap-1">
+		<input
+			type="text"
+			bind:value={description}
+			placeholder="Description"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+		/>
+		<p class="text-xs text-neutral-500">
+			Shown to humans and other agents — a short summary of what this agent does.
+		</p>
+	</div>
+	<div class="flex flex-col gap-1">
+		<textarea
+			bind:value={instructions}
+			placeholder="Instructions"
+			rows="6"
+			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+		></textarea>
+		<p class="text-xs text-neutral-500">
+			Tells the agent how to behave — its private instructions, not shown to other agents.
+		</p>
+	</div>
 	<ModelPicker {providers} bind:value={model} />
 
 	<div class="flex flex-col gap-2">
