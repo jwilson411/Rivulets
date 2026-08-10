@@ -311,4 +311,32 @@ describe('tools/+page.svelte', () => {
 
 		await expect.element(page.getByText('Failed to delete tool')).toBeInTheDocument();
 	});
+
+	it('filters the tool list by name via the search box', async () => {
+		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+
+		render(ToolsPage);
+		await expect.element(page.getByText('web_search')).toBeInTheDocument();
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search tools…').fill('my_');
+
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await expect.element(page.getByText('web_search')).not.toBeInTheDocument();
+	});
+
+	it('filters the tool list by type', async () => {
+		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
+		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+
+		render(ToolsPage);
+		await expect.element(page.getByText('web_search')).toBeInTheDocument();
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Type' }).selectOptions('custom');
+
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await expect.element(page.getByText('web_search')).not.toBeInTheDocument();
+	});
 });
