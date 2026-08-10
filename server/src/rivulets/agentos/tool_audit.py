@@ -76,11 +76,32 @@ async def ensure_unattended_tools_allowed(db: AsyncSession, agent: Agent) -> Non
     sensitive_names = sorted({row for row in result.scalars().all()})
     if not sensitive_names:
         return
+
+    # #102: lazy import -- rivulets.dispatch.approvals pulls in
+    # dispatch.budgets, and dispatch.service imports this module (via
+    # agentos.accounting) at its own module level, so a top-level import
+    # here would risk a circular import depending on which package
+    # happens to be imported first (same reasoning dispatch/service.py's
+    # own lazy `from rivulets.workflows import find_workflow_by_name`
+    # already documents).
+    from rivulets.dispatch.approvals import create_or_get_pending_approval
+
+    await create_or_get_pending_approval(
+        db,
+        "tool_guardrail",
+        agent_id=agent.id,
+        title=f"{agent.name} needs approval for unattended sensitive tools",
+        detail=(
+            f"Sensitive tool(s) assigned: {', '.join(sensitive_names)}. An unattended run "
+            "(schedule, remediation, or nested workflow) tried to invoke this agent and was "
+            "refused until a human approves unattended use."
+        ),
+    )
     raise UnattendedSensitiveToolError(
         f"Agent {agent.name!r} has sensitive tool(s) assigned ({', '.join(sensitive_names)}) "
         "and hasn't been approved to run them unattended. Approve unattended tool use in this "
-        "agent's settings before using it in a schedule, remediation workflow, or nested "
-        "workflow reachable from one."
+        "agent's settings, or in the Approvals inbox, before using it in a schedule, "
+        "remediation workflow, or nested workflow reachable from one."
     )
 
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from rivulets.api import (
     agents,
+    approvals,
     auth,
     backups,
     budgets,
@@ -60,5 +61,6 @@ api_router.include_router(evals.router)
 api_router.include_router(budgets.router)
 api_router.include_router(runs.router)
 api_router.include_router(knowledge_bases.router)
+api_router.include_router(approvals.router)
 
 __all__ = ["api_router"]

@@ -70,6 +70,7 @@ from rivulets.db.models import (
     WorkflowSchedule,
 )
 from rivulets.db.session import session_scope
+from rivulets.dispatch.approvals import create_or_get_pending_approval
 from rivulets.dispatch.budgets import BudgetAlert, budget_alert_text, check_budget_caps
 from rivulets.dispatch.complexity_classifier import classify_tier
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
@@ -671,6 +672,17 @@ async def _invoke_agent(
         # like a guard-paused call, which never reaches _invoke_agent at all
         # -- never opens a #96 trace span below: there's no run to trace.
         new_messages.append(_post_budget_alert(db, rivulet.id, budget_blocking, blocked=True))
+        # #102: surface the block as an actionable inbox item, not just a
+        # message the human has to remember to act on -- dedup'd against
+        # this cap, so a rivulet that keeps re-triggering the same blocked
+        # agent doesn't grow a new row every turn.
+        await create_or_get_pending_approval(
+            db,
+            "budget",
+            budget_cap_id=budget_blocking.cap.id,
+            title=f"Budget cap exceeded for {budget_blocking.cap.scope_type}",
+            detail=budget_alert_text(budget_blocking, blocked=True),
+        )
         await db.flush()
         return new_messages
 
@@ -1169,6 +1181,13 @@ async def _handle_schedule_workflow_trigger(
     await db.flush()
 
     when = f"once at {next_fire_at}" if run_once else f"on schedule {call.cron_expression!r}"
+    await create_or_get_pending_approval(
+        db,
+        "schedule",
+        schedule_id=schedule.id,
+        title=f"@{agent.name} wants to schedule /{workflow.name}",
+        detail=f"Runs {when}. Input: {call.input_content!r}",
+    )
     message = _system_message(
         db,
         rivulet,

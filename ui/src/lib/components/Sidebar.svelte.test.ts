@@ -9,6 +9,7 @@ import { page as browserPage } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import Sidebar from './Sidebar.svelte';
+import { approvals } from '$lib/api/approvals';
 import { channels } from '$lib/api/channels';
 import { agents } from '$lib/api/agents';
 import { teams } from '$lib/api/teams';
@@ -62,6 +63,7 @@ vi.mock('$lib/api/workflows', () => ({ workflows: { list: vi.fn() } }));
 vi.mock('$lib/api/evals', () => ({ evals: { listSuites: vi.fn() } }));
 vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
 vi.mock('$lib/api/update', () => ({ update: { status: vi.fn() } }));
+vi.mock('$lib/api/approvals', () => ({ approvals: { list: vi.fn() } }));
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -248,6 +250,7 @@ describe('Sidebar.svelte', () => {
 			peers: [],
 			pending_changes: 0
 		});
+		vi.mocked(approvals.list).mockResolvedValue([]);
 	}
 
 	it('shows an update badge next to Settings when one is available', async () => {
@@ -279,6 +282,45 @@ describe('Sidebar.svelte', () => {
 		await expect.element(browserPage.getByRole('link', { name: /Settings/ })).toBeInTheDocument();
 
 		await expect.element(browserPage.getByTitle('Update available')).not.toBeInTheDocument();
+	});
+
+	it('shows a badge with the pending approval count', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		mockWorkspaceCounts();
+		vi.mocked(approvals.list).mockResolvedValue([
+			{
+				id: 'a1',
+				source_type: 'budget',
+				schedule_id: null,
+				budget_cap_id: 'cap-1',
+				agent_id: null,
+				title: 'Budget exceeded',
+				detail: 'detail',
+				status: 'pending',
+				resolved_by: null,
+				resolved_at: null,
+				created_at: '2026-01-01T00:00:00Z'
+			},
+			{
+				id: 'a2',
+				source_type: 'budget',
+				schedule_id: null,
+				budget_cap_id: 'cap-2',
+				agent_id: null,
+				title: 'Already resolved',
+				detail: 'detail',
+				status: 'approved',
+				resolved_by: 'human-1',
+				resolved_at: '2026-01-02T00:00:00Z',
+				created_at: '2026-01-01T00:00:00Z'
+			}
+		]);
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Approvals/ })).toBeInTheDocument();
+		// Only the pending row counts toward the badge, not the resolved one.
+		await expect.element(browserPage.getByText('1')).toBeInTheDocument();
 	});
 
 	it('shows the Invites link for an owner session', async () => {

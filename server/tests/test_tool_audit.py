@@ -151,6 +151,37 @@ async def test_gate_allows_approved_agent_with_sensitive_tool(db_session: AsyncS
     await ensure_unattended_tools_allowed(db_session, agent)  # must not raise
 
 
+async def test_gate_creates_pending_approval_and_dedups_across_repeated_blocks(
+    db_session: AsyncSession,
+) -> None:
+    """#102: a blocked unattended run surfaces in the unified approval
+    inbox, not just as a raised exception -- and repeated blocks (e.g. a
+    schedule firing every hour against the same unapproved agent) reuse
+    the same open row rather than growing a new one each time."""
+    from sqlalchemy import select
+
+    from rivulets.db.models import PendingApproval
+
+    agent = await _make_agent(db_session, name="Coder")
+    await _assign_sensitive_tool(db_session, agent)
+
+    for _ in range(3):
+        with pytest.raises(UnattendedSensitiveToolError):
+            await ensure_unattended_tools_allowed(db_session, agent)
+
+    rows = list(
+        (
+            await db_session.scalars(
+                select(PendingApproval).where(PendingApproval.agent_id == agent.id)
+            )
+        ).all()
+    )
+    assert len(rows) == 1
+    assert rows[0].source_type == "tool_guardrail"
+    assert rows[0].status == "pending"
+    assert "execute_python" in rows[0].detail
+
+
 # --- log_tool_calls ----------------------------------------------------------
 
 
