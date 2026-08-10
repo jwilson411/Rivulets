@@ -83,6 +83,7 @@ from rivulets.db.models import (
     EvalSuite,
     File,
     Human,
+    KnowledgeBase,
     MCPServer,
     Message,
     Rivulet,
@@ -264,6 +265,15 @@ BUDGET_CAP_SPEC = EntitySpec(
     "budget_cap",
     BudgetCap,
     ("scope_type", "agent_id", "team_id", "period", "limit_usd", "action", "enabled"),
+)
+# agent_id/team_id have the same FK-ordering hazard as budget_cap's above
+# -- same IntegrityError -> SyncPendingInbound retry treatment.
+# KnowledgeBaseDocument/KnowledgeBaseChunk are deliberately not synced --
+# see KnowledgeBase's docstring (db/models.py) for why.
+KNOWLEDGE_BASE_SPEC = EntitySpec(
+    "knowledge_base",
+    KnowledgeBase,
+    ("name", "description", "scope_type", "agent_id", "team_id"),
 )
 
 
@@ -587,6 +597,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "eval_suite": EVAL_SUITE_SPEC,
     "eval_case": EVAL_CASE_SPEC,
     "budget_cap": BUDGET_CAP_SPEC,
+    "knowledge_base": KNOWLEDGE_BASE_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields

@@ -203,4 +203,19 @@
 		/>
 		<path d="M6.3 11.5h7.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
 	</svg>
+{:else if name === 'book'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M3 4.5c1.6-.9 3.6-1 5.5-.3.7.3 1.3.7 1.5 1v10.6c-.2-.3-.8-.7-1.5-1-1.9-.7-3.9-.6-5.5.3V4.5Z"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linejoin="round"
+		/>
+		<path
+			d="M17 4.5c-1.6-.9-3.6-1-5.5-.3-.7.3-1.3.7-1.5 1v10.6c.2-.3.8-.7 1.5-1 1.9-.7 3.9-.6 5.5.3V4.5Z"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linejoin="round"
+		/>
+	</svg>
 {/if}

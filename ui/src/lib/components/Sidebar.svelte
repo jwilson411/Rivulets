@@ -8,6 +8,7 @@
 	import { providers } from '$lib/api/providers';
 	import { mcpServers } from '$lib/api/mcpServers';
 	import { tools } from '$lib/api/tools';
+	import { knowledgeBases } from '$lib/api/knowledgeBases';
 	import { workflows } from '$lib/api/workflows';
 	import { evals } from '$lib/api/evals';
 	import { sync } from '$lib/api/sync';
@@ -31,6 +32,7 @@
 	let providerCount = $state<number | null>(null);
 	let mcpServerCount = $state<number | null>(null);
 	let toolCount = $state<number | null>(null);
+	let knowledgeBaseCount = $state<number | null>(null);
 	let workflowCount = $state<number | null>(null);
 	let evalSuiteCount = $state<number | null>(null);
 	let syncPeerCount = $state<number | null>(null);
@@ -54,6 +56,7 @@
 				providerList,
 				mcpServerList,
 				toolList,
+				knowledgeBaseList,
 				workflowList,
 				evalSuiteList,
 				syncStatus,
@@ -64,6 +67,7 @@
 				providers.list(),
 				mcpServers.list(),
 				tools.list(),
+				knowledgeBases.list(),
 				workflows.list(),
 				evals.listSuites(),
 				sync.status(),
@@ -74,6 +78,7 @@
 			providerCount = providerList.length;
 			mcpServerCount = mcpServerList.length;
 			toolCount = toolList.length;
+			knowledgeBaseCount = knowledgeBaseList.length;
 			workflowCount = workflowList.length;
 			evalSuiteCount = evalSuiteList.length;
 			syncRunning = syncStatus.running;
@@ -121,6 +126,7 @@
 		'/providers',
 		'/mcp-servers',
 		'/tools',
+		'/knowledge-bases',
 		'/workflows',
 		'/evals',
 		'/usage',
@@ -282,6 +288,21 @@
 					Tools
 					{#if toolCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
 							>{toolCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/knowledge-bases')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/knowledge-bases')
+					)}"
+				>
+					<Icon
+						name="book"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Knowledge Bases
+					{#if knowledgeBaseCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{knowledgeBaseCount}</span
 						>{/if}
 				</a>
 				<a

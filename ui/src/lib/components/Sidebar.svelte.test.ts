@@ -15,6 +15,7 @@ import { teams } from '$lib/api/teams';
 import { providers } from '$lib/api/providers';
 import { mcpServers } from '$lib/api/mcpServers';
 import { tools } from '$lib/api/tools';
+import { knowledgeBases } from '$lib/api/knowledgeBases';
 import { workflows } from '$lib/api/workflows';
 import { evals } from '$lib/api/evals';
 import { sync } from '$lib/api/sync';
@@ -56,6 +57,7 @@ vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
 vi.mock('$lib/api/mcpServers', () => ({ mcpServers: { list: vi.fn() } }));
 vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn() } }));
+vi.mock('$lib/api/knowledgeBases', () => ({ knowledgeBases: { list: vi.fn() } }));
 vi.mock('$lib/api/workflows', () => ({ workflows: { list: vi.fn() } }));
 vi.mock('$lib/api/evals', () => ({ evals: { listSuites: vi.fn() } }));
 vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
@@ -237,6 +239,7 @@ describe('Sidebar.svelte', () => {
 		vi.mocked(providers.list).mockResolvedValue([]);
 		vi.mocked(mcpServers.list).mockResolvedValue([]);
 		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(knowledgeBases.list).mockResolvedValue([]);
 		vi.mocked(workflows.list).mockResolvedValue([]);
 		vi.mocked(evals.listSuites).mockResolvedValue([]);
 		vi.mocked(sync.status).mockResolvedValue({
