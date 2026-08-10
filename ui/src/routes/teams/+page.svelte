@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { teams, type TeamDetail } from '$lib/api/teams';
 	import { agents, type Agent } from '$lib/api/agents';
+	import FilterableList from '$lib/components/FilterableList.svelte';
 
 	let teamList = $state<TeamDetail[]>([]);
 	let agentList = $state<Agent[]>([]);
@@ -102,8 +103,15 @@
 		{#if actionError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
 		{/if}
-		<ul class="flex flex-col gap-3">
-			{#each teamList as team (team.id)}
+		<FilterableList
+			items={teamList}
+			getKey={(team) => team.id}
+			searchPlaceholder="Search teams…"
+			searchPredicate={(team, q) => team.name.toLowerCase().includes(q.toLowerCase())}
+			emptyMessage="No teams yet — create one above."
+			noMatchMessage="No teams match your search."
+		>
+			{#snippet item(team)}
 				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
 					<div class="flex items-center justify-between">
 						<p class="font-medium text-ink dark:text-ink-dark">{team.name}</p>
@@ -134,7 +142,7 @@
 						{/if}
 					</div>
 				</li>
-			{/each}
-		</ul>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>
