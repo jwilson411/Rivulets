@@ -58,6 +58,7 @@ from rivulets.tools.builtin import (
     read_file,
     run_workflow,
     schedule_workflow,
+    search_knowledge_base,
     web_search,
     write_file,
 )
@@ -75,6 +76,7 @@ _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
     read_file,
     run_workflow,
     schedule_workflow,
+    search_knowledge_base,
     web_search,
     write_file,
 )
@@ -83,7 +85,8 @@ _BUILTIN_REGISTRY: dict[str, Function] = {fn.name: fn for fn in _BUILTIN_FUNCTIO
 # #100: builtin tools with real blast radius (arbitrary code exec,
 # arbitrary outbound HTTP, local filesystem writes, DB access) — read_file/
 # list_files are deliberately excluded (read-only, lower risk) as are
-# run_workflow/schedule_workflow/*_schedule/web_search/handoff. Used both
+# run_workflow/schedule_workflow/*_schedule/web_search/handoff/
+# search_knowledge_base (#98 -- also read-only). Used both
 # to seed Tool.sensitive below and by tool_audit.py's unattended gate,
 # which checks an agent's *assigned* tools against this set rather than a
 # live Tool.sensitive lookup for the two purpose-built builtin functions

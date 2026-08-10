@@ -20,6 +20,7 @@ from rivulets.api import (
     health,
     humans,
     invites,
+    knowledge_bases,
     mcp_servers,
     providers,
     rivulets,
@@ -58,5 +59,6 @@ api_router.include_router(workflows.router)
 api_router.include_router(evals.router)
 api_router.include_router(budgets.router)
 api_router.include_router(runs.router)
+api_router.include_router(knowledge_bases.router)
 
 __all__ = ["api_router"]

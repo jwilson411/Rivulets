@@ -1250,3 +1250,101 @@ class SyncPendingInbound(Base):
     origin_node_id: Mapped[str]
     payload_json: Mapped[str]  # JSON: dict[str, Any]
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class KnowledgeBase(Base):
+    """A named collection of ingested documents an agent or team can
+    search mid-conversation via the search_knowledge_base builtin tool
+    (#98). Synced like Team/BudgetCap -- the *definition* (name,
+    description, scope) is agreed workspace policy, visible to every
+    peer. Ingested documents and their chunks/embeddings
+    (KnowledgeBaseDocument/KnowledgeBaseChunk below) are NOT synced --
+    same FR-13.3 "definition syncs, derived local state doesn't"
+    precedent AgentRun/WorkflowRun/DispatchDecision already established,
+    and the same reason File bytes never travel in the gossipsub payload
+    either: embeddings are large, regenerable, and tied to whichever peer
+    actually did the ingestion. A peer that receives a KnowledgeBase's
+    definition but hasn't ingested any documents locally yet just has an
+    empty knowledge base until a human there uploads/ingests documents on
+    that node -- an explicit v1 limitation, not an oversight (see #98's
+    own "sync" open question).
+
+    `ck_knowledge_base_scope` mirrors BudgetCap's ck_budget_cap_scope --
+    exactly one of agent_id/team_id is set. Unlike BudgetCap there's no
+    'workspace' scope option in v1: a knowledge base always belongs to a
+    specific agent or team."""
+
+    __tablename__ = "knowledge_base"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope_type = 'agent' AND agent_id IS NOT NULL AND team_id IS NULL) OR "
+            "(scope_type = 'team' AND team_id IS NOT NULL AND agent_id IS NULL)",
+            name="ck_knowledge_base_scope",
+        ),
+        Index("idx_knowledge_base_agent", "agent_id"),
+        Index("idx_knowledge_base_team", "team_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str]
+    description: Mapped[str | None] = mapped_column(default=None)
+    scope_type: Mapped[str]  # 'agent' | 'team'
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), default=None
+    )
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("team.id", ondelete="CASCADE"), default=None
+    )
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+
+class KnowledgeBaseDocument(Base):
+    """One ingested source file (#98) within a KnowledgeBase -- v1 scope
+    is single-file ingestion per document, reusing the existing File
+    entity/upload endpoint (api/files.py) rather than a second
+    content-storage path. Not synced (see KnowledgeBase's docstring):
+    document rows are per-peer, derived-from-ingestion state, same
+    treatment as AgentRun."""
+
+    __tablename__ = "knowledge_base_document"
+    __table_args__ = (Index("idx_kb_document_kb", "knowledge_base_id"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_base.id", ondelete="CASCADE")
+    )
+    file_id: Mapped[str] = mapped_column(ForeignKey("file.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(default="pending")  # 'pending'|'ingested'|'failed'
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    chunk_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class KnowledgeBaseChunk(Base):
+    """One embedded chunk of a KnowledgeBaseDocument's text content (#98).
+    v1 stores the embedding vector as JSON-encoded floats in a regular
+    column and does brute-force cosine similarity in Python
+    (tools/builtin/knowledge_base.py) rather than a dedicated
+    vector-search extension like sqlite-vec -- simple, correct, and fast
+    enough at the modest scale a v1, single-file-per-document knowledge
+    base actually reaches, avoiding a new C-extension dependency's
+    platform-specific binary distribution risk for a first pass. Worth
+    revisiting once real usage shows brute force doesn't scale. Not
+    synced, same reasoning as KnowledgeBaseDocument."""
+
+    __tablename__ = "knowledge_base_chunk"
+    __table_args__ = (Index("idx_kb_chunk_kb", "knowledge_base_id"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_base.id", ondelete="CASCADE")
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_base_document.id", ondelete="CASCADE")
+    )
+    chunk_index: Mapped[int]
+    content: Mapped[str]
+    embedding_json: Mapped[str]  # JSON: list[float]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
