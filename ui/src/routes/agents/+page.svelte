@@ -1,12 +1,33 @@
 <script lang="ts">
 	import { agents, type Agent, type RoutingRule, type RuleType } from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
+	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
+	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
 	let agentList = $state<Agent[]>([]);
 	let providerList = $state<Provider[]>([]);
+	let teamList = $state<TeamDetail[]>([]);
 	let rulesByAgent = $state<Record<string, RoutingRule[]>>({});
 	let loadError = $state<string | null>(null);
+
+	// Team detail (not just the summary teams.list() returns) is the only
+	// way to know which agents are on a team, needed for the "on a
+	// team" / "not on a team" filter below.
+	const teamAgentIds = $derived(new Set(teamList.flatMap((t) => t.agent_ids)));
+
+	const agentFilters = $derived<ListFilter<Agent>[]>([
+		{
+			id: 'team',
+			label: 'Team',
+			options: [
+				{ value: 'yes', label: 'On a team' },
+				{ value: 'no', label: 'Not on a team' }
+			],
+			predicate: (agent, value) =>
+				value === 'yes' ? teamAgentIds.has(agent.id) : !teamAgentIds.has(agent.id)
+		}
+	]);
 
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
@@ -43,7 +64,14 @@
 	async function refresh() {
 		loadError = null;
 		try {
-			[agentList, providerList] = await Promise.all([agents.list(), providersApi.list()]);
+			const [loadedAgents, loadedProviders, teamSummaries] = await Promise.all([
+				agents.list(),
+				providersApi.list(),
+				teamsApi.list()
+			]);
+			agentList = loadedAgents;
+			providerList = loadedProviders;
+			teamList = await Promise.all(teamSummaries.map((t) => teamsApi.get(t.id)));
 			const entries = await Promise.all(
 				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
 			);
@@ -199,8 +227,16 @@
 		{#if actionError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
 		{/if}
-		<ul class="flex flex-col gap-3">
-			{#each agentList as agent (agent.id)}
+		<FilterableList
+			items={agentList}
+			getKey={(agent) => agent.id}
+			searchPlaceholder="Search agents…"
+			searchPredicate={(agent, q) => agent.name.toLowerCase().includes(q.toLowerCase())}
+			filters={agentFilters}
+			emptyMessage="No agents yet — create one above."
+			noMatchMessage="No agents match your search or filter."
+		>
+			{#snippet item(agent)}
 				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
 					{#if editingAgentId === agent.id}
 						<AgentForm
@@ -356,7 +392,7 @@
 						</details>
 					</div>
 				</li>
-			{/each}
-		</ul>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>
