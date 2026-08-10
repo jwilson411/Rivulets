@@ -87,11 +87,15 @@ async def run_eval_suite(db: AsyncSession, suite: EvalSuite, *, human_id: str | 
     return run
 
 
-async def _run_case(db: AsyncSession, suite: EvalSuite, case: EvalCase, run_id: str) -> EvalCaseResult:
+async def _run_case(
+    db: AsyncSession, suite: EvalSuite, case: EvalCase, run_id: str
+) -> EvalCaseResult:
     started_at = utcnow_iso()
     try:
         if suite.agent_id is not None:
-            actual_output, tool_calls = await _run_agent_case(db, suite.agent_id, case.input_content)
+            actual_output, tool_calls = await _run_agent_case(
+                db, suite.agent_id, case.input_content
+            )
         else:
             assert suite.workflow_id is not None
             actual_output, tool_calls = await _run_workflow_case(
@@ -133,8 +137,13 @@ async def _run_agent_case(
     if run_output.status is RunStatus.error:
         raise RuntimeError(str(run_output.content))
     content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
+    # ToolCallDict(...) call syntax, not a {...} dict literal -- pyright
+    # checks each keyword arg against its own declared type independently
+    # this way, rather than trying to unify tool_name/tool_args into one
+    # dict value type and rejecting the result against the TypedDict.
     tool_calls: list[ToolCallDict] = [
-        {"tool_name": t.tool_name, "tool_args": t.tool_args} for t in (run_output.tools or [])
+        ToolCallDict(tool_name=t.tool_name or "", tool_args=t.tool_args)
+        for t in (run_output.tools or [])
     ]
     return content, tool_calls
 
@@ -177,7 +186,9 @@ async def _run_workflow_case(
     if wf_run.status == "failed":
         raise RuntimeError(wf_run.error_message or "Workflow run failed")
     if wf_run.status == "awaiting_human":
-        raise RuntimeError("Workflow paused on a human_input node -- not supported in eval runs (v1)")
+        raise RuntimeError(
+            "Workflow paused on a human_input node -- not supported in eval runs (v1)"
+        )
     # No tool-call data exists at the workflow-run level -- structural
     # judging is rejected for workflow-attached suites at the API layer.
     return wf_run.final_output or "", []
@@ -191,6 +202,8 @@ async def _judge(
     if case.judge_type == "substring":
         return judge_substring(case.expected_output or "", actual_output)
     if case.judge_type == "structural":
-        expected_args = json.loads(case.expected_tool_args_json) if case.expected_tool_args_json else None
+        expected_args = (
+            json.loads(case.expected_tool_args_json) if case.expected_tool_args_json else None
+        )
         return judge_structural(case.expected_tool_name or "", expected_args, tool_calls)
     return await judge_llm(db, case.input_content, case.rubric or "", actual_output)

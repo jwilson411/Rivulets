@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.db.models import ProviderConfig
 from rivulets.evals.judge import (
     JudgeVerdictSchema,
+    ToolCallDict,
     judge_exact,
     judge_llm,
     judge_structural,
@@ -47,30 +48,36 @@ def test_judge_structural_empty_tool_calls_is_error_not_failed() -> None:
 
 
 def test_judge_structural_passes_when_tool_called_and_args_ignored() -> None:
-    calls = [{"tool_name": "search", "tool_args": {"query": "cats", "limit": 5}}]
+    calls: list[ToolCallDict] = [
+        {"tool_name": "search", "tool_args": {"query": "cats", "limit": 5}}
+    ]
     verdict = judge_structural("search", None, calls)
     assert verdict.status == "passed"
 
 
 def test_judge_structural_passes_on_args_subset_match() -> None:
-    calls = [{"tool_name": "search", "tool_args": {"query": "cats", "limit": 5}}]
+    calls: list[ToolCallDict] = [
+        {"tool_name": "search", "tool_args": {"query": "cats", "limit": 5}}
+    ]
     verdict = judge_structural("search", {"query": "cats"}, calls)
     assert verdict.status == "passed"
 
 
 def test_judge_structural_fails_on_args_mismatch() -> None:
-    calls = [{"tool_name": "search", "tool_args": {"query": "dogs"}}]
+    calls: list[ToolCallDict] = [{"tool_name": "search", "tool_args": {"query": "dogs"}}]
     verdict = judge_structural("search", {"query": "cats"}, calls)
     assert verdict.status == "failed"
 
 
 def test_judge_structural_fails_when_tool_not_called() -> None:
-    calls = [{"tool_name": "other_tool", "tool_args": None}]
+    calls: list[ToolCallDict] = [{"tool_name": "other_tool", "tool_args": None}]
     verdict = judge_structural("search", None, calls)
     assert verdict.status == "failed"
 
 
-async def test_judge_llm_returns_error_with_no_provider_configured(db_session: AsyncSession) -> None:
+async def test_judge_llm_returns_error_with_no_provider_configured(
+    db_session: AsyncSession,
+) -> None:
     verdict = await judge_llm(db_session, "input", "rubric", "output")
     assert verdict.status == "error"
     assert verdict.error_message is not None

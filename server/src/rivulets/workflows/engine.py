@@ -643,9 +643,7 @@ async def run_workflow(
     run_span_id = await start_span(
         db, trace_ctx, span_type="workflow_run", entity_id=run.id, name=f"/{workflow.name}"
     )
-    run_trace_ctx = (
-        TraceContext(trace_ctx.trace_id, run_span_id) if trace_ctx is not None else None
-    )
+    run_trace_ctx = TraceContext(trace_ctx.trace_id, run_span_id) if trace_ctx is not None else None
 
     if rivulet.agentos_session_id is None:
         rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet

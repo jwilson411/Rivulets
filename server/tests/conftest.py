@@ -110,6 +110,12 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # not through this fixture, so no-op it here the same way
     # SyncEngine.start/.stop are above.
     monkeypatch.setattr("rivulets.app.run_scheduler_loop", _noop_async)
+    # #96's run_retention_loop mirrors run_scheduler_loop exactly (its own
+    # bare asyncio.create_task at lifespan startup, its own session_scope()
+    # per tick against the same shared StaticPool connection) and races the
+    # test suite the same way -- no-op it here too. Real retention behavior
+    # is covered by tests/test_tracing.py against prune_old_traces directly.
+    monkeypatch.setattr("rivulets.app.run_retention_loop", _noop_async)
 
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()

@@ -584,6 +584,7 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
 
     file_row = await db_session.get(File, "file-1")
     assert file_row is not None
+    assert file_row.synced_to_nodes is not None
     assert json.loads(file_row.synced_to_nodes) == ["node-b"]
 
 
@@ -628,6 +629,7 @@ async def test_apply_remote_file_change_defers_fetch_for_wan_peer_by_default(
 
     file_row = await db_session.get(File, "file-1")
     assert file_row is not None
+    assert file_row.synced_to_nodes is not None
     assert json.loads(file_row.synced_to_nodes) == ["node-b"]
 
 

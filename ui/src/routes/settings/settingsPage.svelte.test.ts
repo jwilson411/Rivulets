@@ -10,6 +10,9 @@ import { settings, type WorkspaceSettings } from '$lib/api/settings';
 import { dispatch, type HitRate } from '$lib/api/dispatch';
 import { update, type UpdateStatus } from '$lib/api/update';
 import { providers as providersApi, type Provider } from '$lib/api/providers';
+import { budgets as budgetsApi, type BudgetStatus } from '$lib/api/budgets';
+import { agents as agentsApi, type Agent } from '$lib/api/agents';
+import { teams as teamsApi, type Team } from '$lib/api/teams';
 
 vi.mock('$lib/api/settings', () => ({
 	settings: { get: vi.fn(), update: vi.fn() }
@@ -19,6 +22,16 @@ vi.mock('$lib/api/dispatch', () => ({
 	dispatch: { hitRate: vi.fn() }
 }));
 
+// The Dispatcher section's ModelPicker is the only combobox in it — the
+// budget-caps form (#97) elsewhere on the page added its own Scope/Period/
+// On-breach selects, so an unscoped page.getByRole('combobox') now matches
+// multiple elements.
+async function dispatcherSection() {
+	const heading = page.getByRole('heading', { name: 'Dispatcher' });
+	await expect.element(heading).toBeInTheDocument();
+	return page.elementLocator(heading.element().closest('section')!);
+}
+
 vi.mock('$lib/api/update', () => ({
 	update: { status: vi.fn(), apply: vi.fn() }
 }));
@@ -26,6 +39,70 @@ vi.mock('$lib/api/update', () => ({
 vi.mock('$lib/api/providers', () => ({
 	providers: { list: vi.fn() }
 }));
+
+vi.mock('$lib/api/budgets', () => ({
+	budgets: { list: vi.fn(), create: vi.fn(), remove: vi.fn(), override: vi.fn() }
+}));
+
+vi.mock('$lib/api/agents', () => ({
+	agents: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/teams', () => ({
+	teams: { list: vi.fn() }
+}));
+
+async function budgetsSection() {
+	const heading = page.getByRole('heading', { name: 'Budgets' });
+	await expect.element(heading).toBeInTheDocument();
+	return page.elementLocator(heading.element().closest('section')!);
+}
+
+const workspaceCap: BudgetStatus = {
+	id: 'cap-1',
+	scope_type: 'workspace',
+	agent_id: null,
+	team_id: null,
+	period: 'month',
+	limit_usd: 100,
+	action: 'alert',
+	enabled: true,
+	period_start: '2026-08-01T00:00:00Z',
+	spend_usd: 40,
+	unpriced_run_count: 0,
+	breached: false,
+	blocked: false,
+	override_active: false
+};
+
+const blockedAgentCap: BudgetStatus = {
+	id: 'cap-2',
+	scope_type: 'agent',
+	agent_id: 'agent-1',
+	team_id: null,
+	period: 'day',
+	limit_usd: 10,
+	action: 'hard_stop',
+	enabled: true,
+	period_start: '2026-08-10T00:00:00Z',
+	spend_usd: 12,
+	unpriced_run_count: 3,
+	breached: true,
+	blocked: true,
+	override_active: false
+};
+
+const oneAgent: Agent = {
+	id: 'agent-1',
+	name: 'Support Bot',
+	description: '',
+	instructions: '',
+	model: 'test:mock',
+	fallback_models: [],
+	agentos_agent_id: null
+};
+
+const oneTeam: Team = { id: 'team-1', name: 'Support', description: null };
 
 const anthropicProvider: Provider = {
 	id: 'prov-1',
@@ -76,6 +153,9 @@ beforeEach(() => {
 	vi.mocked(dispatch.hitRate).mockResolvedValue(emptyHitRate);
 	vi.mocked(update.status).mockResolvedValue(upToDateStatus);
 	vi.mocked(providersApi.list).mockResolvedValue([]);
+	vi.mocked(budgetsApi.list).mockResolvedValue([]);
+	vi.mocked(agentsApi.list).mockResolvedValue([]);
+	vi.mocked(teamsApi.list).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -150,7 +230,7 @@ describe('settings/+page.svelte', () => {
 
 		render(SettingsPage);
 
-		const select = page.getByRole('combobox');
+		const select = (await dispatcherSection()).getByRole('combobox');
 		await expect
 			.element(select.getByRole('option', { name: /Claude Haiku 4\.5/ }))
 			.toBeInTheDocument();
@@ -168,11 +248,12 @@ describe('settings/+page.svelte', () => {
 		});
 
 		render(SettingsPage);
+		const select = (await dispatcherSection()).getByRole('combobox');
 		await expect
-			.element(page.getByRole('combobox').getByRole('option', { name: /Claude Haiku 4\.5/ }))
+			.element(select.getByRole('option', { name: /Claude Haiku 4\.5/ }))
 			.toBeInTheDocument();
 
-		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await select.selectOptions('anthropic:claude-haiku-4-5-20251001');
 		await page.getByRole('button', { name: 'Save changes' }).click();
 
 		expect(settings.update).toHaveBeenCalledWith({
@@ -189,7 +270,7 @@ describe('settings/+page.svelte', () => {
 
 		render(SettingsPage);
 
-		const select = page.getByRole('combobox');
+		const select = (await dispatcherSection()).getByRole('combobox');
 		await expect.element(select).toBeInTheDocument();
 		expect((select.element() as HTMLSelectElement).value).toBe(
 			'anthropic:claude-haiku-4-5-20251001'
@@ -356,5 +437,212 @@ describe('settings/+page.svelte', () => {
 		render(SettingsPage);
 
 		await expect.element(page.getByText('Failed to check for updates')).toBeInTheDocument();
+	});
+
+	it('shows the empty state when no budget caps are configured', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await expect.element(section.getByText('No budget caps configured yet.')).toBeInTheDocument();
+	});
+
+	it('lists budget caps with scope, spend, and unpriced-run counts', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap, blockedAgentCap]);
+		vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		const list = section.getByRole('list');
+		await expect.element(list.getByText('Whole workspace')).toBeInTheDocument();
+		await expect.element(list.getByText('Support Bot')).toBeInTheDocument();
+		await expect.element(list.getByText('$40.00 / $100.00', { exact: false })).toBeInTheDocument();
+		await expect
+			.element(section.getByText('3 unpriced runs not counted', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it('shows an error when loading budget caps fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockRejectedValueOnce(new Error('Failed to load budget caps'));
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await expect.element(section.getByText('Failed to load budget caps')).toBeInTheDocument();
+	});
+
+	it('only shows an Override button for blocked caps', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap, blockedAgentCap]);
+		vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await expect.element(section.getByRole('button', { name: 'Override' })).toBeInTheDocument();
+		expect(section.getByRole('button', { name: 'Override' }).elements().length).toBe(1);
+	});
+
+	it('overrides a blocked budget cap and refreshes the list', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockResolvedValue([blockedAgentCap]);
+		vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
+		vi.mocked(budgetsApi.override).mockResolvedValueOnce({
+			...blockedAgentCap,
+			blocked: false,
+			override_active: true
+		});
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByRole('button', { name: 'Override' }).click();
+
+		expect(budgetsApi.override).toHaveBeenCalledWith('cap-2');
+		await vi.waitFor(() => expect(budgetsApi.list).toHaveBeenCalledTimes(2));
+	});
+
+	it('deletes a budget cap and refreshes the list', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap]);
+		vi.mocked(budgetsApi.remove).mockResolvedValueOnce(undefined);
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByRole('button', { name: 'Delete' }).click();
+
+		expect(budgetsApi.remove).toHaveBeenCalledWith('cap-1');
+		await vi.waitFor(() => expect(budgetsApi.list).toHaveBeenCalledTimes(2));
+	});
+
+	it('shows an error when deleting a budget cap fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap]);
+		vi.mocked(budgetsApi.remove).mockRejectedValueOnce(new Error('Failed to delete budget cap'));
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(section.getByText('Failed to delete budget cap')).toBeInTheDocument();
+	});
+
+	it('creates a workspace-scoped budget cap from the form defaults', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.create).mockResolvedValueOnce({
+			id: 'cap-3',
+			scope_type: 'workspace',
+			agent_id: null,
+			team_id: null,
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert',
+			enabled: true
+		});
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByRole('button', { name: 'Add cap' }).click();
+
+		expect(budgetsApi.create).toHaveBeenCalledWith({
+			scope_type: 'workspace',
+			agent_id: null,
+			team_id: null,
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert'
+		});
+		await vi.waitFor(() => expect(budgetsApi.list).toHaveBeenCalledTimes(2));
+	});
+
+	it('scopes a new cap to a specific agent once one is picked', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
+		vi.mocked(budgetsApi.create).mockResolvedValueOnce({
+			id: 'cap-4',
+			scope_type: 'agent',
+			agent_id: 'agent-1',
+			team_id: null,
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert',
+			enabled: true
+		});
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByLabelText('Scope').selectOptions('agent');
+
+		const addButton = section.getByRole('button', { name: 'Add cap' });
+		await expect.element(addButton).toBeDisabled();
+
+		// The accessible name of a label-wrapped <select> includes its
+		// currently selected option text (e.g. "Agent Select an agentSupport
+		// Bot"), so an exact match on just "Agent" still fails -- anchor on
+		// the start instead to avoid matching the Scope select, whose name
+		// also contains the substring "Agent" (one of its own options).
+		await section.getByLabelText(/^Agent\b/).selectOptions('agent-1');
+		await expect.element(addButton).not.toBeDisabled();
+		await addButton.click();
+
+		expect(budgetsApi.create).toHaveBeenCalledWith({
+			scope_type: 'agent',
+			agent_id: 'agent-1',
+			team_id: null,
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert'
+		});
+	});
+
+	it('scopes a new cap to a specific team once one is picked', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(teamsApi.list).mockResolvedValue([oneTeam]);
+		vi.mocked(budgetsApi.create).mockResolvedValueOnce({
+			id: 'cap-5',
+			scope_type: 'team',
+			agent_id: null,
+			team_id: 'team-1',
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert',
+			enabled: true
+		});
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByLabelText('Scope').selectOptions('team');
+		await section.getByLabelText(/^Team\b/).selectOptions('team-1');
+		await section.getByRole('button', { name: 'Add cap' }).click();
+
+		expect(budgetsApi.create).toHaveBeenCalledWith({
+			scope_type: 'team',
+			agent_id: null,
+			team_id: 'team-1',
+			period: 'day',
+			limit_usd: 10,
+			action: 'alert'
+		});
+	});
+
+	it('shows an error when creating a budget cap fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(budgetsApi.create).mockRejectedValueOnce(new Error('Failed to create budget cap'));
+
+		render(SettingsPage);
+
+		const section = await budgetsSection();
+		await section.getByRole('button', { name: 'Add cap' }).click();
+
+		await expect.element(section.getByText('Failed to create budget cap')).toBeInTheDocument();
 	});
 });

@@ -7,3 +7,8 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# claude-mem regenerates these context stub files without a trailing
+# newline on every touch of their directory, which repeatedly broke the
+# prettier gate in CI for content nobody hand-edits.
+**/CLAUDE.md

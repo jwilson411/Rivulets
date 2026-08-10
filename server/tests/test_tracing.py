@@ -85,9 +85,7 @@ async def test_finish_span_sets_status_and_backfills_entity_id(db_session: Async
     ctx = await start_trace(
         db_session, trigger_type="message", label="root", rivulet_id=None, channel_id=None
     )
-    span_id = await start_span(
-        db_session, ctx, span_type="agent_run", entity_id=None, name="Agent"
-    )
+    span_id = await start_span(db_session, ctx, span_type="agent_run", entity_id=None, name="Agent")
     await finish_span(
         db_session,
         span_id,

@@ -42,7 +42,9 @@ def _fake_run_agent(content: str, tools: list[Any] | None = None) -> Any:
 
 
 async def _make_agent(db: AsyncSession, name: str = "Grader") -> Agent:
-    agent = Agent(name=name, description="d", instructions="i", model="anthropic:claude-haiku-4-5-20251001")
+    agent = Agent(
+        name=name, description="d", instructions="i", model="anthropic:claude-haiku-4-5-20251001"
+    )
     db.add(agent)
     await db.flush()
     return agent
@@ -172,11 +174,16 @@ async def test_run_eval_suite_workflow_suite_creates_scratch_channel_once(
 ) -> None:
     workflow = await _make_workflow(db_session, "greet-flow")
     node = WorkflowNode(
-        workflow_id=workflow.id, name="shout", node_type="transform", config_json='{"template": "{input}!!!"}'
+        workflow_id=workflow.id,
+        name="shout",
+        node_type="transform",
+        config_json='{"template": "{input}!!!"}',
     )
     db_session.add(node)
     await db_session.flush()
-    db_session.add(WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id))
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id)
+    )
 
     suite = EvalSuite(name="s5", workflow_id=workflow.id)
     db_session.add(suite)
@@ -207,7 +214,9 @@ async def test_run_eval_suite_workflow_suite_case_error_on_pause(db_session: Asy
     node = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
     db_session.add(node)
     await db_session.flush()
-    db_session.add(WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id))
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id)
+    )
 
     suite = EvalSuite(name="s6", workflow_id=workflow.id)
     db_session.add(suite)
@@ -238,11 +247,16 @@ async def test_eval_triggered_workflow_failure_does_not_notify_on_call_or_remedi
     oncall = await _make_agent(db_session, "OnCall")
     fixer = await _make_workflow(db_session, "fixer-eval")
     fixer_node = WorkflowNode(
-        workflow_id=fixer.id, name="recover", node_type="transform", config_json='{"template": "fixed: {input}"}'
+        workflow_id=fixer.id,
+        name="recover",
+        node_type="transform",
+        config_json='{"template": "fixed: {input}"}',
     )
     db_session.add(fixer_node)
     await db_session.flush()
-    db_session.add(WorkflowConnection(workflow_id=fixer.id, from_node_id=None, to_node_id=fixer_node.id))
+    db_session.add(
+        WorkflowConnection(workflow_id=fixer.id, from_node_id=None, to_node_id=fixer_node.id)
+    )
 
     doomed = await _make_workflow(db_session, "doomed-eval")
     doomed.on_failure_workflow_id = fixer.id
@@ -252,7 +266,9 @@ async def test_eval_triggered_workflow_failure_does_not_notify_on_call_or_remedi
     )
     db_session.add(doomed_node)
     await db_session.flush()
-    db_session.add(WorkflowConnection(workflow_id=doomed.id, from_node_id=None, to_node_id=doomed_node.id))
+    db_session.add(
+        WorkflowConnection(workflow_id=doomed.id, from_node_id=None, to_node_id=doomed_node.id)
+    )
 
     channel = Channel(name="eval-guard-channel")
     db_session.add(channel)
