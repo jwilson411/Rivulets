@@ -12,6 +12,7 @@ from rivulets.api import (
     agents,
     auth,
     backups,
+    budgets,
     channels,
     dispatch,
     evals,
@@ -55,6 +56,7 @@ api_router.include_router(dispatch.router)
 api_router.include_router(update.router)
 api_router.include_router(workflows.router)
 api_router.include_router(evals.router)
+api_router.include_router(budgets.router)
 api_router.include_router(runs.router)
 
 __all__ = ["api_router"]

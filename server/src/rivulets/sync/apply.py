@@ -77,6 +77,7 @@ from rivulets.db.base import Base
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
+    BudgetCap,
     Channel,
     EvalCase,
     EvalSuite,
@@ -254,6 +255,15 @@ EVAL_CASE_SPEC = EntitySpec(
         "expected_tool_name",
         "expected_tool_args_json",
     ),
+)
+# agent_id/team_id have the same FK-ordering hazard as eval_suite's
+# agent_id/workflow_id above -- same IntegrityError -> SyncPendingInbound
+# retry treatment. BudgetCapState (local enforcement bookkeeping) is
+# deliberately not synced, same as RivuletGuardState.
+BUDGET_CAP_SPEC = EntitySpec(
+    "budget_cap",
+    BudgetCap,
+    ("scope_type", "agent_id", "team_id", "period", "limit_usd", "action", "enabled"),
 )
 
 
@@ -576,6 +586,7 @@ _DISPATCH: dict[str, EntitySpec] = {
     "workflow_connection": WORKFLOW_CONNECTION_SPEC,
     "eval_suite": EVAL_SUITE_SPEC,
     "eval_case": EVAL_CASE_SPEC,
+    "budget_cap": BUDGET_CAP_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields

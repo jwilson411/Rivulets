@@ -70,6 +70,7 @@ from rivulets.db.models import (
     WorkflowSchedule,
 )
 from rivulets.db.session import session_scope
+from rivulets.dispatch.budgets import BudgetAlert, budget_alert_text, check_budget_caps
 from rivulets.dispatch.complexity_classifier import classify_tier
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
 from rivulets.dispatch.guards import (
@@ -604,6 +605,41 @@ async def _run_agent_with_fallback(
     return run_output, last_exc, served_model, served_model != ordered[0]
 
 
+def _post_budget_alert(
+    db: AsyncSession, rivulet_id: str, alert: BudgetAlert, *, blocked: bool
+) -> Message:
+    """#97: persist a system_alert Message and publish the matching SSE
+    event for a breached budget cap, mirroring guards.py's _pause Message
+    shape and this module's own "guard_paused" SSE event shape."""
+    text = budget_alert_text(alert, blocked=blocked)
+    message = Message(
+        rivulet_id=rivulet_id,
+        sender_type="system",
+        sender_name="system",
+        content=text,
+        content_type="system_alert",
+    )
+    db.add(message)
+    publish(
+        rivulet_id,
+        "system_alert",
+        {
+            "type": "budget_exceeded",
+            "cap_id": alert.cap.id,
+            "scope_type": alert.cap.scope_type,
+            "scope_id": alert.cap.agent_id or alert.cap.team_id,
+            "period": alert.cap.period,
+            "action": alert.cap.action,
+            "limit_usd": alert.cap.limit_usd,
+            "spend_usd": alert.status.spend_usd,
+            "unpriced_run_count": alert.status.unpriced_run_count,
+            "blocked": blocked,
+            "message": text,
+        },
+    )
+    return message
+
+
 async def _invoke_agent(
     db: AsyncSession,
     rivulet: Rivulet,
@@ -623,6 +659,21 @@ async def _invoke_agent(
     by the main dispatch loop and _handle_handoff's target invocation,
     since both need the identical run/error/persist/guard/recurse pipeline.
     """
+    new_messages: list[Message] = []
+    budget_alerts, budget_blocking = await check_budget_caps(db, agent, channel.team_id)
+    for budget_alert in budget_alerts:
+        new_messages.append(_post_budget_alert(db, rivulet.id, budget_alert, blocked=False))
+    if budget_blocking is not None:
+        # #97: refuses this invocation only -- does NOT set guard_state.paused
+        # (that's rivulet-wide conversational pause semantics; a budget block
+        # is scope-specific and shouldn't silently freeze an unrelated agent
+        # in the same rivulet), does NOT recurse or call the model, and --
+        # like a guard-paused call, which never reaches _invoke_agent at all
+        # -- never opens a #96 trace span below: there's no run to trace.
+        new_messages.append(_post_budget_alert(db, rivulet.id, budget_blocking, blocked=True))
+        await db.flush()
+        return new_messages
+
     # #96: opened before the run so its duration covers the actual LLM
     # call, not just the accounting that happens after it returns --
     # entity_id is back-filled once record_agent_run creates the AgentRun
@@ -698,7 +749,7 @@ async def _invoke_agent(
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
         await finish_span(db, agent_span_id, status="error")
-        return []
+        return new_messages
 
     if run_output.status is RunStatus.error:
         # Observed in practice: a bad API key doesn't raise — agno catches
@@ -737,7 +788,8 @@ async def _invoke_agent(
             content_type="system_alert",
         )
         db.add(message)
-        return [message]  # provider errors don't count toward guard limits or recurse
+        new_messages.append(message)
+        return new_messages  # provider errors don't count toward guard limits or recurse
 
     # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
     content = run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
@@ -784,7 +836,7 @@ async def _invoke_agent(
         total_tokens=completed_run.total_tokens,
     )
     await db.flush()  # populate message.id for the agent_message event below
-    new_messages: list[Message] = [message]
+    new_messages.append(message)
     publish(
         rivulet.id,
         "agent_message",

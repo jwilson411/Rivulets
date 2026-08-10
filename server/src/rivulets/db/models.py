@@ -794,6 +794,60 @@ class EvalCaseResult(Base):
     completed_at: Mapped[str | None] = mapped_column(default=None)
 
 
+class BudgetCap(Base):
+    """Spend budget definition (#97): a $ limit per day/week/month at
+    agent, team, or workspace scope, with a configurable action on breach.
+    Synced like Team/Agent/WorkspaceSetting -- the *definition* is agreed
+    workspace policy, visible to every peer. *Enforcement* against it is
+    local-only per peer (dispatch/budgets.py), computed from that peer's
+    own AgentRun spend -- no cross-peer aggregation (that needs #101's
+    not-yet-built coordinator election). Same explicit v1 limitation
+    WorkflowSchedule (#92) documents for its own local-only firing.
+
+    `ck_budget_cap_scope` mirrors EvalSuite's ck_eval_suite_single_subject:
+    exactly one of agent_id/team_id is set for their respective scope_type,
+    both null for 'workspace'. Both FKs use ondelete='CASCADE' for the same
+    reason EvalSuite's do -- a cap on a deleted agent/team has nothing left
+    to cap.
+
+    A workflow's 'agent' node now also writes an AgentRun row (#96's
+    agentos/accounting.py, shared with dispatch/service.py's _invoke_agent),
+    so workflow-node agent spend counts toward these caps too -- unlike the
+    gap that existed before #96 landed, there's no longer a blind spot
+    here."""
+
+    __tablename__ = "budget_cap"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope_type = 'agent' AND agent_id IS NOT NULL AND team_id IS NULL) OR "
+            "(scope_type = 'team' AND team_id IS NOT NULL AND agent_id IS NULL) OR "
+            "(scope_type = 'workspace' AND agent_id IS NULL AND team_id IS NULL)",
+            name="ck_budget_cap_scope",
+        ),
+        CheckConstraint("limit_usd > 0", name="ck_budget_cap_limit_positive"),
+        CheckConstraint("period IN ('day', 'week', 'month')", name="ck_budget_cap_period"),
+        CheckConstraint("action IN ('alert', 'hard_stop')", name="ck_budget_cap_action"),
+        Index("idx_budget_cap_agent", "agent_id"),
+        Index("idx_budget_cap_team", "team_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    scope_type: Mapped[str]  # 'agent' | 'team' | 'workspace'
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), default=None
+    )
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("team.id", ondelete="CASCADE"), default=None
+    )
+    period: Mapped[str]  # 'day' | 'week' | 'month'
+    limit_usd: Mapped[float]
+    action: Mapped[str]  # 'alert' | 'hard_stop'
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+
 class RunTrace(Base):
     """The root of one causal chain of execution (#96): a human message, a
     slash command, or a scheduled workflow fire. Everything that chain goes
@@ -970,6 +1024,35 @@ class RivuletGuardState(Base):
     paused: Mapped[bool] = mapped_column(default=False)
     paused_at: Mapped[str | None] = mapped_column(default=None)
     pause_reason: Mapped[str | None] = mapped_column(default=None)
+
+
+class BudgetCapState(Base):
+    """Local-only enforcement bookkeeping for one BudgetCap (#97) -- not
+    synced, same treatment as RivuletGuardState: each peer tracks its own
+    alert/override state against its own locally-computed spend (see
+    BudgetCap's docstring on why enforcement itself is local-only).
+
+    `period_start` is the calendar-aligned window boundary
+    (dispatch/budgets.py's `_period_start`) this row's alert/override
+    state was last evaluated against -- both `alerted_at` and
+    `override_active` are meaningless once a fresh check computes a
+    *different* period_start than what's stored here (the window rolled
+    over), which is what makes a hard-stop override auto-expire at the
+    next period without any cleanup job: dispatch/budgets.py's check
+    function simply ignores a stale override rather than clearing it."""
+
+    __tablename__ = "budget_cap_state"
+
+    cap_id: Mapped[str] = mapped_column(
+        ForeignKey("budget_cap.id", ondelete="CASCADE"), primary_key=True
+    )
+    period_start: Mapped[str | None] = mapped_column(default=None)
+    alerted_at: Mapped[str | None] = mapped_column(default=None)  # dedup for action='alert'
+    override_active: Mapped[bool] = mapped_column(default=False)
+    # Must equal the freshly computed period_start to count as still valid.
+    override_period_start: Mapped[str | None] = mapped_column(default=None)
+    override_by: Mapped[str | None] = mapped_column(default=None)  # Human.id
+    override_at: Mapped[str | None] = mapped_column(default=None)
 
 
 class RivuletSummary(Base):

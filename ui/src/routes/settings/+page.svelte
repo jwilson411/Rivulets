@@ -3,6 +3,15 @@
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
 	import { update, type UpdateStatus } from '$lib/api/update';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
+	import {
+		budgets as budgetsApi,
+		type BudgetStatus,
+		type BudgetScope,
+		type BudgetPeriod,
+		type BudgetAction
+	} from '$lib/api/budgets';
+	import { agents as agentsApi, type Agent } from '$lib/api/agents';
+	import { teams as teamsApi, type Team } from '$lib/api/teams';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 
 	let loaded = $state<WorkspaceSettings | null>(null);
@@ -29,6 +38,20 @@
 	let applying = $state(false);
 	let applyError = $state<string | null>(null);
 	let restarting = $state(false);
+
+	let budgetCaps = $state<BudgetStatus[]>([]);
+	let budgetsError = $state<string | null>(null);
+	let budgetAgents = $state<Agent[]>([]);
+	let budgetTeams = $state<Team[]>([]);
+	let newCapScope = $state<BudgetScope>('workspace');
+	let newCapAgentId = $state('');
+	let newCapTeamId = $state('');
+	let newCapPeriod = $state<BudgetPeriod>('day');
+	let newCapLimit = $state(10);
+	let newCapAction = $state<BudgetAction>('alert');
+	let creatingCap = $state(false);
+	let createCapError = $state<string | null>(null);
+	let overridingCapId = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -85,10 +108,81 @@
 		}
 	}
 
+	async function refreshBudgets() {
+		budgetsError = null;
+		try {
+			budgetCaps = await budgetsApi.list();
+		} catch (err) {
+			budgetsError = err instanceof Error ? err.message : 'Failed to load budget caps';
+		}
+	}
+
+	async function refreshBudgetPickerOptions() {
+		try {
+			[budgetAgents, budgetTeams] = await Promise.all([agentsApi.list(), teamsApi.list()]);
+		} catch {
+			// Non-fatal: the create form's agent/team pickers just stay empty.
+		}
+	}
+
+	async function handleCreateBudgetCap(event: SubmitEvent) {
+		event.preventDefault();
+		createCapError = null;
+		creatingCap = true;
+		try {
+			await budgetsApi.create({
+				scope_type: newCapScope,
+				agent_id: newCapScope === 'agent' ? newCapAgentId || null : null,
+				team_id: newCapScope === 'team' ? newCapTeamId || null : null,
+				period: newCapPeriod,
+				limit_usd: newCapLimit,
+				action: newCapAction
+			});
+			await refreshBudgets();
+		} catch (err) {
+			createCapError = err instanceof Error ? err.message : 'Failed to create budget cap';
+		} finally {
+			creatingCap = false;
+		}
+	}
+
+	async function handleDeleteBudgetCap(id: string) {
+		try {
+			await budgetsApi.remove(id);
+			await refreshBudgets();
+		} catch (err) {
+			budgetsError = err instanceof Error ? err.message : 'Failed to delete budget cap';
+		}
+	}
+
+	async function handleOverrideBudgetCap(id: string) {
+		overridingCapId = id;
+		try {
+			await budgetsApi.override(id);
+			await refreshBudgets();
+		} catch (err) {
+			budgetsError = err instanceof Error ? err.message : 'Failed to override budget cap';
+		} finally {
+			overridingCapId = null;
+		}
+	}
+
+	function budgetScopeLabel(cap: BudgetStatus): string {
+		if (cap.scope_type === 'agent') {
+			return budgetAgents.find((a) => a.id === cap.agent_id)?.name ?? 'Agent (deleted)';
+		}
+		if (cap.scope_type === 'team') {
+			return budgetTeams.find((t) => t.id === cap.team_id)?.name ?? 'Team (deleted)';
+		}
+		return 'Whole workspace';
+	}
+
 	refresh();
 	refreshProviders();
 	refreshHitRate();
 	refreshUpdateStatus();
+	refreshBudgets();
+	refreshBudgetPickerOptions();
 
 	function formatPct(rate: number | null): string {
 		return rate === null ? '—' : `${Math.round(rate * 100)}%`;
@@ -191,6 +285,167 @@
 					Check for updates
 				</button>
 			{/if}
+		{/if}
+	</section>
+
+	<section
+		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+	>
+		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Budgets</h2>
+		<p class="text-xs text-neutral-600 dark:text-neutral-400">
+			Spend caps per agent, team, or the whole workspace (#97). Cap definitions sync to every peer;
+			the spend shown against each one is only what this node itself has recorded — see the
+			workspace-scope note below.
+		</p>
+
+		{#if budgetsError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{budgetsError}</p>
+		{/if}
+
+		{#if budgetCaps.length > 0}
+			<ul class="flex flex-col gap-2">
+				{#each budgetCaps as cap (cap.id)}
+					{@const pct = Math.min(100, Math.round((cap.spend_usd / cap.limit_usd) * 100))}
+					<li class="rounded-md border border-ink/10 p-3 text-sm dark:border-white/10">
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							<span class="font-medium text-ink dark:text-ink-dark">{budgetScopeLabel(cap)}</span>
+							<span class="text-xs text-neutral-500">
+								{cap.action === 'hard_stop' ? 'Hard stop' : 'Alert only'} · per {cap.period}
+							</span>
+						</div>
+						<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink/10 dark:bg-white/10">
+							<div
+								class="h-full rounded-full {cap.blocked ? 'bg-agent-magenta-600' : 'bg-agent-cyan'}"
+								style="width: {pct}%"
+							></div>
+						</div>
+						<div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs">
+							<span class="text-neutral-600 dark:text-neutral-400">
+								${cap.spend_usd.toFixed(2)} / ${cap.limit_usd.toFixed(2)}
+								{#if cap.unpriced_run_count > 0}
+									<span class="text-neutral-500">
+										· {cap.unpriced_run_count} unpriced run{cap.unpriced_run_count === 1 ? '' : 's'} not
+										counted
+									</span>
+								{/if}
+							</span>
+							<span class="flex items-center gap-2">
+								{#if cap.blocked}
+									<button
+										type="button"
+										onclick={() => handleOverrideBudgetCap(cap.id)}
+										disabled={overridingCapId === cap.id}
+										class="text-agent-cyan-700 hover:underline disabled:opacity-50 dark:text-agent-cyan-400"
+									>
+										{overridingCapId === cap.id ? 'Overriding…' : 'Override'}
+									</button>
+								{/if}
+								<button
+									type="button"
+									onclick={() => handleDeleteBudgetCap(cap.id)}
+									class="text-agent-magenta-700 hover:underline dark:text-agent-magenta-400"
+								>
+									Delete
+								</button>
+							</span>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{:else if !budgetsError}
+			<p class="text-xs text-neutral-500 italic">No budget caps configured yet.</p>
+		{/if}
+
+		<form
+			onsubmit={handleCreateBudgetCap}
+			class="mt-2 flex flex-wrap items-end gap-3 border-t border-ink/10 pt-3 dark:border-white/10"
+		>
+			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+				Scope
+				<select
+					bind:value={newCapScope}
+					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+				>
+					<option value="workspace">Whole workspace</option>
+					<option value="team">Team</option>
+					<option value="agent">Agent</option>
+				</select>
+			</label>
+
+			{#if newCapScope === 'agent'}
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					Agent
+					<select
+						bind:value={newCapAgentId}
+						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					>
+						<option value="" disabled>Select an agent</option>
+						{#each budgetAgents as agent (agent.id)}
+							<option value={agent.id}>{agent.name}</option>
+						{/each}
+					</select>
+				</label>
+			{:else if newCapScope === 'team'}
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					Team
+					<select
+						bind:value={newCapTeamId}
+						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					>
+						<option value="" disabled>Select a team</option>
+						{#each budgetTeams as team (team.id)}
+							<option value={team.id}>{team.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
+
+			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+				Period
+				<select
+					bind:value={newCapPeriod}
+					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+				>
+					<option value="day">Day</option>
+					<option value="week">Week</option>
+					<option value="month">Month</option>
+				</select>
+			</label>
+
+			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+				Limit (USD)
+				<input
+					type="number"
+					min="0.01"
+					step="0.01"
+					bind:value={newCapLimit}
+					class="w-28 rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+				/>
+			</label>
+
+			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+				On breach
+				<select
+					bind:value={newCapAction}
+					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+				>
+					<option value="alert">Alert only</option>
+					<option value="hard_stop">Hard stop</option>
+				</select>
+			</label>
+
+			<button
+				type="submit"
+				disabled={creatingCap ||
+					(newCapScope === 'agent' && !newCapAgentId) ||
+					(newCapScope === 'team' && !newCapTeamId)}
+				class="rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			>
+				{creatingCap ? 'Adding…' : 'Add cap'}
+			</button>
+		</form>
+		{#if createCapError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createCapError}</p>
 		{/if}
 	</section>
 
