@@ -36,8 +36,10 @@ from agno.agent import Agent as AgnoAgent
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
+from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model
 from rivulets.db.models import Agent, WorkflowNode
+from rivulets.tracing import TraceContext, finish_span, start_span
 
 NODE_TYPES = (
     "agent",
@@ -70,15 +72,49 @@ def _load_config(node: WorkflowNode) -> dict[str, object]:
 
 
 async def execute_agent_node(
-    db: AsyncSession, node: WorkflowNode, session_id: str, input_content: str
+    db: AsyncSession,
+    node: WorkflowNode,
+    session_id: str,
+    input_content: str,
+    trace_ctx: TraceContext | None = None,
 ) -> str:
+    """#96: also records an AgentRun row (agentos/accounting.py's
+    record_agent_run, the same helper dispatch/service.py uses) and an
+    agent_run trace span -- before this, a workflow's 'agent' node ran
+    through `run_agent` same as any other agent invocation but never got
+    accounted for: invisible to the usage dashboard (#28) and to a trace
+    built from AgentRun data. No tier/fallback-chain support here (unlike
+    dispatch/service.py's `_invoke_agent`) -- workflow agent nodes have
+    never done auto-tier classification or fallback-model retries, and
+    this doesn't add either, just accounting for what already runs."""
     if node.agent_id is None:
         raise ValueError(f"Node {node.name!r} has no agent assigned")
     agent = await db.get(Agent, node.agent_id)
     if agent is None:
         raise ValueError(f"Node {node.name!r} references a deleted agent")
-    run_output = await run_agent(
-        db, agent.id, input_content, session_id=session_id, user_id="workflow"
+
+    span_id = await start_span(
+        db, trace_ctx, span_type="agent_run", entity_id=None, name=agent.name
+    )
+    try:
+        run_output = await run_agent(
+            db, agent.id, input_content, session_id=session_id, user_id="workflow"
+        )
+    except Exception:
+        # _run_node_with_retries retries/reports this uniformly with every
+        # other node failure -- just close out the span first so it
+        # doesn't sit 'running' forever.
+        await finish_span(db, span_id, status="error")
+        raise
+    run = await record_agent_run(db, agent, agent.model, None, "completed", run_output)
+    await finish_span(
+        db,
+        span_id,
+        status="completed",
+        entity_id=run.id,
+        model=agent.model,
+        cost_usd=run.cost_usd,
+        total_tokens=run.total_tokens,
     )
     return run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
 

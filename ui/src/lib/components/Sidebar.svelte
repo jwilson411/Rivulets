@@ -124,6 +124,7 @@
 		'/workflows',
 		'/evals',
 		'/usage',
+		'/runs',
 		'/settings',
 		'/invites'
 	];
@@ -324,6 +325,18 @@
 						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
 					/>
 					Usage
+				</a>
+				<a
+					href={resolve('/runs')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/runs')
+					)}"
+				>
+					<Icon
+						name="route"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Runs
 				</a>
 				{#if auth.grant === 'owner'}
 					<a

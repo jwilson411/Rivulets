@@ -53,14 +53,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
+from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
-from rivulets.agentos.pricing import estimate_cost_usd
 from rivulets.config import get_settings
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
     AgentRoutingRule,
-    AgentRun,
     Channel,
     DispatchDecision,
     Message,
@@ -85,6 +84,7 @@ from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
 from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.publish import publish_current_state
+from rivulets.tracing import TraceContext, finish_span, start_span
 
 logger = logging.getLogger(__name__)
 
@@ -126,57 +126,6 @@ async def _load_team_dispatch_agents(
             )
         )
     return pairs
-
-
-async def _record_agent_run(
-    db: AsyncSession,
-    agent: Agent,
-    model: str,
-    tier: ModelTier | None,
-    status: str,
-    run_output: RunOutput,
-    *,
-    requested_model: str | None = None,
-) -> None:
-    """Persist one row of run/token/cost accounting (FR-3.5, #28's usage
-    dashboard). `model` may be the AUTO_MODEL sentinel itself (auto mode
-    whose tier resolution failed, run_agent fell through to the
-    already-registered cheap-tier model — agentos/service.py's
-    `_build_agno_agent`) rather than a real 'provider:model_name' string;
-    cost just can't be estimated for that row, same as any other unpriced
-    model.
-
-    `requested_model` (#103) is set only when a fallback chain served this
-    run instead of the model that was actually asked for — `model` is
-    then the one that answered, `requested_model` the one that failed
-    first."""
-    # getattr, not run_output.metrics: dispatch tests monkeypatch run_agent
-    # with a plain SimpleNamespace duck-typing only .status/.tools/
-    # .get_content_as_string() (test_rivulet_dispatch.py), which has no
-    # .metrics attribute at all.
-    metrics = getattr(run_output, "metrics", None)
-    input_tokens = getattr(metrics, "input_tokens", 0) or 0
-    output_tokens = getattr(metrics, "output_tokens", 0) or 0
-    total_tokens = getattr(metrics, "total_tokens", 0) or (input_tokens + output_tokens)
-
-    cost_usd = None
-    provider, _, model_name = model.partition(":")
-    if model_name:
-        cost_usd = estimate_cost_usd(provider, model_name, input_tokens, output_tokens)
-
-    db.add(
-        AgentRun(
-            agent_id=agent.id,
-            model=model,
-            requested_model=requested_model,
-            tier=tier,
-            status=status,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
-            cost_usd=cost_usd,
-        )
-    )
 
 
 def _find_handoff_call(run_output: RunOutput) -> tuple[str, str] | None:
@@ -280,6 +229,7 @@ async def dispatch_and_respond(
     from_agent_id: str | None = None,
     from_agent_name: str | None = None,
     triggering_message_id: str | None = None,
+    trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
     agent, appending its reply to `rivulet` as a Message row. Returns the
@@ -292,6 +242,12 @@ async def dispatch_and_respond(
     human-triggered path. `triggering_message_id` (issue #10) rides along
     for correlation on a remotely-dispatched agent's request/ack, not used
     locally.
+
+    `trace_ctx` (#96) is None on every call site that isn't traced (the
+    default) — see tracing.py's module docstring for why tracing is
+    opt-in rather than auto-starting here. When set, it's threaded
+    unchanged into the DispatchDecision span this call creates and
+    everything that span's agent invocations go on to do.
     """
     is_top_level = from_agent_id is None
     try:
@@ -303,6 +259,7 @@ async def dispatch_and_respond(
             from_agent_id,
             from_agent_name,
             triggering_message_id,
+            trace_ctx,
         )
     finally:
         # One "no more events for this trigger" signal per external call,
@@ -320,6 +277,7 @@ async def _dispatch_and_respond(
     from_agent_id: str | None,
     from_agent_name: str | None,
     triggering_message_id: str | None = None,
+    trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     guard_state = await get_or_create_guard_state(db, rivulet.id)
     if from_agent_id is None:
@@ -343,7 +301,21 @@ async def _dispatch_and_respond(
     # recursive re-dispatches (FR-5.6) included — each is its own invocation
     # of the same two-stage pipeline and can independently hit the LLM
     # fallback.
-    db.add(DispatchDecision(method=result.method.value, llm_invoked=result.llm_invoked))
+    decision = DispatchDecision(method=result.method.value, llm_invoked=result.llm_invoked)
+    db.add(decision)
+    await db.flush()
+    # #96: every agent this decision matches nests under this one span,
+    # whether invoked here or (recursively) by one of their own replies.
+    dispatch_span_id = await start_span(
+        db,
+        trace_ctx,
+        span_type="dispatch_decision",
+        entity_id=decision.id,
+        name=f"dispatch ({result.method.value})",
+    )
+    agent_trace_ctx = (
+        TraceContext(trace_ctx.trace_id, dispatch_span_id) if trace_ctx is not None else None
+    )
 
     if rivulet.agentos_session_id is None:
         rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
@@ -370,7 +342,10 @@ async def _dispatch_and_respond(
             if dispatched:
                 # The reply arrives later via normal Message gossipsub
                 # sync, not as a return value here (see agent_dispatch.py's
-                # module docstring on why the RPC is ack-only).
+                # module docstring on why the RPC is ack-only). Untraced:
+                # #96 is local-only v1 (see RunTrace's docstring), and the
+                # remote peer's own share of this work lands in its own
+                # trace history instead.
                 continue
             # Ack failed or timed out (peer unreachable, no handler,
             # etc.) -- fall through to running it locally instead, same
@@ -387,9 +362,11 @@ async def _dispatch_and_respond(
                 team_agents,
                 from_agent_id=from_agent_id,
                 from_agent_name=from_agent_name,
+                trace_ctx=agent_trace_ctx,
             )
         )
 
+    await finish_span(db, dispatch_span_id, status="completed")
     return new_messages
 
 
@@ -638,6 +615,7 @@ async def _invoke_agent(
     *,
     from_agent_id: str | None,
     from_agent_name: str | None,
+    trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     """Run one agent, persist its reply (or a failure notice), update
     guard state, then act on whatever the run implies: a handoff call
@@ -645,6 +623,16 @@ async def _invoke_agent(
     by the main dispatch loop and _handle_handoff's target invocation,
     since both need the identical run/error/persist/guard/recurse pipeline.
     """
+    # #96: opened before the run so its duration covers the actual LLM
+    # call, not just the accounting that happens after it returns --
+    # entity_id is back-filled once record_agent_run creates the AgentRun
+    # row below (that row doesn't exist yet at span-open time).
+    agent_span_id = await start_span(
+        db, trace_ctx, span_type="agent_run", entity_id=None, name=agent.name
+    )
+    child_trace_ctx = (
+        TraceContext(trace_ctx.trace_id, agent_span_id) if trace_ctx is not None else None
+    )
     seq = 0
 
     def on_token(delta: str, agent_id: str = agent.id, agent_name: str = agent.name) -> None:
@@ -709,6 +697,7 @@ async def _invoke_agent(
             "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=exc
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
+        await finish_span(db, agent_span_id, status="error")
         return []
 
     if run_output.status is RunStatus.error:
@@ -722,7 +711,7 @@ async def _invoke_agent(
             "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
-        await _record_agent_run(
+        error_run = await record_agent_run(
             db,
             agent,
             served_model,
@@ -730,6 +719,15 @@ async def _invoke_agent(
             "error",
             run_output,
             requested_model=requested_model if fallback_used else None,
+        )
+        await finish_span(
+            db,
+            agent_span_id,
+            status="error",
+            entity_id=error_run.id,
+            model=served_model,
+            cost_usd=error_run.cost_usd,
+            total_tokens=error_run.total_tokens,
         )
         message = Message(
             rivulet_id=rivulet.id,
@@ -767,7 +765,7 @@ async def _invoke_agent(
         metadata_json=json.dumps(message_metadata),
     )
     db.add(message)
-    await _record_agent_run(
+    completed_run = await record_agent_run(
         db,
         agent,
         served_model,
@@ -775,6 +773,15 @@ async def _invoke_agent(
         "completed",
         run_output,
         requested_model=requested_model if fallback_used else None,
+    )
+    await finish_span(
+        db,
+        agent_span_id,
+        status="completed",
+        entity_id=completed_run.id,
+        model=served_model,
+        cost_usd=completed_run.cost_usd,
+        total_tokens=completed_run.total_tokens,
     )
     await db.flush()  # populate message.id for the agent_message event below
     new_messages: list[Message] = [message]
@@ -819,14 +826,24 @@ async def _invoke_agent(
         target_name, handoff_context = handoff_call
         new_messages.extend(
             await _handle_handoff(
-                db, rivulet, channel, guard_state, agent, team_agents, target_name, handoff_context
+                db,
+                rivulet,
+                channel,
+                guard_state,
+                agent,
+                team_agents,
+                target_name,
+                handoff_context,
+                trace_ctx=child_trace_ctx,
             )
         )
 
     run_workflow_call = _find_run_workflow_call(run_output)
     if run_workflow_call is not None:
         workflow_name, workflow_input = run_workflow_call
-        await _handle_run_workflow_trigger(db, rivulet, agent, workflow_name, workflow_input)
+        await _handle_run_workflow_trigger(
+            db, rivulet, agent, workflow_name, workflow_input, trace_ctx=child_trace_ctx
+        )
 
     schedule_workflow_call = _find_schedule_workflow_call(run_output)
     if schedule_workflow_call is not None:
@@ -846,7 +863,13 @@ async def _invoke_agent(
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
-        db, rivulet, channel, content, from_agent_id=agent.id, from_agent_name=agent.name
+        db,
+        rivulet,
+        channel,
+        content,
+        from_agent_id=agent.id,
+        from_agent_name=agent.name,
+        trace_ctx=child_trace_ctx,
     )
     new_messages.extend(recursive_messages)
     return new_messages
@@ -861,6 +884,8 @@ async def _handle_handoff(
     team_agents: list[tuple[Agent, AgentDispatchInfo]],
     target_agent_name: str,
     context: str,
+    *,
+    trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     """FR-6.1/6.3: post the visible handoff message, then invoke the named
     target directly — bypassing routing rules entirely, the same way an
@@ -906,13 +931,20 @@ async def _handle_handoff(
         team_agents,
         from_agent_id=from_agent.id,
         from_agent_name=from_agent.name,
+        trace_ctx=trace_ctx,
     )
     messages.extend(target_messages)
     return messages
 
 
 async def _handle_run_workflow_trigger(
-    db: AsyncSession, rivulet: Rivulet, agent: Agent, workflow_name: str, workflow_input: str
+    db: AsyncSession,
+    rivulet: Rivulet,
+    agent: Agent,
+    workflow_name: str,
+    workflow_input: str,
+    *,
+    trace_ctx: TraceContext | None = None,
 ) -> None:
     """#24: an agent called the run_workflow tool — look up the named
     workflow and actually execute it (workflows/engine.py). Imports
@@ -938,7 +970,13 @@ async def _handle_run_workflow_trigger(
         )
         return
     await run_workflow(
-        db, workflow, rivulet, workflow_input, triggered_by="agent", triggered_by_id=agent.id
+        db,
+        workflow,
+        rivulet,
+        workflow_input,
+        triggered_by="agent",
+        triggered_by_id=agent.id,
+        trace_ctx=trace_ctx,
     )
 
 

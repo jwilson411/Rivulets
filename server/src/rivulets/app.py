@@ -31,6 +31,7 @@ from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.publish import drain_pending_outbound
+from rivulets.tracing import run_retention_loop
 from rivulets.version import APP_VERSION
 from rivulets.workflows.scheduler import run_scheduler_loop
 
@@ -125,10 +126,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # workflows/scheduler.py's module docstring for why this doesn't need
     # the sync engine's trio-on-a-thread machinery below.
     scheduler_task = asyncio.create_task(run_scheduler_loop())
+    # #96: same pattern, for run-trace retention (tracing.py's module
+    # docstring) — traces accumulate continuously, unlike backup.py's
+    # startup-only snapshot pruning above.
+    retention_task = asyncio.create_task(run_retention_loop())
     yield
     scheduler_task.cancel()
+    retention_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await scheduler_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await retention_task
     # The sync engine only actually starts on login (api/auth.py — it
     # needs the workspace PSK, not available until then), so stopping here
     # is a no-op if nobody ever logged in; otherwise it cleanly joins the

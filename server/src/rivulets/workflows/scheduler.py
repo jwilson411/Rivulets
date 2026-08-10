@@ -26,6 +26,7 @@ from rivulets.db.base import utcnow_iso
 from rivulets.db.models import Channel, Message, Rivulet, Workflow, WorkflowSchedule
 from rivulets.db.session import session_scope
 from rivulets.sync.publish import publish_current_state
+from rivulets.tracing import finish_trace, start_trace
 from rivulets.workflows.engine import run_workflow
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,13 @@ async def _fire_published_workflow(
     await publish_current_state(db, "message", kickoff.id)
 
     schedule.last_fired_at = utcnow_iso()
+    trace_ctx = await start_trace(
+        db,
+        trigger_type="schedule",
+        label=f"/{workflow.name}",
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+    )
     run = await run_workflow(
         db,
         workflow,
@@ -147,6 +155,8 @@ async def _fire_published_workflow(
         schedule.input_content,
         triggered_by="schedule",
         triggered_by_id=schedule.id,
+        trace_ctx=trace_ctx,
     )
+    await finish_trace(db, trace_ctx.trace_id)
     if run.status == "failed":
         raise RuntimeError(f"Scheduled run {run.id} failed: {run.error_message}")
