@@ -658,7 +658,17 @@ async def _finalize_run(
     status/current_node_id were already committed inside
     _pause_for_human_input, possibly on a different (sibling) session --
     refresh rather than reassign so the returned `run` reflects that write
-    instead of clobbering it with a stale in-memory value."""
+    instead of clobbering it with a stale in-memory value.
+
+    triggered_by='eval' (#95) is excluded from the failed-run notification
+    path entirely: an eval suite deliberately exercising a failure case
+    must not fire a production remediation workflow or @mention a real
+    on-call agent. Unlike 'remediation' -- which only self-guards inside
+    _maybe_trigger_remediation (a remediation run failing should still
+    reach _maybe_notify_on_call_agent, so a human finds out) -- an eval
+    run has no legitimate reason to trigger either, so it's excluded at
+    this single outer gate instead of threading a second guard into both
+    helpers."""
     if outcome.paused:
         await db.refresh(run)
         return run
@@ -669,7 +679,7 @@ async def _finalize_run(
     run.completed_at = utcnow_iso()
     await db.commit()
 
-    if run.status == "failed":
+    if run.status == "failed" and run.triggered_by != "eval":
         await _maybe_trigger_remediation(db, workflow, rivulet, run)
         await _maybe_notify_on_call_agent(db, workflow, rivulet, run)
 

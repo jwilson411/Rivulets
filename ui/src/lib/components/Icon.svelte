@@ -192,4 +192,15 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
+{:else if name === 'flask'}
+	<svg viewBox="0 0 20 20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M8 2.5h4M8.5 2.5v4.8L4.7 14a1.6 1.6 0 0 0 1.4 2.4h7.8a1.6 1.6 0 0 0 1.4-2.4L11.5 7.3V2.5"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linejoin="round"
+			stroke-linecap="round"
+		/>
+		<path d="M6.3 11.5h7.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+	</svg>
 {/if}

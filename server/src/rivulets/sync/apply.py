@@ -78,6 +78,8 @@ from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
     Channel,
+    EvalCase,
+    EvalSuite,
     File,
     Human,
     MCPServer,
@@ -233,6 +235,25 @@ WORKFLOW_CONNECTION_SPEC = EntitySpec(
     "workflow_connection",
     WorkflowConnection,
     ("workflow_id", "from_node_id", "to_node_id", "condition_json"),
+)
+EVAL_SUITE_SPEC = EntitySpec(
+    "eval_suite", EvalSuite, ("name", "description", "agent_id", "workflow_id")
+)
+# suite_id has the same FK-ordering hazard workflow_node's workflow_id
+# already has -- same IntegrityError -> SyncPendingInbound retry treatment.
+EVAL_CASE_SPEC = EntitySpec(
+    "eval_case",
+    EvalCase,
+    (
+        "suite_id",
+        "name",
+        "input_content",
+        "judge_type",
+        "expected_output",
+        "rubric",
+        "expected_tool_name",
+        "expected_tool_args_json",
+    ),
 )
 
 
@@ -553,6 +574,8 @@ _DISPATCH: dict[str, EntitySpec] = {
     "workflow": WORKFLOW_SPEC,
     "workflow_node": WORKFLOW_NODE_SPEC,
     "workflow_connection": WORKFLOW_CONNECTION_SPEC,
+    "eval_suite": EVAL_SUITE_SPEC,
+    "eval_case": EVAL_CASE_SPEC,
 }
 
 # Metadata-only views of tool/file for callers that just need "what fields
@@ -640,8 +663,8 @@ async def handle_incoming_state_change(
 
     Covers FR-9.1's full sync scope: agent/channel/team/mcp_server/tool/
     rivulet/message/file/workspace_setting/workflow/workflow_node/
-    workflow_connection. Anything else is logged and dropped, matching
-    this module's generalization path."""
+    workflow_connection/eval_suite/eval_case. Anything else is logged and
+    dropped, matching this module's generalization path."""
     async with session_scope() as db:
         if entity_type == "tool":
             result = await apply_remote_tool_change(

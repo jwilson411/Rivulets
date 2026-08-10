@@ -6,7 +6,7 @@ engine for last-write-wins conflict resolution (FR-9.6). Tables noted as
 sync_state) intentionally omit or ignore that column's sync semantics.
 """
 
-from sqlalchemy import ForeignKey, Index, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from rivulets.db.base import Base, utcnow_iso, uuid7
@@ -654,6 +654,144 @@ class WorkflowSchedule(Base):
     created_by: Mapped[str] = mapped_column(default="human")  # 'human' or agent_id
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class EvalSuite(Base):
+    """A named regression-test suite (#95) attached to exactly one Agent or
+    Workflow -- `ck_eval_suite_single_subject` enforces exactly one of
+    `agent_id`/`workflow_id` is set (re-checked at the API layer too, since
+    a CHECK violation is a worse error message than a 400). Synced like
+    Agent/Workflow: a suite's *definition* (this row and its EvalCase
+    children) is shared workspace content -- EvalRun/EvalCaseResult
+    (execution history) are local-only instead, exactly the same
+    Workflow/WorkflowRun split.
+
+    Both subject FKs use ondelete='CASCADE', unlike WorkflowNode.agent_id's
+    SET NULL: a suite testing a subject that no longer exists has nothing
+    left to test, so it's deleted along with its subject rather than kept
+    around as a dangling, now-meaningless reference."""
+
+    __tablename__ = "eval_suite"
+    __table_args__ = (
+        CheckConstraint(
+            "(agent_id IS NOT NULL) != (workflow_id IS NOT NULL)",
+            name="ck_eval_suite_single_subject",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str]
+    description: Mapped[str | None] = mapped_column(default=None)
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), default=None
+    )
+    workflow_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow.id", ondelete="CASCADE"), default=None
+    )
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+    cases: Mapped[list["EvalCase"]] = relationship(
+        back_populates="suite", cascade="all, delete-orphan"
+    )
+
+
+class EvalCase(Base):
+    """One test case in an EvalSuite (#95): an input plus a judge_type-
+    specific way to score the subject's output. Synced with its parent
+    suite.
+
+    Field usage by `judge_type` ('exact' | 'substring' | 'llm_judge' |
+    'structural') -- enforced at the API layer, not the schema, same
+    "structural over validated" tradeoff Workflow's entry-point invariant
+    already makes:
+      - 'exact' / 'substring': `expected_output` required, the rest null.
+      - 'llm_judge': `rubric` required, the rest null.
+      - 'structural' (agent-attached suites only -- api/evals.py rejects
+        this judge_type when the parent suite is workflow-attached, since
+        only an agent run's RunOutput.tools carries tool-call data;
+        WorkflowRun has no equivalent): `expected_tool_name` required;
+        `expected_tool_args_json` optional (null means "just check the
+        tool was called at all, ignore its arguments")."""
+
+    __tablename__ = "eval_case"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    suite_id: Mapped[str] = mapped_column(ForeignKey("eval_suite.id", ondelete="CASCADE"))
+    name: Mapped[str]
+    input_content: Mapped[str]
+    judge_type: Mapped[str]  # 'exact' | 'substring' | 'llm_judge' | 'structural'
+    expected_output: Mapped[str | None] = mapped_column(default=None)
+    rubric: Mapped[str | None] = mapped_column(default=None)
+    expected_tool_name: Mapped[str | None] = mapped_column(default=None)
+    expected_tool_args_json: Mapped[str | None] = mapped_column(default=None)  # JSON dict
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    vector_clock: Mapped[int] = mapped_column(default=0)
+
+    suite: Mapped["EvalSuite"] = relationship(back_populates="cases")
+
+
+class EvalRun(Base):
+    """One execution of every case in an EvalSuite (#95), single pass -- v1
+    has no repeat-and-average scoring for judge flakiness (see
+    evals/judge.py). Not synced -- local telemetry, same reasoning as
+    WorkflowRun: a fresh peer doesn't need another node's eval history to
+    function, and re-running the suite *definition* is all sync needs to
+    carry.
+
+    `pass_count`/`fail_count`/`error_count` are denormalized off this run's
+    EvalCaseResult rows, the same convenience WorkflowRun.final_output
+    provides over re-deriving a summary from WorkflowNodeRun every time the
+    UI wants to show one."""
+
+    __tablename__ = "eval_run"
+    __table_args__ = (Index("idx_eval_run_suite", "suite_id", "started_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    suite_id: Mapped[str] = mapped_column(ForeignKey("eval_suite.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(default="running")  # 'running' | 'completed'
+    triggered_by: Mapped[str] = mapped_column(default="human")  # v1 is on-demand-only
+    triggered_by_id: Mapped[str | None] = mapped_column(default=None)  # Human.id who clicked Run
+    case_count: Mapped[int] = mapped_column(default=0)
+    pass_count: Mapped[int] = mapped_column(default=0)
+    fail_count: Mapped[int] = mapped_column(default=0)
+    error_count: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
+
+
+class EvalCaseResult(Base):
+    """One EvalCase's outcome within an EvalRun (#95). Not synced, same
+    reasoning as EvalRun/WorkflowNodeRun.
+
+    `score` is a float in [0.0, 1.0], set only for judge_type='llm_judge'
+    results -- always null for the three boolean-match types ('exact',
+    'substring', 'structural'), where `status` alone is complete and a
+    score would just be a fake-precise 0.0/1.0 standing in for a plain
+    pass/fail.
+
+    `actual_tool_calls_json` is populated only for judge_type='structural'
+    results (possibly an empty JSON list -- see evals/judge.py's
+    judge_structural for why an empty list is `status='error'`, not an
+    automatic 'failed': some providers don't report tool calls even on a
+    genuinely successful completion)."""
+
+    __tablename__ = "eval_case_result"
+    __table_args__ = (Index("idx_eval_case_result_run", "run_id", "started_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    run_id: Mapped[str] = mapped_column(ForeignKey("eval_run.id", ondelete="CASCADE"))
+    case_id: Mapped[str] = mapped_column(ForeignKey("eval_case.id", ondelete="CASCADE"))
+    status: Mapped[str]  # 'passed' | 'failed' | 'error'
+    score: Mapped[float | None] = mapped_column(default=None)
+    actual_output: Mapped[str | None] = mapped_column(default=None)
+    actual_tool_calls_json: Mapped[str | None] = mapped_column(default=None)
+    judge_reasoning: Mapped[str | None] = mapped_column(default=None)  # llm_judge only
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    started_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    completed_at: Mapped[str | None] = mapped_column(default=None)
 
 
 class Rivulet(Base):
