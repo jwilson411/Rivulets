@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
 	import { mcpServers, type MCPServerDetail, type MCPTool } from '$lib/api/mcpServers';
+	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
 	// JSON Schema keywords that make one argument's requiredness/shape depend
 	// on another — surfaced as a badge so a user scanning the tool list can
@@ -10,6 +11,18 @@
 	function hasConditionalArgs(tool: MCPTool): boolean {
 		return CONDITIONAL_SCHEMA_KEYWORDS.some((keyword) => keyword in tool.input_schema);
 	}
+
+	const serverFilters: ListFilter<MCPServerDetail>[] = [
+		{
+			id: 'connection',
+			label: 'Status',
+			options: [
+				{ value: 'connected', label: 'Connected' },
+				{ value: 'disconnected', label: 'Disconnected' }
+			],
+			predicate: (server, value) => (value === 'connected' ? server.connected : !server.connected)
+		}
+	];
 
 	let serverList = $state<MCPServerDetail[]>([]);
 	let loadError = $state<string | null>(null);
@@ -116,14 +129,20 @@
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else if serverList.length === 0}
-		<p class="text-sm text-neutral-500 italic">No MCP servers registered yet — add one above.</p>
 	{:else}
 		{#if rowError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{rowError}</p>
 		{/if}
-		<ul class="flex flex-col gap-2">
-			{#each serverList as server (server.id)}
+		<FilterableList
+			items={serverList}
+			getKey={(server) => server.id}
+			searchPlaceholder="Search MCP servers…"
+			searchPredicate={(server, q) => server.name.toLowerCase().includes(q.toLowerCase())}
+			filters={serverFilters}
+			emptyMessage="No MCP servers registered yet — add one above."
+			noMatchMessage="No MCP servers match your search or filter."
+		>
+			{#snippet item(server)}
 				<li class="rounded-lg border border-ink/12 px-4 py-3 dark:border-white/10">
 					<div class="flex items-center justify-between">
 						<div>
@@ -192,7 +211,7 @@
 						</div>
 					</div>
 				</li>
-			{/each}
-		</ul>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>
