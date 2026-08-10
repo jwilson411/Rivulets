@@ -9,6 +9,7 @@
 	import { mcpServers } from '$lib/api/mcpServers';
 	import { tools } from '$lib/api/tools';
 	import { workflows } from '$lib/api/workflows';
+	import { evals } from '$lib/api/evals';
 	import { sync } from '$lib/api/sync';
 	import { update } from '$lib/api/update';
 	import { theme, type ThemePreference } from '$lib/theme.svelte';
@@ -31,6 +32,7 @@
 	let mcpServerCount = $state<number | null>(null);
 	let toolCount = $state<number | null>(null);
 	let workflowCount = $state<number | null>(null);
+	let evalSuiteCount = $state<number | null>(null);
 	let syncPeerCount = $state<number | null>(null);
 	let syncRunning = $state(false);
 	let updateAvailable = $state(false);
@@ -53,6 +55,7 @@
 				mcpServerList,
 				toolList,
 				workflowList,
+				evalSuiteList,
 				syncStatus,
 				updateStatus
 			] = await Promise.all([
@@ -62,6 +65,7 @@
 				mcpServers.list(),
 				tools.list(),
 				workflows.list(),
+				evals.listSuites(),
 				sync.status(),
 				update.status()
 			]);
@@ -71,6 +75,7 @@
 			mcpServerCount = mcpServerList.length;
 			toolCount = toolList.length;
 			workflowCount = workflowList.length;
+			evalSuiteCount = evalSuiteList.length;
 			syncRunning = syncStatus.running;
 			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
 			updateAvailable = updateStatus.update_available;
@@ -117,6 +122,7 @@
 		'/mcp-servers',
 		'/tools',
 		'/workflows',
+		'/evals',
 		'/usage',
 		'/settings',
 		'/invites'
@@ -290,6 +296,21 @@
 					Workflows
 					{#if workflowCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
 							>{workflowCount}</span
+						>{/if}
+				</a>
+				<a
+					href={resolve('/evals')}
+					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+						isActive('/evals')
+					)}"
+				>
+					<Icon
+						name="flask"
+						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+					/>
+					Evals
+					{#if evalSuiteCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+							>{evalSuiteCount}</span
 						>{/if}
 				</a>
 				<a

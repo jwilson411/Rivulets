@@ -14,6 +14,7 @@ from rivulets.api import (
     backups,
     channels,
     dispatch,
+    evals,
     files,
     health,
     humans,
@@ -52,5 +53,6 @@ api_router.include_router(usage.router)
 api_router.include_router(dispatch.router)
 api_router.include_router(update.router)
 api_router.include_router(workflows.router)
+api_router.include_router(evals.router)
 
 __all__ = ["api_router"]
