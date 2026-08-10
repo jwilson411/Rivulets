@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
+	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
 	const PROVIDER_KINDS: ProviderKind[] = [
 		'anthropic',
@@ -14,6 +15,15 @@
 		'cohere',
 		'ollama',
 		'openai_compatible'
+	];
+
+	const providerFilters: ListFilter<Provider>[] = [
+		{
+			id: 'kind',
+			label: 'Type',
+			options: PROVIDER_KINDS.map((k) => ({ value: k, label: k })),
+			predicate: (provider, value) => provider.provider === value
+		}
 	];
 
 	let providerList = $state<Provider[]>([]);
@@ -162,14 +172,20 @@
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else if providerList.length === 0}
-		<p class="text-sm text-neutral-500 italic">No providers configured yet — add one above.</p>
 	{:else}
 		{#if deleteError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{deleteError}</p>
 		{/if}
-		<ul class="flex flex-col gap-2">
-			{#each providerList as provider (provider.id)}
+		<FilterableList
+			items={providerList}
+			getKey={(provider) => provider.id}
+			searchPlaceholder="Search providers…"
+			searchPredicate={(provider, q) => provider.label.toLowerCase().includes(q.toLowerCase())}
+			filters={providerFilters}
+			emptyMessage="No providers configured yet — add one above."
+			noMatchMessage="No providers match your search or filter."
+		>
+			{#snippet item(provider)}
 				<li
 					class="flex items-center justify-between rounded-lg border border-ink/12 px-4 py-3 dark:border-white/10"
 				>
@@ -193,7 +209,7 @@
 						Remove
 					</button>
 				</li>
-			{/each}
-		</ul>
+			{/snippet}
+		</FilterableList>
 	{/if}
 </div>

@@ -182,4 +182,44 @@ describe('providers/+page.svelte', () => {
 			.element(page.getByText('encrypted with a key derived from your workspace recovery phrase'))
 			.not.toBeInTheDocument();
 	});
+
+	it('filters the provider list by label via the search box', async () => {
+		const openaiProvider: Provider = {
+			id: 'prov-2',
+			provider: 'openai',
+			label: 'Work OpenAI key',
+			base_url: null,
+			is_default: false
+		};
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider, openaiProvider]);
+
+		render(ProvidersPage);
+		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search providers…').fill('work');
+
+		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
+		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
+	});
+
+	it('filters the provider list by type', async () => {
+		const openaiProvider: Provider = {
+			id: 'prov-2',
+			provider: 'openai',
+			label: 'Work OpenAI key',
+			base_url: null,
+			is_default: false
+		};
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider, openaiProvider]);
+
+		render(ProvidersPage);
+		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Type' }).selectOptions('openai');
+
+		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
+		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
+	});
 });
