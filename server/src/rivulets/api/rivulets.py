@@ -54,6 +54,7 @@ from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
 from rivulets.streaming import subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
+from rivulets.tracing import finish_trace, start_trace
 from rivulets.workflows import (
     find_awaiting_workflow_run,
     find_triggered_workflow,
@@ -268,15 +269,39 @@ async def create_rivulet(
         await _publish_message_change(db, human_message)
         for file_row in attached_files:
             await publish_file_change(db, file_row)
-        await run_workflow(
-            db, workflow, rivulet, workflow_input, triggered_by="human", triggered_by_id=human.id
+        trace_ctx = await start_trace(
+            db,
+            trigger_type="message",
+            label=body.content,
+            rivulet_id=rivulet.id,
+            channel_id=channel.id,
         )
+        await run_workflow(
+            db,
+            workflow,
+            rivulet,
+            workflow_input,
+            triggered_by="human",
+            triggered_by_id=human.id,
+            trace_ctx=trace_ctx,
+        )
+        await finish_trace(db, trace_ctx.trace_id)
+        await db.commit()
         await db.refresh(rivulet)
         return rivulet
 
-    agent_messages = await dispatch_and_respond(
-        db, rivulet, channel, body.content, triggering_message_id=human_message.id
+    trace_ctx = await start_trace(
+        db, trigger_type="message", label=body.content, rivulet_id=rivulet.id, channel_id=channel.id
     )
+    agent_messages = await dispatch_and_respond(
+        db,
+        rivulet,
+        channel,
+        body.content,
+        triggering_message_id=human_message.id,
+        trace_ctx=trace_ctx,
+    )
+    await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
     await db.refresh(rivulet)
     await _publish_rivulet_change(db, rivulet)
@@ -350,16 +375,40 @@ async def post_message(
         await _publish_message_change(db, message)
         for file_row in attached_files:
             await publish_file_change(db, file_row)
-        await run_workflow(
-            db, workflow, rivulet, workflow_input, triggered_by="human", triggered_by_id=human.id
+        trace_ctx = await start_trace(
+            db,
+            trigger_type="message",
+            label=body.content,
+            rivulet_id=rivulet.id,
+            channel_id=channel.id,
         )
+        await run_workflow(
+            db,
+            workflow,
+            rivulet,
+            workflow_input,
+            triggered_by="human",
+            triggered_by_id=human.id,
+            trace_ctx=trace_ctx,
+        )
+        await finish_trace(db, trace_ctx.trace_id)
+        await db.commit()
         return _to_message_out(message, attached_files)
 
     # dispatch_and_respond resets RivuletGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
-    agent_messages = await dispatch_and_respond(
-        db, rivulet, channel, body.content, triggering_message_id=message.id
+    trace_ctx = await start_trace(
+        db, trigger_type="message", label=body.content, rivulet_id=rivulet.id, channel_id=channel.id
     )
+    agent_messages = await dispatch_and_respond(
+        db,
+        rivulet,
+        channel,
+        body.content,
+        triggering_message_id=message.id,
+        trace_ctx=trace_ctx,
+    )
+    await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
     await db.refresh(message)
     # dispatch can pause the rivulet (a loop guard tripping) as a side
