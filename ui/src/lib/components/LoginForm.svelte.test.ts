@@ -5,7 +5,7 @@
 // Sidebar.svelte and the route components do.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import LoginForm from './LoginForm.svelte';
 import { auth } from '$lib/api/auth.svelte';
@@ -16,6 +16,27 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		logout: vi.fn()
 	}
 }));
+
+// A fixed stand-in for generateMnemonic's output -- twelve distinct words so
+// each one is a unique, unambiguous locator target in the rendered grid.
+const STUB_PHRASE = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima';
+
+vi.mock('bip39', () => ({
+	generateMnemonic: vi.fn(() => STUB_PHRASE)
+}));
+
+// navigator.clipboard.writeText is stubbed since real clipboard access needs
+// OS-level permissions Playwright's headless Chromium doesn't grant by
+// default (see invites/invitesPage.svelte.test.ts, the shared pattern).
+let writeTextMock: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+	writeTextMock = vi.fn().mockResolvedValue(undefined);
+	Object.defineProperty(navigator, 'clipboard', {
+		value: { writeText: writeTextMock },
+		configurable: true
+	});
+});
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -64,5 +85,61 @@ describe('LoginForm.svelte', () => {
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		await expect.element(page.getByText('Login failed')).toBeInTheDocument();
+	});
+
+	it('shows no US-001 ticket reference in the helper copy', async () => {
+		render(LoginForm);
+		await expect.element(page.getByText('US-001', { exact: false })).not.toBeInTheDocument();
+	});
+
+	describe('generating a phrase', () => {
+		it('reveals the generated words and requires acknowledgment before continuing', async () => {
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+
+			for (const word of STUB_PHRASE.split(' ')) {
+				await expect.element(page.getByText(word, { exact: true })).toBeInTheDocument();
+			}
+
+			const continueButton = page.getByRole('button', { name: 'Enter workspace' });
+			await expect.element(continueButton).toBeDisabled();
+
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await expect.element(continueButton).toBeEnabled();
+		});
+
+		it('logs in with the generated phrase once acknowledged and confirmed', async () => {
+			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE);
+		});
+
+		it('copies the generated phrase to the clipboard', async () => {
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Copy phrase' }).click();
+
+			expect(writeTextMock).toHaveBeenCalledWith(STUB_PHRASE);
+			await expect.element(page.getByText('Copied')).toBeInTheDocument();
+		});
+
+		it('returns to manual entry without logging in', async () => {
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Use a phrase I already have' }).click();
+
+			await expect
+				.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+				.toBeInTheDocument();
+			expect(auth.login).not.toHaveBeenCalled();
+		});
 	});
 });
