@@ -92,6 +92,7 @@ from rivulets.sync.agent_dispatch import (
     read_framed,
     write_framed,
 )
+from rivulets.sync.coordinator import compute_capability_score, outranks
 from rivulets.sync.discovery import WorkspaceMDNS, on_peer_discovered
 from rivulets.sync.file_transfer import (
     FILE_TRANSFER_PROTOCOL,
@@ -120,12 +121,28 @@ AgentDispatchHandler = Callable[[AgentDispatchRequest], Coroutine[Any, Any, None
 
 _MESH_FORM_DELAY_SECONDS = 2.0
 
+# #101: bully-style coordinator election tuning. The timeout is a multiple
+# of the heartbeat interval (3 missed heartbeats), not an independent
+# number, so the two can't accidentally be set inconsistently by a caller
+# overriding only one of them (tests override both together instead).
+_COORDINATOR_HEARTBEAT_INTERVAL_SECONDS = 5.0
+_COORDINATOR_TIMEOUT_SECONDS = _COORDINATOR_HEARTBEAT_INTERVAL_SECONDS * 3
+
 
 @dataclass(frozen=True, slots=True)
 class PeerInfo:
     peer_id: str
     address: str
     connected: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorStatus:
+    coordinator_id: str | None
+    term: int
+    is_self: bool
+    self_score: float
+    peer_scores: dict[str, float]
 
 
 def _peer_ip(address: str) -> str | None:
@@ -238,8 +255,16 @@ class SyncEngine:
     at app startup but not actually running libp2p until `start()` is
     called — that needs the workspace PSK, only available after login."""
 
-    def __init__(self, sync_dir: Path) -> None:
+    def __init__(
+        self,
+        sync_dir: Path,
+        *,
+        coordinator_heartbeat_interval: float = _COORDINATOR_HEARTBEAT_INTERVAL_SECONDS,
+        coordinator_timeout: float = _COORDINATOR_TIMEOUT_SECONDS,
+    ) -> None:
         self._sync_dir = sync_dir
+        self._coordinator_heartbeat_interval = coordinator_heartbeat_interval
+        self._coordinator_timeout = coordinator_timeout
         self._thread: threading.Thread | None = None
         self._trio_token: trio.lowlevel.TrioToken | None = None
         self._ready = threading.Event()
@@ -255,6 +280,20 @@ class SyncEngine:
         # live broadcast state, not a DB-backed EntitySpec (see
         # _receive_loop): no vector clock, no apply.py, latest-wins.
         self._peer_capabilities: dict[str, list[str]] = {}
+        # #101 coordinator election state -- ephemeral, in-memory only,
+        # same "not a DB-backed EntitySpec" treatment as _peer_capabilities
+        # above (see _receive_loop's coordinator_heartbeat branch). Reset
+        # in stop() rather than persisted: trio.current_time() restarts
+        # from ~0 on every _trio_main() run (a fresh trio.run() call per
+        # start()), so a stale _last_coordinator_heartbeat_at from a prior
+        # session would read as "from the future" relative to the new
+        # session's clock and could never trip the timeout check again.
+        self._coordinator_id: str | None = None
+        self._coordinator_term: int = 0
+        self._self_score: float = 0.0
+        self._peer_scores: dict[str, float] = {}
+        self._last_coordinator_heartbeat_at: float | None = None
+        self._started_monotonic: float | None = None
         # Serializes concurrent connect attempts to the same peer_id.
         # Manual connect() and mDNS auto-connect can both target the same
         # peer at nearly the same moment; two concurrent host.connect()
@@ -344,6 +383,7 @@ class SyncEngine:
         host = new_host(key_pair=key_pair, psk=self._psk_hex)
         self._host = host
         self._node_id = str(host.get_id())
+        self._started_monotonic = trio.current_time()
         host.set_stream_handler(FILE_TRANSFER_PROTOCOL, self._handle_file_transfer_stream)
         host.set_stream_handler(AGENT_DISPATCH_PROTOCOL, self._handle_agent_dispatch_stream)
         host.get_network().register_notifee(
@@ -388,6 +428,7 @@ class SyncEngine:
                     self._ready.set()
                     async with trio.open_nursery() as nursery:
                         nursery.start_soon(self._receive_loop, subscription)
+                        nursery.start_soon(self._coordinator_loop)
                         await self._stop_event.wait()
                         nursery.cancel_scope.cancel()
             finally:
@@ -417,6 +458,9 @@ class SyncEngine:
                 # broadcast simply replaces whatever this node had cached
                 # for that peer.
                 self._peer_capabilities[origin_node_id] = payload.get("capabilities", [])
+                continue
+            if entity_type == "coordinator_heartbeat":
+                self._handle_coordinator_heartbeat(origin_node_id, payload)
                 continue
             handler = self._on_state_change
             loop = self._loop
@@ -482,6 +526,14 @@ class SyncEngine:
                 pass  # trio run already tearing down on its own
         await asyncio.to_thread(self._thread.join, _THREAD_STOP_TIMEOUT_SECONDS)
         self._thread = None
+        # See _coordinator_id's __init__ comment: must reset, not carry
+        # over -- trio.current_time() restarts near-0 on the next start().
+        self._coordinator_id = None
+        self._coordinator_term = 0
+        self._self_score = 0.0
+        self._peer_scores.clear()
+        self._last_coordinator_heartbeat_at = None
+        self._started_monotonic = None
         self._connected_peers.clear()
 
     async def _call_trio(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
@@ -536,6 +588,15 @@ class SyncEngine:
         if self._connected_peers.pop(peer_id, None) is not None:
             logger.info("Peer %s disconnected", peer_id)
         self._peer_capabilities.pop(peer_id, None)
+        self._peer_scores.pop(peer_id, None)
+        if peer_id == self._coordinator_id:
+            # Force the next _coordinator_tick to treat the coordinator as
+            # missing immediately rather than waiting out the full timeout
+            # window -- a clean TCP disconnect is a stronger, faster signal
+            # than heartbeat silence. Bounded by one heartbeat interval of
+            # latency (the next tick), not immediate, to avoid adding a
+            # second cross-thread wakeup path just for this.
+            self._last_coordinator_heartbeat_at = None
 
     async def _trigger_peer_connected_handler(self) -> None:
         await trio.sleep(_MESH_FORM_DELAY_SECONDS)
@@ -577,6 +638,166 @@ class SyncEngine:
             }
         ).encode()
         await self._call_trio(self._trio_publish, envelope)
+
+    async def get_coordinator_status(self) -> CoordinatorStatus:
+        """Direct attribute read, no _call_trio round-trip -- same
+        best-effort GIL-protected-dict-read convention list_peers() and
+        list_peer_capabilities() already use for state written from the
+        trio thread and read from the asyncio side."""
+        return CoordinatorStatus(
+            coordinator_id=self._coordinator_id,
+            term=self._coordinator_term,
+            is_self=self._coordinator_id == self._node_id,
+            self_score=self._self_score,
+            peer_scores=dict(self._peer_scores),
+        )
+
+    async def reclaim_coordinator(self) -> None:
+        """Human-triggered failback override (#101's explicit non-default
+        escape hatch -- election never auto-fails-back once a healthy
+        replacement takes over, see _coordinator_tick). Bumping the term
+        unconditionally wins over any existing claim regardless of score:
+        every peer's _handle_coordinator_heartbeat adopts on `remote_term >
+        self._coordinator_term` before it ever compares scores, so this
+        node's next heartbeat is accepted mesh-wide without needing to
+        actually be the highest-scored peer -- a human asked for it
+        explicitly, which is a stronger signal than the score heuristic."""
+        if self._thread is None:
+            return
+        await self._call_trio(self._trio_reclaim_coordinator)
+
+    async def _trio_reclaim_coordinator(self) -> None:
+        self._coordinator_term += 1
+        self._coordinator_id = self._node_id
+        self._last_coordinator_heartbeat_at = trio.current_time()
+        await self._publish_coordinator_heartbeat()
+
+    async def _coordinator_loop(self) -> None:
+        while True:
+            try:
+                await self._coordinator_tick()
+            except Exception:
+                logger.exception("Coordinator election tick failed")
+            await trio.sleep(self._coordinator_heartbeat_interval)
+
+    async def _coordinator_tick(self) -> None:
+        assert self._started_monotonic is not None
+        now = trio.current_time()
+        self._self_score = compute_capability_score(self._sync_dir, now - self._started_monotonic)
+
+        if self._coordinator_id == self._node_id:
+            self._last_coordinator_heartbeat_at = now
+
+        timed_out = (
+            self._coordinator_id is not None
+            and self._coordinator_id != self._node_id
+            and (
+                self._last_coordinator_heartbeat_at is None
+                or now - self._last_coordinator_heartbeat_at > self._coordinator_timeout
+            )
+        )
+        if self._coordinator_id is None or timed_out:
+            best_id, best_score = self._node_id, self._self_score
+            assert best_id is not None
+            for peer_id, score in self._peer_scores.items():
+                if peer_id not in self._connected_peers:
+                    continue  # a stale score from a disconnected peer isn't a valid candidate
+                if outranks(peer_id, score, best_id, best_score):
+                    best_id, best_score = peer_id, score
+            if best_id == self._node_id:
+                if timed_out:
+                    logger.info(
+                        "Coordinator %s unresponsive (term=%s) -- electing self "
+                        "(term=%s, score=%.2f)",
+                        self._coordinator_id,
+                        self._coordinator_term,
+                        self._coordinator_term + 1,
+                        self._self_score,
+                    )
+                self._coordinator_term += 1
+                self._coordinator_id = self._node_id
+                self._last_coordinator_heartbeat_at = now
+            # else: the higher-scored peer is known but hasn't self-claimed
+            # yet -- wait for their own heartbeat rather than claiming on
+            # their behalf. If they never do (gone stale), _on_peer_
+            # disconnected/staleness naturally drops them as a candidate on
+            # a later tick.
+
+        await self._publish_coordinator_heartbeat()
+
+    async def _publish_coordinator_heartbeat(self) -> None:
+        envelope = json.dumps(
+            {
+                "entity_type": "coordinator_heartbeat",
+                "entity_id": "coordinator",
+                "vector_clock": {},
+                "origin_node_id": self._node_id,
+                "payload": {
+                    "term": self._coordinator_term,
+                    "is_coordinator": self._coordinator_id == self._node_id,
+                    "score": self._self_score,
+                },
+            }
+        ).encode()
+        await self._trio_publish(envelope)
+
+    def _handle_coordinator_heartbeat(self, origin_node_id: str, payload: dict[str, Any]) -> None:
+        """Every peer broadcasts every tick (carrying its own score, used
+        to build _peer_scores for candidate ranking); only a self-claim
+        (is_coordinator=True, origin_node_id asserting itself, never a
+        third party relaying belief about someone else) is authoritative
+        for _coordinator_id/_coordinator_term -- classic bully-election
+        semantics. Higher term always wins outright (the split-brain
+        defense: a coordinator that sees a higher term steps down
+        immediately, engine.py:_coordinator_tick's own election bumps the
+        term specifically so its claim wins over any stale lower-term
+        claim still circulating). Equal term with a different claimed
+        coordinator is a genuine simultaneous-election collision (e.g. two
+        peers each self-electing on their very first tick before they'd
+        heard from each other) -- resolved by the same outranks() total
+        order used for candidate selection, so every peer converges on the
+        identical winner from the same gossiped inputs."""
+        try:
+            remote_term = int(payload["term"])
+            is_coordinator = bool(payload["is_coordinator"])
+            score = float(payload["score"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self._peer_scores[origin_node_id] = score
+        if not is_coordinator:
+            return
+
+        current_id = self._coordinator_id
+        if current_id is None:
+            current_score = float("-inf")
+        elif current_id == self._node_id:
+            current_score = self._self_score
+        else:
+            current_score = self._peer_scores.get(current_id, float("-inf"))
+
+        if (
+            current_id is None
+            or remote_term > self._coordinator_term
+            or (
+                remote_term == self._coordinator_term
+                and origin_node_id != current_id
+                and outranks(origin_node_id, score, current_id, current_score)
+            )
+        ):
+            if current_id == self._node_id and origin_node_id != self._node_id:
+                logger.info(
+                    "Stepping down as coordinator: %s has priority "
+                    "(term=%s, score=%.2f vs my %.2f)",
+                    origin_node_id,
+                    remote_term,
+                    score,
+                    self._self_score,
+                )
+            self._coordinator_term = remote_term
+            self._coordinator_id = origin_node_id
+            self._last_coordinator_heartbeat_at = trio.current_time()
+        elif origin_node_id == current_id:
+            self._last_coordinator_heartbeat_at = trio.current_time()
 
     async def publish_state_change(
         self,

@@ -77,6 +77,16 @@ class CapabilitiesOut(BaseModel):
     capabilities: list[str]
 
 
+class CoordinatorOut(BaseModel):
+    running: bool
+    node_id: str | None
+    coordinator_id: str | None
+    term: int
+    is_self: bool
+    self_score: float
+    peer_scores: dict[str, float]
+
+
 class SetCapabilitiesRequest(BaseModel):
     capabilities: list[str]
 
@@ -119,6 +129,58 @@ async def set_capabilities(
     if engine.running:
         await engine.publish_capabilities(body.capabilities)
     return CapabilitiesOut(capabilities=body.capabilities)
+
+
+@router.get("/coordinator", response_model=CoordinatorOut)
+async def get_coordinator(_: CurrentWorkspaceId, _o: OwnerGrant) -> CoordinatorOut:
+    """#101: current bully-election coordinator status for
+    workspace-singleton work. Mirrors sync_status's "not running" shape
+    (benign default, not an error) for the same reason -- a single-peer
+    or not-yet-logged-in workspace isn't a failure state."""
+    engine = get_sync_engine()
+    if not engine.running:
+        return CoordinatorOut(
+            running=False,
+            node_id=None,
+            coordinator_id=None,
+            term=0,
+            is_self=False,
+            self_score=0.0,
+            peer_scores={},
+        )
+    coord = await engine.get_coordinator_status()
+    return CoordinatorOut(
+        running=True,
+        node_id=engine.node_id,
+        coordinator_id=coord.coordinator_id,
+        term=coord.term,
+        is_self=coord.is_self,
+        self_score=coord.self_score,
+        peer_scores=coord.peer_scores,
+    )
+
+
+@router.post("/coordinator/reclaim", response_model=CoordinatorOut)
+async def reclaim_coordinator(_: CurrentWorkspaceId, _o: OwnerGrant) -> CoordinatorOut:
+    """Human-triggered failback override -- election never auto-fails-back
+    on its own (see engine.py's _coordinator_tick), by design: a
+    coordinator that flaps back and forth as a higher-spec peer blinks on
+    and off is worse than a stable-but-suboptimal one. This is the
+    explicit "I want it back now" action instead."""
+    engine = get_sync_engine()
+    if not engine.running:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Sync engine is not running")
+    await engine.reclaim_coordinator()
+    coord = await engine.get_coordinator_status()
+    return CoordinatorOut(
+        running=True,
+        node_id=engine.node_id,
+        coordinator_id=coord.coordinator_id,
+        term=coord.term,
+        is_self=coord.is_self,
+        self_score=coord.self_score,
+        peer_scores=coord.peer_scores,
+    )
 
 
 @router.post("/connect", response_model=PeerOut)

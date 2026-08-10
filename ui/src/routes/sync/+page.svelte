@@ -1,10 +1,19 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
-	import { sync, type Peer, type SyncConflict, type SyncStatus } from '$lib/api/sync';
+	import {
+		sync,
+		type CoordinatorStatus,
+		type Peer,
+		type SyncConflict,
+		type SyncStatus
+	} from '$lib/api/sync';
 
 	let status = $state<SyncStatus | null>(null);
+	let coordinator = $state<CoordinatorStatus | null>(null);
 	let conflicts = $state<SyncConflict[]>([]);
 	let loadError = $state<string | null>(null);
+	let reclaiming = $state(false);
+	let reclaimError = $state<string | null>(null);
 
 	let connectAddress = $state('');
 	let connecting = $state(false);
@@ -20,8 +29,9 @@
 	async function refresh() {
 		loadError = null;
 		try {
-			[status, conflicts, { capabilities: myCapabilities }] = await Promise.all([
+			[status, coordinator, conflicts, { capabilities: myCapabilities }] = await Promise.all([
 				sync.status(),
+				sync.coordinator(),
 				sync.conflicts(),
 				sync.getCapabilities()
 			]);
@@ -32,6 +42,18 @@
 	}
 
 	refresh();
+
+	async function handleReclaim() {
+		reclaimError = null;
+		reclaiming = true;
+		try {
+			coordinator = await sync.reclaimCoordinator();
+		} catch (err) {
+			reclaimError = err instanceof ApiError ? err.message : 'Failed to reclaim coordinator';
+		} finally {
+			reclaiming = false;
+		}
+	}
 
 	async function handleSetCapabilities(event: SubmitEvent) {
 		event.preventDefault();
@@ -210,6 +232,46 @@
 				</ul>
 			{/if}
 		</section>
+
+		{#if coordinator && coordinator.running}
+			<section
+				class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+			>
+				<div class="flex items-center justify-between">
+					<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Coordinator</h2>
+					{#if coordinator.coordinator_id}
+						<span
+							class="rounded-sm px-2 py-0.5 text-xs {coordinator.is_self
+								? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+								: 'bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400'}"
+						>
+							{coordinator.is_self ? 'this node' : shortId(coordinator.coordinator_id)}
+						</span>
+					{/if}
+				</div>
+				<p class="text-sm text-neutral-600 dark:text-neutral-400">
+					A spec-weighted election (#101) picks one peer to own workspace-singleton work (e.g.
+					scheduled jobs) so it doesn't run redundantly on every peer at once. Failover is
+					automatic; failback to a returning higher-spec peer is not — use reclaim below if you want
+					it back explicitly.
+				</p>
+				<p class="font-mono text-xs text-neutral-500">
+					term {coordinator.term} · this node's score {coordinator.self_score.toFixed(1)}
+				</p>
+				{#if !coordinator.is_self}
+					<button
+						onclick={handleReclaim}
+						disabled={reclaiming}
+						class="self-start rounded-md border border-ink/15 px-4 py-2 text-sm font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+					>
+						{reclaiming ? 'Reclaiming…' : 'Reclaim coordinator'}
+					</button>
+				{/if}
+				{#if reclaimError}
+					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{reclaimError}</p>
+				{/if}
+			</section>
+		{/if}
 
 		<section class="flex flex-col gap-3">
 			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">
