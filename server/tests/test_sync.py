@@ -76,6 +76,7 @@ from rivulets.sync.apply import (
     retry_pending_inbound,
 )
 from rivulets.sync.engine import (
+    CoordinatorStatus,
     PeerInfo,
     SyncEngine,
     _bound_port,  # pyright: ignore[reportPrivateUsage]
@@ -906,6 +907,196 @@ async def test_two_engines_sync_capability_broadcast(tmp_path: Path) -> None:
         await engine_b.stop()
 
 
+# ---------------------------------------------------------------------------
+# #101: bully-style coordinator election. Short heartbeat_interval/timeout
+# overrides (vs. engine.py's 5s/15s production defaults) keep these real
+# two/three-engine tests fast without changing the algorithm under test.
+# ---------------------------------------------------------------------------
+
+_TEST_HEARTBEAT_INTERVAL = 0.2
+_TEST_TIMEOUT = 0.6
+
+
+async def _poll_until(predicate: Any, *, attempts: int = 50, interval: float = 0.2) -> None:
+    for _ in range(attempts):
+        if await predicate():
+            return
+        await asyncio.sleep(interval)
+    pytest.fail("condition never became true")
+
+
+async def test_single_engine_elects_self_as_coordinator(tmp_path: Path) -> None:
+    """No quorum threshold: a lone peer with no visible peers becomes its
+    own coordinator on the very first tick, term 1."""
+    engine = SyncEngine(
+        tmp_path,
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    await engine.start("solo-coordinator-fingerprint", hashlib.sha256(b"solo").digest().hex())
+    try:
+        await asyncio.sleep(_TEST_HEARTBEAT_INTERVAL * 3)
+        status = await engine.get_coordinator_status()
+        assert status.is_self is True
+        assert status.coordinator_id == engine.node_id
+        assert status.term == 1
+    finally:
+        await engine.stop()
+
+
+async def test_two_engines_converge_on_same_coordinator(tmp_path: Path) -> None:
+    """Both engines run on the same test machine (near-identical capability
+    scores), so this deliberately doesn't assert *which* peer wins -- only
+    that gossiped self-claims converge both sides onto one agreed
+    coordinator, per outranks()'s deterministic tie-break."""
+    psk_hex = hashlib.sha256(b"coordinator-election-workspace").digest().hex()
+    engine_a = SyncEngine(
+        tmp_path / "a",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    engine_b = SyncEngine(
+        tmp_path / "b",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    await engine_a.start("coordinator-election-fingerprint-a", psk_hex)
+    await engine_b.start("coordinator-election-fingerprint-b", psk_hex)
+    try:
+        addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            _get_first_addr, engine_a
+        )
+        await engine_b.connect(addr)
+        await asyncio.sleep(2.0)  # let gossipsub GRAFT the mesh (heartbeat-driven)
+
+        async def _converged() -> bool:
+            status_a = await engine_a.get_coordinator_status()
+            status_b = await engine_b.get_coordinator_status()
+            return (
+                status_a.coordinator_id is not None
+                and status_a.coordinator_id == status_b.coordinator_id
+                and status_a.term == status_b.term
+            )
+
+        await _poll_until(_converged, attempts=30, interval=0.3)
+
+        status_a = await engine_a.get_coordinator_status()
+        status_b = await engine_b.get_coordinator_status()
+        # Exactly one side believes it's the coordinator, never both, never
+        # neither -- split-brain resolved.
+        assert status_a.is_self != status_b.is_self
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+
+
+async def test_coordinator_failover_on_disconnect(tmp_path: Path) -> None:
+    """The surviving peer re-elects itself once the coordinator drops off
+    the mesh -- TCP disconnect is treated as an immediate re-election
+    trigger (engine.py's _on_peer_disconnected), not just the heartbeat
+    timeout, so this converges within roughly one heartbeat interval."""
+    psk_hex = hashlib.sha256(b"coordinator-failover-workspace").digest().hex()
+    engine_a = SyncEngine(
+        tmp_path / "a",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    engine_b = SyncEngine(
+        tmp_path / "b",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    await engine_a.start("coordinator-failover-fingerprint-a", psk_hex)
+    await engine_b.start("coordinator-failover-fingerprint-b", psk_hex)
+    try:
+        addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            _get_first_addr, engine_a
+        )
+        await engine_b.connect(addr)
+        await asyncio.sleep(2.0)
+
+        async def _converged() -> bool:
+            status_a = await engine_a.get_coordinator_status()
+            status_b = await engine_b.get_coordinator_status()
+            return (
+                status_a.coordinator_id is not None
+                and status_a.coordinator_id == status_b.coordinator_id
+            )
+
+        await _poll_until(_converged, attempts=30, interval=0.3)
+
+        status_a = await engine_a.get_coordinator_status()
+        coordinator, follower = (engine_a, engine_b) if status_a.is_self else (engine_b, engine_a)
+
+        await follower.disconnect(coordinator.node_id)
+
+        async def _follower_took_over() -> bool:
+            status = await follower.get_coordinator_status()
+            return status.is_self is True
+
+        await _poll_until(_follower_took_over, attempts=30, interval=0.3)
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+
+
+async def test_reclaim_coordinator_forces_takeover(tmp_path: Path) -> None:
+    """The human-triggered override: a peer that is NOT currently
+    coordinator (and, on this same-spec test setup, wouldn't necessarily
+    win a natural re-election) forces itself into the role via a higher
+    term, which every peer adopts unconditionally regardless of score."""
+    psk_hex = hashlib.sha256(b"coordinator-reclaim-workspace").digest().hex()
+    engine_a = SyncEngine(
+        tmp_path / "a",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    engine_b = SyncEngine(
+        tmp_path / "b",
+        coordinator_heartbeat_interval=_TEST_HEARTBEAT_INTERVAL,
+        coordinator_timeout=_TEST_TIMEOUT,
+    )
+    await engine_a.start("coordinator-reclaim-fingerprint-a", psk_hex)
+    await engine_b.start("coordinator-reclaim-fingerprint-b", psk_hex)
+    try:
+        addr = await engine_a._call_trio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            _get_first_addr, engine_a
+        )
+        await engine_b.connect(addr)
+        await asyncio.sleep(2.0)
+
+        async def _converged() -> bool:
+            status_a = await engine_a.get_coordinator_status()
+            status_b = await engine_b.get_coordinator_status()
+            return (
+                status_a.coordinator_id is not None
+                and status_a.coordinator_id == status_b.coordinator_id
+            )
+
+        await _poll_until(_converged, attempts=30, interval=0.3)
+
+        status_a = await engine_a.get_coordinator_status()
+        _coordinator, follower = (engine_a, engine_b) if status_a.is_self else (engine_b, engine_a)
+        term_before = status_a.term
+
+        await follower.reclaim_coordinator()
+
+        async def _both_agree_follower_won() -> bool:
+            status_a2 = await engine_a.get_coordinator_status()
+            status_b2 = await engine_b.get_coordinator_status()
+            return (
+                status_a2.coordinator_id == follower.node_id
+                and status_b2.coordinator_id == follower.node_id
+                and status_a2.term == status_b2.term
+                and status_a2.term > term_before
+            )
+
+        await _poll_until(_both_agree_follower_won, attempts=30, interval=0.3)
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+
+
 def test_sync_status_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/sync/status", headers=auth_headers)
     assert response.status_code == 200
@@ -924,6 +1115,27 @@ def test_sync_disconnect_when_not_running(client: TestClient, auth_headers: dict
     response = client.post(
         "/api/v1/sync/disconnect", json={"peer_id": "some-peer"}, headers=auth_headers
     )
+    assert response.status_code == 409
+
+
+def test_get_coordinator_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/sync/coordinator", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {
+        "running": False,
+        "node_id": None,
+        "coordinator_id": None,
+        "term": 0,
+        "is_self": False,
+        "self_score": 0.0,
+        "peer_scores": {},
+    }
+
+
+def test_reclaim_coordinator_when_not_running(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post("/api/v1/sync/coordinator/reclaim", headers=auth_headers)
     assert response.status_code == 409
 
 
@@ -1174,10 +1386,14 @@ class _FakeRunningEngine:
         peers: list[PeerInfo] | None = None,
         connect_result: PeerInfo | Exception | None = None,
         disconnect_error: Exception | None = None,
+        coordinator_status: CoordinatorStatus | None = None,
     ) -> None:
         self._peers = peers or []
         self._connect_result = connect_result
         self._disconnect_error = disconnect_error
+        self._coordinator_status = coordinator_status or CoordinatorStatus(
+            coordinator_id="fake-node-id", term=1, is_self=True, self_score=42.0, peer_scores={}
+        )
 
     async def list_peers(self) -> list[PeerInfo]:
         return self._peers
@@ -1194,6 +1410,18 @@ class _FakeRunningEngine:
     async def disconnect(self, peer_id: str) -> None:  # noqa: ARG002
         if self._disconnect_error is not None:
             raise self._disconnect_error
+
+    async def get_coordinator_status(self) -> CoordinatorStatus:
+        return self._coordinator_status
+
+    async def reclaim_coordinator(self) -> None:
+        self._coordinator_status = CoordinatorStatus(
+            coordinator_id=self.node_id,
+            term=self._coordinator_status.term + 1,
+            is_self=True,
+            self_score=self._coordinator_status.self_score,
+            peer_scores=self._coordinator_status.peer_scores,
+        )
 
 
 def test_sync_status_when_running_reports_peers(
@@ -1268,6 +1496,53 @@ def test_sync_disconnect_when_running_succeeds(
     )
 
     assert response.status_code == 204
+
+
+def test_get_coordinator_when_running_reports_status(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine(
+        coordinator_status=CoordinatorStatus(
+            coordinator_id="peer-9",
+            term=3,
+            is_self=False,
+            self_score=12.5,
+            peer_scores={"peer-9": 99.0},
+        )
+    )
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.get("/api/v1/sync/coordinator", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "running": True,
+        "node_id": "fake-node-id",
+        "coordinator_id": "peer-9",
+        "term": 3,
+        "is_self": False,
+        "self_score": 12.5,
+        "peer_scores": {"peer-9": 99.0},
+    }
+
+
+def test_reclaim_coordinator_when_running_forces_self(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine(
+        coordinator_status=CoordinatorStatus(
+            coordinator_id="peer-9", term=3, is_self=False, self_score=12.5, peer_scores={}
+        )
+    )
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+
+    response = client.post("/api/v1/sync/coordinator/reclaim", headers=auth_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["coordinator_id"] == "fake-node-id"
+    assert body["is_self"] is True
+    assert body["term"] == 4
 
 
 async def test_resolve_conflict_rejects_invalid_keep_for_a_real_conflict(

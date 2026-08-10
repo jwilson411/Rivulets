@@ -17,6 +17,16 @@ export interface SyncStatus {
 	pending_changes: number;
 }
 
+export interface CoordinatorStatus {
+	running: boolean;
+	node_id: string | null;
+	coordinator_id: string | null;
+	term: number;
+	is_self: boolean;
+	self_score: number;
+	peer_scores: Record<string, number>;
+}
+
 export interface SyncConflict {
 	id: string;
 	entity_type: string;
@@ -35,6 +45,9 @@ export const sync = {
 		api.post<Peer>('/sync/connect', { address }, auth.token ?? undefined),
 	disconnect: (peer_id: string) =>
 		api.post<void>('/sync/disconnect', { peer_id }, auth.token ?? undefined),
+	coordinator: () => api.get<CoordinatorStatus>('/sync/coordinator', auth.token ?? undefined),
+	reclaimCoordinator: () =>
+		api.post<CoordinatorStatus>('/sync/coordinator/reclaim', {}, auth.token ?? undefined),
 	conflicts: () => api.get<SyncConflict[]>('/sync/conflicts', auth.token ?? undefined),
 	resolveConflict: (id: string, keep: 'local' | 'remote') =>
 		api.post<SyncConflict>(`/sync/conflicts/${id}/resolve`, { keep }, auth.token ?? undefined),

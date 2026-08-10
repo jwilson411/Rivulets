@@ -6,7 +6,7 @@ import { page } from 'vitest/browser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import SyncPage from './+page.svelte';
-import { sync, type SyncStatus, type SyncConflict } from '$lib/api/sync';
+import { sync, type CoordinatorStatus, type SyncStatus, type SyncConflict } from '$lib/api/sync';
 import { ApiError } from '$lib/api/client';
 
 vi.mock('$lib/api/sync', () => ({
@@ -14,6 +14,8 @@ vi.mock('$lib/api/sync', () => ({
 		status: vi.fn(),
 		connect: vi.fn(),
 		disconnect: vi.fn(),
+		coordinator: vi.fn(),
+		reclaimCoordinator: vi.fn(),
 		conflicts: vi.fn(),
 		resolveConflict: vi.fn(),
 		getCapabilities: vi.fn(),
@@ -35,8 +37,19 @@ const runningStatus: SyncStatus = {
 	pending_changes: 0
 };
 
+const selfCoordinator: CoordinatorStatus = {
+	running: true,
+	node_id: 'node-abc123',
+	coordinator_id: 'node-abc123',
+	term: 1,
+	is_self: true,
+	self_score: 42.5,
+	peer_scores: {}
+};
+
 beforeEach(() => {
 	vi.mocked(sync.getCapabilities).mockResolvedValue({ capabilities: [] });
+	vi.mocked(sync.coordinator).mockResolvedValue(selfCoordinator);
 });
 
 const conflict: SyncConflict = {
@@ -238,5 +251,92 @@ describe('sync/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Disconnect' }).click();
 
 		await expect.element(page.getByText('peer unreachable')).toBeInTheDocument();
+	});
+
+	it('shows this node as coordinator and hides the reclaim button', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.coordinator).mockResolvedValue(selfCoordinator);
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('this node', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('term 1', { exact: false })).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Reclaim coordinator' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows another peer as coordinator with a reclaim option', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.coordinator).mockResolvedValue({
+			...selfCoordinator,
+			coordinator_id: 'peer-9999999999999999',
+			is_self: false
+		});
+
+		render(SyncPage);
+
+		await expect
+			.element(page.getByRole('button', { name: 'Reclaim coordinator' }))
+			.toBeInTheDocument();
+	});
+
+	it('reclaims coordinator via sync.reclaimCoordinator', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.coordinator).mockResolvedValue({
+			...selfCoordinator,
+			coordinator_id: 'peer-9999999999999999',
+			is_self: false
+		});
+		vi.mocked(sync.reclaimCoordinator).mockResolvedValueOnce({
+			...selfCoordinator,
+			term: 2
+		});
+
+		render(SyncPage);
+		await page.getByRole('button', { name: 'Reclaim coordinator' }).click();
+
+		expect(sync.reclaimCoordinator).toHaveBeenCalled();
+		await expect.element(page.getByText('this node', { exact: true })).toBeInTheDocument();
+	});
+
+	it('shows the ApiError message when reclaiming coordinator fails', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.coordinator).mockResolvedValue({
+			...selfCoordinator,
+			coordinator_id: 'peer-9999999999999999',
+			is_self: false
+		});
+		vi.mocked(sync.reclaimCoordinator).mockRejectedValueOnce(
+			new ApiError(409, 'sync engine is not running')
+		);
+
+		render(SyncPage);
+		await page.getByRole('button', { name: 'Reclaim coordinator' }).click();
+
+		await expect.element(page.getByText('sync engine is not running')).toBeInTheDocument();
+	});
+
+	it('hides the coordinator section when sync is not running', async () => {
+		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, running: false, node_id: null });
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+		vi.mocked(sync.coordinator).mockResolvedValue({
+			running: false,
+			node_id: null,
+			coordinator_id: null,
+			term: 0,
+			is_self: false,
+			self_score: 0,
+			peer_scores: {}
+		});
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('not running')).toBeInTheDocument();
+		await expect.element(page.getByText('Coordinator')).not.toBeInTheDocument();
 	});
 });
