@@ -301,3 +301,90 @@ def test_set_peer_preference_not_found(client: TestClient, auth_headers: dict[st
         headers=auth_headers,
     )
     assert response.status_code == 404
+
+
+def test_create_agent_records_version_one(client: TestClient, auth_headers: dict[str, str]) -> None:
+    agent = _create_agent(client, auth_headers)
+    versions = client.get(f"/api/v1/agents/{agent['id']}/versions", headers=auth_headers).json()
+    assert len(versions) == 1
+    assert versions[0]["version"] == 1
+    assert versions[0]["instructions"] == "You are a DBA."
+    assert versions[0]["model"] == "anthropic:claude-haiku-4-5-20251001"
+
+
+def test_list_agent_versions_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/agents/nonexistent/versions", headers=auth_headers)
+    assert response.status_code == 404
+
+
+def test_update_agent_instructions_adds_a_version(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+
+    updated = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"instructions": "You are a senior DBA now."},
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+
+    versions = client.get(f"/api/v1/agents/{agent['id']}/versions", headers=auth_headers).json()
+    assert [v["version"] for v in versions] == [2, 1]
+    assert versions[0]["instructions"] == "You are a senior DBA now."
+    assert versions[1]["instructions"] == "You are a DBA."
+
+
+def test_update_agent_name_only_does_not_add_a_version(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+
+    updated = client.patch(
+        f"/api/v1/agents/{agent['id']}", json={"name": "Senior DBA"}, headers=auth_headers
+    )
+    assert updated.status_code == 200
+
+    versions = client.get(f"/api/v1/agents/{agent['id']}/versions", headers=auth_headers).json()
+    assert len(versions) == 1
+
+
+def test_rollback_agent_version(client: TestClient, auth_headers: dict[str, str]) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"instructions": "You are a senior DBA now.", "model": "openai:gpt-4o-mini"},
+        headers=auth_headers,
+    )
+
+    rolled_back = client.post(
+        f"/api/v1/agents/{agent['id']}/versions/1/rollback", headers=auth_headers
+    )
+    assert rolled_back.status_code == 200, rolled_back.text
+    body = rolled_back.json()
+    assert body["instructions"] == "You are a DBA."
+    assert body["model"] == "anthropic:claude-haiku-4-5-20251001"
+
+    fetched = client.get(f"/api/v1/agents/{agent['id']}", headers=auth_headers).json()
+    assert fetched["instructions"] == "You are a DBA."
+    assert fetched["model"] == "anthropic:claude-haiku-4-5-20251001"
+
+    # The rollback itself is recorded as a new (third) version.
+    versions = client.get(f"/api/v1/agents/{agent['id']}/versions", headers=auth_headers).json()
+    assert [v["version"] for v in versions] == [3, 2, 1]
+    assert versions[0]["instructions"] == "You are a DBA."
+
+
+def test_rollback_agent_version_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    agent = _create_agent(client, auth_headers)
+    response = client.post(
+        f"/api/v1/agents/{agent['id']}/versions/99/rollback", headers=auth_headers
+    )
+    assert response.status_code == 404
+
+
+def test_rollback_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.post(
+        "/api/v1/agents/nonexistent/versions/1/rollback", headers=auth_headers
+    )
+    assert response.status_code == 404

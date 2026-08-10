@@ -28,6 +28,15 @@ export interface RoutingRule {
 	priority: number;
 }
 
+// Instructions/model history (#104) — a change to either field is
+// snapshotted on create/update/rollback, mirroring ToolVersion.
+export interface AgentVersion {
+	version: number;
+	instructions: string;
+	model: string;
+	created_at: string;
+}
+
 export interface AgentCreateInput {
 	name: string;
 	description: string;
@@ -72,5 +81,9 @@ export const agents = {
 			`/agents/${id}/peer-preference`,
 			{ capability_tag },
 			auth.token ?? undefined
-		)
+		),
+	listVersions: (id: string) =>
+		api.get<AgentVersion[]>(`/agents/${id}/versions`, auth.token ?? undefined),
+	rollback: (id: string, version: number) =>
+		api.post<Agent>(`/agents/${id}/versions/${version}/rollback`, undefined, auth.token ?? undefined)
 };

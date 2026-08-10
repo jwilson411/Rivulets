@@ -173,6 +173,35 @@ class Agent(Base):
     )
 
 
+class AgentVersion(Base):
+    """History of Agent.instructions/model changes (#104), so an edit that
+    turns out worse can be diffed against and reverted -- until this
+    existed, editing an agent overwrote instructions/model in place with
+    no way to see what it used to say or revert to. Snapshotted by
+    api/agents.py's create_agent/update_agent/rollback_agent_version
+    whenever either field is set, mirroring ToolVersion: a side effect of
+    editing the parent row, not an independently-replicated record (no
+    vector_clock here). Deliberately narrow scope, per #104: only
+    instructions/model, not routing rules or tool assignments (those can
+    be just as behavior-altering, but versioning them is a separate,
+    unscoped follow-up). Only records edits made on this node -- an
+    instructions/model change that arrives via P2P sync updates the
+    Agent row (see sync/apply.py's AGENT_SPEC) but doesn't add a version
+    row here; the smaller "history to look at and revert" core the issue
+    asked for, not full draft/published gating or cross-peer history
+    replication."""
+
+    __tablename__ = "agent_version"
+    __table_args__ = (Index("idx_agent_version", "agent_id", "version"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
+    version: Mapped[int]
+    instructions: Mapped[str]
+    model: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class AgentRoutingRule(Base):
     __tablename__ = "agent_routing_rule"
 

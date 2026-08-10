@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { agents, type Agent, type RoutingRule, type RuleType } from '$lib/api/agents';
+	import { agents, type Agent, type AgentVersion, type RoutingRule, type RuleType } from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
@@ -9,6 +9,7 @@
 	let providerList = $state<Provider[]>([]);
 	let teamList = $state<TeamDetail[]>([]);
 	let rulesByAgent = $state<Record<string, RoutingRule[]>>({});
+	let versionsByAgent = $state<Record<string, AgentVersion[]>>({});
 	let loadError = $state<string | null>(null);
 
 	// Team detail (not just the summary teams.list() returns) is the only
@@ -94,6 +95,10 @@
 				)
 			);
 			peerPreferenceDrafts = Object.fromEntries(preferenceEntries);
+			const versionEntries = await Promise.all(
+				agentList.map(async (a) => [a.id, await agents.listVersions(a.id)] as const)
+			);
+			versionsByAgent = Object.fromEntries(versionEntries);
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load agents';
 		}
@@ -207,6 +212,18 @@
 			await refresh();
 		} catch (err) {
 			actionError = err instanceof Error ? err.message : 'Failed to delete agent';
+		}
+	}
+
+	// #104: reverts instructions/model to a prior version and records the
+	// rollback itself as a new version, so history stays diffable.
+	async function handleRollback(agentId: string, version: number) {
+		actionError = null;
+		try {
+			await agents.rollback(agentId, version);
+			await refresh();
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to roll back agent';
 		}
 	}
 </script>
@@ -426,6 +443,38 @@
 									/>
 									Approve this agent's sensitive tools for unattended use
 								</label>
+							</div>
+						</details>
+						<details class="mt-2">
+							<summary
+								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+							>
+								Instructions/model history
+							</summary>
+							<div class="mt-2 flex flex-col gap-1">
+								{#if versionsByAgent[agent.id]?.length}
+									<ul class="flex flex-col gap-1">
+										{#each versionsByAgent[agent.id] as version (version.version)}
+											<li
+												class="flex items-center justify-between gap-2 text-xs text-neutral-600 dark:text-neutral-400"
+											>
+												<span class="truncate">
+													v{version.version} — {new Date(
+														version.created_at
+													).toLocaleString()} — <span class="font-mono">{version.model}</span>
+												</span>
+												<button
+													onclick={() => handleRollback(agent.id, version.version)}
+													class="shrink-0 text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+												>
+													Roll back
+												</button>
+											</li>
+										{/each}
+									</ul>
+								{:else}
+									<p class="text-xs text-neutral-500">No history yet.</p>
+								{/if}
 							</div>
 						</details>
 					</div>
