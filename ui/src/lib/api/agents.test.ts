@@ -122,6 +122,27 @@ describe('agents', () => {
 		expect(init.body).toBe(JSON.stringify({ capability_tag: 'router' }));
 	});
 
+	it('getVersions() GETs /agents/:id/versions', async () => {
+		const fetchMock = mockFetch([{ version: 1 }]);
+
+		const result = await agents.getVersions('a1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/agents/a1/versions');
+		expect(result).toEqual([{ version: 1 }]);
+	});
+
+	it('rollbackVersion() POSTs /agents/:id/versions/:version/rollback', async () => {
+		const fetchMock = mockFetch({ id: 'a1' });
+
+		const result = await agents.rollbackVersion('a1', 2);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/versions/2/rollback');
+		expect(init.method).toBe('POST');
+		expect(result).toEqual({ id: 'a1' });
+	});
+
 	it('sends the Authorization header derived from auth.token', async () => {
 		const fetchMock = mockFetch([]);
 

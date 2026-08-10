@@ -173,6 +173,31 @@ class Agent(Base):
     )
 
 
+class AgentVersion(Base):
+    """#104: history of an agent's instructions/model over time, mirroring
+    ToolVersion's shape. Unsynced (no vector_clock, no sync/apply.py entry)
+    on purpose -- Agent.instructions/model are already synced fields
+    (sync/apply.py's AGENT_SPEC), so a rollback that restores an old value
+    onto the live Agent row replicates to peers via the normal agent-update
+    path; the version log itself only needs to exist on whichever node(s)
+    made the edits. Unlike tool_version (where the on-disk file is the
+    source of truth and rollback deliberately skips logging a new row --
+    see api/tools.py), a rollback here also appends a new version, since
+    the DB row is Agent's only source of truth and "latest row == current
+    live values" is a simpler invariant to keep than a special-cased read.
+    """
+
+    __tablename__ = "agent_version"
+    __table_args__ = (Index("idx_agent_version", "agent_id", "version"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
+    version: Mapped[int]
+    instructions: Mapped[str]
+    model: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class AgentRoutingRule(Base):
     __tablename__ = "agent_routing_rule"
 

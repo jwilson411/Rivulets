@@ -28,6 +28,14 @@ export interface RoutingRule {
 	priority: number;
 }
 
+// #104: history of an agent's instructions/model. Newest first.
+export interface AgentVersion {
+	version: number;
+	instructions: string;
+	model: string;
+	created_at: string;
+}
+
 export interface AgentCreateInput {
 	name: string;
 	description: string;
@@ -72,5 +80,9 @@ export const agents = {
 			`/agents/${id}/peer-preference`,
 			{ capability_tag },
 			auth.token ?? undefined
-		)
+		),
+	getVersions: (id: string) =>
+		api.get<AgentVersion[]>(`/agents/${id}/versions`, auth.token ?? undefined),
+	rollbackVersion: (id: string, version: number) =>
+		api.post<Agent>(`/agents/${id}/versions/${version}/rollback`, {}, auth.token ?? undefined)
 };

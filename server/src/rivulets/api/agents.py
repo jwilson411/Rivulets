@@ -12,6 +12,12 @@ first slice — see sync/apply.py's module docstring): every create/update
 bumps this node's vector-clock component and publishes the new state to
 peers. Publishing is best-effort — a peer being unreachable, or the sync
 engine not running at all, must never fail the request (FR-9.5).
+
+#104: every instructions/model change (creation counts as the first one)
+appends an AgentVersion row (unsynced, same shape as tool_version — see
+that model's docstring). Rollback restores instructions/model from a past
+version onto the live Agent row, which *does* propagate to peers, since
+those are already-synced Agent fields.
 """
 
 import json
@@ -29,6 +35,7 @@ from rivulets.db.models import (
     AgentRoutingRule,
     AgentRun,
     AgentTool,
+    AgentVersion,
     TeamAgent,
 )
 from rivulets.dispatch.rule_generation import generate_routing_rules
@@ -129,6 +136,15 @@ class RoutingRulesUpdate(BaseModel):
     rules: list[RoutingRuleIn]
 
 
+class AgentVersionOut(BaseModel):
+    version: int
+    instructions: str
+    model: str
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
 class PeerPreferenceOut(BaseModel):
     capability_tag: str | None
 
@@ -168,6 +184,27 @@ async def _generate_and_store_routing_rules(db: DbSession, agent: Agent) -> None
         await db.commit()
 
 
+async def _snapshot_agent_version(db: DbSession, agent: Agent) -> None:
+    """Append a version row capturing agent's *current* instructions/model
+    (same after-the-fact convention as tool_version — see api/tools.py's
+    save_tool_version). Caller is responsible for having already applied
+    the new values to `agent` and for committing afterward."""
+    latest_version = await db.scalar(
+        select(AgentVersion.version)
+        .where(AgentVersion.agent_id == agent.id)
+        .order_by(AgentVersion.version.desc())
+        .limit(1)
+    )
+    db.add(
+        AgentVersion(
+            agent_id=agent.id,
+            version=(latest_version or 0) + 1,
+            instructions=agent.instructions,
+            model=agent.model,
+        )
+    )
+
+
 async def _publish_agent_change(db: DbSession, agent: Agent) -> None:
     await publish_current_state(db, "agent", agent.id)
 
@@ -205,6 +242,7 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
 
     await _set_tools(db, agent.id, body.tool_ids)
     await _set_teams(db, agent.id, body.team_ids)
+    await _snapshot_agent_version(db, agent)  # #104: version 1
     await db.commit()
 
     await _generate_and_store_routing_rules(db, agent)
@@ -224,10 +262,12 @@ async def update_agent(
 ) -> Agent:
     agent = await _get_or_404(db, agent_id)
     rule_regen_fields = {"description", "instructions"}
+    version_fields = {"instructions", "model"}
     updates = body.model_dump(
         exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models"}
     )
     needs_rule_regen = rule_regen_fields & updates.keys()
+    needs_new_version = bool(version_fields & updates.keys())
 
     for field, value in updates.items():
         setattr(agent, field, value)
@@ -239,6 +279,8 @@ async def update_agent(
         await _set_teams(db, agent_id, body.team_ids)
 
     agent.vector_clock += 1
+    if needs_new_version:  # #104: only instructions/model changes are versioned
+        await _snapshot_agent_version(db, agent)
     await db.commit()
 
     if needs_rule_regen:
@@ -274,6 +316,56 @@ async def get_agent_runs(agent_id: str, db: DbSession, _: CurrentWorkspaceId) ->
         .limit(100)
     )
     return list(result.scalars().all())
+
+
+@router.get("/{agent_id}/versions", response_model=list[AgentVersionOut])
+async def list_agent_versions(
+    agent_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> list[AgentVersion]:
+    """#104: newest first, mirroring GET /tools/{tool_id}/versions."""
+    await _get_or_404(db, agent_id)
+    result = await db.execute(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent_id)
+        .order_by(AgentVersion.version.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.post("/{agent_id}/versions/{version}/rollback", response_model=AgentOut)
+async def rollback_agent_version(
+    agent_id: str, version: int, db: DbSession, _: CurrentWorkspaceId
+) -> Agent:
+    """#104: restore instructions/model from a past version onto the live
+    agent. Regenerates routing rules if instructions actually changed
+    (same condition update_agent uses), and records the restored state as
+    a new version -- unlike tool rollback (api/tools.py), which skips
+    logging a new row because the on-disk file is that model's real source
+    of truth; here the Agent row is, so "latest version == current live
+    values" is worth keeping true."""
+    agent = await _get_or_404(db, agent_id)
+    target = await db.scalar(
+        select(AgentVersion).where(
+            AgentVersion.agent_id == agent_id, AgentVersion.version == version
+        )
+    )
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Version not found")
+
+    instructions_changed = agent.instructions != target.instructions
+    agent.instructions = target.instructions
+    agent.model = target.model
+    agent.vector_clock += 1
+    await _snapshot_agent_version(db, agent)
+    await db.commit()
+
+    if instructions_changed:
+        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
+        await _generate_and_store_routing_rules(db, agent)
+
+    await _register_with_agentos(db, agent)
+    await _publish_agent_change(db, agent)
+    return agent
 
 
 @router.get("/{agent_id}/routing-rules", response_model=list[RoutingRuleOut])

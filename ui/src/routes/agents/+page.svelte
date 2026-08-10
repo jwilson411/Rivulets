@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { agents, type Agent, type RoutingRule, type RuleType } from '$lib/api/agents';
+	import {
+		agents,
+		type Agent,
+		type AgentVersion,
+		type RoutingRule,
+		type RuleType
+	} from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
@@ -41,6 +47,15 @@
 	let actionError = $state<string | null>(null);
 
 	let peerPreferenceDrafts = $state<Record<string, string>>({});
+
+	// #104: loaded lazily (only once "Version history" is expanded for a
+	// given agent) rather than fetched for every agent on every refresh
+	// like routing rules/peer preference above -- version lists aren't
+	// needed for the collapsed card view, so there's no reason to pay for
+	// them up front.
+	let versionsByAgent = $state<Record<string, AgentVersion[]>>({});
+	let rollingBackVersion = $state<number | null>(null);
+	let versionError = $state<string | null>(null);
 
 	// Draft rule-type selection per agent, driving the exclusive radio group
 	// below. Kept separate from `rulesByAgent` so picking a different type
@@ -198,6 +213,33 @@
 		return rules
 			.map((r) => (r.rule_type === 'keyword' ? `keyword: ${r.pattern}` : r.rule_type))
 			.join(', ');
+	}
+
+	async function loadVersions(agentId: string) {
+		if (versionsByAgent[agentId]) return; // already loaded for this expand
+		versionError = null;
+		try {
+			versionsByAgent[agentId] = await agents.getVersions(agentId);
+		} catch (err) {
+			versionError = err instanceof Error ? err.message : 'Failed to load version history';
+		}
+	}
+
+	async function rollback(agent: Agent, version: number) {
+		versionError = null;
+		rollingBackVersion = version;
+		try {
+			const updated = await agents.rollbackVersion(agent.id, version);
+			agent.instructions = updated.instructions;
+			agent.model = updated.model;
+			delete versionsByAgent[agent.id]; // stale after rollback -- reload on next expand
+			versionsByAgent[agent.id] = await agents.getVersions(agent.id);
+			rulesByAgent[agent.id] = await agents.getRoutingRules(agent.id);
+		} catch (err) {
+			versionError = err instanceof Error ? err.message : 'Failed to roll back agent version';
+		} finally {
+			rollingBackVersion = null;
+		}
 	}
 
 	async function handleDelete(agentId: string) {
@@ -426,6 +468,57 @@
 									/>
 									Approve this agent's sensitive tools for unattended use
 								</label>
+							</div>
+						</details>
+						<details class="mt-2" ontoggle={() => loadVersions(agent.id)}>
+							<summary
+								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+							>
+								Version history
+							</summary>
+							<div class="mt-2 flex flex-col gap-2">
+								<p class="text-xs text-neutral-500">
+									Every change to instructions or model is recorded here. Rolling back restores that
+									version's instructions/model onto this agent — the rollback itself becomes the
+									newest entry, so nothing is lost.
+								</p>
+								{#if versionError}
+									<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+										{versionError}
+									</p>
+								{/if}
+								{#if versionsByAgent[agent.id]}
+									<ul class="flex flex-col gap-2">
+										{#each versionsByAgent[agent.id] as v (v.version)}
+											<li class="rounded-md border border-ink/10 p-2 text-xs dark:border-white/10">
+												<div class="flex items-center justify-between gap-2">
+													<span class="font-medium text-ink dark:text-ink-dark">
+														Version {v.version}
+														{#if v.version === versionsByAgent[agent.id][0].version}
+															<span class="text-neutral-500">(current)</span>
+														{/if}
+													</span>
+													<span class="text-neutral-500">{v.created_at}</span>
+												</div>
+												<p class="mt-1 font-mono text-neutral-500">{v.model}</p>
+												<p class="mt-1 whitespace-pre-wrap text-neutral-600 dark:text-neutral-400">
+													{v.instructions}
+												</p>
+												{#if v.version !== versionsByAgent[agent.id][0].version}
+													<button
+														onclick={() => rollback(agent, v.version)}
+														disabled={rollingBackVersion !== null}
+														class="mt-2 rounded-md border border-ink/15 px-2 py-1 text-xs text-ink disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-ink-dark"
+													>
+														{rollingBackVersion === v.version
+															? 'Rolling back…'
+															: 'Roll back to this version'}
+													</button>
+												{/if}
+											</li>
+										{/each}
+									</ul>
+								{/if}
 							</div>
 						</details>
 					</div>
