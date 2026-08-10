@@ -57,6 +57,9 @@ class AgentUpdate(BaseModel):
     fallback_models: list[str] | None = None
     tool_ids: list[str] | None = None
     team_ids: list[str] | None = None
+    # #100: one-time approval to run this agent's sensitive tools (if any
+    # are assigned) unattended -- see Agent.approved_for_unattended_tools.
+    approved_for_unattended_tools: bool | None = None
 
 
 class AgentOut(BaseModel):
@@ -66,6 +69,7 @@ class AgentOut(BaseModel):
     instructions: str
     model: str
     fallback_models: list[str] = Field(default_factory=list)
+    approved_for_unattended_tools: bool
     agentos_agent_id: str | None
 
     model_config = {"from_attributes": True}

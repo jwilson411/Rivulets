@@ -8,6 +8,10 @@ Lives here rather than in dispatch/service.py (its original home before
 circular import: that module already can't import dispatch/service.py
 (its own docstring explains why), but both it and dispatch/service.py
 already depend on this `agentos` package.
+
+Also the one place `log_tool_calls` (#100) is invoked, for the same
+reason -- every `run_agent` caller's tool calls get audited uniformly
+without each caller remembering to do it separately.
 """
 
 from agno.run.agent import RunOutput
@@ -15,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import ModelTier
 from rivulets.agentos.pricing import estimate_cost_usd
+from rivulets.agentos.tool_audit import log_tool_calls
 from rivulets.db.models import Agent, AgentRun
 
 
@@ -67,4 +72,5 @@ async def record_agent_run(
     )
     db.add(run)
     await db.flush()
+    await log_tool_calls(db, run, run_output)
     return run

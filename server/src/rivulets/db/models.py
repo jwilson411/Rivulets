@@ -150,6 +150,19 @@ class Agent(Base):
     # project, so a new typed column would be just as much schema churn
     # for no benefit over reusing that pattern.
     fallback_models: Mapped[str | None] = mapped_column(default=None)
+    # #100: one-time human approval that this agent may use its assigned
+    # sensitive tools (execute_python/http_request/write_file/
+    # query_workspace_db -- see tool_resolution.py's SENSITIVE_BUILTIN_TOOL_
+    # NAMES) when invoked *unattended* -- a schedule fire (#92) or a
+    # remediation run (#94), where nothing resembling a human is watching
+    # the tool call happen live. Doesn't affect ordinary chat/slash-command
+    # use of the same tools at all (those already happen with a human
+    # plausibly present, same as before this flag existed) -- only gates
+    # the specific unattended paths workflows/engine.py's `unattended`
+    # threading identifies. False by default: an agent with a sensitive
+    # tool assigned is unattended-safe only once a human explicitly opts
+    # it in (agents/+page.svelte), not the moment it's created.
+    approved_for_unattended_tools: Mapped[bool] = mapped_column(default=False)
     agentos_agent_id: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
@@ -230,6 +243,52 @@ class AgentRun(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
 
+class ToolCallLog(Base):
+    """One row per tool call an agent actually made (#100) -- until this
+    table existed, `agentos/tool_resolution.py` resolved an agent's tools
+    with no record of what was actually invoked, with what arguments, or
+    whether it succeeded, beyond a `logger.warning` for a tool that failed
+    to *resolve* (not one that ran and errored). Populated by
+    `agentos/tool_audit.py`'s `log_tool_calls`, called from the same
+    `record_agent_run` choke point every `run_agent` caller already goes
+    through (agentos/accounting.py's docstring) -- so this covers ordinary
+    chat tool use and workflow agent-node tool use uniformly, not just the
+    unattended paths `sensitive`/gating below cares about.
+
+    `sensitive` is denormalized off `Tool.sensitive` *at call time* rather
+    than joined live -- a tool's sensitivity tag changing later shouldn't
+    rewrite history for calls made under the old tag. `agent_run_id` is
+    nullable because a tool call is logged the same way regardless of
+    whether the run that made it went on to complete or error (AgentRun's
+    own `status` already carries the run-level outcome); this row's own
+    `status` is the tool call's outcome specifically, which can differ (a
+    tool can fail without the overall run failing, if the agent recovers).
+
+    `arguments_json`/`result_summary` are truncated (see tool_audit.py) --
+    this is an audit trail for "what ran, with roughly what, and did it
+    work", not a byte-exact replay log; a tool that returns megabytes of
+    data (a large file read) shouldn't make this table unbounded.
+
+    Not synced, same reasoning as AgentRun: local execution telemetry tied
+    to whichever node actually ran the tool, not shared workspace content."""
+
+    __tablename__ = "tool_call_log"
+    __table_args__ = (Index("idx_tool_call_log_agent", "agent_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
+    agent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_run.id", ondelete="CASCADE"), default=None
+    )
+    tool_name: Mapped[str]
+    sensitive: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[str]  # 'success' | 'error'
+    arguments_json: Mapped[str | None] = mapped_column(default=None)  # truncated JSON
+    result_summary: Mapped[str | None] = mapped_column(default=None)  # truncated
+    duration_ms: Mapped[int | None] = mapped_column(default=None)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class DispatchDecision(Base):
     """One row per dispatch/engine.py `dispatch()` call's outcome — the raw
     data behind R-4's dispatcher hit-rate metric and fallback-rate cost
@@ -273,6 +332,15 @@ class Tool(Base):
     name: Mapped[str]
     description: Mapped[str]
     tool_type: Mapped[str]  # 'builtin' | 'custom' | 'mcp'
+    # #100: real blast radius (arbitrary code exec, arbitrary outbound
+    # HTTP, local filesystem writes, DB access) -- gates unattended use
+    # via Agent.approved_for_unattended_tools; doesn't restrict attended
+    # (chat/slash-command) use at all. Seeded True for the four builtin
+    # tools tool_resolution.py's SENSITIVE_BUILTIN_TOOL_NAMES names;
+    # False for every other builtin tool and, for now, every custom/mcp
+    # tool -- v1 scope is the fixed builtin set called out in #100, not a
+    # UI for marking an arbitrary custom/mcp tool sensitive yet.
+    sensitive: Mapped[bool] = mapped_column(default=False)
     source_path: Mapped[str | None] = mapped_column(default=None)
     mcp_server_id: Mapped[str | None] = mapped_column(ForeignKey("mcp_server.id"), default=None)
     mcp_tool_name: Mapped[str | None] = mapped_column(default=None)
@@ -538,7 +606,21 @@ class WorkflowRun(Base):
     logic itself: a run whose own triggered_by is already 'remediation'
     is never eligible to trigger further remediation, the depth-1 cap
     that keeps a remediation workflow referencing (directly or via a
-    cycle) the workflow it's remediating from ping-ponging forever."""
+    cycle) the workflow it's remediating from ping-ponging forever.
+
+    `unattended` (#100): True iff nothing resembling a human was watching
+    this run happen live -- derived once at creation from `triggered_by`
+    ('schedule'/'remediation' are unattended; everything else -- 'human',
+    'agent' (a live chat's own run_workflow tool call), 'workflow' (a
+    nested run, which inherits its *parent* run's unattended-ness rather
+    than being derived from the literal string 'workflow'), 'eval' -- is
+    not) by `run_workflow`'s own default-derivation logic, unless a nested
+    invocation passes it through explicitly. Persisted (not just held in
+    the in-memory `_RunContext`) so `resume_workflow` can restore it after
+    a pause/resume boundary, which starts a fresh `_RunContext`. Read by
+    `workflows/nodes.py`'s `execute_agent_node` to gate an 'agent' node
+    whose assigned agent has an unapproved sensitive tool -- see
+    `Agent.approved_for_unattended_tools`."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -550,6 +632,7 @@ class WorkflowRun(Base):
     # human_id / agent_id / (for 'workflow') parent WorkflowRun's id /
     # (for 'schedule') the firing WorkflowSchedule's id
     triggered_by_id: Mapped[str | None] = mapped_column(default=None)
+    unattended: Mapped[bool] = mapped_column(default=False)
     input_content: Mapped[str]
     # 'running' | 'completed' | 'failed' | 'awaiting_human'
     status: Mapped[str] = mapped_column(default="running")

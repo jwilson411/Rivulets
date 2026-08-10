@@ -99,6 +99,7 @@ const oneAgent: Agent = {
 	instructions: '',
 	model: 'test:mock',
 	fallback_models: [],
+	approved_for_unattended_tools: false,
 	agentos_agent_id: null
 };
 

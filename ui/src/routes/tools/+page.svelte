@@ -236,6 +236,14 @@
 										unavailable
 									</span>
 								{/if}
+								{#if tool.sensitive}
+									<span
+										class="ml-1 rounded-sm bg-agent-yellow-500/15 px-2 py-0.5 text-xs text-agent-yellow-700 dark:text-agent-yellow-500"
+										title="Blocked from unattended use (schedules, remediation) unless the agent using it is approved."
+									>
+										sensitive
+									</span>
+								{/if}
 							</p>
 							<p class="text-sm text-neutral-600 dark:text-neutral-400">{tool.description}</p>
 						</div>

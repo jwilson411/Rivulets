@@ -189,6 +189,33 @@
 				{/if}
 			</span>
 		</div>
+		{#if node.span.tool_calls.length > 0}
+			<ul class="flex flex-col gap-1 pl-5">
+				{#each node.span.tool_calls as call (call.id)}
+					<li class="flex items-center gap-2 text-neutral-500">
+						<Icon name="wrench" class="h-3 w-3 flex-none" />
+						<span class="font-mono text-[11px] text-neutral-600 dark:text-neutral-400"
+							>{call.tool_name}</span
+						>
+						{#if call.sensitive}
+							<span
+								class="rounded-sm bg-agent-yellow-500/15 px-1 py-0.5 text-[10px] text-agent-yellow-700 dark:text-agent-yellow-500"
+							>
+								sensitive
+							</span>
+						{/if}
+						<span
+							class="rounded-sm px-1.5 py-0.5 {statusClass(
+								call.status === 'success' ? 'completed' : 'error'
+							)}"
+						>
+							{call.status}
+						</span>
+						<span class="ml-auto flex-none">{formatDuration(call.duration_ms)}</span>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 	</li>
 	{#each node.children as child (child.span.id)}
 		{@render spanRow(child, depth + 1)}

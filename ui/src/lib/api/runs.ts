@@ -23,6 +23,19 @@ export interface RunTrace {
 	completed_at: string | null;
 }
 
+// #100: recorded whenever a tool actually executes during an agent run --
+// see agentos/tool_audit.py. Only populated on 'agent_run' spans.
+export interface ToolCall {
+	id: string;
+	tool_name: string;
+	sensitive: boolean;
+	status: 'success' | 'error';
+	arguments_json: string | null;
+	result_summary: string | null;
+	duration_ms: number | null;
+	created_at: string;
+}
+
 export interface RunSpan {
 	id: string;
 	parent_span_id: string | null;
@@ -36,6 +49,7 @@ export interface RunSpan {
 	started_at: string;
 	completed_at: string | null;
 	duration_ms: number | null;
+	tool_calls: ToolCall[];
 }
 
 export interface RunTraceDetail extends RunTrace {

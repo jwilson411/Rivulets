@@ -80,18 +80,46 @@ _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
 )
 _BUILTIN_REGISTRY: dict[str, Function] = {fn.name: fn for fn in _BUILTIN_FUNCTIONS}
 
+# #100: builtin tools with real blast radius (arbitrary code exec,
+# arbitrary outbound HTTP, local filesystem writes, DB access) — read_file/
+# list_files are deliberately excluded (read-only, lower risk) as are
+# run_workflow/schedule_workflow/*_schedule/web_search/handoff. Used both
+# to seed Tool.sensitive below and by tool_audit.py's unattended gate,
+# which checks an agent's *assigned* tools against this set rather than a
+# live Tool.sensitive lookup for the two purpose-built builtin functions
+# that most matter (execute_python, http_request) — see tool_audit.py.
+SENSITIVE_BUILTIN_TOOL_NAMES = frozenset(
+    {"execute_python", "http_request", "write_file", "query_workspace_db"}
+)
+
 
 async def seed_builtin_tools(db: AsyncSession) -> None:
     """Ensures a `tool` row (tool_type='builtin') exists for each function
     in the registry above, so builtin tools can be assigned to agents via
     the same agent_tool join table custom/mcp tools use. Idempotent by
     name — call on every app startup (mirrors sync_agents()'s own
-    call-every-startup pattern), not just the first."""
+    call-every-startup pattern), not just the first.
+
+    Also patches `sensitive` on every existing builtin row to match
+    SENSITIVE_BUILTIN_TOOL_NAMES (#100) — not just set at insert time —
+    since an install that seeded these rows before #100 existed would
+    otherwise carry `sensitive=False` forever with no other code path
+    that ever revisits it."""
     result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
-    existing_names = {row.name for row in result.scalars().all()}
+    existing = {row.name: row for row in result.scalars().all()}
     for fn in _BUILTIN_FUNCTIONS:
-        if fn.name not in existing_names:
-            db.add(Tool(name=fn.name, description=fn.description or "", tool_type="builtin"))
+        sensitive = fn.name in SENSITIVE_BUILTIN_TOOL_NAMES
+        if fn.name not in existing:
+            db.add(
+                Tool(
+                    name=fn.name,
+                    description=fn.description or "",
+                    tool_type="builtin",
+                    sensitive=sensitive,
+                )
+            )
+        elif existing[fn.name].sensitive != sensitive:
+            existing[fn.name].sensitive = sensitive
     await db.commit()
 
 

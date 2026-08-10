@@ -179,6 +179,20 @@
 		}
 	}
 
+	// #100: toggled directly (no separate draft/save step) since it's a
+	// single boolean, unlike peer preference's free-text field above.
+	async function toggleUnattendedApproval(agent: Agent) {
+		actionError = null;
+		const next = !agent.approved_for_unattended_tools;
+		try {
+			await agents.update(agent.id, { approved_for_unattended_tools: next });
+			agent.approved_for_unattended_tools = next;
+		} catch (err) {
+			actionError =
+				err instanceof Error ? err.message : 'Failed to update unattended tool approval';
+		}
+	}
+
 	function ruleSummary(rules: RoutingRule[] | undefined): string {
 		if (!rules || rules.length === 0) return 'No routing rules — only @mention triggers this agent';
 		return rules
@@ -388,6 +402,30 @@
 										Save
 									</button>
 								</div>
+							</div>
+						</details>
+						<details class="mt-2">
+							<summary
+								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+							>
+								Advanced: unattended sensitive tool use
+							</summary>
+							<div class="mt-2 flex flex-col gap-2">
+								<p class="text-xs text-neutral-500">
+									If this agent has a sensitive tool assigned (runs code, makes outbound HTTP calls,
+									writes files, or queries the DB), it's blocked from using that tool when invoked
+									unattended — a schedule fire or an auto-remediation run, where nobody is watching
+									the tool call happen live. Ordinary chat/slash-command use is never affected by
+									this.
+								</p>
+								<label class="flex items-center gap-2 text-xs text-ink dark:text-ink-dark">
+									<input
+										type="checkbox"
+										checked={agent.approved_for_unattended_tools}
+										onchange={() => toggleUnattendedApproval(agent)}
+									/>
+									Approve this agent's sensitive tools for unattended use
+								</label>
 							</div>
 						</details>
 					</div>

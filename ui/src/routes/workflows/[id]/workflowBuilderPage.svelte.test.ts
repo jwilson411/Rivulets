@@ -148,6 +148,7 @@ function mockLoad() {
 			instructions: 'i',
 			model: 'm',
 			fallback_models: [],
+			approved_for_unattended_tools: false,
 			agentos_agent_id: null
 		}
 	]);

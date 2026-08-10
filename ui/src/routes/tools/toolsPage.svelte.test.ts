@@ -30,6 +30,7 @@ const builtinTool: Tool = {
 	description: 'Search the web',
 	tool_type: 'builtin',
 	source_path: null,
+	sensitive: false,
 	available: true
 };
 
@@ -39,6 +40,7 @@ const customTool: Tool = {
 	description: 'Does a custom thing',
 	tool_type: 'custom',
 	source_path: '/tools/my_tool.py',
+	sensitive: false,
 	available: true
 };
 
