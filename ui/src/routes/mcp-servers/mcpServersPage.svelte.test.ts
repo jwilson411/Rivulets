@@ -52,7 +52,9 @@ describe('mcp-servers/+page.svelte', () => {
 		render(McpServersPage);
 
 		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
-		await expect.element(page.getByText('connected')).toBeInTheDocument();
+		// Exact match: the "Status" filter select also has "Connected" /
+		// "Disconnected" options, which a substring match would also hit.
+		await expect.element(page.getByText('connected', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('1 tool')).toBeInTheDocument();
 		await expect.element(page.getByText('read_file')).toBeInTheDocument();
 	});
@@ -68,7 +70,7 @@ describe('mcp-servers/+page.svelte', () => {
 
 		render(McpServersPage);
 
-		await expect.element(page.getByText('disconnected')).toBeInTheDocument();
+		await expect.element(page.getByText('disconnected', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText(/\d+ tools?/)).not.toBeInTheDocument();
 	});
 
@@ -216,5 +218,51 @@ describe('mcp-servers/+page.svelte', () => {
 		await expect
 			.element(page.getByText('url must be a streamable-http endpoint'))
 			.toBeInTheDocument();
+	});
+
+	it('filters the server list by name via the search box', async () => {
+		const dbServer: MCPServerDetail = {
+			...fsServerDetail,
+			id: 'mcp-2',
+			name: 'Database tools',
+			tools: []
+		};
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			fsServerSummary,
+			{ ...fsServerSummary, id: 'mcp-2', name: 'Database tools' }
+		]);
+		vi.mocked(mcpServers.get).mockImplementation((id) =>
+			Promise.resolve(id === 'mcp-2' ? dbServer : fsServerDetail)
+		);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+		await expect.element(page.getByText('Database tools')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search MCP servers…').fill('data');
+
+		await expect.element(page.getByText('Database tools')).toBeInTheDocument();
+		await expect.element(page.getByText('Filesystem tools')).not.toBeInTheDocument();
+	});
+
+	it('filters the server list by connection status', async () => {
+		const disconnected: MCPServerDetail = { ...fsServerDetail, id: 'mcp-2', connected: false };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			fsServerSummary,
+			{ ...fsServerSummary, id: 'mcp-2', connected: false }
+		]);
+		vi.mocked(mcpServers.get).mockImplementation((id) =>
+			Promise.resolve(id === 'mcp-2' ? disconnected : fsServerDetail)
+		);
+
+		render(McpServersPage);
+		// "connected" is a substring of "disconnected", so match exact text.
+		await expect.element(page.getByText('connected', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('disconnected', { exact: true })).toBeInTheDocument();
+
+		await page.getByRole('combobox', { name: 'Status' }).selectOptions('disconnected');
+
+		await expect.element(page.getByText('disconnected', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('connected', { exact: true })).not.toBeInTheDocument();
 	});
 });
