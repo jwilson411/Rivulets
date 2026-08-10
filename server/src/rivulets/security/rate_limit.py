@@ -21,9 +21,11 @@ _MAX_ATTEMPTS = 5
 
 
 class LoginRateLimiter:
-    def __init__(self) -> None:
+    def __init__(self, window_seconds: float = _WINDOW_SECONDS, max_attempts: int = _MAX_ATTEMPTS) -> None:
         self._lock = threading.Lock()
         self._attempts: dict[str, list[float]] = {}
+        self._window_seconds = window_seconds
+        self._max_attempts = max_attempts
 
     def check(self, client_ip: str) -> bool:
         """Records this attempt and returns whether it's allowed to
@@ -32,8 +34,10 @@ class LoginRateLimiter:
         happen to be right."""
         now = time.monotonic()
         with self._lock:
-            recent = [t for t in self._attempts.get(client_ip, []) if now - t < _WINDOW_SECONDS]
-            if len(recent) >= _MAX_ATTEMPTS:
+            recent = [
+                t for t in self._attempts.get(client_ip, []) if now - t < self._window_seconds
+            ]
+            if len(recent) >= self._max_attempts:
                 self._attempts[client_ip] = recent
                 return False
             recent.append(now)
@@ -61,3 +65,17 @@ _invite_accept_limiter = LoginRateLimiter()
 
 def get_invite_accept_rate_limiter() -> LoginRateLimiter:
     return _invite_accept_limiter
+
+
+# A separate counter again (#99's webhook trigger endpoint), but a wider
+# budget than the 5/minute above: unlike a login or invite secret, a
+# webhook's HMAC secret is 256 bits of entropy an attacker can't
+# meaningfully brute-force at *any* request rate, so this limiter's job is
+# basic flood protection for a legitimately bursty sender (e.g. a CI
+# system firing several events in quick succession), not slowing down
+# credential guessing.
+_webhook_trigger_limiter = LoginRateLimiter(window_seconds=60.0, max_attempts=30)
+
+
+def get_webhook_trigger_rate_limiter() -> LoginRateLimiter:
+    return _webhook_trigger_limiter

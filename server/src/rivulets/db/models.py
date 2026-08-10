@@ -6,7 +6,7 @@ engine for last-write-wins conflict resolution (FR-9.6). Tables noted as
 sync_state) intentionally omit or ignore that column's sync semantics.
 """
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, LargeBinary, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from rivulets.db.base import Base, utcnow_iso, uuid7
@@ -608,18 +608,25 @@ class WorkflowRun(Base):
     that keeps a remediation workflow referencing (directly or via a
     cycle) the workflow it's remediating from ping-ponging forever.
 
+    triggered_by='webhook' (#99): this run was started by an external
+    system's HMAC-signed POST to api/webhooks.py's trigger endpoint,
+    verified against a WorkflowWebhook -- `triggered_by_id` is that
+    webhook's id, same convention as 'schedule'. Unattended for the same
+    reason 'schedule' is: nothing resembling a human is watching an
+    inbound HTTP call happen live.
+
     `unattended` (#100): True iff nothing resembling a human was watching
     this run happen live -- derived once at creation from `triggered_by`
-    ('schedule'/'remediation' are unattended; everything else -- 'human',
-    'agent' (a live chat's own run_workflow tool call), 'workflow' (a
-    nested run, which inherits its *parent* run's unattended-ness rather
-    than being derived from the literal string 'workflow'), 'eval' -- is
-    not) by `run_workflow`'s own default-derivation logic, unless a nested
-    invocation passes it through explicitly. Persisted (not just held in
-    the in-memory `_RunContext`) so `resume_workflow` can restore it after
-    a pause/resume boundary, which starts a fresh `_RunContext`. Read by
-    `workflows/nodes.py`'s `execute_agent_node` to gate an 'agent' node
-    whose assigned agent has an unapproved sensitive tool -- see
+    ('schedule'/'remediation'/'webhook' are unattended; everything else --
+    'human', 'agent' (a live chat's own run_workflow tool call), 'workflow'
+    (a nested run, which inherits its *parent* run's unattended-ness
+    rather than being derived from the literal string 'workflow'), 'eval'
+    -- is not) by `run_workflow`'s own default-derivation logic, unless a
+    nested invocation passes it through explicitly. Persisted (not just
+    held in the in-memory `_RunContext`) so `resume_workflow` can restore
+    it after a pause/resume boundary, which starts a fresh `_RunContext`.
+    Read by `workflows/nodes.py`'s `execute_agent_node` to gate an 'agent'
+    node whose assigned agent has an unapproved sensitive tool -- see
     `Agent.approved_for_unattended_tools`."""
 
     __tablename__ = "workflow_run"
@@ -628,9 +635,10 @@ class WorkflowRun(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
     rivulet_id: Mapped[str] = mapped_column(ForeignKey("rivulet.id", ondelete="CASCADE"))
-    triggered_by: Mapped[str]  # 'human' | 'agent' | 'workflow' | 'schedule'
+    triggered_by: Mapped[str]  # 'human' | 'agent' | 'workflow' | 'schedule' | 'webhook'
     # human_id / agent_id / (for 'workflow') parent WorkflowRun's id /
-    # (for 'schedule') the firing WorkflowSchedule's id
+    # (for 'schedule') the firing WorkflowSchedule's id / (for 'webhook')
+    # the firing WorkflowWebhook's id
     triggered_by_id: Mapped[str | None] = mapped_column(default=None)
     unattended: Mapped[bool] = mapped_column(default=False)
     input_content: Mapped[str]
@@ -735,6 +743,52 @@ class WorkflowSchedule(Base):
     consecutive_failures: Mapped[int] = mapped_column(default=0)
     name: Mapped[str | None] = mapped_column(default=None)
     created_by: Mapped[str] = mapped_column(default="human")  # 'human' or agent_id
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class WorkflowWebhook(Base):
+    """Inbound HTTP trigger for a published workflow (#99): an external
+    system POSTs to api/webhooks.py's trigger endpoint, HMAC-signed with
+    this row's secret (security/webhook_signing.py), and that endpoint
+    fires the workflow via workflows/webhook.py.
+
+    Deliberately unsynced, same treatment and reasoning as
+    WorkflowSchedule above (no vector_clock, absent from
+    sync/apply.py's _DISPATCH): the URL this row's id appears in is only
+    ever reachable through whichever specific peer's HTTP port a human
+    has exposed to the external sender in the first place, so no other
+    peer could ever receive this webhook's POST -- there's nothing for a
+    synced copy of this row to do.
+
+    `secret_nonce`/`secret_ciphertext` hold the HMAC signing secret
+    encrypted with a workspace-key-derived key (security/keys.py's
+    derive_webhook_secret_key + security/webhook_secret_store.py),
+    recoverable rather than bcrypt-hashed like Invite.secret_hash --
+    verifying an inbound signature means recomputing the HMAC with the
+    actual secret, not just an equality check. Like an invite's secret,
+    the plaintext is returned to the human exactly once, at creation
+    (api/workflows.py's create_webhook response), and never again.
+
+    `input_template` reuses the exact "{input}" substitution convention a
+    `transform` node's config already establishes (workflows/nodes.py's
+    execute_transform_node) rather than inventing a second mechanism --
+    None/empty passes the raw request body through as input_content
+    unchanged; set, it's plain str.replace (not str.format), so a JSON
+    payload's own brace characters can't break template rendering."""
+
+    __tablename__ = "workflow_webhook"
+    __table_args__ = (Index("idx_workflow_webhook_workflow", "workflow_id"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow.id", ondelete="CASCADE"))
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channel.id", ondelete="CASCADE"))
+    secret_nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    input_template: Mapped[str | None] = mapped_column(default=None)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    last_triggered_at: Mapped[str | None] = mapped_column(default=None)
+    name: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
@@ -978,7 +1032,7 @@ class RunTrace(Base):
     __table_args__ = (Index("idx_run_trace_started", "started_at"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
-    trigger_type: Mapped[str]  # 'message' | 'schedule'
+    trigger_type: Mapped[str]  # 'message' | 'schedule' | 'webhook'
     label: Mapped[str]
     rivulet_id: Mapped[str | None] = mapped_column(
         ForeignKey("rivulet.id", ondelete="SET NULL"), default=None
