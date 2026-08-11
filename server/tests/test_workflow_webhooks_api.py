@@ -44,7 +44,9 @@ def _add_transform_node(
     return node_id
 
 
-def _connect_entry(client: TestClient, headers: dict[str, str], workflow_id: str, node_id: str) -> None:
+def _connect_entry(
+    client: TestClient, headers: dict[str, str], workflow_id: str, node_id: str
+) -> None:
     resp = client.post(
         f"/api/v1/workflows/{workflow_id}/connections",
         json={"from_node_id": None, "to_node_id": node_id},
@@ -58,7 +60,9 @@ def _publish_workflow(client: TestClient, headers: dict[str, str], workflow_id: 
     assert resp.status_code == 200, resp.text
 
 
-def _get_run(client: TestClient, headers: dict[str, str], workflow_id: str, run_id: str) -> dict[str, Any]:
+def _get_run(
+    client: TestClient, headers: dict[str, str], workflow_id: str, run_id: str
+) -> dict[str, Any]:
     resp = client.get(f"/api/v1/workflows/{workflow_id}/runs", headers=headers)
     assert resp.status_code == 200, resp.text
     runs = [r for r in resp.json() if r["id"] == run_id]
@@ -232,7 +236,9 @@ def test_trigger_applies_input_template_substitution(
     assert run["final_output"] == 'got: webhook says: {"count": 3}'
 
 
-def test_trigger_rejects_invalid_signature(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_trigger_rejects_invalid_signature(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     webhook = _make_published_workflow_with_webhook(client, auth_headers, "bad-sig")
     body = b"payload"
     headers = _signed_headers("wrong-secret", body)
@@ -248,7 +254,9 @@ def test_trigger_rejects_missing_signature_headers(
     assert resp.status_code == 401
 
 
-def test_trigger_rejects_expired_timestamp(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_trigger_rejects_expired_timestamp(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     webhook = _make_published_workflow_with_webhook(client, auth_headers, "expired")
     body = b"payload"
     stale_timestamp = str(int(time.time()) - 600)
@@ -269,7 +277,9 @@ def test_trigger_unknown_webhook_id_returns_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_trigger_disabled_webhook_returns_404(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_trigger_disabled_webhook_returns_404(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     webhook = _make_published_workflow_with_webhook(client, auth_headers, "disabled-hook")
     client.patch(
         f"/api/v1/workflows/{webhook['workflow_id']}/webhooks/{webhook['id']}",
@@ -278,7 +288,9 @@ def test_trigger_disabled_webhook_returns_404(client: TestClient, auth_headers: 
     )
     body = b"payload"
     resp = client.post(
-        f"/api/v1/webhooks/{webhook['id']}", content=body, headers=_signed_headers(webhook["secret"], body)
+        f"/api/v1/webhooks/{webhook['id']}",
+        content=body,
+        headers=_signed_headers(webhook["secret"], body),
     )
     assert resp.status_code == 404
 
@@ -291,15 +303,21 @@ def test_trigger_unpublished_workflow_returns_409(
     webhook = _create_webhook(client, auth_headers, workflow_id, channel_id)
     body = b"payload"
     resp = client.post(
-        f"/api/v1/webhooks/{webhook['id']}", content=body, headers=_signed_headers(webhook["secret"], body)
+        f"/api/v1/webhooks/{webhook['id']}",
+        content=body,
+        headers=_signed_headers(webhook["secret"], body),
     )
     assert resp.status_code == 409
 
 
-def test_trigger_oversized_payload_returns_413(client: TestClient, auth_headers: dict[str, str]) -> None:
+def test_trigger_oversized_payload_returns_413(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
     webhook = _make_published_workflow_with_webhook(client, auth_headers, "too-big")
     body = b"x" * (262_144 + 1)
     resp = client.post(
-        f"/api/v1/webhooks/{webhook['id']}", content=body, headers=_signed_headers(webhook["secret"], body)
+        f"/api/v1/webhooks/{webhook['id']}",
+        content=body,
+        headers=_signed_headers(webhook["secret"], body),
     )
     assert resp.status_code == 413

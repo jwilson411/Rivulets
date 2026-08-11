@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { agents, type Agent, type AgentVersion, type RoutingRule, type RuleType } from '$lib/api/agents';
+	import {
+		agents,
+		type Agent,
+		type AgentVersion,
+		type RoutingRule,
+		type RuleType
+	} from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
@@ -459,9 +465,8 @@
 												class="flex items-center justify-between gap-2 text-xs text-neutral-600 dark:text-neutral-400"
 											>
 												<span class="truncate">
-													v{version.version} — {new Date(
-														version.created_at
-													).toLocaleString()} — <span class="font-mono">{version.model}</span>
+													v{version.version} — {new Date(version.created_at).toLocaleString()} —
+													<span class="font-mono">{version.model}</span>
 												</span>
 												<button
 													onclick={() => handleRollback(agent.id, version.version)}

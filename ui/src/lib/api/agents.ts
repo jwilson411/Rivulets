@@ -85,5 +85,9 @@ export const agents = {
 	listVersions: (id: string) =>
 		api.get<AgentVersion[]>(`/agents/${id}/versions`, auth.token ?? undefined),
 	rollback: (id: string, version: number) =>
-		api.post<Agent>(`/agents/${id}/versions/${version}/rollback`, undefined, auth.token ?? undefined)
+		api.post<Agent>(
+			`/agents/${id}/versions/${version}/rollback`,
+			undefined,
+			auth.token ?? undefined
+		)
 };
