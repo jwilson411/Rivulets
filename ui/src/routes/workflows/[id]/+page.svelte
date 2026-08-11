@@ -216,13 +216,52 @@
 	let scheduleError = $state<string | null>(null);
 	let schedulePreviewTimer: ReturnType<typeof setTimeout> | undefined;
 
+	// Plain-language schedule builder (#131) — generates the cron expression
+	// under the hood; the raw field is still available as "Advanced".
+	const WEEKDAY_OPTIONS = [
+		{ value: 1, label: 'Monday' },
+		{ value: 2, label: 'Tuesday' },
+		{ value: 3, label: 'Wednesday' },
+		{ value: 4, label: 'Thursday' },
+		{ value: 5, label: 'Friday' },
+		{ value: 6, label: 'Saturday' },
+		{ value: 0, label: 'Sunday' }
+	];
+	let scheduleAdvanced = $state(false);
+	let scheduleFrequencyDraft = $state<'daily' | 'weekly' | 'hourly'>('daily');
+	let scheduleTimeDraft = $state('09:00');
+	let scheduleWeekdayDraft = $state(1);
+	let scheduleMinuteDraft = $state(0);
+
+	function buildCronFromSimple() {
+		if (scheduleFrequencyDraft === 'hourly') {
+			const minute = Math.min(59, Math.max(0, scheduleMinuteDraft || 0));
+			scheduleCronDraft = `${minute} * * * *`;
+		} else {
+			const [hourStr, minuteStr] = scheduleTimeDraft.split(':');
+			const hour = Number(hourStr) || 0;
+			const minute = Number(minuteStr) || 0;
+			scheduleCronDraft =
+				scheduleFrequencyDraft === 'weekly'
+					? `${minute} ${hour} * * ${scheduleWeekdayDraft}`
+					: `${minute} ${hour} * * *`;
+		}
+		onCronDraftChange();
+	}
+
 	function openAddSchedule() {
 		showAddSchedule = true;
+		scheduleAdvanced = false;
+		scheduleFrequencyDraft = 'daily';
+		scheduleTimeDraft = '09:00';
+		scheduleWeekdayDraft = 1;
+		scheduleMinuteDraft = 0;
 		scheduleCronDraft = '';
 		scheduleChannelDraft = channelList[0]?.id ?? '';
 		scheduleInputDraft = '';
 		schedulePreview = null;
 		scheduleError = null;
+		buildCronFromSimple();
 	}
 
 	function closeAddSchedule() {
@@ -772,16 +811,89 @@
 			{/if}
 			{#if showAddSchedule}
 				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
-					<label class="flex flex-col gap-1 text-xs text-neutral-500">
-						Cron expression
-						<input
-							type="text"
-							bind:value={scheduleCronDraft}
-							oninput={onCronDraftChange}
-							placeholder="0 9 * * *"
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					</label>
+					<div class="flex items-center gap-3 text-xs">
+						<button
+							type="button"
+							onclick={() => (scheduleAdvanced = false)}
+							class={scheduleAdvanced
+								? 'text-neutral-500 hover:text-ink dark:hover:text-ink-dark'
+								: 'font-semibold text-ink dark:text-ink-dark'}
+						>
+							Simple
+						</button>
+						<button
+							type="button"
+							onclick={() => (scheduleAdvanced = true)}
+							class={scheduleAdvanced
+								? 'font-semibold text-ink dark:text-ink-dark'
+								: 'text-neutral-500 hover:text-ink dark:hover:text-ink-dark'}
+						>
+							Advanced (cron)
+						</button>
+					</div>
+					{#if scheduleAdvanced}
+						<label class="flex flex-col gap-1 text-xs text-neutral-500">
+							Cron expression
+							<input
+								type="text"
+								bind:value={scheduleCronDraft}
+								oninput={onCronDraftChange}
+								placeholder="0 9 * * *"
+								class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+							/>
+						</label>
+					{:else}
+						<label class="flex flex-col gap-1 text-xs text-neutral-500">
+							Frequency
+							<select
+								bind:value={scheduleFrequencyDraft}
+								onchange={buildCronFromSimple}
+								class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+							>
+								<option value="daily">Every day</option>
+								<option value="weekly">Every week</option>
+								<option value="hourly">Every hour</option>
+							</select>
+						</label>
+						{#if scheduleFrequencyDraft === 'weekly'}
+							<label class="flex flex-col gap-1 text-xs text-neutral-500">
+								Day
+								<select
+									bind:value={scheduleWeekdayDraft}
+									onchange={buildCronFromSimple}
+									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+								>
+									{#each WEEKDAY_OPTIONS as day (day.value)}
+										<option value={day.value}>{day.label}</option>
+									{/each}
+								</select>
+							</label>
+						{/if}
+						{#if scheduleFrequencyDraft === 'hourly'}
+							<label class="flex flex-col gap-1 text-xs text-neutral-500">
+								Minute past the hour
+								<input
+									type="number"
+									min="0"
+									max="59"
+									bind:value={scheduleMinuteDraft}
+									oninput={buildCronFromSimple}
+									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+								/>
+							</label>
+						{:else}
+							<label class="flex flex-col gap-1 text-xs text-neutral-500">
+								Time
+								<input
+									type="time"
+									bind:value={scheduleTimeDraft}
+									onchange={buildCronFromSimple}
+									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+								/>
+							</label>
+						{/if}
+						<p class="font-mono text-xs text-neutral-500">{scheduleCronDraft}</p>
+					{/if}
 					{#if schedulePreview}
 						{#if schedulePreview.error}
 							<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
@@ -854,8 +966,8 @@
 			{/if}
 			<p class="text-xs text-neutral-500">
 				An external system can POST to a webhook's URL to trigger this workflow, signed with its
-				secret (see the docs for the signing headers). Only reachable from outside this machine
-				if you've deliberately exposed it beyond localhost — same caveat as an invite link.
+				secret (see the docs for the signing headers). Only reachable from outside this machine if
+				you've deliberately exposed it beyond localhost — same caveat as an invite link.
 			</p>
 			{#if webhookError}
 				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{webhookError}</p>
@@ -863,7 +975,7 @@
 
 			{#if revealedWebhook}
 				<div
-					class="flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 bg-agent-cyan-50 p-3 text-xs dark:bg-agent-cyan-950/20"
+					class="bg-agent-cyan-50 dark:bg-agent-cyan-950/20 flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 p-3 text-xs"
 				>
 					<p class="font-medium text-ink dark:text-ink-dark">
 						Save this secret now — it won't be shown again.

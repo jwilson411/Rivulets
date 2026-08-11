@@ -154,6 +154,11 @@
 			title="lowercase letters, numbers, and hyphens, starting with a letter"
 			class="rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
+		<p class="text-xs text-neutral-500">
+			This becomes a slash command in your channels, e.g. <code class="font-mono"
+				>/{newName.trim() || 'my-workflow'}</code
+			> — lowercase letters, numbers, and hyphens only.
+		</p>
 		<input
 			type="text"
 			bind:value={newDescription}
