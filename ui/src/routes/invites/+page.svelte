@@ -89,12 +89,19 @@
 </script>
 
 <div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Invites</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			Let a second human join this workspace without sharing your recovery phrase (#15). An invite
-			link only works if this node is reachable from their device — by default that means the same
-			machine or, with Tailscale/LAN exposure configured, the same network.
+	<header class="flex flex-col gap-3">
+		<div>
+			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Invites</h1>
+			<p class="text-sm text-neutral-600 dark:text-neutral-400">
+				Let a second human join this workspace without sharing your recovery phrase (#15).
+			</p>
+		</div>
+		<p
+			class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
+		>
+			<strong>Reachability matters:</strong> an invite link only works if this node is reachable from
+			the invitee's device — by default that means the same machine, or the same network if you've configured
+			Tailscale/LAN exposure.
 		</p>
 	</header>
 
