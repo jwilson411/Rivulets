@@ -14,6 +14,7 @@ vi.mock('$lib/api/mcpServers', () => ({
 		list: vi.fn(),
 		get: vi.fn(),
 		create: vi.fn(),
+		setHeaders: vi.fn(),
 		reconnect: vi.fn(),
 		remove: vi.fn()
 	}
@@ -24,7 +25,8 @@ const fsServerSummary: MCPServer = {
 	name: 'Filesystem tools',
 	url: 'http://localhost:9001',
 	connected: true,
-	last_connected_at: '2026-08-01T00:00:00Z'
+	last_connected_at: '2026-08-01T00:00:00Z',
+	header_names: []
 };
 
 const fsServerDetail: MCPServerDetail = {
@@ -126,10 +128,102 @@ describe('mcp-servers/+page.svelte', () => {
 
 		expect(mcpServers.create).toHaveBeenCalledWith({
 			name: 'Filesystem tools',
-			url: 'http://localhost:9001'
+			url: 'http://localhost:9001',
+			headers: undefined
 		});
 		await expect.element(page.getByPlaceholder('Name (e.g. Filesystem tools)')).toHaveValue('');
 		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+	});
+
+	it('registers a server with auth headers via mcpServers.create', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValueOnce([]).mockResolvedValueOnce([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.create).mockResolvedValueOnce(fsServerDetail);
+
+		render(McpServersPage);
+		await expect
+			.element(page.getByText('No MCP servers registered yet — add one above.'))
+			.toBeInTheDocument();
+
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page.getByText('Advanced: auth headers').click();
+		await page
+			.getByPlaceholder('Authorization: Bearer sk-...')
+			.first()
+			.fill('Authorization: Bearer sk-real-secret');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).toHaveBeenCalledWith({
+			name: 'Filesystem tools',
+			url: 'http://localhost:9001',
+			headers: { Authorization: 'Bearer sk-real-secret' }
+		});
+	});
+
+	it('shows an error and does not submit when a header line has no colon', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page.getByText('Advanced: auth headers').click();
+		await page.getByPlaceholder('Authorization: Bearer sk-...').first().fill('not-a-header-line');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+		await expect.element(page.getByText(/missing ":"/)).toBeInTheDocument();
+	});
+
+	it('shows configured header names on a server with headers', async () => {
+		const authedServer: MCPServerDetail = { ...fsServerDetail, header_names: ['Authorization'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...fsServerSummary, header_names: ['Authorization'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(authedServer);
+
+		render(McpServersPage);
+
+		await expect.element(page.getByText('Auth headers: Authorization')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Edit headers' })).toBeInTheDocument();
+	});
+
+	it('adds headers to an existing server via mcpServers.setHeaders', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.setHeaders).mockResolvedValueOnce({
+			...fsServerDetail,
+			header_names: ['Authorization']
+		});
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add headers' }).click();
+		await page
+			.getByPlaceholder('Authorization: Bearer sk-...')
+			.last()
+			.fill('Authorization: Bearer sk-real-secret');
+		await page.getByRole('button', { name: 'Save headers' }).click();
+
+		expect(mcpServers.setHeaders).toHaveBeenCalledWith('mcp-1', {
+			Authorization: 'Bearer sk-real-secret'
+		});
+	});
+
+	it('clears headers on a server via mcpServers.setHeaders', async () => {
+		const authedServer: MCPServerDetail = { ...fsServerDetail, header_names: ['Authorization'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...fsServerSummary, header_names: ['Authorization'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(authedServer);
+		vi.mocked(mcpServers.setHeaders).mockResolvedValueOnce({ ...fsServerDetail, header_names: [] });
+
+		render(McpServersPage);
+		await page.getByRole('button', { name: 'Edit headers' }).click();
+		await page.getByRole('button', { name: 'Clear all' }).click();
+
+		expect(mcpServers.setHeaders).toHaveBeenCalledWith('mcp-1', {});
 	});
 
 	it('reconnects a server via mcpServers.reconnect', async () => {

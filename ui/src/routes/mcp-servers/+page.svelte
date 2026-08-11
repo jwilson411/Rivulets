@@ -12,6 +12,26 @@
 		return CONDITIONAL_SCHEMA_KEYWORDS.some((keyword) => keyword in tool.input_schema);
 	}
 
+	// "Header-Name: value" per line -- simpler to type/paste than a dynamic
+	// row-add-remove widget for what's usually one or two headers, and
+	// matches the shape a user copies straight out of an MCP server's docs.
+	function parseHeaderLines(text: string): Record<string, string> {
+		const headers: Record<string, string> = {};
+		for (const rawLine of text.split('\n')) {
+			const line = rawLine.trim();
+			if (!line) continue;
+			const separator = line.indexOf(':');
+			if (separator === -1) {
+				throw new Error(`Header line missing ":" — "${line}"`);
+			}
+			const key = line.slice(0, separator).trim();
+			const value = line.slice(separator + 1).trim();
+			if (!key) throw new Error(`Header line missing a name — "${line}"`);
+			headers[key] = value;
+		}
+		return headers;
+	}
+
 	const serverFilters: ListFilter<MCPServerDetail>[] = [
 		{
 			id: 'connection',
@@ -29,10 +49,16 @@
 
 	let name = $state('');
 	let url = $state('');
+	let headerLines = $state('');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 	let rowError = $state<string | null>(null);
 	let reconnectingId = $state<string | null>(null);
+
+	let editingHeadersId = $state<string | null>(null);
+	let editHeaderLines = $state('');
+	let savingHeaders = $state(false);
+	let headersError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -52,16 +78,67 @@
 		event.preventDefault();
 		createError = null;
 		if (!name.trim() || !url.trim()) return;
+		let headers: Record<string, string> | undefined;
+		if (headerLines.trim()) {
+			try {
+				headers = parseHeaderLines(headerLines);
+			} catch (err) {
+				createError = err instanceof Error ? err.message : 'Invalid headers';
+				return;
+			}
+		}
 		creating = true;
 		try {
-			await mcpServers.create({ name: name.trim(), url: url.trim() });
+			await mcpServers.create({ name: name.trim(), url: url.trim(), headers });
 			name = '';
 			url = '';
+			headerLines = '';
 			await refresh();
 		} catch (err) {
 			createError = err instanceof ApiError ? err.message : 'Failed to register MCP server';
 		} finally {
 			creating = false;
+		}
+	}
+
+	function openHeaderEditor(id: string) {
+		headersError = null;
+		editHeaderLines = '';
+		editingHeadersId = id;
+	}
+
+	async function handleSaveHeaders(id: string) {
+		headersError = null;
+		let headers: Record<string, string>;
+		try {
+			headers = parseHeaderLines(editHeaderLines);
+		} catch (err) {
+			headersError = err instanceof Error ? err.message : 'Invalid headers';
+			return;
+		}
+		savingHeaders = true;
+		try {
+			await mcpServers.setHeaders(id, headers);
+			editingHeadersId = null;
+			await refresh();
+		} catch (err) {
+			headersError = err instanceof ApiError ? err.message : 'Failed to save headers';
+		} finally {
+			savingHeaders = false;
+		}
+	}
+
+	async function handleClearHeaders(id: string) {
+		headersError = null;
+		savingHeaders = true;
+		try {
+			await mcpServers.setHeaders(id, {});
+			editingHeadersId = null;
+			await refresh();
+		} catch (err) {
+			headersError = err instanceof ApiError ? err.message : 'Failed to clear headers';
+		} finally {
+			savingHeaders = false;
 		}
 	}
 
@@ -115,6 +192,26 @@
 			placeholder="URL (streamable-http endpoint)"
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
+		<details class="group">
+			<summary
+				class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
+			>
+				Advanced: auth headers
+			</summary>
+			<div class="mt-2 flex flex-col gap-1">
+				<p class="text-xs text-neutral-500">
+					One per line, as <code>Header-Name: value</code> — e.g.
+					<code>Authorization: Bearer sk-...</code>. Requires an owner session; values are stored in
+					your OS keychain, never shown again once saved.
+				</p>
+				<textarea
+					bind:value={headerLines}
+					rows="2"
+					placeholder="Authorization: Bearer sk-..."
+					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				></textarea>
+			</div>
+		</details>
 		<button
 			type="submit"
 			disabled={creating}
@@ -157,6 +254,11 @@
 								</span>
 							</p>
 							<p class="text-xs text-neutral-500">{server.url}</p>
+							{#if server.header_names.length > 0}
+								<p class="mt-1 text-xs text-neutral-500">
+									Auth headers: {server.header_names.join(', ')}
+								</p>
+							{/if}
 							{#if server.connected}
 								<p class="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
 									{server.tools.length} tool{server.tools.length === 1 ? '' : 's'}
@@ -196,6 +298,12 @@
 						</div>
 						<div class="flex shrink-0 items-center gap-3">
 							<button
+								onclick={() => openHeaderEditor(server.id)}
+								class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
+							>
+								{server.header_names.length > 0 ? 'Edit headers' : 'Add headers'}
+							</button>
+							<button
 								onclick={() => handleReconnect(server.id)}
 								disabled={reconnectingId === server.id}
 								class="text-xs text-neutral-600 hover:text-agent-cyan-700 disabled:opacity-50 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
@@ -210,6 +318,49 @@
 							</button>
 						</div>
 					</div>
+					{#if editingHeadersId === server.id}
+						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
+							<p class="text-xs text-neutral-500">
+								One per line, as <code>Header-Name: value</code>. Replaces the full set — leave
+								blank and save to clear all headers. Requires an owner session.
+							</p>
+							<textarea
+								bind:value={editHeaderLines}
+								rows="2"
+								placeholder="Authorization: Bearer sk-..."
+								class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+							></textarea>
+							{#if headersError}
+								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+									{headersError}
+								</p>
+							{/if}
+							<div class="flex items-center gap-3">
+								<button
+									onclick={() => handleSaveHeaders(server.id)}
+									disabled={savingHeaders}
+									class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+								>
+									{savingHeaders ? 'Saving…' : 'Save headers'}
+								</button>
+								{#if server.header_names.length > 0}
+									<button
+										onclick={() => handleClearHeaders(server.id)}
+										disabled={savingHeaders}
+										class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
+									>
+										Clear all
+									</button>
+								{/if}
+								<button
+									onclick={() => (editingHeadersId = null)}
+									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
 				</li>
 			{/snippet}
 		</FilterableList>

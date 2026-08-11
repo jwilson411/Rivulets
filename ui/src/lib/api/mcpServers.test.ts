@@ -56,6 +56,17 @@ describe('mcpServers', () => {
 		expect(init.body).toBe(JSON.stringify(input));
 	});
 
+	it('setHeaders() PUTs headers to /mcp-servers/:id/headers', async () => {
+		const fetchMock = mockFetch({ id: 'm1', header_names: ['Authorization'] });
+
+		await mcpServers.setHeaders('m1', { Authorization: 'Bearer secret' });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/mcp-servers/m1/headers');
+		expect(init.method).toBe('PUT');
+		expect(init.body).toBe(JSON.stringify({ headers: { Authorization: 'Bearer secret' } }));
+	});
+
 	it('reconnect() POSTs to /mcp-servers/:id/reconnect with no body', async () => {
 		const fetchMock = mockFetch({ id: 'm1', connected: true });
 

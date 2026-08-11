@@ -1281,7 +1281,11 @@ def test_team_create_does_not_fail_when_sync_engine_not_running(
 def test_mcp_server_register_does_not_fail_when_sync_engine_not_running(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _fake_discover_tools(url: str, timeout_seconds: int = 10) -> list[object]:  # noqa: ARG001
+    async def _fake_discover_tools(
+        url: str,  # noqa: ARG001
+        timeout_seconds: int = 10,  # noqa: ARG001
+        headers: dict[str, str] | None = None,  # noqa: ARG001
+    ) -> list[object]:
         return []
 
     monkeypatch.setattr("rivulets.api.mcp_servers.discover_tools", _fake_discover_tools)

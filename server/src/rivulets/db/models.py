@@ -391,6 +391,15 @@ class ToolVersion(Base):
 
 
 class MCPServer(Base):
+    """`header_names_json` (#124) is a JSON list of configured HTTP header
+    *names* only (e.g. `["Authorization"]`) -- the header values are
+    secrets and live in the OS keychain (security/credentials.py) under
+    `agentos.mcp.mcp_header_ref(id)`, same as ProviderConfig.api_key_ref
+    never puts a raw key in this database. Per-node like `connected`/
+    `last_connected_at` (module docstring on api/mcp_servers.py) -- not
+    in MCP_SERVER_SPEC's synced fields, so each node configures its own
+    auth for a given server rather than a secret propagating over sync."""
+
     __tablename__ = "mcp_server"
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
@@ -398,6 +407,7 @@ class MCPServer(Base):
     url: Mapped[str]
     connected: Mapped[bool] = mapped_column(default=False)
     last_connected_at: Mapped[str | None] = mapped_column(default=None)
+    header_names_json: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
 

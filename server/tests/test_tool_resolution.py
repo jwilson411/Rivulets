@@ -190,6 +190,45 @@ async def test_resolve_agent_tools_resolves_mcp(db_session: AsyncSession) -> Non
     assert resolved[0].initialized is False
 
 
+async def test_resolve_agent_tools_resolves_mcp_with_headers(db_session: AsyncSession) -> None:
+    """#124: a server with stored auth headers must build MCPTools with
+    server_params carrying them, not the plain url=/no-auth form -- the
+    runtime tool-call path, distinct from (and previously missed by)
+    discovery-time resolution in api/mcp_servers.py."""
+    import json
+
+    from rivulets.agentos.mcp import mcp_header_ref
+    from rivulets.security.credentials import store_secret
+
+    server = MCPServer(
+        name="test-server",
+        url="http://localhost:9999/mcp",
+        header_names_json=json.dumps(["Authorization"]),
+    )
+    db_session.add(server)
+    await db_session.commit()
+    store_secret(mcp_header_ref(server.id), json.dumps({"Authorization": "Bearer sk-real"}))
+
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="remote_tool",
+        description="An MCP tool.",
+        tool_type="mcp",
+        mcp_server_id=server.id,
+        mcp_tool_name="remote_tool",
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    resolved = await resolve_agent_tools(db_session, agent)
+
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], MCPTools)
+    assert resolved[0].server_params is not None
+    assert resolved[0].server_params.headers == {"Authorization": "Bearer sk-real"}
+
+
 async def test_resolve_agent_tools_skips_mcp_with_missing_server(
     db_session: AsyncSession,
 ) -> None:
