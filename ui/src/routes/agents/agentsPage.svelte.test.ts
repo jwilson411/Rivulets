@@ -19,7 +19,9 @@ vi.mock('$lib/api/agents', () => ({
 		getRoutingRules: vi.fn(),
 		setRoutingRules: vi.fn(),
 		getPeerPreference: vi.fn(),
-		setPeerPreference: vi.fn()
+		setPeerPreference: vi.fn(),
+		listVersions: vi.fn(),
+		rollback: vi.fn()
 	}
 }));
 
@@ -74,6 +76,7 @@ afterEach(() => {
 
 beforeEach(() => {
 	vi.mocked(agents.getPeerPreference).mockResolvedValue({ capability_tag: null });
+	vi.mocked(agents.listVersions).mockResolvedValue([]);
 	// Most tests don't care about team membership -- default to no teams so
 	// the "on a team" filter has nothing to match unless a test opts in.
 	vi.mocked(teams.list).mockResolvedValue([]);
