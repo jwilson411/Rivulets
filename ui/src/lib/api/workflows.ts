@@ -122,6 +122,14 @@ export interface WorkflowNodeUpdateInput {
 export interface WorkflowConnectionCreateInput {
 	from_node_id: string | null;
 	to_node_id: string;
+	condition_json?: Record<string, unknown> | null;
+}
+
+export interface WorkflowConnectionUpdateInput {
+	// Omit to leave unchanged; include (even as null, to clear the
+	// condition) to update -- mirrors api/workflows.py's
+	// WorkflowConnectionUpdate.
+	condition_json?: Record<string, unknown> | null;
 }
 
 export interface WorkflowSchedule {
@@ -237,6 +245,16 @@ export const workflows = {
 		api.post<WorkflowConnection>(
 			`/workflows/${workflowId}/connections`,
 			body,
+			auth.token ?? undefined
+		),
+	updateConnection: (
+		workflowId: string,
+		connectionId: string,
+		patch: WorkflowConnectionUpdateInput
+	) =>
+		api.patch<WorkflowConnection>(
+			`/workflows/${workflowId}/connections/${connectionId}`,
+			patch,
 			auth.token ?? undefined
 		),
 	removeConnection: (workflowId: string, connectionId: string) =>

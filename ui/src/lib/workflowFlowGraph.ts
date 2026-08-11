@@ -17,6 +17,18 @@ export interface BuildFlowGraphResult {
 	entryNodeId: string | null;
 }
 
+// #198: a conditional edge's label -- what a viewer sees on the canvas
+// without opening the inspector. Mirrors _validate_condition's shape
+// (api/workflows.py): exactly one of contains/not_contains, string value.
+// Anything else (null, or a shape validation would've rejected) renders as
+// an unconditional edge -- no label, no dashed styling.
+export function conditionEdgeLabel(condition: Record<string, unknown> | null): string | null {
+	if (!condition || Object.keys(condition).length !== 1) return null;
+	if (typeof condition.contains === 'string') return `contains "${condition.contains}"`;
+	if (typeof condition.not_contains === 'string') return `not contains "${condition.not_contains}"`;
+	return null;
+}
+
 // Pure WorkflowNode[]/WorkflowConnection[] -> Svelte Flow {nodes, edges}
 // transform. Framework-agnostic on purpose so branch/merge correctness is
 // unit-testable without any DOM/browser involvement. Replaces the old
@@ -59,16 +71,31 @@ export function buildFlowGraph(
 			(c): c is WorkflowConnection & { from_node_id: string } =>
 				c.from_node_id !== null && nodeIds.has(c.from_node_id) && nodeIds.has(c.to_node_id)
 		)
-		.map((c) => ({
-			id: c.id,
-			source: c.from_node_id,
-			target: c.to_node_id,
-			type: 'smoothstep',
-			// Lets tests target a specific edge (`page.getByTestId(...)`) the
-			// same way workflow-node-${id} does for nodes -- domAttributes is
-			// spread straight onto the rendered <g class="svelte-flow__edge">.
-			domAttributes: { 'data-testid': `workflow-edge-${c.id}` }
-		}));
+		.map((c) => {
+			const conditionLabel = conditionEdgeLabel(c.condition_json);
+			return {
+				id: c.id,
+				source: c.from_node_id,
+				target: c.to_node_id,
+				type: 'smoothstep',
+				// Lets tests target a specific edge (`page.getByTestId(...)`) the
+				// same way workflow-node-${id} does for nodes -- domAttributes is
+				// spread straight onto the rendered <g class="svelte-flow__edge">.
+				domAttributes: { 'data-testid': `workflow-edge-${c.id}` },
+				// A conditional edge gets a label plus a dashed stroke so
+				// branching is visible on the canvas itself, not just in the
+				// inspector -- an unconditional edge keeps the plain solid line
+				// it always had (no extra keys, so existing snapshots/tests for
+				// those are untouched).
+				...(conditionLabel
+					? {
+							label: conditionLabel,
+							labelStyle: 'font-size: 11px; font-weight: 600; fill: var(--color-agent-magenta);',
+							style: 'stroke-dasharray: 5 4; stroke: var(--color-agent-magenta);'
+						}
+					: {})
+			};
+		});
 
 	return { nodes: flowNodes, edges: flowEdges, entryNodeId };
 }

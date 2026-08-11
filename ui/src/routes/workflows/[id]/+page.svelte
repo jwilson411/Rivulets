@@ -63,6 +63,14 @@
 	let edgeDeleteBusy = $state(false);
 	let edgeDeleteError = $state<string | null>(null);
 	let connectError = $state<string | null>(null);
+	// #198: seeded from the selected connection's condition_json in
+	// startEditEdge -- 'none' means "always follow", the same as a null
+	// condition_json (see _validate_condition, api/workflows.py).
+	let editingEdgeCondition = $state<{ operator: 'none' | 'contains' | 'not_contains'; value: string }>(
+		{ operator: 'none', value: '' }
+	);
+	let conditionBusy = $state(false);
+	let conditionError = $state<string | null>(null);
 
 	let runList = $state<WorkflowRun[] | null>(null);
 	let runsError = $state<string | null>(null);
@@ -542,9 +550,38 @@
 
 	function startEditEdge(edgeId: string) {
 		edgeDeleteError = null;
+		conditionError = null;
 		editingNodeId = null;
 		addingNode = null;
 		editingEdgeId = edgeId;
+		const condition = connectionList.find((c) => c.id === edgeId)?.condition_json ?? null;
+		if (condition && typeof condition.contains === 'string') {
+			editingEdgeCondition = { operator: 'contains', value: condition.contains };
+		} else if (condition && typeof condition.not_contains === 'string') {
+			editingEdgeCondition = { operator: 'not_contains', value: condition.not_contains };
+		} else {
+			editingEdgeCondition = { operator: 'none', value: '' };
+		}
+	}
+
+	async function handleUpdateEdgeCondition(edgeId: string) {
+		if (!workflow) return;
+		if (editingEdgeCondition.operator !== 'none' && !editingEdgeCondition.value.trim()) return;
+		conditionError = null;
+		conditionBusy = true;
+		try {
+			const condition_json =
+				editingEdgeCondition.operator === 'none'
+					? null
+					: { [editingEdgeCondition.operator]: editingEdgeCondition.value.trim() };
+			await workflows.updateConnection(workflow.id, edgeId, { condition_json });
+			editingEdgeId = null;
+			await load(workflow.id);
+		} catch (err) {
+			conditionError = err instanceof Error ? err.message : 'Failed to update condition';
+		} finally {
+			conditionBusy = false;
+		}
 	}
 
 	// Svelte Flow's Handle already optimistically draws the new edge the
@@ -1167,6 +1204,47 @@
 				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 			>
 				<p class="text-sm text-ink dark:text-ink-dark">Connection selected.</p>
+				<form
+					onsubmit={(event) => {
+						event.preventDefault();
+						handleUpdateEdgeCondition(editingEdgeId!);
+					}}
+					class="mt-3 flex flex-col gap-2"
+				>
+					<label class="flex flex-col gap-1 text-xs text-neutral-600 dark:text-neutral-400">
+						Condition
+						<select
+							bind:value={editingEdgeCondition.operator}
+							class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						>
+							<option value="none">Always follow</option>
+							<option value="contains">Follow if output contains…</option>
+							<option value="not_contains">Follow if output does not contain…</option>
+						</select>
+					</label>
+					{#if editingEdgeCondition.operator !== 'none'}
+						<input
+							type="text"
+							bind:value={editingEdgeCondition.value}
+							placeholder="Text to match"
+							class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+						/>
+					{/if}
+					<div class="flex items-center gap-3">
+						<button
+							type="submit"
+							disabled={conditionBusy}
+							class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+						>
+							{conditionBusy ? 'Saving…' : 'Save condition'}
+						</button>
+					</div>
+					{#if conditionError}
+						<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+							{conditionError}
+						</p>
+					{/if}
+				</form>
 				{#if edgeDeleteError}
 					<p class="mt-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
 						{edgeDeleteError}

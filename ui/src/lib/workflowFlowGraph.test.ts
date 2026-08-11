@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFlowGraph } from './workflowFlowGraph';
+import { buildFlowGraph, conditionEdgeLabel } from './workflowFlowGraph';
 import type { WorkflowConnection, WorkflowNode } from './api/workflows';
 
 function node(overrides: Partial<WorkflowNode> & { id: string }): WorkflowNode {
@@ -130,5 +130,50 @@ describe('buildFlowGraph', () => {
 
 		expect(result.nodes[0].data.subtitle).toBe('subtitle for Fetch data');
 		expect(result.nodes[0].data.label).toBe('Fetch data');
+	});
+
+	it('leaves an unconditional edge with no label or style', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const plain = connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' });
+
+		const result = buildFlowGraph([n1, n2], [plain], noSubtitle);
+
+		expect(result.edges[0].label).toBeUndefined();
+		expect(result.edges[0].style).toBeUndefined();
+	});
+
+	it('labels and styles a conditional edge distinctly from a plain one', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const conditional = connection({
+			id: 'c1',
+			from_node_id: 'n1',
+			to_node_id: 'n2',
+			condition_json: { contains: 'urgent' }
+		});
+
+		const result = buildFlowGraph([n1, n2], [conditional], noSubtitle);
+
+		expect(result.edges[0].label).toBe('contains "urgent"');
+		expect(result.edges[0].style).toContain('stroke-dasharray');
+	});
+});
+
+describe('conditionEdgeLabel', () => {
+	it('returns null for no condition', () => {
+		expect(conditionEdgeLabel(null)).toBeNull();
+	});
+
+	it('labels a contains condition', () => {
+		expect(conditionEdgeLabel({ contains: 'urgent' })).toBe('contains "urgent"');
+	});
+
+	it('labels a not_contains condition', () => {
+		expect(conditionEdgeLabel({ not_contains: 'spam' })).toBe('not contains "spam"');
+	});
+
+	it('returns null for a malformed shape', () => {
+		expect(conditionEdgeLabel({ contains: 'x', extra: 1 })).toBeNull();
 	});
 });
