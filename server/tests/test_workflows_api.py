@@ -335,6 +335,56 @@ def test_create_workflow_node_round_trips_child_workflow_id(
     assert node["child_workflow_id"] == child_id
 
 
+def test_node_position_round_trips_through_create_and_update(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "positioned")
+    created = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={
+            "name": "step",
+            "node_type": "transform",
+            "config": {"template": "{input}"},
+            "position_x": 120.0,
+            "position_y": 40.0,
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["position_x"] == 120.0
+    assert created.json()["position_y"] == 40.0
+    node_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/v1/workflows/{workflow_id}/nodes/{node_id}",
+        json={"position_x": 300.0, "position_y": 90.0},
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["position_x"] == 300.0
+    assert updated.json()["position_y"] == 90.0
+
+
+def test_node_without_position_gets_auto_layout_fallback_on_list(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#194: nodes created without an explicit position (e.g. every node
+    saved before the canvas existed) still get sensible coordinates from
+    the GET /nodes response instead of stacking at the origin."""
+    workflow_id = _create_workflow(client, auth_headers, "unpositioned")
+    a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
+    _connect(client, auth_headers, workflow_id, None, a)
+    _connect(client, auth_headers, workflow_id, a, b)
+
+    nodes = client.get(f"/api/v1/workflows/{workflow_id}/nodes", headers=auth_headers).json()
+    node_a = next(n for n in nodes if n["id"] == a)
+    node_b = next(n for n in nodes if n["id"] == b)
+    assert node_a["position_x"] is not None and node_a["position_y"] is not None
+    assert node_b["position_x"] is not None and node_b["position_y"] is not None
+    assert node_a["position_x"] != node_b["position_x"]
+
+
 def test_second_outbound_connection_from_same_node_is_allowed(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

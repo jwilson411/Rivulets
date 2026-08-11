@@ -235,6 +235,8 @@ WORKFLOW_NODE_SPEC = EntitySpec(
         "config_json",
         "retry_max_attempts",
         "retry_backoff_seconds",
+        "position_x",
+        "position_y",
     ),
 )
 WORKFLOW_CONNECTION_SPEC = EntitySpec(

@@ -581,6 +581,18 @@ class WorkflowNode(Base):
     config_json: Mapped[str | None] = mapped_column(default=None)  # JSON, node-type-specific
     retry_max_attempts: Mapped[int] = mapped_column(default=0)
     retry_backoff_seconds: Mapped[int] = mapped_column(default=5)
+    # Canvas coordinates (#194). Nullable rather than defaulting to (0, 0)
+    # so "never positioned" (every node saved before the canvas existed,
+    # or created without an explicit position) stays distinguishable from
+    # "deliberately placed at the origin" -- the API layer's auto-layout
+    # fallback (workflows/layout.py) only fills in nodes where this is
+    # still None, so it never clobbers a real 0.0 a user actually dragged
+    # to. Two typed floats rather than a layout_json blob per the
+    # fallback_models comment above: fixed two-field shape, not variable,
+    # so JSON-in-TEXT would just be schema churn without the benefit that
+    # pattern buys for genuinely variable-shape data.
+    position_x: Mapped[float | None] = mapped_column(default=None)
+    position_y: Mapped[float | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
