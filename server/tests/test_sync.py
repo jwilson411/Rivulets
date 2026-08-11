@@ -944,6 +944,24 @@ async def test_single_engine_elects_self_as_coordinator(tmp_path: Path) -> None:
         await engine.stop()
 
 
+async def test_own_addresses_populated_after_start(tmp_path: Path) -> None:
+    """Issue #132: own_addresses gives the user something copyable for
+    manual cross-network pairing instead of requiring them to hand-build
+    a multiaddr. Each entry must be this node's own listen interface plus
+    its own peer id, dialable as-is by another node's connect()."""
+    engine = SyncEngine(tmp_path)
+    assert engine.own_addresses == []  # nothing bound yet
+    await engine.start("own-addresses-fingerprint", hashlib.sha256(b"addrs").digest().hex())
+    try:
+        addrs = engine.own_addresses
+        assert len(addrs) > 0
+        for addr in addrs:
+            assert addr.endswith(f"/p2p/{engine.node_id}")
+    finally:
+        await engine.stop()
+    assert engine.own_addresses == []  # reset on stop, same as other ephemeral state
+
+
 async def test_two_engines_converge_on_same_coordinator(tmp_path: Path) -> None:
     """Both engines run on the same test machine (near-identical capability
     scores), so this deliberately doesn't assert *which* peer wins -- only
@@ -1101,7 +1119,13 @@ def test_sync_status_when_not_running(client: TestClient, auth_headers: dict[str
     response = client.get("/api/v1/sync/status", headers=auth_headers)
     assert response.status_code == 200
     body = response.json()
-    assert body == {"running": False, "node_id": None, "peers": [], "pending_changes": 0}
+    assert body == {
+        "running": False,
+        "node_id": None,
+        "peers": [],
+        "pending_changes": 0,
+        "own_addresses": [],
+    }
 
 
 def test_sync_connect_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -1384,6 +1408,7 @@ def test_settings_patch_does_not_fail_when_sync_engine_not_running(
 class _FakeRunningEngine:
     running = True
     node_id = "fake-node-id"
+    own_addresses = ["/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id"]
 
     def __init__(
         self,
@@ -1442,6 +1467,7 @@ def test_sync_status_when_running_reports_peers(
     body = response.json()
     assert body["running"] is True
     assert body["node_id"] == "fake-node-id"
+    assert body["own_addresses"] == ["/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id"]
     assert body["peers"] == [
         {
             "peer_id": "peer-1",

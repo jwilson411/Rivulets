@@ -20,6 +20,7 @@
 	let connectError = $state<string | null>(null);
 	let rowError = $state<string | null>(null);
 	let resolvingId = $state<string | null>(null);
+	let copiedAddress = $state<string | null>(null);
 
 	let myCapabilities = $state<string[]>([]);
 	let capabilitiesDraft = $state('');
@@ -87,6 +88,11 @@
 		} finally {
 			connecting = false;
 		}
+	}
+
+	async function handleCopyAddress(address: string) {
+		await navigator.clipboard.writeText(address);
+		copiedAddress = address;
 	}
 
 	async function handleDisconnect(peer: Peer) {
@@ -183,20 +189,49 @@
 				</p>
 			{/if}
 
-			<form onsubmit={handleConnect} class="flex gap-2 pt-2">
-				<input
-					type="text"
-					bind:value={connectAddress}
-					placeholder="Multiaddr (e.g. /ip4/1.2.3.4/tcp/5000/p2p/12D3Koo...)"
-					class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				/>
-				<button
-					type="submit"
-					disabled={connecting || !status.running}
-					class="shrink-0 rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-				>
-					{connecting ? 'Connecting…' : 'Connect'}
-				</button>
+			{#if status.own_addresses.length > 0}
+				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
+					<p class="text-xs text-neutral-500">
+						Your sync address — paste this into the "Connect to a node" field on the
+						<strong>other</strong> device to pair with it manually (e.g. over Tailscale or another network
+						peers can't auto-discover each other on).
+					</p>
+					{#each status.own_addresses as address (address)}
+						<div class="flex items-center gap-2">
+							<code class="min-w-0 flex-1 truncate text-xs text-ink dark:text-ink-dark"
+								>{address}</code
+							>
+							<button
+								type="button"
+								onclick={() => handleCopyAddress(address)}
+								class="shrink-0 rounded-md border border-ink/15 px-3 py-1 text-xs font-medium text-ink dark:border-white/15 dark:text-ink-dark"
+							>
+								{copiedAddress === address ? 'Copied' : 'Copy'}
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			<form onsubmit={handleConnect} class="flex flex-col gap-1 pt-2">
+				<p class="text-xs text-neutral-500">
+					Connect to a node — paste the sync address copied from the other device here.
+				</p>
+				<div class="flex gap-2">
+					<input
+						type="text"
+						bind:value={connectAddress}
+						placeholder="Multiaddr (e.g. /ip4/1.2.3.4/tcp/5000/p2p/12D3Koo...)"
+						class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					/>
+					<button
+						type="submit"
+						disabled={connecting || !status.running}
+						class="shrink-0 rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+					>
+						{connecting ? 'Connecting…' : 'Connect'}
+					</button>
+				</div>
 			</form>
 			{#if connectError}
 				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
