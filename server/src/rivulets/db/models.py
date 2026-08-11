@@ -163,6 +163,13 @@ class Agent(Base):
     # tool assigned is unattended-safe only once a human explicitly opts
     # it in (agents/+page.svelte), not the moment it's created.
     approved_for_unattended_tools: Mapped[bool] = mapped_column(default=False)
+    # #107: JSON Schema object (JSON-in-TEXT, same convention as
+    # fallback_models above) constraining this agent's reply. None (the
+    # default) means free-form text, exactly as every agent behaved before
+    # this existed. When set, agentos/service.py's run_agent requests
+    # structured output from the model instead of streaming free text --
+    # see that module for the streaming/parsing tradeoffs this implies.
+    output_schema: Mapped[str | None] = mapped_column(default=None)
     agentos_agent_id: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)

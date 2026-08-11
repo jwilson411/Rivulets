@@ -12,6 +12,12 @@ export interface Agent {
 	// Ordered 'provider:model_name' strings (#103): tried in turn if
 	// `model`'s call fails with a retryable-looking error.
 	fallback_models: string[];
+	// #107: a raw JSON Schema object constraining this agent's reply, or
+	// null for free-form text (the only behavior before this existed).
+	// Optional (not just nullable) so the many existing fixtures/mocks
+	// across the UI test suite that predate this field don't all need
+	// updating -- unlike fallback_models, most agents never set this.
+	output_schema?: Record<string, unknown> | null;
 	// #100: one-time approval to run this agent's sensitive tools (if any
 	// are assigned) unattended -- schedules, remediation runs. Doesn't
 	// affect ordinary chat/slash-command tool use at all.
@@ -43,6 +49,7 @@ export interface AgentCreateInput {
 	instructions: string;
 	model: string;
 	fallback_models?: string[];
+	output_schema?: Record<string, unknown> | null;
 	tool_ids?: string[];
 	team_ids?: string[];
 }
@@ -53,6 +60,7 @@ export interface AgentUpdateInput {
 	instructions?: string;
 	model?: string;
 	fallback_models?: string[];
+	output_schema?: Record<string, unknown> | null;
 	tool_ids?: string[];
 	team_ids?: string[];
 	approved_for_unattended_tools?: boolean;

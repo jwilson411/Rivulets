@@ -16,6 +16,7 @@ from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
     RunErrorEvent,
+    RunOutput,
     ToolCallCompletedEvent,
     ToolCallErrorEvent,
     ToolCallStartedEvent,
@@ -246,3 +247,49 @@ async def test_run_agent_model_override_does_not_run_on_the_registered_instance(
     # The registered singleton itself is untouched -- the clone got the
     # override, this fixture's own agent (created with no model) didn't.
     assert registered_agent.model is None
+
+
+async def test_run_agent_calls_schema_constrained_agent_non_streamed(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """#107: an agent with output_schema set skips the streaming loop
+    entirely -- stream=False, no on_token calls -- and returns whatever
+    RunOutput agno hands back directly."""
+    registered_agent.output_schema = {"type": "object"}
+    calls: list[dict[str, Any]] = []
+
+    async def structured_arun(*_args: object, **kwargs: object) -> RunOutput:
+        calls.append(dict(kwargs))
+        return RunOutput(content={"answer": "42"}, status=RunStatus.completed, content_type="dict")
+
+    registered_agent.arun = structured_arun  # pyright: ignore[reportAttributeAccessIssue]
+    tokens: list[str] = []
+
+    result = await run_agent(
+        db_session, "agent-1", "hi", session_id="s-1", on_token=tokens.append
+    )
+
+    assert result.status is RunStatus.completed
+    assert result.content == {"answer": "42"}
+    assert tokens == []
+    assert calls == [{"stream": False, "session_id": "s-1", "user_id": "human"}]
+
+
+async def test_run_agent_treats_schema_violation_as_error(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """#107 open question, resolved: a model that doesn't comply with the
+    schema (agno leaves content as the raw string, content_type='str',
+    without failing the run itself) is promoted to RunStatus.error here --
+    a genuine agent failure, same as any other bad response."""
+    registered_agent.output_schema = {"type": "object"}
+
+    async def non_compliant_arun(*_args: object, **_kwargs: object) -> RunOutput:
+        return RunOutput(content="not valid json", status=RunStatus.completed, content_type="str")
+
+    registered_agent.arun = non_compliant_arun  # pyright: ignore[reportAttributeAccessIssue]
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert result.status is RunStatus.error
+    assert result.content == "not valid json"

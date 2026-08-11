@@ -283,7 +283,8 @@
 								description: agent.description,
 								instructions: agent.instructions,
 								model: agent.model,
-								fallback_models: agent.fallback_models
+								fallback_models: agent.fallback_models,
+								output_schema: agent.output_schema ?? null
 							}}
 							submitLabel="Save changes"
 							busyLabel="Saving…"
@@ -302,6 +303,9 @@
 									<p class="font-mono text-xs text-neutral-400">
 										fallback: {agent.fallback_models.join(' → ')}
 									</p>
+								{/if}
+								{#if agent.output_schema}
+									<p class="text-xs text-neutral-400">structured output configured</p>
 								{/if}
 							</div>
 							<div class="flex items-center gap-2">

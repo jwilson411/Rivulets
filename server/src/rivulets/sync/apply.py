@@ -188,7 +188,9 @@ class EntitySpec:
 
 
 AGENT_SPEC = EntitySpec(
-    "agent", Agent, ("name", "description", "instructions", "model", "fallback_models")
+    "agent",
+    Agent,
+    ("name", "description", "instructions", "model", "fallback_models", "output_schema"),
 )
 CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
