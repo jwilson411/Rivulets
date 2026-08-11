@@ -6,6 +6,7 @@
 		workflows,
 		type Workflow,
 		type WorkflowNode,
+		type WorkflowNodeType,
 		type WorkflowConnection,
 		type WorkflowRun,
 		type WorkflowNodeRun,
@@ -20,13 +21,10 @@
 	import WorkflowNodeForm, {
 		type WorkflowNodeFormValues
 	} from '$lib/components/WorkflowNodeForm.svelte';
-	import { SvelteFlow, Background, Controls, MiniMap, type NodeTypes } from '@xyflow/svelte';
-	import '@xyflow/svelte/dist/style.css';
-	import WorkflowFlowNode from '$lib/components/WorkflowFlowNode.svelte';
+	import WorkflowFlowCanvas from '$lib/components/WorkflowFlowCanvas.svelte';
 	import { buildFlowGraph } from '$lib/workflowFlowGraph';
+	import { NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
 	import { theme } from '$lib/theme.svelte';
-
-	const nodeTypes: NodeTypes = { workflowNode: WorkflowFlowNode };
 
 	let workflow = $state<Workflow | null>(null);
 	let nodeList = $state<WorkflowNode[]>([]);
@@ -54,6 +52,11 @@
 	let editingNodeId = $state<string | null>(null);
 	let editBusy = $state(false);
 	let editError = $state<string | null>(null);
+	let deleteBusy = $state(false);
+
+	let addingNode = $state<{ nodeType: WorkflowNodeType; x: number; y: number } | null>(null);
+	let addBusy = $state(false);
+	let addError = $state<string | null>(null);
 
 	let runList = $state<WorkflowRun[] | null>(null);
 	let runsError = $state<string | null>(null);
@@ -431,6 +434,7 @@
 
 	function startEditNode(nodeId: string) {
 		editError = null;
+		addingNode = null;
 		editingNodeId = nodeId;
 	}
 
@@ -454,6 +458,78 @@
 		} finally {
 			editBusy = false;
 		}
+	}
+
+	async function handleDeleteNode(nodeId: string) {
+		if (!workflow) return;
+		editError = null;
+		deleteBusy = true;
+		try {
+			await workflows.removeNode(workflow.id, nodeId);
+			editingNodeId = null;
+			await load(workflow.id);
+		} catch (err) {
+			editError = err instanceof Error ? err.message : 'Failed to delete step';
+		} finally {
+			deleteBusy = false;
+		}
+	}
+
+	// Dropping a palette entry doesn't create the node immediately -- 'agent'
+	// and 'workflow' node types have a required agent_id/child_workflow_id
+	// the drop itself can't supply, so every type opens the same locked-type
+	// form (at the drop position) rather than special-casing the types that
+	// happen to need no further input.
+	function startAddNode(nodeType: WorkflowNodeType, position: { x: number; y: number }) {
+		addError = null;
+		editingNodeId = null;
+		addingNode = { nodeType, x: position.x, y: position.y };
+	}
+
+	async function handleAddNode(values: WorkflowNodeFormValues) {
+		if (!workflow || !addingNode) return;
+		addError = null;
+		addBusy = true;
+		try {
+			await workflows.createNode(workflow.id, {
+				name: values.name,
+				node_type: values.node_type,
+				agent_id: values.node_type === 'agent' ? values.agent_id : undefined,
+				child_workflow_id: values.node_type === 'workflow' ? values.child_workflow_id : undefined,
+				config: values.config,
+				retry_max_attempts: values.retry_max_attempts,
+				retry_backoff_seconds: values.retry_backoff_seconds,
+				position_x: addingNode.x,
+				position_y: addingNode.y
+			});
+			addingNode = null;
+			await load(workflow.id);
+		} catch (err) {
+			addError = err instanceof Error ? err.message : 'Failed to add step';
+		} finally {
+			addBusy = false;
+		}
+	}
+
+	// Optimistic local update first so the node doesn't snap back to its
+	// pre-drag position while the PATCH is in flight -- flowGraph is
+	// $derived from nodeList, so this takes effect the moment nodeList
+	// changes, no reload needed.
+	async function handleNodesMoved(updates: { id: string; positionX: number; positionY: number }[]) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		nodeList = nodeList.map((n) => {
+			const update = updates.find((u) => u.id === n.id);
+			return update ? { ...n, position_x: update.positionX, position_y: update.positionY } : n;
+		});
+		await Promise.all(
+			updates.map((u) =>
+				workflows.updateNode(workflowId, u.id, {
+					position_x: u.positionX,
+					position_y: u.positionY
+				})
+			)
+		);
 	}
 
 	async function loadRuns() {
@@ -1013,25 +1089,20 @@
 			class="relative w-full overflow-hidden rounded-lg border border-ink/12 dark:border-white/10"
 			style="height: 34rem"
 		>
-			<SvelteFlow
+			<WorkflowFlowCanvas
 				nodes={flowGraph.nodes}
 				edges={flowGraph.edges}
-				{nodeTypes}
-				fitView
-				nodesDraggable={false}
-				nodesConnectable={false}
-				edgesFocusable={false}
 				colorMode={theme.preference}
-				onnodeclick={(e) => startEditNode(e.node.id)}
-			>
-				<Background />
-				<Controls showLock={false} />
-				<MiniMap />
-			</SvelteFlow>
+				onnodeclick={startEditNode}
+				onnodesmoved={handleNodesMoved}
+				onpalettedrop={startAddNode}
+			/>
 		</section>
 
 		{#if flowGraph.nodes.length === 0}
-			<p class="text-center text-sm text-neutral-500">No steps yet — add the first one above.</p>
+			<p class="text-center text-sm text-neutral-500">
+				No steps yet — drag one from the palette above onto the canvas.
+			</p>
 		{/if}
 
 		{#if editingNodeId}
@@ -1062,8 +1133,42 @@
 							oncancel={() => (editingNodeId = null)}
 						/>
 					{/key}
+					<button
+						onclick={() => handleDeleteNode(node.id)}
+						disabled={deleteBusy}
+						class="mt-3 text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
+					>
+						{deleteBusy ? 'Deleting…' : 'Delete step'}
+					</button>
 				</section>
 			{/if}
+		{/if}
+
+		{#if addingNode}
+			<section
+				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+			>
+				<WorkflowNodeForm
+					agentOptions={agentList}
+					{workflowOptions}
+					lockNodeType
+					initial={{
+						name: NODE_TYPE_LABELS[addingNode.nodeType],
+						node_type: addingNode.nodeType,
+						agent_id: null,
+						child_workflow_id: null,
+						config: {},
+						retry_max_attempts: 0,
+						retry_backoff_seconds: 5
+					}}
+					submitLabel="Add step"
+					busyLabel="Adding…"
+					busy={addBusy}
+					error={addError}
+					onsubmit={handleAddNode}
+					oncancel={() => (addingNode = null)}
+				/>
+			</section>
 		{/if}
 
 		<section class="flex flex-col gap-3">

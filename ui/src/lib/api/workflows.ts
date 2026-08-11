@@ -104,6 +104,8 @@ export interface WorkflowNodeCreateInput {
 	config?: Record<string, unknown>;
 	retry_max_attempts?: number;
 	retry_backoff_seconds?: number;
+	position_x?: number;
+	position_y?: number;
 }
 
 export interface WorkflowNodeUpdateInput {
@@ -113,6 +115,8 @@ export interface WorkflowNodeUpdateInput {
 	config?: Record<string, unknown>;
 	retry_max_attempts?: number;
 	retry_backoff_seconds?: number;
+	position_x?: number;
+	position_y?: number;
 }
 
 export interface WorkflowConnectionCreateInput {
