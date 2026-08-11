@@ -20,16 +20,13 @@
 	import WorkflowNodeForm, {
 		type WorkflowNodeFormValues
 	} from '$lib/components/WorkflowNodeForm.svelte';
+	import { SvelteFlow, Background, Controls, MiniMap, type NodeTypes } from '@xyflow/svelte';
+	import '@xyflow/svelte/dist/style.css';
+	import WorkflowFlowNode from '$lib/components/WorkflowFlowNode.svelte';
+	import { buildFlowGraph } from '$lib/workflowFlowGraph';
+	import { theme } from '$lib/theme.svelte';
 
-	const NODE_TYPE_LABELS: Record<WorkflowNode['node_type'], string> = {
-		agent: 'Agent',
-		transform: 'Transform',
-		summarize: 'Summarize',
-		conditional: 'Conditional',
-		merge: 'Merge',
-		human_input: 'Human input',
-		workflow: 'Workflow'
-	};
+	const nodeTypes: NodeTypes = { workflowNode: WorkflowFlowNode };
 
 	let workflow = $state<Workflow | null>(null);
 	let nodeList = $state<WorkflowNode[]>([]);
@@ -54,18 +51,9 @@
 	let publishBusy = $state(false);
 	let publishError = $state<string | null>(null);
 
-	// `undefined` = no insert form open; `null` = inserting as the new entry
-	// (before the current first step); a node id = inserting right after it.
-	let insertAfter = $state<string | null | undefined>(undefined);
-	let insertBusy = $state(false);
-	let insertError = $state<string | null>(null);
-	let insertFormKey = $state(0);
-
 	let editingNodeId = $state<string | null>(null);
 	let editBusy = $state(false);
 	let editError = $state<string | null>(null);
-
-	let actionError = $state<string | null>(null);
 
 	let runList = $state<WorkflowRun[] | null>(null);
 	let runsError = $state<string | null>(null);
@@ -73,22 +61,23 @@
 	let nodeRunsByRun = $state<Record<string, WorkflowNodeRun[]>>({});
 	let nodeRunsError = $state<string | null>(null);
 
-	const chain = $derived(buildChain(nodeList, connectionList));
-	const orphanNodes = $derived(nodeList.filter((n) => !chain.some((c) => c.id === n.id)));
-
-	function buildChain(nodes: WorkflowNode[], connections: WorkflowConnection[]): WorkflowNode[] {
-		const nodeById = new Map(nodes.map((n) => [n.id, n]));
-		const outgoingFrom = new Map(connections.map((c) => [c.from_node_id, c]));
-		const result: WorkflowNode[] = [];
-		let cursor = outgoingFrom.get(null);
-		while (cursor) {
-			const node = nodeById.get(cursor.to_node_id);
-			if (!node || result.some((n) => n.id === node.id)) break;
-			result.push(node);
-			cursor = outgoingFrom.get(node.id);
+	function subtitleFor(node: WorkflowNode): string | null {
+		if (node.node_type === 'agent') {
+			return agentList.find((a) => a.id === node.agent_id)?.name ?? 'Deleted agent';
 		}
-		return result;
+		if (node.node_type === 'transform' && node.config.template) {
+			return String(node.config.template);
+		}
+		if (node.node_type === 'conditional' && node.config.contains) {
+			return `stop unless input contains "${node.config.contains}"`;
+		}
+		if (node.node_type === 'workflow') {
+			return `/${workflowList.find((w) => w.id === node.child_workflow_id)?.name ?? 'Deleted workflow'}`;
+		}
+		return null;
 	}
+
+	const flowGraph = $derived(buildFlowGraph(nodeList, connectionList, subtitleFor));
 
 	async function load(workflowId: string) {
 		loadError = null;
@@ -440,51 +429,6 @@
 		}
 	}
 
-	function openInsertForm(afterNodeId: string | null) {
-		insertError = null;
-		insertAfter = afterNodeId;
-		insertFormKey += 1;
-	}
-
-	function closeInsertForm() {
-		insertAfter = undefined;
-		insertError = null;
-	}
-
-	async function handleInsert(values: WorkflowNodeFormValues) {
-		if (!workflow || insertAfter === undefined) return;
-		const workflowId = workflow.id;
-		const position = insertAfter;
-		insertError = null;
-		insertBusy = true;
-		try {
-			const node = await workflows.createNode(workflowId, values);
-			const displaced = connectionList.find((c) => c.from_node_id === position);
-			if (displaced) {
-				await workflows.removeConnection(workflowId, displaced.id);
-				await workflows.createConnection(workflowId, {
-					from_node_id: position,
-					to_node_id: node.id
-				});
-				await workflows.createConnection(workflowId, {
-					from_node_id: node.id,
-					to_node_id: displaced.to_node_id
-				});
-			} else {
-				await workflows.createConnection(workflowId, {
-					from_node_id: position,
-					to_node_id: node.id
-				});
-			}
-			insertAfter = undefined;
-			await load(workflowId);
-		} catch (err) {
-			insertError = err instanceof Error ? err.message : 'Failed to add step';
-		} finally {
-			insertBusy = false;
-		}
-	}
-
 	function startEditNode(nodeId: string) {
 		editError = null;
 		editingNodeId = nodeId;
@@ -509,41 +453,6 @@
 			editError = err instanceof Error ? err.message : 'Failed to update step';
 		} finally {
 			editBusy = false;
-		}
-	}
-
-	async function handleRemoveNode(nodeId: string) {
-		if (!workflow) return;
-		const workflowId = workflow.id;
-		actionError = null;
-		try {
-			const incoming = connectionList.find((c) => c.to_node_id === nodeId);
-			const outgoing = connectionList.find((c) => c.from_node_id === nodeId);
-			await workflows.removeNode(workflowId, nodeId);
-			if (incoming && outgoing) {
-				await workflows.createConnection(workflowId, {
-					from_node_id: incoming.from_node_id,
-					to_node_id: outgoing.to_node_id
-				});
-			}
-			await load(workflowId);
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to remove step';
-		}
-	}
-
-	async function connectOrphanToEnd(nodeId: string) {
-		if (!workflow) return;
-		const workflowId = workflow.id;
-		actionError = null;
-		try {
-			await workflows.createConnection(workflowId, {
-				from_node_id: chain.length > 0 ? chain[chain.length - 1].id : null,
-				to_node_id: nodeId
-			});
-			await load(workflowId);
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to connect step';
 		}
 	}
 
@@ -1100,179 +1009,61 @@
 			{/if}
 		</section>
 
-		{#if actionError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
+		<section
+			class="relative w-full overflow-hidden rounded-lg border border-ink/12 dark:border-white/10"
+			style="height: 34rem"
+		>
+			<SvelteFlow
+				nodes={flowGraph.nodes}
+				edges={flowGraph.edges}
+				{nodeTypes}
+				fitView
+				nodesDraggable={false}
+				nodesConnectable={false}
+				edgesFocusable={false}
+				colorMode={theme.preference}
+				onnodeclick={(e) => startEditNode(e.node.id)}
+			>
+				<Background />
+				<Controls showLock={false} />
+				<MiniMap />
+			</SvelteFlow>
+		</section>
+
+		{#if flowGraph.nodes.length === 0}
+			<p class="text-center text-sm text-neutral-500">No steps yet — add the first one above.</p>
 		{/if}
 
-		<section class="flex flex-col items-stretch gap-0">
-			<button
-				type="button"
-				onclick={() => openInsertForm(null)}
-				class="mx-auto rounded-full border border-dashed border-ink/25 px-3 py-1 text-xs text-neutral-500 hover:border-agent-cyan-600 hover:text-agent-cyan-700 dark:border-white/20 dark:hover:text-agent-cyan-400"
-			>
-				+ Add step
-			</button>
-			{#if insertAfter === null}
-				<div
-					class="my-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+		{#if editingNodeId}
+			{@const node = nodeList.find((n) => n.id === editingNodeId)}
+			{#if node}
+				<section
+					class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 				>
-					{#key insertFormKey}
+					{#key node.id}
 						<WorkflowNodeForm
 							agentOptions={agentList}
 							{workflowOptions}
-							submitLabel="Add step"
-							busyLabel="Adding…"
-							busy={insertBusy}
-							error={insertError}
-							onsubmit={handleInsert}
-							oncancel={closeInsertForm}
+							lockNodeType
+							initial={{
+								name: node.name,
+								node_type: node.node_type,
+								agent_id: node.agent_id,
+								child_workflow_id: node.child_workflow_id,
+								config: node.config,
+								retry_max_attempts: node.retry_max_attempts,
+								retry_backoff_seconds: node.retry_backoff_seconds
+							}}
+							submitLabel="Save changes"
+							busyLabel="Saving…"
+							busy={editBusy}
+							error={editError}
+							onsubmit={(values) => handleEditNode(node.id, values)}
+							oncancel={() => (editingNodeId = null)}
 						/>
 					{/key}
-				</div>
+				</section>
 			{/if}
-
-			{#each chain as node, i (node.id)}
-				<div class="flex justify-center py-1">
-					<div class="h-4 w-px bg-ink/15 dark:bg-white/15"></div>
-				</div>
-				<div class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					{#if editingNodeId === node.id}
-						{#key node.id}
-							<WorkflowNodeForm
-								agentOptions={agentList}
-								{workflowOptions}
-								lockNodeType
-								initial={{
-									name: node.name,
-									node_type: node.node_type,
-									agent_id: node.agent_id,
-									child_workflow_id: node.child_workflow_id,
-									config: node.config,
-									retry_max_attempts: node.retry_max_attempts,
-									retry_backoff_seconds: node.retry_backoff_seconds
-								}}
-								submitLabel="Save changes"
-								busyLabel="Saving…"
-								busy={editBusy}
-								error={editError}
-								onsubmit={(values) => handleEditNode(node.id, values)}
-								oncancel={() => (editingNodeId = null)}
-							/>
-						{/key}
-					{:else}
-						<div class="flex items-start justify-between">
-							<div>
-								<span
-									class="rounded-sm bg-neutral-200 px-1.5 py-0.5 text-[11px] font-medium text-neutral-700 dark:bg-white/10 dark:text-neutral-300"
-								>
-									{i + 1}. {NODE_TYPE_LABELS[node.node_type]}
-								</span>
-								<p class="mt-1 font-medium text-ink dark:text-ink-dark">{node.name}</p>
-								{#if node.node_type === 'agent'}
-									<p class="text-xs text-neutral-500">
-										{agentList.find((a) => a.id === node.agent_id)?.name ?? 'Deleted agent'}
-									</p>
-								{:else if node.node_type === 'transform' && node.config.template}
-									<p class="font-mono text-xs text-neutral-500">
-										{node.config.template}
-									</p>
-								{:else if node.node_type === 'conditional' && node.config.contains}
-									<p class="text-xs text-neutral-500">
-										stop unless input contains "{node.config.contains}"
-									</p>
-								{:else if node.node_type === 'workflow'}
-									<p class="text-xs text-neutral-500">
-										/{workflowList.find((w) => w.id === node.child_workflow_id)?.name ??
-											'Deleted workflow'}
-									</p>
-								{/if}
-							</div>
-							<div class="flex items-center gap-2">
-								<button
-									onclick={() => startEditNode(node.id)}
-									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									Edit
-								</button>
-								<button
-									onclick={() => handleRemoveNode(node.id)}
-									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-								>
-									Remove
-								</button>
-							</div>
-						</div>
-					{/if}
-				</div>
-				<div class="flex justify-center py-1">
-					<div class="h-4 w-px bg-ink/15 dark:bg-white/15"></div>
-				</div>
-				<button
-					type="button"
-					onclick={() => openInsertForm(node.id)}
-					class="mx-auto rounded-full border border-dashed border-ink/25 px-3 py-1 text-xs text-neutral-500 hover:border-agent-cyan-600 hover:text-agent-cyan-700 dark:border-white/20 dark:hover:text-agent-cyan-400"
-				>
-					+ Add step
-				</button>
-				{#if insertAfter === node.id}
-					<div
-						class="my-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-					>
-						{#key insertFormKey}
-							<WorkflowNodeForm
-								agentOptions={agentList}
-								{workflowOptions}
-								submitLabel="Add step"
-								busyLabel="Adding…"
-								busy={insertBusy}
-								error={insertError}
-								onsubmit={handleInsert}
-								oncancel={closeInsertForm}
-							/>
-						{/key}
-					</div>
-				{/if}
-			{/each}
-
-			{#if chain.length === 0}
-				<p class="mt-3 text-center text-sm text-neutral-500">
-					No steps yet — add the first one above.
-				</p>
-			{/if}
-		</section>
-
-		{#if orphanNodes.length > 0}
-			<section class="flex flex-col gap-2 rounded-lg border border-ink/12 p-4 dark:border-white/10">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Unconnected steps</h2>
-				<p class="text-xs text-neutral-500">
-					These steps exist but aren't wired into the chain, so the engine skips them.
-				</p>
-				<ul class="flex flex-col gap-2">
-					{#each orphanNodes as node (node.id)}
-						<li
-							class="flex items-center justify-between rounded-md border border-ink/12 p-2 dark:border-white/10"
-						>
-							<span class="text-sm text-ink dark:text-ink-dark"
-								>{NODE_TYPE_LABELS[node.node_type]} — {node.name}</span
-							>
-							<div class="flex items-center gap-2">
-								<button
-									onclick={() => connectOrphanToEnd(node.id)}
-									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									Add to end of chain
-								</button>
-								<button
-									onclick={() => handleRemoveNode(node.id)}
-									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-								>
-									Remove
-								</button>
-							</div>
-						</li>
-					{/each}
-				</ul>
-			</section>
 		{/if}
 
 		<section class="flex flex-col gap-3">

@@ -36,6 +36,8 @@ export interface WorkflowNode {
 	config: Record<string, unknown>;
 	retry_max_attempts: number;
 	retry_backoff_seconds: number;
+	position_x: number | null;
+	position_y: number | null;
 }
 
 export interface WorkflowConnection {
@@ -43,6 +45,7 @@ export interface WorkflowConnection {
 	workflow_id: string;
 	from_node_id: string | null;
 	to_node_id: string;
+	condition_json: Record<string, unknown> | null;
 }
 
 export type WorkflowRunStatus = 'running' | 'awaiting_human' | 'completed' | 'failed' | 'stopped';

@@ -16,16 +16,7 @@
 	import { untrack } from 'svelte';
 	import type { Agent } from '$lib/api/agents';
 	import type { Workflow } from '$lib/api/workflows';
-
-	const NODE_TYPE_LABELS: Record<WorkflowNodeType, string> = {
-		agent: 'Agent',
-		transform: 'Transform',
-		summarize: 'Summarize',
-		conditional: 'Conditional',
-		merge: 'Merge',
-		human_input: 'Human input',
-		workflow: 'Workflow'
-	};
+	import { NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
 
 	let {
 		agentOptions,
