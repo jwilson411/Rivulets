@@ -404,7 +404,8 @@ describe('workflows/[id]/+page.svelte', () => {
 		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([created]);
 
 		await page.getByRole('button', { name: '+ Add schedule' }).click();
-		await page.getByPlaceholder('0 9 * * *').fill('0 9 * * *');
+		// Simple mode defaults to "Every day" at 09:00, which already
+		// generates '0 9 * * *' -- no need to touch the frequency/time fields.
 		await page.getByPlaceholder('input passed to the entry step').fill('go');
 		await page.getByRole('button', { name: 'Add schedule', exact: true }).click();
 
@@ -489,6 +490,7 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		await page.getByRole('button', { name: 'Advanced (cron)' }).click();
 		await page.getByPlaceholder('0 9 * * *').fill('nonsense');
 
 		await expect.element(page.getByText('Invalid cron expression')).toBeInTheDocument();
@@ -686,6 +688,7 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		await page.getByRole('button', { name: 'Advanced (cron)' }).click();
 		await page.getByPlaceholder('0 9 * * *').fill('0 9 * * *');
 		// Clearing back to empty exercises onCronDraftChange's early-return
 		// guard, since a blank cron expression has nothing to preview.
@@ -696,6 +699,45 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByPlaceholder('0 9 * * *')).not.toBeInTheDocument();
 	});
 
+	it('builds a cron expression from the simple weekly picker (#131)', async () => {
+		mockLoad();
+		const created: WorkflowSchedule = {
+			id: 'sched-weekly',
+			workflow_id: 'wf-1',
+			channel_id: 'ch-1',
+			cron_expression: '30 14 * * 3',
+			run_once: false,
+			input_content: '',
+			enabled: true,
+			next_fire_at: '2026-08-12T14:30:00Z',
+			last_fired_at: null,
+			consecutive_failures: 0,
+			name: null,
+			created_by: 'human',
+			created_at: '2026-08-08T00:00:00Z',
+			updated_at: '2026-08-08T00:00:00Z'
+		};
+		vi.mocked(workflows.createSchedule).mockResolvedValueOnce(created);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([created]);
+
+		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		// combobox 2 is Frequency; selecting "weekly" reveals a Day combobox
+		// (index 3), pushing the Channel picker to index 4.
+		await page.getByRole('combobox').nth(2).selectOptions('weekly');
+		await page.getByRole('combobox').nth(3).selectOptions('3');
+		await page.getByLabelText('Time').fill('14:30');
+		await page.getByRole('button', { name: 'Add schedule', exact: true }).click();
+
+		expect(workflows.createSchedule).toHaveBeenCalledWith('wf-1', {
+			channel_id: 'ch-1',
+			cron_expression: '30 14 * * 3',
+			input_content: ''
+		});
+	});
+
 	it('shows an error when creating a schedule fails', async () => {
 		mockLoad();
 		vi.mocked(workflows.createSchedule).mockRejectedValueOnce(new Error('Channel not found'));
@@ -704,7 +746,6 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: '+ Add schedule' }).click();
-		await page.getByPlaceholder('0 9 * * *').fill('0 9 * * *');
 		await page.getByRole('button', { name: 'Add schedule', exact: true }).click();
 
 		// The schedule error paragraph is shown both above the schedule list
@@ -726,8 +767,9 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: '+ Add schedule' }).click();
-		await page.getByPlaceholder('0 9 * * *').fill('0 9 * * *');
-		await page.getByRole('combobox').nth(2).selectOptions('ch-2');
+		// combobox 2 is the simple-mode Frequency picker added by #131;
+		// the schedule's Channel picker is now combobox 3.
+		await page.getByRole('combobox').nth(3).selectOptions('ch-2');
 
 		await expect.element(page.getByText(/Next run:/)).toBeInTheDocument();
 	});
