@@ -864,6 +864,100 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Cannot save step')).toBeInTheDocument();
 	});
 
+	it('deletes a step from the canvas edit panel, and surfaces an error on failure', async () => {
+		mockLoad();
+		vi.mocked(workflows.removeNode).mockRejectedValueOnce(new Error('Cannot delete step'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('workflow-node-n1').click();
+		await page.getByRole('button', { name: 'Delete step' }).click();
+		await expect.element(page.getByText('Cannot delete step')).toBeInTheDocument();
+
+		vi.mocked(workflows.removeNode).mockResolvedValueOnce(undefined);
+		await page.getByRole('button', { name: 'Delete step' }).click();
+
+		expect(workflows.removeNode).toHaveBeenCalledWith('wf-1', 'n1');
+		await expect
+			.element(page.getByRole('button', { name: 'Save changes' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('creates a node by dragging a palette entry onto the canvas', async () => {
+		mockLoad();
+		vi.mocked(workflows.createNode).mockResolvedValueOnce({
+			...formatNode,
+			id: 'n9',
+			name: 'Transform'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('palette-node-transform').dropTo(page.getByTestId('workflow-canvas'));
+		await expect.element(page.getByRole('button', { name: 'Add step' })).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add step' }).click();
+
+		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
+			name: 'Transform',
+			node_type: 'transform',
+			agent_id: undefined,
+			child_workflow_id: undefined,
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5,
+			position_x: expect.any(Number),
+			position_y: expect.any(Number)
+		});
+	});
+
+	it('shows an error when creating a node from the palette fails', async () => {
+		mockLoad();
+		vi.mocked(workflows.createNode).mockRejectedValueOnce(new Error('Cannot add step'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('palette-node-merge').dropTo(page.getByTestId('workflow-canvas'));
+		await page.getByRole('button', { name: 'Add step' }).click();
+
+		await expect.element(page.getByText('Cannot add step')).toBeInTheDocument();
+	});
+
+	it('cancels adding a node from the palette without submitting', async () => {
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('palette-node-summarize').dropTo(page.getByTestId('workflow-canvas'));
+		await expect.element(page.getByRole('button', { name: 'Add step' })).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		expect(workflows.createNode).not.toHaveBeenCalled();
+		await expect.element(page.getByRole('button', { name: 'Add step' })).not.toBeInTheDocument();
+	});
+
+	it('persists a new position when an existing node is dragged on the canvas', async () => {
+		mockLoad();
+		vi.mocked(workflows.updateNode).mockResolvedValue(fetchNode);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n2')).toBeInTheDocument();
+
+		await page.getByTestId('workflow-node-n1').dropTo(page.getByTestId('workflow-node-n2'));
+
+		await expect.poll(() => vi.mocked(workflows.updateNode).mock.calls.length).toBeGreaterThan(0);
+		expect(workflows.updateNode).toHaveBeenCalledWith('wf-1', 'n1', {
+			position_x: expect.any(Number),
+			position_y: expect.any(Number)
+		});
+	});
+
 	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {
 		mockLoad();
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
@@ -883,7 +977,7 @@ describe('workflows/[id]/+page.svelte', () => {
 		render(WorkflowBuilderPage);
 
 		await expect
-			.element(page.getByText('No steps yet — add the first one above.'))
+			.element(page.getByText('No steps yet — drag one from the palette above onto the canvas.'))
 			.toBeInTheDocument();
 	});
 
