@@ -384,7 +384,5 @@ def test_rollback_agent_version_not_found(client: TestClient, auth_headers: dict
 
 
 def test_rollback_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
-    response = client.post(
-        "/api/v1/agents/nonexistent/versions/1/rollback", headers=auth_headers
-    )
+    response = client.post("/api/v1/agents/nonexistent/versions/1/rollback", headers=auth_headers)
     assert response.status_code == 404

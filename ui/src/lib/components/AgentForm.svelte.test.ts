@@ -28,10 +28,8 @@ describe('AgentForm.svelte', () => {
 		});
 
 		await page.getByPlaceholder('Name').fill('  Researcher  ');
-		await page
-			.getByPlaceholder('Description (used by the dispatcher for routing)')
-			.fill('  Looks things up  ');
-		await page.getByPlaceholder('Instructions (system prompt)').fill('  Be thorough  ');
+		await page.getByPlaceholder('Description').fill('  Looks things up  ');
+		await page.getByPlaceholder('Instructions').fill('  Be thorough  ');
 		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
 		await page.getByRole('button', { name: 'Create agent' }).click();
 
@@ -54,10 +52,8 @@ describe('AgentForm.svelte', () => {
 		});
 
 		await page.getByPlaceholder('Name').fill('Researcher');
-		await page
-			.getByPlaceholder('Description (used by the dispatcher for routing)')
-			.fill('Looks things up');
-		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByPlaceholder('Description').fill('Looks things up');
+		await page.getByPlaceholder('Instructions').fill('Be thorough');
 		await page.getByRole('button', { name: 'Create agent' }).click();
 
 		expect(onsubmit).not.toHaveBeenCalled();
@@ -99,10 +95,8 @@ describe('AgentForm.svelte', () => {
 		});
 
 		await page.getByPlaceholder('Name').fill('Researcher');
-		await page
-			.getByPlaceholder('Description (used by the dispatcher for routing)')
-			.fill('Looks things up');
-		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByPlaceholder('Description').fill('Looks things up');
+		await page.getByPlaceholder('Instructions').fill('Be thorough');
 		await page.getByRole('combobox').first().selectOptions('anthropic:claude-haiku-4-5-20251001');
 
 		await page.getByRole('button', { name: '+ Add fallback' }).click();

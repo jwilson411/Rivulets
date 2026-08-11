@@ -826,7 +826,9 @@ async def create_webhook(
     # Deliberately no publish_current_state call -- WorkflowWebhook is
     # unsynced (see its own docstring / sync/apply.py's absence of it
     # from _DISPATCH).
-    return WorkflowWebhookCreated(**WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret)
+    return WorkflowWebhookCreated(
+        **WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret
+    )
 
 
 @router.get("/{workflow_id}/webhooks", response_model=list[WorkflowWebhookOut])
@@ -892,7 +894,9 @@ async def rotate_webhook_secret(
     webhook.secret_ciphertext = ciphertext
     await db.commit()
     await db.refresh(webhook)
-    return WorkflowWebhookCreated(**WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret)
+    return WorkflowWebhookCreated(
+        **WorkflowWebhookOut.model_validate(webhook).model_dump(), secret=secret
+    )
 
 
 @router.get("/runs/failed", response_model=list[FailedWorkflowRunOut])

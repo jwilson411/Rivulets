@@ -19,7 +19,9 @@ vi.mock('$lib/api/agents', () => ({
 		getRoutingRules: vi.fn(),
 		setRoutingRules: vi.fn(),
 		getPeerPreference: vi.fn(),
-		setPeerPreference: vi.fn()
+		setPeerPreference: vi.fn(),
+		listVersions: vi.fn(),
+		rollback: vi.fn()
 	}
 }));
 
@@ -74,6 +76,7 @@ afterEach(() => {
 
 beforeEach(() => {
 	vi.mocked(agents.getPeerPreference).mockResolvedValue({ capability_tag: null });
+	vi.mocked(agents.listVersions).mockResolvedValue([]);
 	// Most tests don't care about team membership -- default to no teams so
 	// the "on a team" filter has nothing to match unless a test opts in.
 	vi.mocked(teams.list).mockResolvedValue([]);
@@ -158,10 +161,8 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('New agent')).toBeInTheDocument();
 
 		await page.getByPlaceholder('Name').fill('Researcher');
-		await page
-			.getByPlaceholder('Description (used by the dispatcher for routing)')
-			.fill('Looks things up');
-		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByPlaceholder('Description').fill('Looks things up');
+		await page.getByPlaceholder('Instructions').fill('Be thorough');
 		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
 		await page.getByRole('button', { name: 'Create agent' }).click();
 
@@ -187,10 +188,8 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('New agent')).toBeInTheDocument();
 
 		await page.getByPlaceholder('Name').fill('Researcher');
-		await page
-			.getByPlaceholder('Description (used by the dispatcher for routing)')
-			.fill('Looks things up');
-		await page.getByPlaceholder('Instructions (system prompt)').fill('Be thorough');
+		await page.getByPlaceholder('Description').fill('Looks things up');
+		await page.getByPlaceholder('Instructions').fill('Be thorough');
 		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
 		await page.getByRole('button', { name: 'Create agent' }).click();
 
@@ -226,7 +225,8 @@ describe('agents/+page.svelte', () => {
 			.element(page.getByText('No routing rules — only @mention triggers this agent'))
 			.toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Always respond' }).click();
+		await page.getByRole('radio', { name: 'Always respond' }).click();
+		await page.getByRole('button', { name: 'Apply routing rule' }).click();
 
 		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
 			{ rule_type: 'always', pattern: '', priority: 10 }
@@ -238,13 +238,16 @@ describe('agents/+page.svelte', () => {
 	it('sets a mention-only routing rule', async () => {
 		vi.mocked(agents.list).mockResolvedValue([researcher]);
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
-		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.getRoutingRules)
+			.mockResolvedValueOnce([{ id: 'r1', rule_type: 'always', pattern: '', priority: 10 }])
+			.mockResolvedValueOnce([{ id: 'r2', rule_type: 'mention_only', pattern: '', priority: 10 }]);
 		vi.mocked(agents.setRoutingRules).mockResolvedValueOnce([]);
 
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: '@mention only' }).click();
+		await page.getByRole('radio', { name: '@mention only' }).click();
+		await page.getByRole('button', { name: 'Apply routing rule' }).click();
 
 		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
 			{ rule_type: 'mention_only', pattern: '', priority: 10 }
@@ -262,12 +265,13 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Always respond' }).click();
+		await page.getByRole('radio', { name: 'Always respond' }).click();
+		await page.getByRole('button', { name: 'Apply routing rule' }).click();
 
 		await expect.element(page.getByText('Failed to update routing rule')).toBeInTheDocument();
 	});
 
-	it('sets keyword routing rules from the comma-separated draft and clears the input', async () => {
+	it('sets keyword routing rules from the comma-separated draft', async () => {
 		vi.mocked(agents.list).mockResolvedValue([researcher]);
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
 		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
@@ -276,14 +280,14 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
+		await page.getByRole('radio', { name: 'Keyword match' }).click();
 		const keywordInput = page.getByPlaceholder('keyword, keyword, ...');
 		await keywordInput.fill('billing, invoices');
-		await page.getByRole('button', { name: 'Set keywords' }).click();
+		await page.getByRole('button', { name: 'Apply routing rule' }).click();
 
 		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
 			{ rule_type: 'keyword', pattern: JSON.stringify(['billing', 'invoices']), priority: 10 }
 		]);
-		await expect.element(keywordInput).toHaveValue('');
 	});
 
 	it('does nothing when Set keywords is clicked with an empty draft', async () => {
@@ -294,7 +298,8 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Set keywords' }).click();
+		await page.getByRole('radio', { name: 'Keyword match' }).click();
+		await expect.element(page.getByRole('button', { name: 'Apply routing rule' })).toBeDisabled();
 
 		expect(agents.setRoutingRules).not.toHaveBeenCalled();
 	});
@@ -308,6 +313,7 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
+		await page.getByText('Advanced: peer capability preference').click();
 		await page.getByPlaceholder('e.g. gpu (blank = no preference)').fill('gpu');
 		await page.getByRole('button', { name: 'Save' }).click();
 
@@ -323,6 +329,7 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
+		await page.getByText('Advanced: peer capability preference').click();
 		await page.getByRole('button', { name: 'Save' }).click();
 
 		expect(agents.setPeerPreference).toHaveBeenCalledWith('agent-1', null);
@@ -339,6 +346,7 @@ describe('agents/+page.svelte', () => {
 		render(AgentsPage);
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 
+		await page.getByText('Advanced: peer capability preference').click();
 		await page.getByRole('button', { name: 'Save' }).click();
 
 		await expect.element(page.getByText('Failed to update peer preference')).toBeInTheDocument();
