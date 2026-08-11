@@ -3,7 +3,11 @@
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
-	const PROVIDER_KINDS: ProviderKind[] = [
+	// Hosted providers run the model for you and just need an API key;
+	// self-hosted/local ones need a base URL pointing at wherever you're
+	// running them (#128). Grouped in the "Add provider" select so the
+	// distinction is visible before you pick one.
+	const HOSTED_PROVIDER_KINDS: ProviderKind[] = [
 		'anthropic',
 		'openai',
 		'deepseek',
@@ -12,10 +16,10 @@
 		'groq',
 		'xai',
 		'qwen',
-		'cohere',
-		'ollama',
-		'openai_compatible'
+		'cohere'
 	];
+	const SELF_HOSTED_PROVIDER_KINDS: ProviderKind[] = ['ollama', 'openai_compatible'];
+	const PROVIDER_KINDS: ProviderKind[] = [...HOSTED_PROVIDER_KINDS, ...SELF_HOSTED_PROVIDER_KINDS];
 
 	const providerFilters: ListFilter<Provider>[] = [
 		{
@@ -108,7 +112,12 @@
 		<div>
 			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Providers</h1>
 			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				LLM provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
+				A provider is the company or service that runs the AI model your agents use — for example
+				Anthropic or OpenAI, or a model you run yourself with Ollama. Add one here, then pick a
+				model from it when you set up an agent.
+			</p>
+			<p class="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+				Provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
 				once saved.
 			</p>
 		</div>
@@ -133,9 +142,16 @@
 			bind:value={kind}
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink dark:border-white/15 dark:text-ink-dark"
 		>
-			{#each PROVIDER_KINDS as k (k)}
-				<option value={k}>{k}</option>
-			{/each}
+			<optgroup label="Hosted">
+				{#each HOSTED_PROVIDER_KINDS as k (k)}
+					<option value={k}>{k}</option>
+				{/each}
+			</optgroup>
+			<optgroup label="Self-hosted / local">
+				{#each SELF_HOSTED_PROVIDER_KINDS as k (k)}
+					<option value={k}>{k}</option>
+				{/each}
+			</optgroup>
 		</select>
 		<input
 			type="text"
@@ -153,11 +169,24 @@
 		<input
 			type="text"
 			bind:value={baseUrl}
-			placeholder={kind === 'openai_compatible' || kind === 'ollama'
-				? 'Base URL (required)'
-				: 'Base URL (optional override)'}
+			placeholder={kind === 'ollama'
+				? 'Base URL (e.g. http://localhost:11434)'
+				: kind === 'openai_compatible'
+					? 'Base URL (required)'
+					: 'Base URL (optional override)'}
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
+		{#if kind === 'ollama'}
+			<p class="text-xs text-neutral-500">
+				New to Ollama? See
+				<a
+					href="https://ollama.com"
+					target="_blank"
+					rel="noopener noreferrer"
+					class="underline hover:text-agent-cyan-600">ollama.com</a
+				> for setup — once it's running, its base URL is usually http://localhost:11434.
+			</p>
+		{/if}
 		<button
 			type="submit"
 			disabled={creating}

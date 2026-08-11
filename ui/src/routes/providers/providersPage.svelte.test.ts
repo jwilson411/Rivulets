@@ -132,7 +132,9 @@ describe('providers/+page.svelte', () => {
 
 		await page.getByRole('combobox').selectOptions('ollama');
 		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local Ollama');
-		await page.getByPlaceholder('Base URL (required)').fill('http://localhost:11434');
+		await page
+			.getByPlaceholder('Base URL (e.g. http://localhost:11434)')
+			.fill('http://localhost:11434');
 		await page.getByRole('button', { name: 'Add provider' }).click();
 
 		expect(providers.create).toHaveBeenCalledWith({
@@ -201,6 +203,24 @@ describe('providers/+page.svelte', () => {
 
 		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
 		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
+	});
+
+	it('shows an Ollama setup pointer only when ollama is selected (#128)', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+
+		render(ProvidersPage);
+		await expect
+			.element(page.getByText('No providers configured yet — add one above.'))
+			.toBeInTheDocument();
+
+		await expect.element(page.getByText('New to Ollama?')).not.toBeInTheDocument();
+
+		await page.getByRole('combobox').selectOptions('ollama');
+
+		await expect.element(page.getByText('New to Ollama?')).toBeInTheDocument();
+		await expect
+			.element(page.getByPlaceholder('Base URL (e.g. http://localhost:11434)'))
+			.toBeInTheDocument();
 	});
 
 	it('filters the provider list by type', async () => {
