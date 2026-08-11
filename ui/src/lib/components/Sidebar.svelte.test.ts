@@ -248,7 +248,8 @@ describe('Sidebar.svelte', () => {
 			running: false,
 			node_id: null,
 			peers: [],
-			pending_changes: 0
+			pending_changes: 0,
+			own_addresses: []
 		});
 		vi.mocked(approvals.list).mockResolvedValue([]);
 	}

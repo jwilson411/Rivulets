@@ -15,6 +15,7 @@ export interface SyncStatus {
 	node_id: string | null;
 	peers: Peer[];
 	pending_changes: number;
+	own_addresses: string[];
 }
 
 export interface CoordinatorStatus {

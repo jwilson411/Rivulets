@@ -310,6 +310,15 @@ class SyncEngine:
         self._psk_hex: str | None = None
         self._node_id: str | None = None
         self._start_error: BaseException | None = None
+        # Full dialable multiaddrs for this node's own listen interfaces,
+        # each with this node's own /p2p/<peer_id> suffix -- so a user can
+        # copy one into another node's manual-connect field (issue #132)
+        # without hand-constructing a multiaddr. Populated once in
+        # _trio_main right after the host binds; listen addresses don't
+        # change for the lifetime of a running engine, so a plain list
+        # (not re-fetched per read) is safe to read cross-thread, same as
+        # _node_id above.
+        self._own_addresses: list[str] = []
 
     @property
     def running(self) -> bool:
@@ -320,6 +329,13 @@ class SyncEngine:
         if self._node_id is None:
             raise RuntimeError("Sync engine not running")
         return self._node_id
+
+    @property
+    def own_addresses(self) -> list[str]:
+        """This node's own copyable multiaddrs (see _own_addresses).
+        Empty (not an error) while not yet bound, same "benign default"
+        treatment as list_peers()."""
+        return list(self._own_addresses)
 
     def set_state_change_handler(self, handler: StateChangeHandler) -> None:
         self._on_state_change = handler
@@ -408,6 +424,7 @@ class SyncEngine:
         port = find_free_port()
         listen_addrs = get_available_interfaces(port)
         async with host.run(listen_addrs=listen_addrs):
+            self._own_addresses = [f"{addr}/p2p/{self._node_id}" for addr in host.get_addrs()]
             mdns = WorkspaceMDNS(host, self._workspace_fingerprint, _bound_port(host))
             self._mdns = mdns
             # PeerListener (sync/discovery.py) only adds a discovered
@@ -535,6 +552,7 @@ class SyncEngine:
         self._last_coordinator_heartbeat_at = None
         self._started_monotonic = None
         self._connected_peers.clear()
+        self._own_addresses = []
 
     async def _call_trio(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
         token = self._trio_token

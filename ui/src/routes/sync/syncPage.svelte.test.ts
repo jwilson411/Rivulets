@@ -34,7 +34,8 @@ const runningStatus: SyncStatus = {
 			capabilities: []
 		}
 	],
-	pending_changes: 0
+	pending_changes: 0,
+	own_addresses: ['/ip4/192.168.1.5/tcp/5000/p2p/node-abc123']
 };
 
 const selfCoordinator: CoordinatorStatus = {
@@ -47,9 +48,19 @@ const selfCoordinator: CoordinatorStatus = {
 	peer_scores: {}
 };
 
+let writeTextMock: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
 	vi.mocked(sync.getCapabilities).mockResolvedValue({ capabilities: [] });
 	vi.mocked(sync.coordinator).mockResolvedValue(selfCoordinator);
+	// navigator.clipboard.writeText is stubbed since real clipboard access
+	// needs OS-level permissions Playwright's headless Chromium doesn't
+	// grant by default (see invites/invitesPage.svelte.test.ts).
+	writeTextMock = vi.fn().mockResolvedValue(undefined);
+	Object.defineProperty(navigator, 'clipboard', {
+		value: { writeText: writeTextMock },
+		configurable: true
+	});
 });
 
 const conflict: SyncConflict = {
@@ -101,6 +112,33 @@ describe('sync/+page.svelte', () => {
 		await expect.element(input).toHaveValue('');
 	});
 
+	it('shows own sync address with a copy affordance (#132)', async () => {
+		vi.mocked(sync.status).mockResolvedValue(runningStatus);
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+		await expect
+			.element(page.getByText('/ip4/192.168.1.5/tcp/5000/p2p/node-abc123'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Copy', exact: true }).click();
+
+		expect(writeTextMock).toHaveBeenCalledWith('/ip4/192.168.1.5/tcp/5000/p2p/node-abc123');
+		await expect.element(page.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
+	});
+
+	it('hides the own-address section when no addresses are available', async () => {
+		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, own_addresses: [] });
+		vi.mocked(sync.conflicts).mockResolvedValue([]);
+
+		render(SyncPage);
+		await expect.element(page.getByText('running')).toBeInTheDocument();
+
+		await expect
+			.element(page.getByText('Your sync address', { exact: false }))
+			.not.toBeInTheDocument();
+	});
+
 	it('disconnects a peer via sync.disconnect', async () => {
 		vi.mocked(sync.status).mockResolvedValue(runningStatus);
 		vi.mocked(sync.conflicts).mockResolvedValue([]);
@@ -129,7 +167,12 @@ describe('sync/+page.svelte', () => {
 	});
 
 	it('shows a not-running status and disables Connect', async () => {
-		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, running: false, node_id: null });
+		vi.mocked(sync.status).mockResolvedValue({
+			...runningStatus,
+			running: false,
+			node_id: null,
+			own_addresses: []
+		});
 		vi.mocked(sync.conflicts).mockResolvedValue([]);
 
 		render(SyncPage);
@@ -322,7 +365,12 @@ describe('sync/+page.svelte', () => {
 	});
 
 	it('hides the coordinator section when sync is not running', async () => {
-		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, running: false, node_id: null });
+		vi.mocked(sync.status).mockResolvedValue({
+			...runningStatus,
+			running: false,
+			node_id: null,
+			own_addresses: []
+		});
 		vi.mocked(sync.conflicts).mockResolvedValue([]);
 		vi.mocked(sync.coordinator).mockResolvedValue({
 			running: false,

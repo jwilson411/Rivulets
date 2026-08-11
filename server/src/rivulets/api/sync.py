@@ -59,6 +59,7 @@ class SyncStatus(BaseModel):
     node_id: str | None
     peers: list[PeerOut]
     pending_changes: int
+    own_addresses: list[str] = []
 
 
 class ConnectRequest(BaseModel):
@@ -112,6 +113,7 @@ async def sync_status(_: CurrentWorkspaceId, _o: OwnerGrant) -> SyncStatus:
         node_id=engine.node_id,
         peers=[_peer_out(p, peer_capabilities.get(p.peer_id, [])) for p in peers],
         pending_changes=0,
+        own_addresses=engine.own_addresses,
     )
 
 
