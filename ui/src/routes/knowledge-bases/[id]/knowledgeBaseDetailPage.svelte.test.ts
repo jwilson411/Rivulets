@@ -11,6 +11,7 @@ import {
 	type KnowledgeBase,
 	type KnowledgeBaseDocument
 } from '$lib/api/knowledgeBases';
+import { files } from '$lib/api/files';
 
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'kb-1' }, url: new URL('http://localhost/knowledge-bases/kb-1') }
@@ -102,5 +103,73 @@ describe('knowledge-bases/[id]/+page.svelte', () => {
 
 		await expect.element(page.getByText('Failed')).toBeInTheDocument();
 		await expect.element(page.getByText('No OpenAI provider configured')).toBeInTheDocument();
+	});
+
+	it('shows an error when the knowledge base fails to load', async () => {
+		vi.mocked(knowledgeBases.get).mockRejectedValueOnce(new Error('Failed to load'));
+		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([]);
+
+		render(KnowledgeBaseDetailPage);
+
+		await expect.element(page.getByText('Failed to load')).toBeInTheDocument();
+	});
+
+	it('uploads and ingests a document, then refreshes the list', async () => {
+		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
+		vi.mocked(knowledgeBases.listDocuments)
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([ingestedDoc]);
+		vi.mocked(files.upload).mockResolvedValueOnce({
+			file_id: 'file-1',
+			content_hash: 'hash',
+			filename: 'notes.txt',
+			mime_type: 'text/plain',
+			size_bytes: 5
+		});
+		vi.mocked(knowledgeBases.ingestDocument).mockResolvedValueOnce(ingestedDoc);
+
+		render(KnowledgeBaseDetailPage);
+		await expect
+			.element(page.getByText('No documents ingested yet — add one above.'))
+			.toBeInTheDocument();
+
+		const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+		const fileLocator = page.elementLocator(input);
+		await fileLocator.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
+
+		expect(files.upload).toHaveBeenCalled();
+		expect(knowledgeBases.ingestDocument).toHaveBeenCalledWith('kb-1', 'file-1');
+		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
+	});
+
+	it('shows an error when the upload fails', async () => {
+		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
+		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([]);
+		vi.mocked(files.upload).mockRejectedValueOnce(new Error('Failed to ingest document'));
+
+		render(KnowledgeBaseDetailPage);
+		await expect
+			.element(page.getByText('No documents ingested yet — add one above.'))
+			.toBeInTheDocument();
+
+		const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+		const fileLocator = page.elementLocator(input);
+		await fileLocator.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
+
+		await expect.element(page.getByText('Failed to ingest document')).toBeInTheDocument();
+	});
+
+	it('shows a row-scoped error when removing a document fails', async () => {
+		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
+		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([ingestedDoc]);
+		vi.mocked(knowledgeBases.removeDocument).mockRejectedValueOnce(
+			new Error('Failed to remove document')
+		);
+
+		render(KnowledgeBaseDetailPage);
+		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		await expect.element(page.getByText('Failed to remove document')).toBeInTheDocument();
 	});
 });

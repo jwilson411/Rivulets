@@ -335,4 +335,363 @@ describe('evals/+page.svelte', () => {
 		expect(evals.listResults).toHaveBeenCalledWith('suite-1', 'run-1');
 		await expect.element(page.getByText('goodbye')).toBeInTheDocument();
 	});
+
+	it('shows an error when suite deletion fails', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.deleteSuite).mockRejectedValueOnce(new Error('Failed to delete eval suite'));
+
+		render(EvalsPage);
+		await expect.element(page.getByText('greeting-suite')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Failed to delete eval suite')).toBeInTheDocument();
+	});
+
+	it('collapses the cases panel on a second click', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValue([exactCase]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await expect.element(page.getByText('greets')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Hide cases' }).click();
+		await expect.element(page.getByText('greets')).not.toBeInTheDocument();
+	});
+
+	it('shows an error when cases fail to load', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockRejectedValueOnce(new Error('Failed to load cases'));
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+
+		await expect.element(page.getByText('Failed to load cases')).toBeInTheDocument();
+	});
+
+	it('rejects invalid JSON in expected tool args for a structural case', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await page.getByRole('button', { name: '+ Add case' }).click();
+
+		await page.getByRole('textbox').first().fill('calls search');
+		await page.getByRole('textbox').nth(1).fill('find cats');
+		await page.getByLabelText('Judge').selectOptions('structural');
+		await page.getByPlaceholder('search').fill('search_web');
+		await page.getByPlaceholder('{"query": "cats"}').fill('not json');
+		await page.getByRole('button', { name: 'Add case' }).click();
+
+		expect(evals.createCase).not.toHaveBeenCalled();
+		await expect
+			.element(page.getByText('Expected tool args must be valid JSON (or left blank).'))
+			.toBeInTheDocument();
+	});
+
+	it('shows an error when adding a case fails', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValue([]);
+		vi.mocked(evals.createCase).mockRejectedValueOnce(new Error('Failed to add case'));
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await page.getByRole('button', { name: '+ Add case' }).click();
+		await page.getByRole('textbox').first().fill('greets');
+		await page.getByRole('textbox').nth(1).fill('hi');
+
+		await page.getByRole('button', { name: 'Add case' }).click();
+
+		await expect.element(page.getByText('Failed to add case')).toBeInTheDocument();
+	});
+
+	it('adds an llm_judge case with a rubric', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+		vi.mocked(evals.createCase).mockResolvedValueOnce({
+			...exactCase,
+			judge_type: 'llm_judge',
+			expected_output: null,
+			rubric: 'Should acknowledge the request.'
+		});
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await page.getByRole('button', { name: '+ Add case' }).click();
+		await page.getByRole('textbox').first().fill('greets');
+		await page.getByRole('textbox').nth(1).fill('hi');
+		await page.getByLabelText('Judge').selectOptions('llm_judge');
+		await page.getByRole('textbox').nth(2).fill('Should acknowledge the request.');
+
+		await page.getByRole('button', { name: 'Add case' }).click();
+
+		expect(evals.createCase).toHaveBeenCalledWith('suite-1', {
+			name: 'greets',
+			input_content: 'hi',
+			judge_type: 'llm_judge',
+			expected_output: undefined,
+			rubric: 'Should acknowledge the request.',
+			expected_tool_name: undefined,
+			expected_tool_args: undefined
+		});
+	});
+
+	it('adds a structural case with valid tool args JSON', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+		vi.mocked(evals.createCase).mockResolvedValueOnce({
+			...exactCase,
+			judge_type: 'structural',
+			expected_output: null,
+			expected_tool_name: 'search_web'
+		});
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await page.getByRole('button', { name: '+ Add case' }).click();
+		await page.getByRole('textbox').first().fill('calls search');
+		await page.getByRole('textbox').nth(1).fill('find cats');
+		await page.getByLabelText('Judge').selectOptions('structural');
+		await page.getByPlaceholder('search').fill('search_web');
+		await page.getByPlaceholder('{"query": "cats"}').fill('{"query": "cats"}');
+
+		await page.getByRole('button', { name: 'Add case' }).click();
+
+		expect(evals.createCase).toHaveBeenCalledWith('suite-1', {
+			name: 'calls search',
+			input_content: 'find cats',
+			judge_type: 'structural',
+			expected_output: undefined,
+			rubric: undefined,
+			expected_tool_name: 'search_web',
+			expected_tool_args: { query: 'cats' }
+		});
+	});
+
+	it('cancels adding a case without calling evals.createCase', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await page.getByRole('button', { name: '+ Add case' }).click();
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		await expect.element(page.getByRole('button', { name: '+ Add case' })).toBeInTheDocument();
+		expect(evals.createCase).not.toHaveBeenCalled();
+	});
+
+	it('shows an error when deleting a case fails', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listCases).mockResolvedValue([exactCase]);
+		vi.mocked(evals.deleteCase).mockRejectedValueOnce(new Error('Failed to delete case'));
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Manage cases' }).click();
+		await expect.element(page.getByText('greets')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		await expect.element(page.getByText('Failed to delete case')).toBeInTheDocument();
+	});
+
+	it('shows an error when running a suite fails', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.run).mockRejectedValueOnce(new Error('Failed to run eval suite'));
+
+		render(EvalsPage);
+		await expect.element(page.getByText('greeting-suite')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Run', exact: true }).click();
+
+		await expect.element(page.getByText('Failed to run eval suite')).toBeInTheDocument();
+	});
+
+	it('collapses run history on a second click', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listRuns).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Run history' }).click();
+		await expect
+			.element(page.getByText('No runs yet — click "Run" to try this suite.'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Hide runs' }).click();
+		await expect
+			.element(page.getByText('No runs yet — click "Run" to try this suite.'))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows an error when run history fails to load', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(evals.listRuns).mockRejectedValueOnce(new Error('Failed to load run history'));
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Run history' }).click();
+
+		await expect.element(page.getByText('Failed to load run history')).toBeInTheDocument();
+	});
+
+	it('collapses expanded run results on a second click, then re-expands from cache', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		const run: EvalRun = {
+			id: 'run-1',
+			suite_id: 'suite-1',
+			status: 'completed',
+			triggered_by: 'human',
+			triggered_by_id: null,
+			case_count: 1,
+			pass_count: 1,
+			fail_count: 0,
+			error_count: 0,
+			started_at: '2026-01-01T00:00:00Z',
+			completed_at: '2026-01-01T00:00:01Z'
+		};
+		vi.mocked(evals.listRuns).mockResolvedValueOnce([run]);
+		vi.mocked(evals.listResults).mockResolvedValueOnce([
+			{
+				id: 'result-1',
+				run_id: 'run-1',
+				case_id: 'case-1',
+				status: 'passed',
+				score: null,
+				actual_output: 'hello',
+				actual_tool_calls: null,
+				judge_reasoning: null,
+				error_message: null,
+				started_at: '2026-01-01T00:00:00Z',
+				completed_at: '2026-01-01T00:00:01Z'
+			}
+		]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Run history' }).click();
+		await expect.element(page.getByText('1/1 passed')).toBeInTheDocument();
+
+		await page.getByText('1/1 passed').click();
+		await expect.element(page.getByText('hello')).toBeInTheDocument();
+
+		await page.getByText('1/1 passed').click();
+		await expect.element(page.getByText('hello')).not.toBeInTheDocument();
+
+		await page.getByText('1/1 passed').click();
+		await expect.element(page.getByText('hello')).toBeInTheDocument();
+		expect(evals.listResults).toHaveBeenCalledTimes(1);
+	});
+
+	it('shows an error when run results fail to load', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		const run: EvalRun = {
+			id: 'run-1',
+			suite_id: 'suite-1',
+			status: 'completed',
+			triggered_by: 'human',
+			triggered_by_id: null,
+			case_count: 1,
+			pass_count: 1,
+			fail_count: 0,
+			error_count: 0,
+			started_at: '2026-01-01T00:00:00Z',
+			completed_at: '2026-01-01T00:00:01Z'
+		};
+		vi.mocked(evals.listRuns).mockResolvedValueOnce([run]);
+		vi.mocked(evals.listResults).mockRejectedValueOnce(new Error('Failed to load results'));
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Run history' }).click();
+		await page.getByText('1/1 passed').click();
+
+		await expect.element(page.getByText('Failed to load results')).toBeInTheDocument();
+	});
+
+	it('shows a case result with a score, error status, an amber run summary, and reasoning/error text', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		const run: EvalRun = {
+			id: 'run-1',
+			suite_id: 'suite-1',
+			status: 'completed',
+			triggered_by: 'human',
+			triggered_by_id: null,
+			case_count: 2,
+			pass_count: 0,
+			fail_count: 0,
+			error_count: 2,
+			started_at: '2026-01-01T00:00:00Z',
+			completed_at: '2026-01-01T00:00:01Z'
+		};
+		vi.mocked(evals.listRuns).mockResolvedValueOnce([run]);
+		vi.mocked(evals.listResults).mockResolvedValueOnce([
+			{
+				id: 'result-1',
+				run_id: 'run-1',
+				case_id: 'case-1',
+				status: 'error',
+				score: 0.5,
+				actual_output: null,
+				actual_tool_calls: null,
+				judge_reasoning: 'The reply drifted off-topic.',
+				error_message: 'Provider timed out',
+				started_at: '2026-01-01T00:00:00Z',
+				completed_at: '2026-01-01T00:00:01Z'
+			}
+		]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: 'Run history' }).click();
+		await expect.element(page.getByText('0/2 passed')).toBeInTheDocument();
+		await page.getByText('0/2 passed').click();
+
+		await expect.element(page.getByText('score 0.50')).toBeInTheDocument();
+		await expect.element(page.getByText('The reply drifted off-topic.')).toBeInTheDocument();
+		await expect.element(page.getByText('Provider timed out')).toBeInTheDocument();
+	});
+
+	it('fills the suite description, toggles the scope radios, and cancels without creating', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: '+ New suite' }).click();
+		await page.getByPlaceholder('optional').fill('Catches greeting regressions');
+
+		await page.getByRole('radio', { name: 'Workflow' }).click();
+		await expect.element(page.getByText('Select a workflow…')).toBeInTheDocument();
+		await page.getByRole('combobox').selectOptions('wf-1');
+
+		await page.getByRole('radio', { name: 'Agent' }).click();
+		await expect.element(page.getByText('Select an agent…')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		await expect.element(page.getByRole('button', { name: '+ New suite' })).toBeInTheDocument();
+		expect(evals.createSuite).not.toHaveBeenCalled();
+	});
+
+	it('shows a suite description when present', async () => {
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([
+			{ ...agentSuite, description: 'Covers the onboarding greeting flow.' }
+		]);
+
+		render(EvalsPage);
+
+		await expect
+			.element(page.getByText('Covers the onboarding greeting flow.'))
+			.toBeInTheDocument();
+	});
 });

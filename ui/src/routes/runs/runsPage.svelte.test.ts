@@ -161,4 +161,97 @@ describe('runs/+page.svelte', () => {
 		await expect.element(link).toBeInTheDocument();
 		await expect.element(link).toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
 	});
+
+	it('collapses an expanded trace on a second click, then re-expands from cache', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue(traceDetail);
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('Researcher')).not.toBeInTheDocument();
+
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		expect(runs.get).toHaveBeenCalledTimes(1);
+	});
+
+	it('shows an error when the span detail fails to load', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockRejectedValueOnce(new Error('Failed to load run detail'));
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('Failed to load run detail')).toBeInTheDocument();
+	});
+
+	it('shows a no-spans message for a trace with an empty span list', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue({ ...traceDetail, spans: [] });
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('No spans recorded for this run.')).toBeInTheDocument();
+	});
+
+	it('formats an error-status trace with no cost/duration and unmapped span types', async () => {
+		const erroredTrace: RunTrace = {
+			...messageTrace,
+			id: 'trace-2',
+			label: 'a failed run',
+			status: 'running',
+			total_cost_usd: null
+		};
+		vi.mocked(runs.list).mockResolvedValue([erroredTrace]);
+		vi.mocked(runs.get).mockResolvedValue({
+			...traceDetail,
+			id: 'trace-2',
+			spans: [
+				{
+					id: 'span-3',
+					parent_span_id: null,
+					span_type: 'workflow_run',
+					entity_id: 'wr-1',
+					name: 'Nightly digest',
+					status: 'error',
+					model: null,
+					cost_usd: null,
+					total_tokens: null,
+					started_at: '2026-08-09T06:00:00Z',
+					completed_at: null,
+					duration_ms: null,
+					tool_calls: []
+				},
+				{
+					id: 'span-4',
+					parent_span_id: 'span-3',
+					span_type: 'workflow_node_run',
+					entity_id: 'wnr-1',
+					name: 'Send summary',
+					status: 'error',
+					model: null,
+					cost_usd: null,
+					total_tokens: null,
+					started_at: '2026-08-09T06:00:00Z',
+					completed_at: null,
+					duration_ms: null,
+					tool_calls: []
+				}
+			]
+		});
+
+		render(RunsPage);
+		await expect.element(page.getByText('a failed run')).toBeInTheDocument();
+		await expect.element(page.getByText('—', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('running')).toBeInTheDocument();
+
+		await page.getByText('a failed run').click();
+
+		await expect.element(page.getByText('workflow', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('step', { exact: true })).toBeInTheDocument();
+	});
 });
