@@ -123,7 +123,9 @@ describe('mcp-servers/+page.svelte', () => {
 			.toBeInTheDocument();
 
 		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
-		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page
+			.getByPlaceholder('URL (e.g. http://localhost:3001/mcp)')
+			.fill('http://localhost:9001');
 		await page.getByRole('button', { name: 'Register server' }).click();
 
 		expect(mcpServers.create).toHaveBeenCalledWith({
@@ -306,7 +308,7 @@ describe('mcp-servers/+page.svelte', () => {
 
 		render(McpServersPage);
 		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Bad server');
-		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('not-a-url');
+		await page.getByPlaceholder('URL (e.g. http://localhost:3001/mcp)').fill('not-a-url');
 		await page.getByRole('button', { name: 'Register server' }).click();
 
 		await expect
