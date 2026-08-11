@@ -171,6 +171,18 @@ const orphanNode: WorkflowNode = {
 	position_y: 0
 };
 
+// Svelte Flow renders an edge as an <svg><g> pair with no CSS layout box of
+// its own, so Playwright's actionability check ("element is not visible")
+// never resolves for a plain `.click()` the way it does for an ordinary
+// <div> node -- dispatching the click directly is what the library's own
+// pointer handler (EdgeWrapper's onclick) actually listens for.
+function clickEdge(edgeTestId: string) {
+	page
+		.getByTestId(edgeTestId)
+		.element()
+		.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function mockLoad() {
 	vi.mocked(workflows.get).mockResolvedValue(reviewFlow);
 	vi.mocked(workflows.list).mockResolvedValue([reviewFlow]);
@@ -956,6 +968,95 @@ describe('workflows/[id]/+page.svelte', () => {
 			position_x: expect.any(Number),
 			position_y: expect.any(Number)
 		});
+	});
+
+	it('draws a connection by dragging from one node’s output handle to another’s input handle, supporting fan-out from a node that already has an outbound edge', async () => {
+		mockLoad();
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
+		vi.mocked(workflows.createConnection).mockResolvedValueOnce({
+			id: 'c9',
+			workflow_id: 'wf-1',
+			from_node_id: 'n1',
+			to_node_id: 'n3',
+			condition_json: null
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
+
+		await page
+			.getByTestId('workflow-node-n1-source-handle')
+			.dropTo(page.getByTestId('workflow-node-n3-target-handle'));
+
+		await expect
+			.poll(() => vi.mocked(workflows.createConnection).mock.calls.length)
+			.toBeGreaterThan(0);
+		expect(workflows.createConnection).toHaveBeenCalledWith('wf-1', {
+			from_node_id: 'n1',
+			to_node_id: 'n3'
+		});
+	});
+
+	it('shows an error when creating a connection fails', async () => {
+		mockLoad();
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
+		vi.mocked(workflows.createConnection).mockRejectedValueOnce(
+			new Error('Cannot create connection')
+		);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
+
+		await page
+			.getByTestId('workflow-node-n1-source-handle')
+			.dropTo(page.getByTestId('workflow-node-n3-target-handle'));
+
+		await expect.element(page.getByText('Cannot create connection')).toBeInTheDocument();
+	});
+
+	it('deletes a connection from the canvas after clicking to select it, and surfaces an error on failure', async () => {
+		mockLoad();
+		vi.mocked(workflows.removeConnection).mockRejectedValueOnce(
+			new Error('Cannot delete connection')
+		);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await expect
+			.element(page.getByRole('button', { name: 'Delete connection' }))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Delete connection' }).click();
+		await expect.element(page.getByText('Cannot delete connection')).toBeInTheDocument();
+
+		vi.mocked(workflows.removeConnection).mockResolvedValueOnce(undefined);
+		await page.getByRole('button', { name: 'Delete connection' }).click();
+
+		expect(workflows.removeConnection).toHaveBeenCalledWith('wf-1', 'c2');
+		await expect
+			.element(page.getByRole('button', { name: 'Delete connection' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('cancels an edge selection without deleting it', async () => {
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await expect
+			.element(page.getByRole('button', { name: 'Delete connection' }))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		expect(workflows.removeConnection).not.toHaveBeenCalled();
+		await expect
+			.element(page.getByRole('button', { name: 'Delete connection' }))
+			.not.toBeInTheDocument();
 	});
 
 	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {

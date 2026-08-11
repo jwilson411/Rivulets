@@ -7,7 +7,8 @@
 		type NodeTypes,
 		type Edge,
 		type Viewport,
-		type ColorMode
+		type ColorMode,
+		type Connection
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 	import WorkflowFlowNode from './WorkflowFlowNode.svelte';
@@ -23,7 +24,9 @@
 		colorMode,
 		onnodeclick,
 		onnodesmoved,
-		onpalettedrop
+		onpalettedrop,
+		onconnect,
+		onedgeclick
 	}: {
 		nodes: FlowNode[];
 		edges: Edge[];
@@ -31,6 +34,8 @@
 		onnodeclick: (nodeId: string) => void;
 		onnodesmoved: (updates: { id: string; positionX: number; positionY: number }[]) => void;
 		onpalettedrop: (nodeType: WorkflowNodeType, position: { x: number; y: number }) => void;
+		onconnect: (connection: Connection) => void;
+		onedgeclick: (edgeId: string) => void;
 	} = $props();
 
 	let viewport = $state<Viewport>({ x: 0, y: 0, zoom: 1 });
@@ -79,8 +84,6 @@
 			{nodeTypes}
 			fitView
 			nodesDraggable
-			nodesConnectable={false}
-			edgesFocusable={false}
 			{colorMode}
 			bind:viewport
 			onnodeclick={(e) => onnodeclick(e.node.id)}
@@ -88,6 +91,8 @@
 				onnodesmoved(
 					e.nodes.map((n) => ({ id: n.id, positionX: n.position.x, positionY: n.position.y }))
 				)}
+			{onconnect}
+			onedgeclick={(e) => onedgeclick(e.edge.id)}
 		>
 			<Background />
 			<Controls showLock={false} />

@@ -14,7 +14,11 @@
 		? 'border-agent-cyan-600 ring-2 ring-agent-cyan-600/40'
 		: 'border-ink/12 dark:border-white/10'}"
 >
-	<Handle type="target" position={Position.Left} isConnectable={false} />
+	<Handle
+		type="target"
+		position={Position.Left}
+		data-testid={`workflow-node-${id}-target-handle`}
+	/>
 
 	<div class="flex items-center justify-between gap-2">
 		<span
@@ -46,5 +50,9 @@
 		</p>
 	{/if}
 
-	<Handle type="source" position={Position.Right} isConnectable={false} />
+	<Handle
+		type="source"
+		position={Position.Right}
+		data-testid={`workflow-node-${id}-source-handle`}
+	/>
 </div>

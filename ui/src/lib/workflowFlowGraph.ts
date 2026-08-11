@@ -63,7 +63,11 @@ export function buildFlowGraph(
 			id: c.id,
 			source: c.from_node_id,
 			target: c.to_node_id,
-			type: 'smoothstep'
+			type: 'smoothstep',
+			// Lets tests target a specific edge (`page.getByTestId(...)`) the
+			// same way workflow-node-${id} does for nodes -- domAttributes is
+			// spread straight onto the rendered <g class="svelte-flow__edge">.
+			domAttributes: { 'data-testid': `workflow-edge-${c.id}` }
 		}));
 
 	return { nodes: flowNodes, edges: flowEdges, entryNodeId };

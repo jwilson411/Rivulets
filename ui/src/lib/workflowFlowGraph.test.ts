@@ -47,7 +47,13 @@ describe('buildFlowGraph', () => {
 
 		// The entry connection has no source node -- it must never become an edge.
 		expect(result.edges).toEqual([
-			{ id: 'c-chain', source: 'n1', target: 'n2', type: 'smoothstep' }
+			{
+				id: 'c-chain',
+				source: 'n1',
+				target: 'n2',
+				type: 'smoothstep',
+				domAttributes: { 'data-testid': 'workflow-edge-c-chain' }
+			}
 		]);
 	});
 

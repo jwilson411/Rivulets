@@ -15,6 +15,7 @@
 		type WorkflowWebhookCreated
 	} from '$lib/api/workflows';
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
+	import type { Connection } from '@xyflow/svelte';
 	import { channels as channelsApi, type Channel } from '$lib/api/channels';
 	import { timeAgo } from '$lib/format';
 	import Icon from '$lib/components/Icon.svelte';
@@ -57,6 +58,11 @@
 	let addingNode = $state<{ nodeType: WorkflowNodeType; x: number; y: number } | null>(null);
 	let addBusy = $state(false);
 	let addError = $state<string | null>(null);
+
+	let editingEdgeId = $state<string | null>(null);
+	let edgeDeleteBusy = $state(false);
+	let edgeDeleteError = $state<string | null>(null);
+	let connectError = $state<string | null>(null);
 
 	let runList = $state<WorkflowRun[] | null>(null);
 	let runsError = $state<string | null>(null);
@@ -435,6 +441,7 @@
 	function startEditNode(nodeId: string) {
 		editError = null;
 		addingNode = null;
+		editingEdgeId = null;
 		editingNodeId = nodeId;
 	}
 
@@ -483,6 +490,7 @@
 	function startAddNode(nodeType: WorkflowNodeType, position: { x: number; y: number }) {
 		addError = null;
 		editingNodeId = null;
+		editingEdgeId = null;
 		addingNode = { nodeType, x: position.x, y: position.y };
 	}
 
@@ -530,6 +538,49 @@
 				})
 			)
 		);
+	}
+
+	function startEditEdge(edgeId: string) {
+		edgeDeleteError = null;
+		editingNodeId = null;
+		addingNode = null;
+		editingEdgeId = edgeId;
+	}
+
+	// Svelte Flow's Handle already optimistically draws the new edge the
+	// instant the drag completes (before this even runs) -- reloading
+	// unconditionally, success or failure, is what reconciles that
+	// optimistic edge with the server's real id (on success) or removes it
+	// again (on failure) rather than leaving a phantom edge on screen.
+	async function handleConnect(connection: Connection) {
+		if (!workflow) return;
+		const workflowId = workflow.id;
+		connectError = null;
+		try {
+			await workflows.createConnection(workflowId, {
+				from_node_id: connection.source,
+				to_node_id: connection.target
+			});
+		} catch (err) {
+			connectError = err instanceof Error ? err.message : 'Failed to create connection';
+		} finally {
+			await load(workflowId);
+		}
+	}
+
+	async function handleDeleteConnection(connectionId: string) {
+		if (!workflow) return;
+		edgeDeleteError = null;
+		edgeDeleteBusy = true;
+		try {
+			await workflows.removeConnection(workflow.id, connectionId);
+			editingEdgeId = null;
+			await load(workflow.id);
+		} catch (err) {
+			edgeDeleteError = err instanceof Error ? err.message : 'Failed to delete connection';
+		} finally {
+			edgeDeleteBusy = false;
+		}
 	}
 
 	async function loadRuns() {
@@ -1096,6 +1147,8 @@
 				onnodeclick={startEditNode}
 				onnodesmoved={handleNodesMoved}
 				onpalettedrop={startAddNode}
+				onconnect={handleConnect}
+				onedgeclick={startEditEdge}
 			/>
 		</section>
 
@@ -1103,6 +1156,38 @@
 			<p class="text-center text-sm text-neutral-500">
 				No steps yet — drag one from the palette above onto the canvas.
 			</p>
+		{/if}
+
+		{#if connectError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
+		{/if}
+
+		{#if editingEdgeId}
+			<section
+				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+			>
+				<p class="text-sm text-ink dark:text-ink-dark">Connection selected.</p>
+				{#if edgeDeleteError}
+					<p class="mt-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+						{edgeDeleteError}
+					</p>
+				{/if}
+				<div class="mt-3 flex gap-3">
+					<button
+						onclick={() => handleDeleteConnection(editingEdgeId!)}
+						disabled={edgeDeleteBusy}
+						class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
+					>
+						{edgeDeleteBusy ? 'Deleting…' : 'Delete connection'}
+					</button>
+					<button
+						onclick={() => (editingEdgeId = null)}
+						class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+					>
+						Cancel
+					</button>
+				</div>
+			</section>
 		{/if}
 
 		{#if editingNodeId}
