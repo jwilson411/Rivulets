@@ -302,9 +302,7 @@ describe('agents/+page.svelte', () => {
 
 		await page.getByRole('radio', { name: 'Keyword match' }).click();
 
-		await expect
-			.element(page.getByRole('button', { name: 'Apply routing rule' }))
-			.toBeDisabled();
+		await expect.element(page.getByRole('button', { name: 'Apply routing rule' })).toBeDisabled();
 		expect(agents.setRoutingRules).not.toHaveBeenCalled();
 	});
 
