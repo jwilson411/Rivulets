@@ -300,6 +300,7 @@ async def create_rivulet(
         body.content,
         triggering_message_id=human_message.id,
         trace_ctx=trace_ctx,
+        attached_files=attached_files,
     )
     await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
@@ -407,6 +408,7 @@ async def post_message(
         body.content,
         triggering_message_id=message.id,
         trace_ctx=trace_ctx,
+        attached_files=attached_files,
     )
     await finish_trace(db, trace_ctx.trace_id)
     await db.commit()

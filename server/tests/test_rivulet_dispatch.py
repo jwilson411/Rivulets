@@ -377,6 +377,95 @@ def test_channel_with_no_team_gets_no_dispatch(
     assert [m["sender_type"] for m in messages] == ["human"]
 
 
+def test_attached_file_is_noted_to_the_agent_as_a_readable_file_id(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#105: without this note, an agent has no way to discover a message
+    had a file attached at all -- the tool that reads/sees it
+    (read_attached_file) needs a file_id, and nothing before this told the
+    agent one existed."""
+    captured: list[str] = []
+
+    async def fake_run_agent(
+        _db: object, _agent_id: str, message_content: str, **_kwargs: object
+    ) -> Any:
+        captured.append(message_content)
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    # A keyword rule (not "always") matching only the trigger message, not
+    # the reply -- same reasoning as _create_agent_with_fallback's comment:
+    # keeps this to a single round-trip instead of self-triggering recursion.
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Vision Agent",
+            "description": "Describes attached photos.",
+            "instructions": "Describe the photo.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
+    agent_id = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": '["photo"]', "priority": 10}]},
+        headers=auth_headers,
+    )
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    uploaded = client.post(
+        "/api/v1/files/upload",
+        files={"upload": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        headers=auth_headers,
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    file_id = uploaded.json()["file_id"]
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "what's in this photo?", "files": [file_id]},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+
+    assert len(captured) == 1
+    assert "what's in this photo?" in captured[0]
+    assert f"file_id={file_id}" in captured[0]
+    assert "photo.png" in captured[0]
+    assert "image/png" in captured[0]
+    assert "read_attached_file" in captured[0]
+
+
+def test_no_attachment_note_when_message_has_no_files(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[str] = []
+
+    async def fake_run_agent(
+        _db: object, _agent_id: str, message_content: str, **_kwargs: object
+    ) -> Any:
+        captured.append(message_content)
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    agent_id = _create_agent_with_fallback(client, auth_headers, "No Attachment Agent", [])
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "just text about a widget, nothing attached"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+
+    assert captured == ["just text about a widget, nothing attached"]
+
+
 def test_auto_mode_agent_receives_a_per_message_model_override(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
