@@ -40,7 +40,8 @@ describe('AgentForm.svelte', () => {
 			description: 'Looks things up',
 			instructions: 'Be thorough',
 			model: 'anthropic:claude-haiku-4-5-20251001',
-			fallback_models: []
+			fallback_models: [],
+			output_schema: null
 		});
 	});
 
@@ -72,7 +73,8 @@ describe('AgentForm.svelte', () => {
 				description: 'Looks things up',
 				instructions: 'Be thorough',
 				model: 'anthropic:claude-haiku-4-5-20251001',
-				fallback_models: []
+				fallback_models: [],
+				output_schema: null
 			},
 			submitLabel: 'Save changes',
 			busyLabel: 'Saving…',
@@ -120,7 +122,8 @@ describe('AgentForm.svelte', () => {
 			description: 'Looks things up',
 			instructions: 'Be thorough',
 			model: 'anthropic:claude-haiku-4-5-20251001',
-			fallback_models: ['anthropic:claude-opus-4-1']
+			fallback_models: ['anthropic:claude-opus-4-1'],
+			output_schema: null
 		});
 	});
 
@@ -134,5 +137,53 @@ describe('AgentForm.svelte', () => {
 		});
 
 		await expect.element(page.getByText('Failed to create agent')).toBeInTheDocument();
+	});
+
+	it('submits a parsed output schema entered in the Advanced section (#107)', async () => {
+		const onsubmit = vi.fn();
+		render(AgentForm, {
+			providers: [anthropicProvider],
+			submitLabel: 'Create agent',
+			busyLabel: 'Creating…',
+			onsubmit
+		});
+
+		await page.getByPlaceholder('Name').fill('Extractor');
+		await page.getByPlaceholder('Description').fill('Extracts fields');
+		await page.getByPlaceholder('Instructions').fill('Extract the fields');
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByText('Advanced: structured output schema').click();
+		await page.getByPlaceholder('Output schema (JSON)').fill('{"type": "object"}');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(onsubmit).toHaveBeenCalledWith({
+			name: 'Extractor',
+			description: 'Extracts fields',
+			instructions: 'Extract the fields',
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: [],
+			output_schema: { type: 'object' }
+		});
+	});
+
+	it('rejects invalid JSON in the output schema field instead of submitting (#107)', async () => {
+		const onsubmit = vi.fn();
+		render(AgentForm, {
+			providers: [anthropicProvider],
+			submitLabel: 'Create agent',
+			busyLabel: 'Creating…',
+			onsubmit
+		});
+
+		await page.getByPlaceholder('Name').fill('Extractor');
+		await page.getByPlaceholder('Description').fill('Extracts fields');
+		await page.getByPlaceholder('Instructions').fill('Extract the fields');
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByText('Advanced: structured output schema').click();
+		await page.getByPlaceholder('Output schema (JSON)').fill('{not json');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(onsubmit).not.toHaveBeenCalled();
+		await expect.element(page.getByText('Output schema must be valid JSON')).toBeInTheDocument();
 	});
 });

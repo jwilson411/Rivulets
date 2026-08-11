@@ -5,6 +5,9 @@
 		instructions: string;
 		model: string;
 		fallback_models: string[];
+		// #107: a raw JSON Schema object constraining this agent's reply,
+		// or null for free-form text.
+		output_schema: Record<string, unknown> | null;
 	}
 </script>
 
@@ -15,7 +18,14 @@
 
 	let {
 		providers,
-		initial = { name: '', description: '', instructions: '', model: '', fallback_models: [] },
+		initial = {
+			name: '',
+			description: '',
+			instructions: '',
+			model: '',
+			fallback_models: [],
+			output_schema: null
+		},
 		submitLabel,
 		busyLabel,
 		busy = false,
@@ -46,6 +56,14 @@
 	let fallbackModels = $state(
 		untrack(() => initial.fallback_models.map((m) => ({ id: crypto.randomUUID(), value: m })))
 	);
+	// Raw JSON Schema text (#107) -- v1 is a plain text field per the
+	// issue's own "simplest v1" note, not a field-by-field schema builder.
+	// Pretty-printed so an existing schema is readable when reopening the
+	// edit form, not round-tripped as compact JSON.
+	let outputSchemaText = $state(
+		untrack(() => (initial.output_schema ? JSON.stringify(initial.output_schema, null, 2) : ''))
+	);
+	let outputSchemaError = $state<string | null>(null);
 
 	function addFallback() {
 		fallbackModels.push({ id: crypto.randomUUID(), value: '' });
@@ -58,12 +76,32 @@
 	function handleSubmit(event: SubmitEvent) {
 		event.preventDefault();
 		if (!name.trim() || !description.trim() || !instructions.trim() || !model.trim()) return;
+
+		let output_schema: Record<string, unknown> | null = null;
+		const trimmedSchema = outputSchemaText.trim();
+		if (trimmedSchema) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(trimmedSchema);
+			} catch {
+				outputSchemaError = 'Output schema must be valid JSON';
+				return;
+			}
+			if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+				outputSchemaError = 'Output schema must be a JSON object';
+				return;
+			}
+			output_schema = parsed as Record<string, unknown>;
+		}
+		outputSchemaError = null;
+
 		onsubmit({
 			name: name.trim(),
 			description: description.trim(),
 			instructions: instructions.trim(),
 			model: model.trim(),
-			fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== '')
+			fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== ''),
+			output_schema
 		});
 	}
 </script>
@@ -129,6 +167,31 @@
 			</div>
 		{/each}
 	</div>
+
+	<details class="mt-1">
+		<summary
+			class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+		>
+			Advanced: structured output schema
+		</summary>
+		<div class="mt-2 flex flex-col gap-1">
+			<textarea
+				bind:value={outputSchemaText}
+				placeholder="Output schema (JSON)"
+				rows="4"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			></textarea>
+			<p class="text-xs text-neutral-500">
+				A JSON Schema object. When set, this agent's reply is constrained to match it instead of
+				free-form text. Leave blank for normal chat behavior.
+			</p>
+			{#if outputSchemaError}
+				<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+					{outputSchemaError}
+				</p>
+			{/if}
+		</div>
+	</details>
 
 	<div class="flex items-center gap-3">
 		<button

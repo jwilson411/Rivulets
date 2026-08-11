@@ -36,6 +36,7 @@ it owns its own schema and migrations internally; sharing our file would
 mean fighting its migration tooling for no benefit.
 """
 
+import json
 import logging
 from collections.abc import Callable
 
@@ -133,6 +134,11 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
         # FR-6.1: unlike the opt-in tools resolved above, handoff is
         # available to every agent unconditionally.
         tools=[handoff, *assigned_tools],
+        # #107: a raw JSON Schema dict, agno's own supported shape for
+        # output_schema alongside a Pydantic model class -- no dynamic
+        # BaseModel construction needed. None means free-form text, same
+        # as every agent before this field existed.
+        output_schema=json.loads(agent_row.output_schema) if agent_row.output_schema else None,
     )
 
 
@@ -164,6 +170,39 @@ async def sync_agents(db: AsyncSession) -> None:
     # assigning our narrower list[AgnoAgent] as an error even though it's a
     # safe subset at runtime.
     agent_os.agents = agno_agents  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def _run_structured(
+    agno_agent: AgnoAgent, message: str, session_id: str, user_id: str
+) -> RunOutput:
+    """#107: the non-streamed counterpart of run_agent's main loop, taken
+    only when `agno_agent.output_schema` is set.
+
+    Streaming and structured output are in tension -- a schema-constrained
+    reply generally isn't valid JSON until the model has finished, so
+    there's nothing meaningful to hand `on_token` piecemeal. Rather than
+    half-stream it, this skips streaming (and therefore on_token/on_status)
+    entirely, mirroring dispatch/complexity_classifier.py's own
+    `arun(output_schema=..., stream=False)` call -- a data-extraction
+    agent doesn't need to feel like it's typing.
+
+    agno parses the reply against `output_schema` internally and sets
+    `content_type='dict'` on success; on a malformed/non-compliant
+    response it degrades to a warning log and leaves `content` as the raw
+    string with `content_type` still `'str'`, *without* flagging the run
+    as failed. Promoting that here to RunStatus.error treats "the model
+    didn't comply with the schema" as a genuine agent failure like any
+    other bad response, per #107's open question -- callers (dispatch/
+    service.py's fallback chain, workflow node retries) already handle
+    RunStatus.error uniformly, so no new failure-handling path is needed
+    for it.
+    """
+    run_output = await agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
+        message, stream=False, session_id=session_id, user_id=user_id
+    )
+    if run_output.status == RunStatus.completed and run_output.content_type != "dict":
+        run_output.status = RunStatus.error
+    return run_output
 
 
 async def run_agent(
@@ -205,6 +244,10 @@ async def run_agent(
     Agents not in auto mode never pass this, so their code path (the
     shared registered instance, unmodified) is exactly what it was before
     this parameter existed.
+
+    A schema-constrained agent (#107, `agent_row.output_schema`) skips all
+    of the above and takes the non-streamed `_run_structured` path below
+    instead — see that function's docstring for why.
     """
     agent_os = get_agentos()
     agno_agent = next(
@@ -217,6 +260,9 @@ async def run_agent(
         )
     if model_override is not None:
         agno_agent = agno_agent.deep_copy(update={"model": model_override})
+
+    if agno_agent.output_schema is not None:
+        return await _run_structured(agno_agent, message, session_id, user_id)
 
     final: RunOutput | None = None
     accumulated_content = ""

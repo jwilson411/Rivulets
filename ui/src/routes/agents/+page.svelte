@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { agents, type Agent, type AgentVersion, type RoutingRule, type RuleType } from '$lib/api/agents';
+	import {
+		agents,
+		type Agent,
+		type AgentVersion,
+		type RoutingRule,
+		type RuleType
+	} from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
@@ -277,7 +283,8 @@
 								description: agent.description,
 								instructions: agent.instructions,
 								model: agent.model,
-								fallback_models: agent.fallback_models
+								fallback_models: agent.fallback_models,
+								output_schema: agent.output_schema ?? null
 							}}
 							submitLabel="Save changes"
 							busyLabel="Saving…"
@@ -296,6 +303,9 @@
 									<p class="font-mono text-xs text-neutral-400">
 										fallback: {agent.fallback_models.join(' → ')}
 									</p>
+								{/if}
+								{#if agent.output_schema}
+									<p class="text-xs text-neutral-400">structured output configured</p>
 								{/if}
 							</div>
 							<div class="flex items-center gap-2">
@@ -459,9 +469,8 @@
 												class="flex items-center justify-between gap-2 text-xs text-neutral-600 dark:text-neutral-400"
 											>
 												<span class="truncate">
-													v{version.version} — {new Date(
-														version.created_at
-													).toLocaleString()} — <span class="font-mono">{version.model}</span>
+													v{version.version} — {new Date(version.created_at).toLocaleString()} —
+													<span class="font-mono">{version.model}</span>
 												</span>
 												<button
 													onclick={() => handleRollback(agent.id, version.version)}

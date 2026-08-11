@@ -50,6 +50,10 @@ class AgentCreate(BaseModel):
     # Ordered "provider:model_name" strings (#103): tried in turn if
     # `model`'s call fails with a retryable-looking error.
     fallback_models: list[str] = Field(default_factory=list)
+    # #107: a raw JSON Schema object constraining this agent's reply. None
+    # (the default) means free-form text -- the only behavior that existed
+    # before this field did.
+    output_schema: dict[str, object] | None = None
     tool_ids: list[str] = Field(default_factory=list)
     team_ids: list[str] = Field(default_factory=list)
 
@@ -60,6 +64,11 @@ class AgentUpdate(BaseModel):
     instructions: str | None = None
     model: str | None = None
     fallback_models: list[str] | None = None
+    # #107: same "None means don't touch, {} clears it" convention as
+    # fallback_models' "None means don't touch, [] clears it" above --
+    # there's otherwise no way to distinguish "not sent" from "explicitly
+    # cleared" on an already-nullable field.
+    output_schema: dict[str, object] | None = None
     tool_ids: list[str] | None = None
     team_ids: list[str] | None = None
     # #100: one-time approval to run this agent's sensitive tools (if any
@@ -74,6 +83,7 @@ class AgentOut(BaseModel):
     instructions: str
     model: str
     fallback_models: list[str] = Field(default_factory=list)
+    output_schema: dict[str, object] | None = None
     approved_for_unattended_tools: bool
     agentos_agent_id: str | None
 
@@ -96,6 +106,22 @@ class AgentOut(BaseModel):
         if isinstance(value, list):
             return [item for item in cast(list[object], value) if isinstance(item, str)]
         return []
+
+    @field_validator("output_schema", mode="before")
+    @classmethod
+    def _parse_output_schema(cls, value: object) -> dict[str, object] | None:
+        # Agent.output_schema is stored as a JSON string (same convention
+        # as fallback_models above) -- unpack it into the dict the API
+        # actually exposes.
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                return None
+            return cast(dict[str, object], parsed) if isinstance(parsed, dict) else None
+        if isinstance(value, dict):
+            return cast(dict[str, object], value)
+        return None
 
 
 class AgentRunOut(BaseModel):
@@ -235,6 +261,7 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
         instructions=body.instructions,
         model=body.model,
         fallback_models=json.dumps(body.fallback_models) if body.fallback_models else None,
+        output_schema=json.dumps(body.output_schema) if body.output_schema else None,
     )
     db.add(agent)
     await db.flush()  # populate agent.id before using it in join rows
@@ -262,7 +289,7 @@ async def update_agent(
     agent = await _get_or_404(db, agent_id)
     rule_regen_fields = {"description", "instructions"}
     updates = body.model_dump(
-        exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models"}
+        exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models", "output_schema"}
     )
     needs_rule_regen = rule_regen_fields & updates.keys()
     old_instructions, old_model = agent.instructions, agent.model
@@ -271,6 +298,8 @@ async def update_agent(
         setattr(agent, field, value)
     if body.fallback_models is not None:
         agent.fallback_models = json.dumps(body.fallback_models) if body.fallback_models else None
+    if body.output_schema is not None:
+        agent.output_schema = json.dumps(body.output_schema) if body.output_schema else None
     if body.tool_ids is not None:
         await _set_tools(db, agent_id, body.tool_ids)
     if body.team_ids is not None:
