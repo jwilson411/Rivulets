@@ -59,6 +59,16 @@ const productDocs: KnowledgeBase = {
 	document_count: 3
 };
 
+const supportPlaybook: KnowledgeBase = {
+	id: 'kb-2',
+	name: 'Support Playbook',
+	description: null,
+	scope_type: 'team',
+	agent_id: null,
+	team_id: 'team-1',
+	document_count: 1
+};
+
 afterEach(() => {
 	vi.clearAllMocks();
 });
@@ -112,5 +122,117 @@ describe('knowledge-bases/+page.svelte', () => {
 		await expect
 			.element(page.getByText('No knowledge bases yet — create one above.'))
 			.toBeInTheDocument();
+	});
+
+	it('renders a team-scoped knowledge base with its team name', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([supportPlaybook]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+
+		render(KnowledgeBasesPage);
+
+		await expect.element(page.getByText('Support Playbook')).toBeInTheDocument();
+		await expect.element(page.getByText(/Team: Support/)).toBeInTheDocument();
+	});
+
+	it('shows a load error when the initial fetch fails', async () => {
+		vi.mocked(knowledgeBases.list).mockRejectedValueOnce(new Error('Failed to load'));
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+
+		render(KnowledgeBasesPage);
+
+		await expect.element(page.getByText('Failed to load')).toBeInTheDocument();
+		await expect.element(page.getByText('Product Docs')).not.toBeInTheDocument();
+	});
+
+	it('does not submit when the name or subject is missing', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+
+		render(KnowledgeBasesPage);
+
+		await expect
+			.element(page.getByText('No knowledge bases yet — create one above.'))
+			.toBeInTheDocument();
+
+		// No name and no subject chosen -- the guard in handleCreate should
+		// bail before ever calling the API.
+		await page.getByRole('button', { name: 'Create' }).click();
+		expect(knowledgeBases.create).not.toHaveBeenCalled();
+
+		// A name but still no subject chosen should still be rejected.
+		await page.getByPlaceholder('Knowledge base name').fill('Product Docs');
+		await page.getByRole('button', { name: 'Create' }).click();
+		expect(knowledgeBases.create).not.toHaveBeenCalled();
+	});
+
+	it('shows a create error when knowledgeBases.create rejects', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(knowledgeBases.create).mockRejectedValueOnce(
+			new Error('An OpenAI provider must be configured first')
+		);
+
+		render(KnowledgeBasesPage);
+
+		await page.getByPlaceholder('Knowledge base name').fill('Product Docs');
+		await page.getByLabelText('Subject').selectOptions('agent-1');
+		await page.getByRole('button', { name: 'Create' }).click();
+
+		await expect
+			.element(page.getByText('An OpenAI provider must be configured first'))
+			.toBeInTheDocument();
+	});
+
+	it('shows an action error when deleting a knowledge base fails, leaving the list intact', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([productDocs]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(knowledgeBases.remove).mockRejectedValueOnce(
+			new Error('Failed to delete knowledge base')
+		);
+
+		render(KnowledgeBasesPage);
+
+		await expect.element(page.getByText('Product Docs')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Delete' }).click();
+
+		await expect.element(page.getByText('Failed to delete knowledge base')).toBeInTheDocument();
+		await expect.element(page.getByText('Product Docs')).toBeInTheDocument();
+	});
+
+	it('resets the chosen subject when the scope is changed', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+
+		render(KnowledgeBasesPage);
+
+		await page.getByLabelText('Subject').selectOptions('agent-1');
+		await expect.element(page.getByLabelText('Subject')).toHaveValue('agent-1');
+
+		await page.getByLabelText('Scope').selectOptions('team');
+
+		await expect.element(page.getByLabelText('Subject')).toHaveValue('');
+		await expect.element(page.getByText('Choose a team…')).toBeInTheDocument();
+	});
+
+	it('filters the list by name via the search box', async () => {
+		vi.mocked(knowledgeBases.list).mockResolvedValue([productDocs, supportPlaybook]);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+
+		render(KnowledgeBasesPage);
+
+		await expect.element(page.getByText('Product Docs')).toBeInTheDocument();
+		await expect.element(page.getByText('Support Playbook')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Search knowledge bases…').fill('support');
+
+		await expect.element(page.getByText('Support Playbook')).toBeInTheDocument();
+		await expect.element(page.getByText('Product Docs')).not.toBeInTheDocument();
 	});
 });

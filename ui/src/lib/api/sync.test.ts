@@ -87,6 +87,45 @@ describe('sync', () => {
 		expect(result).toEqual({ capabilities: ['router'] });
 	});
 
+	it('coordinator() GETs /sync/coordinator', async () => {
+		const fetchMock = mockFetch({
+			running: true,
+			node_id: 'n1',
+			coordinator_id: 'n1',
+			term: 3,
+			is_self: true,
+			self_score: 0.9,
+			peer_scores: {}
+		});
+
+		const result = await sync.coordinator();
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/sync/coordinator');
+		expect(init.method).toBe('GET');
+		expect(result).toMatchObject({ coordinator_id: 'n1', term: 3, is_self: true });
+	});
+
+	it('reclaimCoordinator() POSTs to /sync/coordinator/reclaim', async () => {
+		const fetchMock = mockFetch({
+			running: true,
+			node_id: 'n1',
+			coordinator_id: 'n1',
+			term: 4,
+			is_self: true,
+			self_score: 0.9,
+			peer_scores: {}
+		});
+
+		const result = await sync.reclaimCoordinator();
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/sync/coordinator/reclaim');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify({}));
+		expect(result).toMatchObject({ term: 4 });
+	});
+
 	it('setCapabilities() PATCHes /sync/capabilities with { capabilities }', async () => {
 		const fetchMock = mockFetch({ capabilities: ['router'] });
 

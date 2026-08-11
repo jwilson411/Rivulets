@@ -140,4 +140,73 @@ describe('api client', () => {
 		expect(init.body).toBe(JSON.stringify({ name: 'general' }));
 		expect((init.headers as Headers).get('Content-Type')).toBe('application/json');
 	});
+
+	it('PUTs a JSON-encoded body', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await api.put('/channels/1', { name: 'renamed' });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/channels/1');
+		expect(init.method).toBe('PUT');
+		expect(init.body).toBe(JSON.stringify({ name: 'renamed' }));
+	});
+
+	it('falls back to a generic per-field message when a validation error has a non-string loc', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						detail: [{ type: 'missing', loc: [], msg: 'Field required' }]
+					}),
+					{ status: 422 }
+				)
+			)
+		);
+
+		await expect(api.post('/workflows', {})).rejects.toMatchObject({
+			status: 422,
+			message: 'Value: Field required'
+		});
+	});
+
+	it('falls back to a generic per-field message when the loc path ends in a non-string segment', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						detail: [{ type: 'missing', loc: ['body', 'items', 0], msg: 'Field required' }]
+					}),
+					{ status: 422 }
+				)
+			)
+		);
+
+		await expect(api.post('/workflows', {})).rejects.toMatchObject({
+			status: 422,
+			message: 'Value: Field required'
+		});
+	});
+
+	it('falls back to "<field> is invalid." when a validation error item has no string msg', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						detail: [{ type: 'missing', loc: ['body', 'name'] }]
+					}),
+					{ status: 422 }
+				)
+			)
+		);
+
+		await expect(api.post('/workflows', {})).rejects.toMatchObject({
+			status: 422,
+			message: 'Name is invalid.'
+		});
+	});
 });

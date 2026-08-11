@@ -130,6 +130,23 @@ describe('LoginForm.svelte', () => {
 			await expect.element(page.getByText('Copied')).toBeInTheDocument();
 		});
 
+		it('shows the error message on the generated-phrase screen when login fails', async () => {
+			vi.mocked(auth.login).mockRejectedValueOnce(new Error('Server unavailable'));
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			await expect.element(page.getByText('Server unavailable')).toBeInTheDocument();
+			// Login failure keeps the generated-phrase screen up (rather than
+			// clearing it back to manual entry) so the user doesn't lose the
+			// phrase they were about to confirm.
+			await expect
+				.element(page.getByText("I've saved this phrase somewhere safe"))
+				.toBeInTheDocument();
+		});
+
 		it('returns to manual entry without logging in', async () => {
 			render(LoginForm);
 

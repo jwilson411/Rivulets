@@ -122,6 +122,29 @@ describe('agents', () => {
 		expect(init.body).toBe(JSON.stringify({ capability_tag: 'router' }));
 	});
 
+	it('listVersions() GETs /agents/:id/versions and returns the parsed array', async () => {
+		const fetchMock = mockFetch([{ version: 1, instructions: 'i', model: 'm', created_at: 't' }]);
+
+		const result = await agents.listVersions('a1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/versions');
+		expect(init.method).toBe('GET');
+		expect(result).toEqual([{ version: 1, instructions: 'i', model: 'm', created_at: 't' }]);
+	});
+
+	it('rollback() POSTs /agents/:id/versions/:version/rollback with no body', async () => {
+		const fetchMock = mockFetch({ id: 'a1', model: 'rolled-back-model' });
+
+		const result = await agents.rollback('a1', 2);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/versions/2/rollback');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBeUndefined();
+		expect(result).toEqual({ id: 'a1', model: 'rolled-back-model' });
+	});
+
 	it('sends the Authorization header derived from auth.token', async () => {
 		const fetchMock = mockFetch([]);
 
