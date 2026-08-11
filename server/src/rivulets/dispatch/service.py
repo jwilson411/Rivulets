@@ -62,6 +62,7 @@ from rivulets.db.models import (
     AgentRoutingRule,
     Channel,
     DispatchDecision,
+    File,
     Message,
     Rivulet,
     RivuletGuardState,
@@ -232,6 +233,7 @@ async def dispatch_and_respond(
     from_agent_name: str | None = None,
     triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
+    attached_files: list[File] | None = None,
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
     agent, appending its reply to `rivulet` as a Message row. Returns the
@@ -244,6 +246,14 @@ async def dispatch_and_respond(
     human-triggered path. `triggering_message_id` (issue #10) rides along
     for correlation on a remotely-dispatched agent's request/ack, not used
     locally.
+
+    `attached_files` (#105) is the human message's file attachments, if
+    any. It only affects what the invoked agent(s) actually see (a note
+    listing each file_id, so an agent can discover and call
+    read_attached_file on it) -- it's kept out of the content used for
+    dispatch routing and Auto-mode tier classification so an attachment
+    list can't skew which agent gets picked or which model tier a message
+    classifies into.
 
     `trace_ctx` (#96) is None on every call site that isn't traced (the
     default) — see tracing.py's module docstring for why tracing is
@@ -262,6 +272,7 @@ async def dispatch_and_respond(
             from_agent_name,
             triggering_message_id,
             trace_ctx,
+            attached_files,
         )
     finally:
         # One "no more events for this trigger" signal per external call,
@@ -269,6 +280,27 @@ async def dispatch_and_respond(
         # this even when nothing ended up matching, api-design.md's `done`).
         if is_top_level:
             publish(rivulet.id, "done", {"rivulet_id": rivulet.id})
+
+
+def _attachment_note(attached_files: list[File] | None) -> str:
+    """#105: tells the invoked agent(s) what was attached to the triggering
+    message. Without this, an agent has no way to discover a file_id
+    exists to pass to read_attached_file -- the message content alone
+    doesn't carry it. Deliberately not folded into the dispatch-routing/
+    tier-classification content (see dispatch_and_respond's docstring)."""
+    if not attached_files:
+        return ""
+    lines = [
+        "",
+        "",
+        "[Attached files — call read_attached_file(file_id) to access "
+        "content; image attachments are returned as visible image content]",
+    ]
+    lines.extend(
+        f"- {f.filename} (file_id={f.id}, {f.mime_type}, {f.size_bytes} bytes)"
+        for f in attached_files
+    )
+    return "\n".join(lines)
 
 
 async def _dispatch_and_respond(
@@ -280,6 +312,7 @@ async def _dispatch_and_respond(
     from_agent_name: str | None,
     triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
+    attached_files: list[File] | None = None,
 ) -> list[Message]:
     guard_state = await get_or_create_guard_state(db, rivulet.id)
     if from_agent_id is None:
@@ -322,6 +355,12 @@ async def _dispatch_and_respond(
     if rivulet.agentos_session_id is None:
         rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
 
+    # #105: routing/tier-classification above used the raw message_content;
+    # what the matched agent(s) actually receive gets the attachment note
+    # appended, computed once since it's identical for every matched agent
+    # this round.
+    agent_content = message_content + _attachment_note(attached_files)
+
     new_messages: list[Message] = []
     for agent_id in result.agent_ids:
         if guard_state.paused:
@@ -336,7 +375,7 @@ async def _dispatch_and_respond(
                 rivulet,
                 channel,
                 agent,
-                message_content,
+                agent_content,
                 from_agent_id,
                 from_agent_name,
                 triggering_message_id,
@@ -360,7 +399,7 @@ async def _dispatch_and_respond(
                 channel,
                 guard_state,
                 agent,
-                message_content,
+                agent_content,
                 team_agents,
                 from_agent_id=from_agent_id,
                 from_agent_name=from_agent_name,

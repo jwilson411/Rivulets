@@ -1,4 +1,4 @@
-"""File attachment access built-in tool (FR-10.3).
+"""File attachment access built-in tool (FR-10.3, #105).
 
 Lets an invoked agent read the content of a file shared in its rivulet, via
 the same content-addressed local store api/files.py writes uploads to.
@@ -11,21 +11,26 @@ know or care which.
 import sqlite3
 from pathlib import Path
 
+from agno.media import Image
 from agno.tools import tool
+from agno.tools.function import ToolResult
 
 from rivulets.config import get_settings
 
 _MAX_TEXT_BYTES = 200_000  # keep tool output within a reasonable context budget
 _TEXT_MIME_PREFIXES = ("text/",)
 _TEXT_MIME_TYPES = ("application/json",)
+_IMAGE_MIME_PREFIX = "image/"
 
 
 @tool
-def read_attached_file(file_id: str) -> str:
-    """Read the text content of a file attached to a rivulet message, given
-    its file_id (as returned by the file upload API). Binary files and
-    files whose content hasn't synced to this node yet return a
-    description instead of raw bytes."""
+def read_attached_file(file_id: str) -> str | ToolResult:
+    """Read the content of a file attached to a rivulet message, given its
+    file_id (as returned by the file upload API). Text/JSON files are
+    returned as text. Image files are returned as actual visible image
+    content (#105) so a vision-capable model can see them, not just a
+    description. Other binary files and files whose content hasn't synced
+    to this node yet return a description instead of raw bytes."""
     db_path = get_settings().db_path
     uri = f"file:{db_path}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
@@ -43,6 +48,21 @@ def read_attached_file(file_id: str) -> str:
         return (
             f"File {filename!r} ({mime_type}, {size_bytes} bytes) is registered but its "
             "content hasn't synced to this node yet."
+        )
+
+    if mime_type.startswith(_IMAGE_MIME_PREFIX):
+        # ToolResult.images is merged into the model's next-turn context by
+        # agno (agno/models/base.py's function-call-result handling) — this
+        # is the same mechanism agno's own built-in tools (e.g.
+        # tools/file_generation.py, tools/models_labs.py) use to hand media
+        # back to the model, not a new subsystem. If the resolved model
+        # doesn't actually support vision, the provider API call itself
+        # fails and surfaces as a normal run error (dispatch/service.py's
+        # existing error handling) rather than being silently dropped.
+        return ToolResult(
+            content=f"Attached image {filename!r} ({mime_type}, {size_bytes} bytes) is "
+            "shown below.",
+            images=[Image(filepath=str(path), mime_type=mime_type)],
         )
 
     if not mime_type.startswith(_TEXT_MIME_PREFIXES) and mime_type not in _TEXT_MIME_TYPES:

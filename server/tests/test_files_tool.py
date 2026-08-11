@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from agno.tools.function import ToolResult
 
 from rivulets.config import get_settings
 from rivulets.tools.builtin.files import read_attached_file
 
 assert read_attached_file.entrypoint is not None
-_call = cast("Callable[..., str]", read_attached_file.entrypoint)
+_call = cast("Callable[..., str | ToolResult]", read_attached_file.entrypoint)
 
 
 @pytest.fixture
@@ -78,15 +79,35 @@ def test_reads_json_file_content(file_db: None, tmp_path: Path) -> None:
 
 
 def test_binary_file_returns_description_not_content(file_db: None, tmp_path: Path) -> None:
+    content_path = tmp_path / "archive.zip"
+    content_path.write_bytes(b"PK\x03\x04")
+    file_id = str(uuid.uuid4())
+    _insert_file_row(file_id, "archive.zip", "application/zip", 4, str(content_path))
+
+    result = _call(file_id=file_id)
+    assert isinstance(result, str)
+    assert "archive.zip" in result
+    assert "application/zip" in result
+    assert "not a text file" in result
+
+
+def test_image_file_returns_tool_result_with_image_content(file_db: None, tmp_path: Path) -> None:
+    """#105: an image attachment is handed back as actual visible image
+    content (agno's ToolResult.images), not the old "not a text file"
+    description -- so a vision-capable model can see it."""
     content_path = tmp_path / "photo.png"
     content_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     file_id = str(uuid.uuid4())
     _insert_file_row(file_id, "photo.png", "image/png", 8, str(content_path))
 
     result = _call(file_id=file_id)
-    assert "photo.png" in result
-    assert "image/png" in result
-    assert "not a text file" in result
+    assert isinstance(result, ToolResult)
+    assert "photo.png" in (result.content or "")
+    assert result.images is not None
+    assert len(result.images) == 1
+    image = result.images[0]
+    assert str(image.filepath) == str(content_path)
+    assert image.mime_type == "image/png"
 
 
 def test_unsynced_file_returns_description(file_db: None, tmp_path: Path) -> None:
@@ -98,6 +119,7 @@ def test_unsynced_file_returns_description(file_db: None, tmp_path: Path) -> Non
     _insert_file_row(file_id, "not_here_yet.txt", "text/plain", 42, str(missing_path))
 
     result = _call(file_id=file_id)
+    assert isinstance(result, str)
     assert "not_here_yet.txt" in result
     assert "hasn't synced to this node yet" in result
 
@@ -110,6 +132,7 @@ def test_large_text_file_is_truncated(file_db: None, tmp_path: Path) -> None:
     _insert_file_row(file_id, "big.txt", "text/plain", len(big_content), str(content_path))
 
     result = _call(file_id=file_id)
+    assert isinstance(result, str)
     assert result.startswith("x" * 100)
     assert "[truncated, showing first 200000 of 250000 bytes]" in result
     # The truncation notice is appended, not counted as part of the
