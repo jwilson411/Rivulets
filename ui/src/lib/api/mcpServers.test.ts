@@ -67,6 +67,17 @@ describe('mcpServers', () => {
 		expect(init.body).toBe(JSON.stringify({ headers: { Authorization: 'Bearer secret' } }));
 	});
 
+	it('setEnv() PUTs env to /mcp-servers/:id/env', async () => {
+		const fetchMock = mockFetch({ id: 'm1', env_names: ['API_KEY'] });
+
+		await mcpServers.setEnv('m1', { API_KEY: 'secret' });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/mcp-servers/m1/env');
+		expect(init.method).toBe('PUT');
+		expect(init.body).toBe(JSON.stringify({ env: { API_KEY: 'secret' } }));
+	});
+
 	it('reconnect() POSTs to /mcp-servers/:id/reconnect with no body', async () => {
 		const fetchMock = mockFetch({ id: 'm1', connected: true });
 

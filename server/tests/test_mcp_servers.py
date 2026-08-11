@@ -172,6 +172,61 @@ async def test_discover_tools_omits_server_params_when_no_headers(
     assert captured["server_params"] is None
 
 
+async def test_discover_tools_passes_command_and_env_to_mcp_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#187: a stdio server's command/args/env must reach agno's MCPTools
+    as a single shlex-joined `command` string (so agno's own
+    prepare_command validation runs) plus `env`/`transport="stdio"` --
+    not silently dropped or routed through the streamable-http path."""
+    captured: dict[str, Any] = {}
+
+    def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
+        captured.update(kwargs)
+        return _FakeMCPTools(on_connect=None, functions={"run": _FakeFunction("run", "Runs.")})
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    result = await discover_tools(
+        command="npx", args=["-y", "@foo/bar"], env={"API_KEY": "secret"}
+    )
+
+    assert captured["command"] == "npx -y @foo/bar"
+    assert captured["env"] == {"API_KEY": "secret"}
+    assert captured["transport"] == "stdio"
+    assert result == [DiscoveredTool(name="run", description="Runs.")]
+
+
+async def test_discover_tools_shlex_quotes_args_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
+        captured.update(kwargs)
+        return _FakeMCPTools(on_connect=None, functions={})
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    await discover_tools(command="python3", args=["/path/with spaces/server.py"])
+
+    assert captured["command"] == "python3 '/path/with spaces/server.py'"
+
+
+async def test_discover_tools_wraps_stdio_construction_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command agno's own prepare_command() rejects (shell metacharacters,
+    disallowed executable) must degrade to MCPConnectionError like any
+    other connection failure, not propagate the raw ValueError."""
+
+    def _fake_mcp_tools(**_kwargs: Any) -> _FakeMCPTools:
+        raise ValueError("MCP command needs to use one of the following executables: {...}")
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    with pytest.raises(MCPConnectionError, match="executables"):
+        await discover_tools(command="curl", args=["evil.example"])
+
+
 async def test_discover_tools_succeeds_even_when_closing_the_connection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,14 +250,24 @@ def _patch_discover_tools(
     result: Sequence[DiscoveredTool] | BaseException,
     *,
     capture_headers: list[dict[str, str] | None] | None = None,
+    capture_env: list[dict[str, str] | None] | None = None,
+    capture_commands: list[str | None] | None = None,
 ) -> None:
     async def _fake(
-        url: str,  # noqa: ARG001
+        url: str | None = None,  # noqa: ARG001
         timeout_seconds: int = 10,  # noqa: ARG001
         headers: dict[str, str] | None = None,
+        *,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> list[DiscoveredTool]:
         if capture_headers is not None:
             capture_headers.append(headers)
+        if capture_env is not None:
+            capture_env.append(env)
+        if capture_commands is not None:
+            capture_commands.append(f"{command} {args}" if command else None)
         if isinstance(result, BaseException):
             raise result
         return list(result)
@@ -486,6 +551,214 @@ def test_unregister_mcp_server_with_headers_deletes_stored_secret(
     )
     server_id = created.json()["id"]
     ref = mcp_header_ref(server_id)
+    assert get_secret(ref)  # sanity check: it was actually stored
+
+    deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    with pytest.raises(CredentialStoreError):
+        get_secret(ref)
+
+
+# --- stdio transport (#187) ---
+
+
+def test_register_stdio_mcp_server_success(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_commands: list[str | None] = []
+    captured_env: list[dict[str, str] | None] = []
+    _patch_discover_tools(
+        monkeypatch,
+        [DiscoveredTool(name="list_dir", description="Lists a directory.")],
+        capture_commands=captured_commands,
+        capture_env=captured_env,
+    )
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Filesystem tools",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            "env": {"API_KEY": "secret-value"},
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["transport"] == "stdio"
+    assert body["command"] == "npx"
+    assert body["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    assert body["url"] is None
+    assert body["connected"] is True
+    assert body["env_names"] == ["API_KEY"]
+    assert "env" not in body
+    assert "secret-value" not in response.text
+    assert captured_commands == ["npx ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']"]
+    assert captured_env == [{"API_KEY": "secret-value"}]
+
+
+def test_register_stdio_mcp_server_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike streamable-http (only owner-gated when headers are set),
+    every stdio registration is owner-gated -- command execution itself
+    is the sensitive part, not just entering a credential."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Local tool", "transport": "stdio", "command": "npx"},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_register_mcp_server_rejects_mismatched_transport_fields(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    missing_url = client.post(
+        "/api/v1/mcp-servers", json={"name": "No url"}, headers=auth_headers
+    )
+    assert missing_url.status_code == 422
+
+    missing_command = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "No command", "transport": "stdio"},
+        headers=auth_headers,
+    )
+    assert missing_command.status_code == 422
+
+    mixed_fields = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Mixed",
+            "transport": "stdio",
+            "command": "npx",
+            "url": "http://127.0.0.1:9999/mcp",
+        },
+        headers=auth_headers,
+    )
+    assert mixed_fields.status_code == 422
+
+
+def test_set_mcp_server_env_replaces_and_reconnects(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_env: list[dict[str, str] | None] = []
+    _patch_discover_tools(monkeypatch, MCPConnectionError("bad env"), capture_env=captured_env)
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "transport": "stdio", "command": "npx"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    assert created.json()["connected"] is False
+
+    _patch_discover_tools(
+        monkeypatch, [DiscoveredTool(name="run", description="Runs.")], capture_env=captured_env
+    )
+    updated = client.put(
+        f"/api/v1/mcp-servers/{server_id}/env",
+        json={"env": {"TOKEN": "abc"}},
+        headers=auth_headers,
+    )
+
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["env_names"] == ["TOKEN"]
+    assert body["connected"] is True
+    assert captured_env[-1] == {"TOKEN": "abc"}
+
+    cleared = client.put(
+        f"/api/v1/mcp-servers/{server_id}/env", json={"env": {}}, headers=auth_headers
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["env_names"] == []
+    assert captured_env[-1] is None
+
+
+def test_set_mcp_server_env_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="run", description="Runs.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "transport": "stdio", "command": "npx"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.put(
+        f"/api/v1/mcp-servers/{server_id}/env",
+        json={"env": {"TOKEN": "x"}},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_set_mcp_server_env_rejects_streamable_http_server(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+
+    response = client.put(
+        f"/api/v1/mcp-servers/{server_id}/env",
+        json={"env": {"TOKEN": "x"}},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+def test_set_mcp_server_headers_rejects_stdio_server(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="run", description="Runs.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "transport": "stdio", "command": "npx"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+
+    response = client.put(
+        f"/api/v1/mcp-servers/{server_id}/headers",
+        json={"headers": {"Authorization": "Bearer x"}},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+def test_unregister_stdio_mcp_server_deletes_stored_env_secret(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rivulets.agentos.mcp import mcp_env_ref
+    from rivulets.security.credentials import CredentialStoreError, get_secret
+
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="run", description="Runs.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Local tool",
+            "transport": "stdio",
+            "command": "npx",
+            "env": {"TOKEN": "secret"},
+        },
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    ref = mcp_env_ref(server_id)
     assert get_secret(ref)  # sanity check: it was actually stored
 
     deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers)

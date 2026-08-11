@@ -229,6 +229,108 @@ async def test_resolve_agent_tools_resolves_mcp_with_headers(db_session: AsyncSe
     assert resolved[0].server_params.headers == {"Authorization": "Bearer sk-real"}
 
 
+async def test_resolve_agent_tools_resolves_stdio_mcp(db_session: AsyncSession) -> None:
+    """#187: a stdio-transport server must build MCPTools with a
+    shlex-joined `command` string and transport="stdio", not the
+    url=/streamable-http form."""
+    import json
+
+    server = MCPServer(
+        name="local-server",
+        transport="stdio",
+        command="npx",
+        args_json=json.dumps(["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]),
+    )
+    db_session.add(server)
+    await db_session.commit()
+
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="list_dir",
+        description="An MCP tool.",
+        tool_type="mcp",
+        mcp_server_id=server.id,
+        mcp_tool_name="list_dir",
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    resolved = await resolve_agent_tools(db_session, agent)
+
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], MCPTools)
+    assert resolved[0].server_params.command == "npx"
+    assert resolved[0].server_params.args == [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp",
+    ]
+
+
+async def test_resolve_agent_tools_resolves_stdio_mcp_with_env(db_session: AsyncSession) -> None:
+    import json
+
+    from rivulets.agentos.mcp import mcp_env_ref
+    from rivulets.security.credentials import store_secret
+
+    server = MCPServer(
+        name="local-server",
+        transport="stdio",
+        command="npx",
+        env_names_json=json.dumps(["API_KEY"]),
+    )
+    db_session.add(server)
+    await db_session.commit()
+    store_secret(mcp_env_ref(server.id), json.dumps({"API_KEY": "sk-real"}))
+
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="list_dir",
+        description="An MCP tool.",
+        tool_type="mcp",
+        mcp_server_id=server.id,
+        mcp_tool_name="list_dir",
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    resolved = await resolve_agent_tools(db_session, agent)
+
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], MCPTools)
+    assert resolved[0].server_params.env["API_KEY"] == "sk-real"
+
+
+async def test_resolve_agent_tools_skips_stdio_mcp_with_disallowed_command(
+    db_session: AsyncSession,
+) -> None:
+    """A stored command that fails agno's own prepare_command() validation
+    (e.g. an executable outside its allowlist) must be skipped like any
+    other broken tool assignment (NFR-2.4), not take the whole agent
+    resolution down."""
+    server = MCPServer(
+        name="local-server", transport="stdio", command="not-a-real-executable-xyz"
+    )
+    db_session.add(server)
+    await db_session.commit()
+
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="bad_tool",
+        description="An MCP tool with a disallowed command.",
+        tool_type="mcp",
+        mcp_server_id=server.id,
+        mcp_tool_name="bad_tool",
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+
 async def test_resolve_agent_tools_skips_mcp_with_missing_server(
     db_session: AsyncSession,
 ) -> None:

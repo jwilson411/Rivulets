@@ -36,6 +36,7 @@ Three tool_types, three resolution strategies:
 """
 
 import importlib.util
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -47,7 +48,7 @@ from agno.tools.mcp.params import StreamableHTTPClientParams
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.mcp import get_server_headers
+from rivulets.agentos.mcp import build_stdio_command, get_server_env, get_server_headers
 from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
 from rivulets.tools.builtin import (
     cancel_schedule,
@@ -196,19 +197,30 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                         agent_row.name,
                     )
                     continue
-                headers = get_server_headers(server)
-                resolved.append(
-                    MCPTools(
-                        url=server.url,
-                        transport="streamable-http",
-                        include_tools=[tool_row.mcp_tool_name],
-                        server_params=(
-                            StreamableHTTPClientParams(url=server.url, headers=headers)
-                            if headers
-                            else None
-                        ),
+                if server.transport == "stdio":
+                    args = json.loads(server.args_json) if server.args_json else None
+                    resolved.append(
+                        MCPTools(
+                            command=build_stdio_command(server.command, args),
+                            env=get_server_env(server),
+                            transport="stdio",
+                            include_tools=[tool_row.mcp_tool_name],
+                        )
                     )
-                )
+                else:
+                    headers = get_server_headers(server)
+                    resolved.append(
+                        MCPTools(
+                            url=server.url,
+                            transport="streamable-http",
+                            include_tools=[tool_row.mcp_tool_name],
+                            server_params=(
+                                StreamableHTTPClientParams(url=server.url, headers=headers)
+                                if headers
+                                else None
+                            ),
+                        )
+                    )
         except Exception:
             logger.warning(
                 "Failed to resolve tool %r for agent %r",
