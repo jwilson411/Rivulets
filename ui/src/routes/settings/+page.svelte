@@ -22,6 +22,7 @@
 
 	let turnLimit = $state(10);
 	let cycleWindow = $state(8);
+	let cycleThreshold = $state(3);
 	let timeoutMinutes = $state(30);
 	let modelOverride = $state('');
 	let eagerFilesLan = $state(true);
@@ -59,6 +60,7 @@
 			loaded = await settings.get();
 			turnLimit = loaded['guard.turn_limit'];
 			cycleWindow = loaded['guard.cycle_window'];
+			cycleThreshold = loaded['guard.cycle_threshold'];
 			timeoutMinutes = loaded['guard.timeout_minutes'];
 			modelOverride = loaded['dispatcher.model_override'] ?? '';
 			eagerFilesLan = loaded['sync.eager_files_lan'];
@@ -198,6 +200,8 @@
 		const trimmedOverride = modelOverride.trim() || null;
 		if (turnLimit !== loaded['guard.turn_limit']) patch['guard.turn_limit'] = turnLimit;
 		if (cycleWindow !== loaded['guard.cycle_window']) patch['guard.cycle_window'] = cycleWindow;
+		if (cycleThreshold !== loaded['guard.cycle_threshold'])
+			patch['guard.cycle_threshold'] = cycleThreshold;
 		if (timeoutMinutes !== loaded['guard.timeout_minutes'])
 			patch['guard.timeout_minutes'] = timeoutMinutes;
 		if (trimmedOverride !== loaded['dispatcher.model_override'])
@@ -460,11 +464,17 @@
 			>
 				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Guardrails</h2>
 				<p class="text-xs text-neutral-600 dark:text-neutral-400">
-					Loop-prevention thresholds (FR-7.4) — the same on every node.
+					Loop-prevention thresholds (FR-7.4) — the same on every node. The defaults below work
+					well for most workspaces; only change these if agents are looping unexpectedly or you
+					want tighter or looser limits.
 				</p>
 
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
-					Turn limit <span class="text-xs text-neutral-500">(1-100 messages per rivulet)</span>
+					Turn limit
+					<span class="text-xs text-neutral-600 dark:text-neutral-400">
+						Pause an agent conversation for a human to check in once it's exchanged this many
+						messages, whether or not anything's gone wrong.
+					</span>
 					<input
 						type="number"
 						min="1"
@@ -472,11 +482,15 @@
 						bind:value={turnLimit}
 						class="w-32 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 					/>
+					<span class="text-xs text-neutral-500">1-100 messages per rivulet</span>
 				</label>
 
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
 					Cycle detection window
-					<span class="text-xs text-neutral-500">(4-20 messages looked back for repeats)</span>
+					<span class="text-xs text-neutral-600 dark:text-neutral-400">
+						How many recent messages to check for the same two agents replying back and forth to
+						each other.
+					</span>
 					<input
 						type="number"
 						min="4"
@@ -484,10 +498,31 @@
 						bind:value={cycleWindow}
 						class="w-32 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 					/>
+					<span class="text-xs text-neutral-500">4-20 messages looked back for repeats</span>
 				</label>
 
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
-					Time-based pause <span class="text-xs text-neutral-500">(5-1440 minutes)</span>
+					Cycle threshold
+					<span class="text-xs text-neutral-600 dark:text-neutral-400">
+						How many times the same two agents have to reply to each other within that window
+						before it's treated as a loop and paused for a human.
+					</span>
+					<input
+						type="number"
+						min="2"
+						max="20"
+						bind:value={cycleThreshold}
+						class="w-32 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					/>
+					<span class="text-xs text-neutral-500">2-20 repeats within the cycle window</span>
+				</label>
+
+				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
+					Time-based pause
+					<span class="text-xs text-neutral-600 dark:text-neutral-400">
+						Pause an agent conversation automatically if it's been running this long without a
+						human weighing in, even if neither limit above has been hit.
+					</span>
 					<input
 						type="number"
 						min="5"
@@ -495,6 +530,7 @@
 						bind:value={timeoutMinutes}
 						class="w-32 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 					/>
+					<span class="text-xs text-neutral-500">5-1440 minutes</span>
 				</label>
 			</section>
 
