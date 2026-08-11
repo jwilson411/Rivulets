@@ -45,6 +45,7 @@
 		"vitest-browser-svelte": "^3.0.0"
 	},
 	"dependencies": {
+		"@xyflow/svelte": "^1.6.2",
 		"bip39": "^3.1.0"
 	}
 }

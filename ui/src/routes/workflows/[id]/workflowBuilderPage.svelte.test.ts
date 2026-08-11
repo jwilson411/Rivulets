@@ -89,7 +89,9 @@ const fetchNode: WorkflowNode = {
 	child_workflow_id: null,
 	config: {},
 	retry_max_attempts: 0,
-	retry_backoff_seconds: 5
+	retry_backoff_seconds: 5,
+	position_x: 0,
+	position_y: 0
 };
 
 const formatNode: WorkflowNode = {
@@ -101,21 +103,25 @@ const formatNode: WorkflowNode = {
 	child_workflow_id: null,
 	config: { template: '{input}!' },
 	retry_max_attempts: 0,
-	retry_backoff_seconds: 5
+	retry_backoff_seconds: 5,
+	position_x: 240,
+	position_y: 0
 };
 
 const entryConnection: WorkflowConnection = {
 	id: 'c1',
 	workflow_id: 'wf-1',
 	from_node_id: null,
-	to_node_id: 'n1'
+	to_node_id: 'n1',
+	condition_json: null
 };
 
 const chainConnection: WorkflowConnection = {
 	id: 'c2',
 	workflow_id: 'wf-1',
 	from_node_id: 'n1',
-	to_node_id: 'n2'
+	to_node_id: 'n2',
+	condition_json: null
 };
 
 const digestChannel = {
@@ -160,7 +166,9 @@ const orphanNode: WorkflowNode = {
 	child_workflow_id: null,
 	config: {},
 	retry_max_attempts: 0,
-	retry_backoff_seconds: 5
+	retry_backoff_seconds: 5,
+	position_x: 480,
+	position_y: 0
 };
 
 function mockLoad() {
@@ -190,125 +198,21 @@ afterEach(() => {
 });
 
 describe('workflows/[id]/+page.svelte', () => {
-	it('renders the chain in connection order', async () => {
+	it('renders both connected steps on the canvas', async () => {
 		mockLoad();
 
 		render(WorkflowBuilderPage);
 
-		await expect.element(page.getByText('1. Agent')).toBeInTheDocument();
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-		await expect.element(page.getByText('2. Transform')).toBeInTheDocument();
-		await expect.element(page.getByText('Format')).toBeInTheDocument();
-	});
-
-	it('inserts a new step between two existing steps, rewiring the connection around it', async () => {
-		mockLoad();
-		vi.mocked(workflows.createNode).mockResolvedValueOnce({
-			id: 'n3',
-			workflow_id: 'wf-1',
-			name: 'Recap',
-			node_type: 'summarize',
-			agent_id: null,
-			child_workflow_id: null,
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		// Button order: top "+ Add step", then one after each chain node --
-		// index 1 is the one between Fetch (n1) and Format (n2).
-		await page.getByRole('button', { name: '+ Add step' }).nth(1).click();
-		await page.getByPlaceholder('Step name').fill('Recap');
-		// Combobox 0 is the page-level remediation picker (#94 layer 2),
-		// combobox 1 is the on-call agent picker (#94 layer 3) -- combobox
-		// 2 is this form's node-type select.
-		await page.getByRole('combobox').nth(2).selectOptions('summarize');
-		await page.getByRole('button', { name: 'Add step', exact: true }).click();
-
-		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
-			name: 'Recap',
-			node_type: 'summarize',
-			agent_id: null,
-			child_workflow_id: null,
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-		expect(workflows.removeConnection).toHaveBeenCalledWith('wf-1', 'c2');
-		expect(workflows.createConnection).toHaveBeenNthCalledWith(1, 'wf-1', {
-			from_node_id: 'n1',
-			to_node_id: 'n3'
-		});
-		expect(workflows.createConnection).toHaveBeenNthCalledWith(2, 'wf-1', {
-			from_node_id: 'n3',
-			to_node_id: 'n2'
-		});
-	});
-
-	it('inserts a nested workflow step, excluding the current workflow from the picker', async () => {
-		mockLoad();
-		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
-		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
-		vi.mocked(workflows.createNode).mockResolvedValueOnce({
-			id: 'n3',
-			workflow_id: 'wf-1',
-			name: 'Invoke other',
-			node_type: 'workflow',
-			agent_id: null,
-			child_workflow_id: 'wf-2',
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: '+ Add step' }).first().click();
-		await page.getByPlaceholder('Step name').fill('Invoke other');
-		// Combobox 0 is the page-level remediation picker (#94 layer 2),
-		// combobox 1 is the on-call agent picker (#94 layer 3) -- combobox
-		// 2 is this form's node-type select.
-		await page.getByRole('combobox').nth(2).selectOptions('workflow');
-
-		const workflowPicker = page.getByRole('combobox').nth(3);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
 		await expect
-			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
+			.element(page.getByTestId('workflow-node-n1').getByText('Agent'))
 			.toBeInTheDocument();
-		await expect
-			.element(workflowPicker.getByRole('option', { name: '/review-pr' }))
-			.not.toBeInTheDocument();
-		await workflowPicker.selectOptions('wf-2');
-		await page.getByRole('button', { name: 'Add step', exact: true }).click();
-
-		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
-			name: 'Invoke other',
-			node_type: 'workflow',
-			agent_id: null,
-			child_workflow_id: 'wf-2',
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-	});
-
-	it('removes a step and reconnects its neighbors', async () => {
-		mockLoad();
-		vi.mocked(workflows.removeNode).mockResolvedValueOnce(undefined);
-
-		render(WorkflowBuilderPage);
 		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Remove' }).first().click();
-
-		expect(workflows.removeNode).toHaveBeenCalledWith('wf-1', 'n1');
-		expect(workflows.createConnection).toHaveBeenCalledWith('wf-1', {
-			from_node_id: null,
-			to_node_id: 'n2'
-		});
+		await expect.element(page.getByTestId('workflow-node-n2')).toBeInTheDocument();
+		await expect
+			.element(page.getByTestId('workflow-node-n2').getByText('Transform'))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Format')).toBeInTheDocument();
 	});
 
 	it('renames the workflow', async () => {
@@ -923,79 +827,18 @@ describe('workflows/[id]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
-	it('cancels adding a new step without submitting', async () => {
-		mockLoad();
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: '+ Add step' }).first().click();
-		await page.getByPlaceholder('Step name').fill('abandoned');
-		await page.getByRole('button', { name: 'Cancel' }).click();
-
-		expect(workflows.createNode).not.toHaveBeenCalled();
-		await expect.element(page.getByPlaceholder('Step name')).not.toBeInTheDocument();
-	});
-
-	it('adds a step at the end of the chain with no connection to rewire', async () => {
-		mockLoad();
-		vi.mocked(workflows.createNode).mockResolvedValueOnce({
-			id: 'n3',
-			workflow_id: 'wf-1',
-			name: 'Wrap up',
-			node_type: 'summarize',
-			agent_id: null,
-			child_workflow_id: null,
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		// Buttons: top, after Fetch (n1), after Format (n2) -- the last one
-		// has no outgoing connection to rewire around.
-		await page.getByRole('button', { name: '+ Add step' }).last().click();
-		await page.getByPlaceholder('Step name').fill('Wrap up');
-		await page.getByRole('combobox').nth(2).selectOptions('summarize');
-		await page.getByRole('button', { name: 'Add step', exact: true }).click();
-
-		expect(workflows.createConnection).toHaveBeenCalledWith('wf-1', {
-			from_node_id: 'n2',
-			to_node_id: 'n3'
-		});
-		expect(workflows.removeConnection).not.toHaveBeenCalled();
-	});
-
-	it('shows an error when adding a step fails', async () => {
-		mockLoad();
-		vi.mocked(workflows.createNode).mockRejectedValueOnce(new Error('Cannot add step'));
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: '+ Add step' }).first().click();
-		await page.getByPlaceholder('Step name').fill('Oops');
-		await page.getByRole('combobox').nth(2).selectOptions('summarize');
-		await page.getByRole('button', { name: 'Add step', exact: true }).click();
-
-		await expect.element(page.getByText('Cannot add step')).toBeInTheDocument();
-	});
-
 	it('edits a step, supports canceling, and saves changes', async () => {
 		mockLoad();
 		vi.mocked(workflows.updateNode).mockResolvedValueOnce(fetchNode);
 
 		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
 
-		// Button 0 is the header's rename Edit; button 1 is Fetch's step Edit.
-		await page.getByRole('button', { name: 'Edit' }).nth(1).click();
+		await page.getByTestId('workflow-node-n1').click();
 		await page.getByRole('button', { name: 'Cancel' }).click();
 		expect(workflows.updateNode).not.toHaveBeenCalled();
 
-		await page.getByRole('button', { name: 'Edit' }).nth(1).click();
+		await page.getByTestId('workflow-node-n1').click();
 		await page.getByRole('button', { name: 'Save changes' }).click();
 
 		expect(workflows.updateNode).toHaveBeenCalledWith('wf-1', 'n1', {
@@ -1013,91 +856,28 @@ describe('workflows/[id]/+page.svelte', () => {
 		vi.mocked(workflows.updateNode).mockRejectedValueOnce(new Error('Cannot save step'));
 
 		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Edit' }).nth(1).click();
+		await page.getByTestId('workflow-node-n1').click();
 		await page.getByRole('button', { name: 'Save changes' }).click();
 
 		await expect.element(page.getByText('Cannot save step')).toBeInTheDocument();
 	});
 
-	it('removes the last step in the chain without creating a reconnect', async () => {
-		mockLoad();
-		vi.mocked(workflows.removeNode).mockResolvedValueOnce(undefined);
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Format')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Remove' }).last().click();
-
-		expect(workflows.removeNode).toHaveBeenCalledWith('wf-1', 'n2');
-		expect(workflows.createConnection).not.toHaveBeenCalled();
-	});
-
-	it('shows an error when removing a step fails', async () => {
-		mockLoad();
-		vi.mocked(workflows.removeNode).mockRejectedValueOnce(new Error('Cannot remove step'));
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Remove' }).first().click();
-
-		await expect.element(page.getByText('Cannot remove step')).toBeInTheDocument();
-	});
-
-	it('shows unconnected steps and can attach one to the end of the chain', async () => {
+	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {
 		mockLoad();
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
-		vi.mocked(workflows.createConnection).mockResolvedValueOnce({
-			id: 'c3',
-			workflow_id: 'wf-1',
-			from_node_id: 'n2',
-			to_node_id: 'n3'
-		});
 
 		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Unconnected steps')).toBeInTheDocument();
-		await expect.element(page.getByText('Merge — Stray')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Add to end of chain' }).click();
-
-		expect(workflows.createConnection).toHaveBeenCalledWith('wf-1', {
-			from_node_id: 'n2',
-			to_node_id: 'n3'
-		});
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
+		await expect.element(page.getByText('Stray')).toBeInTheDocument();
+		await expect.element(page.getByText('Unconnected steps')).not.toBeInTheDocument();
 	});
 
-	it('removes an unconnected step from the orphan section', async () => {
+	it('shows the empty state when the workflow has no steps at all', async () => {
 		mockLoad();
-		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
-		vi.mocked(workflows.removeNode).mockResolvedValueOnce(undefined);
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Unconnected steps')).toBeInTheDocument();
-
-		// Chain steps' "Remove" buttons render first; the orphan section's own
-		// "Remove" button is last in DOM order.
-		await page.getByRole('button', { name: 'Remove' }).last().click();
-
-		expect(workflows.removeNode).toHaveBeenCalledWith('wf-1', 'n3');
-	});
-
-	it('shows an error when connecting an orphan step fails', async () => {
-		mockLoad();
-		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
-		vi.mocked(workflows.createConnection).mockRejectedValueOnce(new Error('Cannot connect step'));
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Unconnected steps')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Add to end of chain' }).click();
-
-		await expect.element(page.getByText('Cannot connect step')).toBeInTheDocument();
-	});
-
-	it('shows the empty-chain message when there are no connections', async () => {
-		mockLoad();
+		vi.mocked(workflows.listNodes).mockResolvedValue([]);
 		vi.mocked(workflows.listConnections).mockResolvedValue([]);
 
 		render(WorkflowBuilderPage);
@@ -1107,17 +887,26 @@ describe('workflows/[id]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
-	it('stops building the chain if a connection points to a missing node', async () => {
+	it('still renders existing nodes, without an entry marker, if the entry connection points to a missing node', async () => {
 		mockLoad();
 		vi.mocked(workflows.listConnections).mockResolvedValue([
-			{ id: 'c1', workflow_id: 'wf-1', from_node_id: null, to_node_id: 'ghost' }
+			{
+				id: 'c1',
+				workflow_id: 'wf-1',
+				from_node_id: null,
+				to_node_id: 'ghost',
+				condition_json: null
+			}
 		]);
 
 		render(WorkflowBuilderPage);
 
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n2')).toBeInTheDocument();
+		expect(page.getByTestId('workflow-node-n1').element().getAttribute('data-entry')).toBe('false');
 		await expect
 			.element(page.getByText('No steps yet — add the first one above.'))
-			.toBeInTheDocument();
+			.not.toBeInTheDocument();
 	});
 
 	it('renders conditional and nested-workflow step details in the chain, including deleted references', async () => {
@@ -1131,7 +920,9 @@ describe('workflows/[id]/+page.svelte', () => {
 			child_workflow_id: null,
 			config: { contains: 'urgent' },
 			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
+			retry_backoff_seconds: 5,
+			position_x: 240,
+			position_y: 140
 		};
 		const workflowNode: WorkflowNode = {
 			id: 'n4',
@@ -1142,7 +933,9 @@ describe('workflows/[id]/+page.svelte', () => {
 			child_workflow_id: 'wf-missing',
 			config: {},
 			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
+			retry_backoff_seconds: 5,
+			position_x: 480,
+			position_y: 140
 		};
 		const ghostAgentNode: WorkflowNode = {
 			id: 'n5',
@@ -1153,7 +946,9 @@ describe('workflows/[id]/+page.svelte', () => {
 			child_workflow_id: null,
 			config: {},
 			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
+			retry_backoff_seconds: 5,
+			position_x: 720,
+			position_y: 140
 		};
 		vi.mocked(workflows.listNodes).mockResolvedValue([
 			fetchNode,
@@ -1165,9 +960,9 @@ describe('workflows/[id]/+page.svelte', () => {
 		vi.mocked(workflows.listConnections).mockResolvedValue([
 			entryConnection,
 			chainConnection,
-			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3' },
-			{ id: 'c4', workflow_id: 'wf-1', from_node_id: 'n3', to_node_id: 'n4' },
-			{ id: 'c5', workflow_id: 'wf-1', from_node_id: 'n4', to_node_id: 'n5' }
+			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3', condition_json: null },
+			{ id: 'c4', workflow_id: 'wf-1', from_node_id: 'n3', to_node_id: 'n4', condition_json: null },
+			{ id: 'c5', workflow_id: 'wf-1', from_node_id: 'n4', to_node_id: 'n5', condition_json: null }
 		]);
 
 		render(WorkflowBuilderPage);
@@ -1551,43 +1346,6 @@ describe('workflows/[id]/+page.svelte', () => {
 		});
 	});
 
-	it('inserts a nested workflow step after an existing step in the chain, not just at the top', async () => {
-		mockLoad();
-		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
-		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
-		vi.mocked(workflows.createNode).mockResolvedValueOnce({
-			id: 'n3',
-			workflow_id: 'wf-1',
-			name: 'Nested mid',
-			node_type: 'workflow',
-			agent_id: null,
-			child_workflow_id: 'wf-2',
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-
-		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
-
-		// index 1 is the "+ Add step" between Fetch (n1) and Format (n2).
-		await page.getByRole('button', { name: '+ Add step' }).nth(1).click();
-		await page.getByPlaceholder('Step name').fill('Nested mid');
-		await page.getByRole('combobox').nth(2).selectOptions('workflow');
-		await page.getByRole('combobox').nth(3).selectOptions('wf-2');
-		await page.getByRole('button', { name: 'Add step', exact: true }).click();
-
-		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
-			name: 'Nested mid',
-			node_type: 'workflow',
-			agent_id: null,
-			child_workflow_id: 'wf-2',
-			config: {},
-			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
-		});
-	});
-
 	it('edits an existing nested-workflow step with the node type locked, keeping the selected child workflow', async () => {
 		mockLoad();
 		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
@@ -1601,26 +1359,28 @@ describe('workflows/[id]/+page.svelte', () => {
 			child_workflow_id: 'wf-2',
 			config: {},
 			retry_max_attempts: 0,
-			retry_backoff_seconds: 5
+			retry_backoff_seconds: 5,
+			position_x: 480,
+			position_y: 0
 		};
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, nestedNode]);
 		vi.mocked(workflows.listConnections).mockResolvedValue([
 			entryConnection,
 			chainConnection,
-			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3' }
+			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3', condition_json: null }
 		]);
 		vi.mocked(workflows.updateNode).mockResolvedValueOnce(nestedNode);
 
 		render(WorkflowBuilderPage);
-		await expect.element(page.getByText('Nested')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
 
-		// Buttons: header rename Edit (0), Fetch's Edit (1), Format's Edit (2),
-		// Nested's Edit (3).
-		await page.getByRole('button', { name: 'Edit' }).nth(3).click();
+		await page.getByTestId('workflow-node-n3').click();
 
 		// lockNodeType renders the type as static text, not a select -- and the
 		// workflow picker still needs workflowOptions to list the current pick.
-		await expect.element(page.getByText('Workflow', { exact: true })).toBeInTheDocument();
+		// "Workflow" also appears on n3's own canvas badge, so scope to the
+		// edit panel's copy (the last match in DOM order).
+		await expect.element(page.getByText('Workflow', { exact: true }).last()).toBeInTheDocument();
 		const workflowPicker = page.getByRole('combobox').last();
 		await expect
 			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
