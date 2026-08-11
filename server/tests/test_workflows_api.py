@@ -442,6 +442,75 @@ def test_connection_rejects_malformed_condition_json(
     assert resp.status_code == 400
 
 
+def test_update_connection_sets_and_clears_condition_json(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#198: the canvas's edge inspector edits an existing connection's
+    condition in place rather than deleting and recreating it."""
+    workflow_id = _create_workflow(client, auth_headers, "editable-condition")
+    a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
+    _connect(client, auth_headers, workflow_id, None, a)
+    created = client.post(
+        f"/api/v1/workflows/{workflow_id}/connections",
+        json={"from_node_id": a, "to_node_id": b},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    connection_id = created.json()["id"]
+    assert created.json()["condition_json"] is None
+
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}/connections/{connection_id}",
+        json={"condition_json": {"not_contains": "spam"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["condition_json"] == {"not_contains": "spam"}
+
+    cleared = client.patch(
+        f"/api/v1/workflows/{workflow_id}/connections/{connection_id}",
+        json={"condition_json": None},
+        headers=auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["condition_json"] is None
+
+
+def test_update_connection_rejects_malformed_condition_json(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "bad-update-condition")
+    a = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    b = _add_transform_node(client, auth_headers, workflow_id, "b", "{input}")
+    _connect(client, auth_headers, workflow_id, None, a)
+    created = client.post(
+        f"/api/v1/workflows/{workflow_id}/connections",
+        json={"from_node_id": a, "to_node_id": b},
+        headers=auth_headers,
+    )
+    connection_id = created.json()["id"]
+
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}/connections/{connection_id}",
+        json={"condition_json": {"contains": "x", "extra": 1}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+
+
+def test_update_connection_404_for_unknown_connection(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "no-such-connection")
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}/connections/does-not-exist",
+        json={"condition_json": {"contains": "x"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
 def test_second_entry_connection_is_conflict(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

@@ -45,6 +45,7 @@ vi.mock('$lib/api/workflows', () => ({
 		removeNode: vi.fn(),
 		listConnections: vi.fn(),
 		createConnection: vi.fn(),
+		updateConnection: vi.fn(),
 		removeConnection: vi.fn(),
 		listSchedules: vi.fn(),
 		createSchedule: vi.fn(),
@@ -1057,6 +1058,78 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect
 			.element(page.getByRole('button', { name: 'Delete connection' }))
 			.not.toBeInTheDocument();
+	});
+
+	it('sets a condition on an unconditional edge and shows the label on the canvas after reload', async () => {
+		mockLoad();
+		vi.mocked(workflows.updateConnection).mockResolvedValueOnce({
+			...chainConnection,
+			condition_json: { contains: 'urgent' }
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await expect
+			.element(page.getByRole('combobox', { name: 'Condition' }))
+			.toBeInTheDocument();
+
+		await page
+			.getByRole('combobox', { name: 'Condition' })
+			.selectOptions('Follow if output contains…');
+		await page.getByPlaceholder('Text to match').fill('urgent');
+
+		vi.mocked(workflows.listConnections).mockResolvedValueOnce([
+			entryConnection,
+			{ ...chainConnection, condition_json: { contains: 'urgent' } }
+		]);
+		await page.getByRole('button', { name: 'Save condition' }).click();
+
+		await expect.poll(() => vi.mocked(workflows.updateConnection).mock.calls.length).toBe(1);
+		expect(workflows.updateConnection).toHaveBeenCalledWith('wf-1', 'c2', {
+			condition_json: { contains: 'urgent' }
+		});
+		await expect.element(page.getByText('contains "urgent"')).toBeInTheDocument();
+	});
+
+	it('pre-fills the condition form from an existing conditional edge, and can clear it back to unconditional', async () => {
+		mockLoad();
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			{ ...chainConnection, condition_json: { not_contains: 'spam' } }
+		]);
+		vi.mocked(workflows.updateConnection).mockResolvedValueOnce(chainConnection);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+		await expect.element(page.getByText('not contains "spam"')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await expect.element(page.getByPlaceholder('Text to match')).toHaveValue('spam');
+
+		await page.getByRole('combobox', { name: 'Condition' }).selectOptions('Always follow');
+		await page.getByRole('button', { name: 'Save condition' }).click();
+
+		await expect.poll(() => vi.mocked(workflows.updateConnection).mock.calls.length).toBe(1);
+		expect(workflows.updateConnection).toHaveBeenCalledWith('wf-1', 'c2', { condition_json: null });
+	});
+
+	it('shows an error when updating a connection condition fails', async () => {
+		mockLoad();
+		vi.mocked(workflows.updateConnection).mockRejectedValueOnce(new Error('Cannot save condition'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await page
+			.getByRole('combobox', { name: 'Condition' })
+			.selectOptions('Follow if output contains…');
+		await page.getByPlaceholder('Text to match').fill('urgent');
+		await page.getByRole('button', { name: 'Save condition' }).click();
+
+		await expect.element(page.getByText('Cannot save condition')).toBeInTheDocument();
 	});
 
 	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {

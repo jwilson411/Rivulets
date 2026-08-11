@@ -189,6 +189,17 @@ class WorkflowConnectionCreate(BaseModel):
     condition_json: dict[str, object] | None = None
 
 
+class WorkflowConnectionUpdate(BaseModel):
+    """#198: the canvas's edge inspector needs to change (or clear) an
+    existing connection's condition_json without recreating the edge, so
+    this checks `model_fields_set` the same way WorkflowUpdate does for
+    on_failure_workflow_id — an explicit `null` means "clear the
+    condition", not "leave it alone", which the `is not None` shortcut
+    used elsewhere in this module can't distinguish."""
+
+    condition_json: dict[str, object] | None = None
+
+
 class WorkflowConnectionOut(BaseModel):
     id: str
     workflow_id: str
@@ -362,6 +373,15 @@ async def _get_node_or_404(db: DbSession, workflow_id: str, node_id: str) -> Wor
     if node is None or node.workflow_id != workflow_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow node not found")
     return node
+
+
+async def _get_connection_or_404(
+    db: DbSession, workflow_id: str, connection_id: str
+) -> WorkflowConnection:
+    connection = await db.get(WorkflowConnection, connection_id)
+    if connection is None or connection.workflow_id != workflow_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow connection not found")
+    return connection
 
 
 async def _get_schedule_or_404(
@@ -691,13 +711,31 @@ async def list_connections(
     return [WorkflowConnectionOut.from_row(row) for row in result.scalars().all()]
 
 
+@router.patch(
+    "/{workflow_id}/connections/{connection_id}", response_model=WorkflowConnectionOut
+)
+async def update_connection(
+    workflow_id: str,
+    connection_id: str,
+    body: WorkflowConnectionUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+) -> WorkflowConnectionOut:
+    connection = await _get_connection_or_404(db, workflow_id, connection_id)
+    if "condition_json" in body.model_fields_set:
+        _validate_condition(body.condition_json)
+        connection.condition_json = json.dumps(body.condition_json) if body.condition_json else None
+    await db.commit()
+    await db.refresh(connection)
+    await publish_current_state(db, "workflow_connection", connection.id)
+    return WorkflowConnectionOut.from_row(connection)
+
+
 @router.delete("/{workflow_id}/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_connection(
     workflow_id: str, connection_id: str, db: DbSession, _: CurrentWorkspaceId
 ) -> None:
-    connection = await db.get(WorkflowConnection, connection_id)
-    if connection is None or connection.workflow_id != workflow_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow connection not found")
+    connection = await _get_connection_or_404(db, workflow_id, connection_id)
     await db.delete(connection)
     await db.commit()
 
