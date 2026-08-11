@@ -13,11 +13,17 @@ constraint first.
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from agno.tools.mcp import MCPTools
+from agno.tools.mcp.params import StreamableHTTPClientParams
+
+from rivulets.db.models import MCPServer
+from rivulets.security.credentials import CredentialStoreError, get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +48,36 @@ class DiscoveredTool:
     input_schema: dict[str, Any] = field(default_factory=lambda: {})
 
 
+def mcp_header_ref(server_id: str) -> str:
+    return f"mcp-server-headers:{server_id}"
+
+
+def get_server_headers(server: MCPServer) -> dict[str, str] | None:
+    """The custom HTTP headers (#124) configured for `server`, or None if
+    it has none. Values live in the keychain (security/credentials.py),
+    keyed by mcp_header_ref -- `header_names_json` on the row is only ever
+    the header *names*, so a lookup is needed even to know there's
+    anything to fetch."""
+    if not server.header_names_json:
+        return None
+    ref = mcp_header_ref(server.id)
+    try:
+        raw = get_secret(ref)
+    except CredentialStoreError:
+        logger.warning(
+            "MCP server %r has header_names_json but no stored secret at ref %r "
+            "-- treating as no headers",
+            server.name,
+            ref,
+        )
+        return None
+    return json.loads(raw)
+
+
 async def discover_tools(
-    url: str, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS
+    url: str,
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    headers: dict[str, str] | None = None,
 ) -> list[DiscoveredTool]:
     """Connect to the MCP server at `url` over streamable-http, list its
     tools, then disconnect. Raises MCPConnectionError on any failure (bad
@@ -69,7 +103,7 @@ async def discover_tools(
     awaits again instead of poisoning the request-handling task.
     """
     task: asyncio.Task[list[DiscoveredTool]] = asyncio.ensure_future(
-        _run_handshake(url, timeout_seconds)
+        _run_handshake(url, timeout_seconds, headers)
     )
     try:
         return await asyncio.wait_for(
@@ -81,8 +115,29 @@ async def discover_tools(
         raise MCPConnectionError(f"Could not connect to MCP server at {url}: {exc}") from exc
 
 
-async def _run_handshake(url: str, timeout_seconds: int) -> list[DiscoveredTool]:
-    mcp_tools = MCPTools(url=url, transport="streamable-http", timeout_seconds=timeout_seconds)
+async def _run_handshake(
+    url: str, timeout_seconds: int, headers: dict[str, str] | None = None
+) -> list[DiscoveredTool]:
+    # Only build server_params when there are headers to carry -- passing
+    # StreamableHTTPClientParams unconditionally would substitute its own
+    # 30s default `timeout` for the connect-phase read timeout MCPTools
+    # would otherwise derive from `timeout_seconds` (see agno's
+    # MCPTools._connect: `params_timeout = streamable_http_params.get(
+    # "timeout", self.timeout_seconds)`), silently changing behavior for
+    # every server that has no headers configured.
+    server_params = (
+        StreamableHTTPClientParams(
+            url=url, headers=headers, timeout=timedelta(seconds=timeout_seconds)
+        )
+        if headers
+        else None
+    )
+    mcp_tools = MCPTools(
+        url=url,
+        transport="streamable-http",
+        timeout_seconds=timeout_seconds,
+        server_params=server_params,
+    )
     try:
         await mcp_tools.connect()
         await mcp_tools.initialize()

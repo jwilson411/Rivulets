@@ -43,9 +43,11 @@ from typing import Any
 
 from agno.tools.function import Function
 from agno.tools.mcp import MCPTools
+from agno.tools.mcp.params import StreamableHTTPClientParams
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.mcp import get_server_headers
 from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
 from rivulets.tools.builtin import (
     cancel_schedule,
@@ -194,11 +196,17 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                         agent_row.name,
                     )
                     continue
+                headers = get_server_headers(server)
                 resolved.append(
                     MCPTools(
                         url=server.url,
                         transport="streamable-http",
                         include_tools=[tool_row.mcp_tool_name],
+                        server_params=(
+                            StreamableHTTPClientParams(url=server.url, headers=headers)
+                            if headers
+                            else None
+                        ),
                     )
                 )
         except Exception:

@@ -23,6 +23,9 @@ export interface MCPServer {
 	url: string;
 	connected: boolean;
 	last_connected_at: string | null;
+	// Names of configured auth headers only -- values are secrets and never
+	// leave the server (server/api/mcp_servers.py's module docstring).
+	header_names: string[];
 }
 
 export interface MCPServerDetail extends MCPServer {
@@ -32,6 +35,10 @@ export interface MCPServerDetail extends MCPServer {
 export interface MCPServerCreateInput {
 	name: string;
 	url: string;
+	// Setting headers at creation requires an owner session (server-side
+	// 403 for an invite-grant session) -- entering auth on the workspace's
+	// behalf, same as provider API keys.
+	headers?: Record<string, string>;
 }
 
 export const mcpServers = {
@@ -39,6 +46,9 @@ export const mcpServers = {
 	get: (id: string) => api.get<MCPServerDetail>(`/mcp-servers/${id}`, auth.token ?? undefined),
 	create: (body: MCPServerCreateInput) =>
 		api.post<MCPServerDetail>('/mcp-servers', body, auth.token ?? undefined),
+	// Always a full replace -- pass {} to clear every header. Owner-only.
+	setHeaders: (id: string, headers: Record<string, string>) =>
+		api.put<MCPServerDetail>(`/mcp-servers/${id}/headers`, { headers }, auth.token ?? undefined),
 	reconnect: (id: string) =>
 		api.post<MCPServerDetail>(`/mcp-servers/${id}/reconnect`, undefined, auth.token ?? undefined),
 	remove: (id: string) => api.delete<void>(`/mcp-servers/${id}`, auth.token ?? undefined)

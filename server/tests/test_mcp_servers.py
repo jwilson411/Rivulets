@@ -132,6 +132,46 @@ async def test_discover_tools_closes_even_on_failure(monkeypatch: pytest.MonkeyP
     assert fake.closed is True
 
 
+async def test_discover_tools_passes_headers_to_mcp_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#124: headers must reach agno's MCPTools as a StreamableHTTPClientParams
+    server_params, not silently get dropped."""
+    captured: dict[str, Any] = {}
+
+    def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
+        captured.update(kwargs)
+        return _FakeMCPTools(on_connect=None, functions={"add": _FakeFunction("add", "Adds.")})
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    await discover_tools(
+        "http://127.0.0.1:9999/mcp", headers={"Authorization": "Bearer secret-token"}
+    )
+
+    server_params = captured["server_params"]
+    assert server_params is not None
+    assert server_params.headers == {"Authorization": "Bearer secret-token"}
+    assert server_params.url == "http://127.0.0.1:9999/mcp"
+
+
+async def test_discover_tools_omits_server_params_when_no_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: passing server_params unconditionally would swap
+    in StreamableHTTPClientParams' own 30s default timeout in place of
+    discover_tools' own timeout_seconds for every headerless server."""
+    captured: dict[str, Any] = {}
+
+    def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
+        captured.update(kwargs)
+        return _FakeMCPTools(on_connect=None, functions={})
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    await discover_tools("http://127.0.0.1:9999/mcp")
+
+    assert captured["server_params"] is None
+
+
 async def test_discover_tools_succeeds_even_when_closing_the_connection_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,9 +191,18 @@ async def test_discover_tools_succeeds_even_when_closing_the_connection_fails(
 
 
 def _patch_discover_tools(
-    monkeypatch: pytest.MonkeyPatch, result: Sequence[DiscoveredTool] | BaseException
+    monkeypatch: pytest.MonkeyPatch,
+    result: Sequence[DiscoveredTool] | BaseException,
+    *,
+    capture_headers: list[dict[str, str] | None] | None = None,
 ) -> None:
-    async def _fake(url: str, timeout_seconds: int = 10) -> list[DiscoveredTool]:  # noqa: ARG001
+    async def _fake(
+        url: str,  # noqa: ARG001
+        timeout_seconds: int = 10,  # noqa: ARG001
+        headers: dict[str, str] | None = None,
+    ) -> list[DiscoveredTool]:
+        if capture_headers is not None:
+            capture_headers.append(headers)
         if isinstance(result, BaseException):
             raise result
         return list(result)
@@ -285,3 +334,162 @@ def test_unregister_mcp_server_removes_server_and_tools(
     assert client.get(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers).status_code == 404
     tools = client.get("/api/v1/tools", headers=auth_headers).json()
     assert all(t["tool_type"] != "mcp" for t in tools)
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def test_register_mcp_server_with_headers_stores_names_not_values(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, str] | None] = []
+    _patch_discover_tools(
+        monkeypatch, [DiscoveredTool(name="add", description="Adds.")], capture_headers=captured
+    )
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Authed server",
+            "url": "http://127.0.0.1:9999/mcp",
+            "headers": {"Authorization": "Bearer sk-real-secret"},
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["header_names"] == ["Authorization"]
+    assert "headers" not in body
+    assert "Bearer sk-real-secret" not in response.text
+    # discover_tools (and thus the actual MCP handshake) received the real
+    # header value, even though the response never does.
+    assert captured == [{"Authorization": "Bearer sk-real-secret"}]
+
+    listed = client.get("/api/v1/mcp-servers", headers=auth_headers).json()
+    assert listed[0]["header_names"] == ["Authorization"]
+
+
+def test_register_mcp_server_with_headers_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Authed server",
+            "url": "http://127.0.0.1:9999/mcp",
+            "headers": {"Authorization": "Bearer sk-real-secret"},
+        },
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # Registering without headers stays open to any grant, unchanged.
+    plain = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Plain server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=invite_headers,
+    )
+    assert plain.status_code == 201, plain.text
+
+
+def test_set_mcp_server_headers_replaces_and_reconnects(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, str] | None] = []
+    _patch_discover_tools(monkeypatch, MCPConnectionError("no auth"), capture_headers=captured)
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    assert created.json()["connected"] is False
+
+    _patch_discover_tools(
+        monkeypatch, [DiscoveredTool(name="add", description="Adds.")], capture_headers=captured
+    )
+    updated = client.put(
+        f"/api/v1/mcp-servers/{server_id}/headers",
+        json={"headers": {"X-Api-Key": "k-123"}},
+        headers=auth_headers,
+    )
+
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["header_names"] == ["X-Api-Key"]
+    assert body["connected"] is True
+    assert captured[-1] == {"X-Api-Key": "k-123"}
+
+    # Clearing (empty dict) removes them and drops back to a headerless
+    # reconnect.
+    cleared = client.put(
+        f"/api/v1/mcp-servers/{server_id}/headers", json={"headers": {}}, headers=auth_headers
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["header_names"] == []
+    assert captured[-1] is None
+
+
+def test_set_mcp_server_headers_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.put(
+        f"/api/v1/mcp-servers/{server_id}/headers",
+        json={"headers": {"Authorization": "Bearer x"}},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_set_mcp_server_headers_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.put(
+        "/api/v1/mcp-servers/nonexistent/headers", json={"headers": {}}, headers=auth_headers
+    )
+    assert response.status_code == 404
+
+
+def test_unregister_mcp_server_with_headers_deletes_stored_secret(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rivulets.agentos.mcp import mcp_header_ref
+    from rivulets.security.credentials import CredentialStoreError, get_secret
+
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Authed server",
+            "url": "http://127.0.0.1:9999/mcp",
+            "headers": {"Authorization": "Bearer sk-real-secret"},
+        },
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    ref = mcp_header_ref(server_id)
+    assert get_secret(ref)  # sanity check: it was actually stored
+
+    deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    with pytest.raises(CredentialStoreError):
+        get_secret(ref)
