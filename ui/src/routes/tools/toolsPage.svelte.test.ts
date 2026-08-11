@@ -118,7 +118,7 @@ describe('tools/+page.svelte', () => {
 		});
 	});
 
-	it('shows the simple-mode-not-wired-up message on a 501 response', async () => {
+	it('shows an actionable message and next steps on a 501 response', async () => {
 		vi.mocked(tools.list).mockResolvedValue([]);
 		vi.mocked(tools.create).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
 
@@ -130,12 +130,37 @@ describe('tools/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Create tool' }).click();
 
 		await expect
-			.element(
-				page.getByText(
-					'Simple-mode codegen isn’t wired up on this server yet — use Advanced Mode to create an empty tool and write it by hand.'
-				)
-			)
+			.element(page.getByText('Simple mode isn’t available on this server yet.', { exact: false }))
 			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Switch to Advanced mode' }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('link', { name: 'Ask an agent in a channel' }))
+			.toBeInTheDocument();
+	});
+
+	it('lets the user switch to advanced mode after a 501, keeping name and description', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(tools.create).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
+
+		render(ToolsPage);
+		await page.getByRole('button', { name: 'Simple mode' }).click();
+		await page.getByPlaceholder('Name').fill('my_tool');
+		await page.getByPlaceholder('Description').fill('desc');
+		await page.getByPlaceholder(/Describe what the tool should do/).fill('do a thing');
+		await page.getByRole('button', { name: 'Create tool' }).click();
+
+		await page.getByRole('button', { name: 'Switch to Advanced mode' }).click();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Advanced mode' }))
+			.toHaveAttribute('aria-pressed', 'true');
+		await expect.element(page.getByPlaceholder('Name')).toHaveValue('my_tool');
+		await expect.element(page.getByPlaceholder('Description')).toHaveValue('desc');
+		await expect
+			.element(page.getByText('Simple mode isn’t available on this server yet.', { exact: false }))
+			.not.toBeInTheDocument();
 	});
 
 	it('deletes a custom tool via tools.remove', async () => {

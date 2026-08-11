@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api/client';
 	import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
@@ -29,6 +30,16 @@
 	let prompt = $state('');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
+	// #133: Simple mode's codegen isn't wired up on every server. When it
+	// isn't, offer a concrete next step (switch modes, keep the fields the
+	// user already filled in) instead of leaving a non-coder stuck.
+	let simpleModeUnavailable = $state(false);
+
+	function selectMode(mode: 'simple' | 'advanced') {
+		createMode = mode;
+		createError = null;
+		simpleModeUnavailable = false;
+	}
 
 	async function refresh() {
 		loadError = null;
@@ -56,6 +67,7 @@
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		createError = null;
+		simpleModeUnavailable = false;
 		if (!name.trim() || !description.trim()) return;
 		if (createMode === 'simple' && !prompt.trim()) return;
 		creating = true;
@@ -72,8 +84,9 @@
 			await refresh();
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 501) {
+				simpleModeUnavailable = true;
 				createError =
-					'Simple-mode codegen isn’t wired up on this server yet — use Advanced Mode to create an empty tool and write it by hand.';
+					'Simple mode isn’t available on this server yet. Your name and description are kept below — switch to Advanced mode to write the code yourself, or ask an agent in a channel chat to write it for you and paste the result in once the tool is created.';
 			} else {
 				createError = err instanceof ApiError ? err.message : 'Failed to create tool';
 			}
@@ -149,7 +162,7 @@
 			<button
 				type="button"
 				aria-pressed={createMode === 'simple'}
-				onclick={() => (createMode = 'simple')}
+				onclick={() => selectMode('simple')}
 				class="rounded-[3px] px-3 py-1 text-xs {createMode === 'simple'
 					? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
 					: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
@@ -159,7 +172,7 @@
 			<button
 				type="button"
 				aria-pressed={createMode === 'advanced'}
-				onclick={() => (createMode = 'advanced')}
+				onclick={() => selectMode('advanced')}
 				class="rounded-[3px] px-3 py-1 text-xs {createMode === 'advanced'
 					? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
 					: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
@@ -188,6 +201,11 @@
 				rows="3"
 				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 			></textarea>
+			<p class="text-xs text-neutral-500">
+				Code generation isn't available on every server. If it isn't here, you'll be able to switch
+				to Advanced mode without losing your name and description, then write the code yourself or
+				ask an agent in a channel chat to write it for you.
+			</p>
 		{:else}
 			<p class="text-xs text-neutral-500">
 				Creates an empty tool file you write by hand — use "Open in editor" below once it's created.
@@ -203,6 +221,23 @@
 		</button>
 		{#if createError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
+			{#if simpleModeUnavailable}
+				<div class="flex flex-wrap gap-2">
+					<button
+						type="button"
+						onclick={() => selectMode('advanced')}
+						class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+					>
+						Switch to Advanced mode
+					</button>
+					<a
+						href={resolve('/channels')}
+						class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+					>
+						Ask an agent in a channel
+					</a>
+				</div>
+			{/if}
 		{/if}
 	</form>
 
