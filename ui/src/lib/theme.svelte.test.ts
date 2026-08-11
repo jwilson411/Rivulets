@@ -9,7 +9,7 @@
 // `theme` is only exercised through its public set() API, which is real
 // runtime behavior regardless of import caching.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readStored, theme } from './theme.svelte';
 
 const STORAGE_KEY = 'rivulets-theme';
@@ -20,6 +20,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.unstubAllGlobals();
 	localStorage.removeItem(STORAGE_KEY);
 	delete document.documentElement.dataset.theme;
 });
@@ -41,6 +42,11 @@ describe('readStored', () => {
 		localStorage.setItem(STORAGE_KEY, 'sepia');
 		expect(readStored()).toBe('system');
 	});
+
+	it('defaults to system when localStorage is unavailable (SSR)', () => {
+		vi.stubGlobal('localStorage', undefined);
+		expect(readStored()).toBe('system');
+	});
 });
 
 describe('theme.set()', () => {
@@ -58,4 +64,11 @@ describe('theme.set()', () => {
 		expect(document.documentElement.dataset.theme).toBeUndefined();
 		expect(localStorage.getItem(STORAGE_KEY)).toBe('system');
 	});
+
+	// The `typeof document === 'undefined'` SSR guard inside apply() isn't
+	// exercised here: vitest-browser-svelte runs against a real Chromium
+	// `document`, whose global binding isn't configurable, so it can't be
+	// stubbed away the way `localStorage` above can (see readStored's SSR
+	// test). That guard is otherwise identical in shape and intent to the
+	// localStorage one, which the above test does cover.
 });

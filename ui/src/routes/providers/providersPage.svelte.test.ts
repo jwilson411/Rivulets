@@ -146,6 +146,21 @@ describe('providers/+page.svelte', () => {
 		await expect.element(page.getByText('Local Ollama')).toBeInTheDocument();
 	});
 
+	it('removes a provider via providers.remove and refreshes the list', async () => {
+		vi.mocked(providers.list).mockResolvedValueOnce([anthropicProvider]).mockResolvedValueOnce([]);
+		vi.mocked(providers.remove).mockResolvedValueOnce(undefined);
+
+		render(ProvidersPage);
+		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		expect(providers.remove).toHaveBeenCalledWith('prov-1');
+		await expect
+			.element(page.getByText('No providers configured yet — add one above.'))
+			.toBeInTheDocument();
+	});
+
 	it('shows the ApiError message when removing a provider fails', async () => {
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
 		vi.mocked(providers.remove).mockRejectedValueOnce(
@@ -241,5 +256,57 @@ describe('providers/+page.svelte', () => {
 
 		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
 		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
+	});
+
+	it('shows an error when the initial provider list fails to load', async () => {
+		vi.mocked(providers.list).mockRejectedValueOnce(new Error('Failed to load providers'));
+
+		render(ProvidersPage);
+
+		await expect.element(page.getByText('Failed to load providers')).toBeInTheDocument();
+	});
+
+	it('does not submit while the label is blank', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+
+		render(ProvidersPage);
+		await page.getByPlaceholder('API key').fill('sk-test-123');
+		await page.getByRole('button', { name: 'Add provider' }).click();
+
+		expect(providers.create).not.toHaveBeenCalled();
+	});
+
+	it('does not submit while the api key is blank for a non-ollama provider', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+
+		render(ProvidersPage);
+		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('My Anthropic key');
+		await page.getByRole('button', { name: 'Add provider' }).click();
+
+		expect(providers.create).not.toHaveBeenCalled();
+	});
+
+	it('shows a generic error when adding a provider fails', async () => {
+		vi.mocked(providers.list).mockResolvedValue([]);
+		vi.mocked(providers.create).mockRejectedValueOnce(new Error('Failed to add provider'));
+
+		render(ProvidersPage);
+		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('My Anthropic key');
+		await page.getByPlaceholder('API key').fill('sk-test-123');
+		await page.getByRole('button', { name: 'Add provider' }).click();
+
+		await expect.element(page.getByText('Failed to add provider')).toBeInTheDocument();
+	});
+
+	it('shows a generic error when removing a provider fails with a non-ApiError', async () => {
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(providers.remove).mockRejectedValueOnce(new Error('network blip'));
+
+		render(ProvidersPage);
+		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		await expect.element(page.getByText('Failed to remove provider')).toBeInTheDocument();
 	});
 });

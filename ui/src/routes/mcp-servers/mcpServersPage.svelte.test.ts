@@ -499,4 +499,199 @@ describe('mcp-servers/+page.svelte', () => {
 
 		await expect.element(page.getByRole('button', { name: 'Add headers' })).not.toBeInTheDocument();
 	});
+
+	it('skips blank lines when parsing header lines', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValueOnce([]).mockResolvedValueOnce([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.create).mockResolvedValueOnce(fsServerDetail);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page.getByText('Advanced: auth headers').click();
+		await page
+			.getByPlaceholder('Authorization: Bearer sk-...')
+			.first()
+			.fill('Authorization: Bearer sk-real-secret\n\nX-Custom: val');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).toHaveBeenCalledWith({
+			name: 'Filesystem tools',
+			transport: 'streamable-http',
+			url: 'http://localhost:9001',
+			headers: { Authorization: 'Bearer sk-real-secret', 'X-Custom': 'val' }
+		});
+	});
+
+	it('shows an error and does not submit when a header line has no name', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page.getByText('Advanced: auth headers').click();
+		await page.getByPlaceholder('Authorization: Bearer sk-...').first().fill(': value');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+		await expect.element(page.getByText(/missing a name/)).toBeInTheDocument();
+	});
+
+	it('does not submit while the name is blank', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+	});
+
+	it('shows an error and does not submit when a stdio env line has no colon', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Local filesystem');
+		await page.getByText('Stdio (local command)').click();
+		await page.getByPlaceholder('Command (e.g. npx)').fill('npx');
+		await page.getByText('Advanced: env vars').click();
+		await page.getByPlaceholder('API_KEY: sk-...').fill('not-a-env-line');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+		await expect.element(page.getByText(/missing ":"/)).toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when registering a stdio server fails', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+		vi.mocked(mcpServers.create).mockRejectedValueOnce(
+			new ApiError(422, 'command is not permitted')
+		);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Local filesystem');
+		await page.getByText('Stdio (local command)').click();
+		await page.getByPlaceholder('Command (e.g. npx)').fill('npx');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		await expect.element(page.getByText('command is not permitted')).toBeInTheDocument();
+	});
+
+	it('switches the form back to streamable-http after selecting stdio', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByText('Stdio (local command)').click();
+		await expect.element(page.getByPlaceholder('Command (e.g. npx)')).toBeInTheDocument();
+
+		await page.getByText('Streamable-HTTP', { exact: true }).click();
+
+		await expect
+			.element(page.getByPlaceholder('URL (streamable-http endpoint)'))
+			.toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Command (e.g. npx)')).not.toBeInTheDocument();
+	});
+
+	it('shows an error and cancels out of the header editor without saving', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add headers' }).click();
+		await page.getByPlaceholder('Authorization: Bearer sk-...').last().fill('not-a-header-line');
+		await page.getByRole('button', { name: 'Save headers' }).click();
+
+		expect(mcpServers.setHeaders).not.toHaveBeenCalled();
+		await expect.element(page.getByText(/missing ":"/)).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Save headers' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when saving headers fails', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([fsServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(fsServerDetail);
+		vi.mocked(mcpServers.setHeaders).mockRejectedValueOnce(new ApiError(500, 'Vault unreachable'));
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Filesystem tools')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add headers' }).click();
+		await page
+			.getByPlaceholder('Authorization: Bearer sk-...')
+			.last()
+			.fill('Authorization: Bearer sk-real-secret');
+		await page.getByRole('button', { name: 'Save headers' }).click();
+
+		await expect.element(page.getByText('Vault unreachable')).toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when clearing headers fails', async () => {
+		const authedServer: MCPServerDetail = { ...fsServerDetail, header_names: ['Authorization'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...fsServerSummary, header_names: ['Authorization'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(authedServer);
+		vi.mocked(mcpServers.setHeaders).mockRejectedValueOnce(new ApiError(500, 'Vault unreachable'));
+
+		render(McpServersPage);
+		await page.getByRole('button', { name: 'Edit headers' }).click();
+		await page.getByRole('button', { name: 'Clear all' }).click();
+
+		await expect.element(page.getByText('Vault unreachable')).toBeInTheDocument();
+	});
+
+	it('shows an error and cancels out of the env editor without saving', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([localServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(localServerDetail);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Local filesystem')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add env vars' }).click();
+		await page.getByPlaceholder('API_KEY: sk-...').fill('not-a-env-line');
+		await page.getByRole('button', { name: 'Save env vars' }).click();
+
+		expect(mcpServers.setEnv).not.toHaveBeenCalled();
+		await expect.element(page.getByText(/missing ":"/)).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		await expect.element(page.getByPlaceholder('API_KEY: sk-...')).not.toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when saving env vars fails', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([localServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(localServerDetail);
+		vi.mocked(mcpServers.setEnv).mockRejectedValueOnce(new ApiError(500, 'Vault unreachable'));
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Local filesystem')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add env vars' }).click();
+		await page.getByPlaceholder('API_KEY: sk-...').fill('API_KEY: sk-real-secret');
+		await page.getByRole('button', { name: 'Save env vars' }).click();
+
+		await expect.element(page.getByText('Vault unreachable')).toBeInTheDocument();
+	});
+
+	it('shows an ApiError message when clearing env vars fails', async () => {
+		const withEnv: MCPServerDetail = { ...localServerDetail, env_names: ['API_KEY'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...localServerSummary, env_names: ['API_KEY'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(withEnv);
+		vi.mocked(mcpServers.setEnv).mockRejectedValueOnce(new ApiError(500, 'Vault unreachable'));
+
+		render(McpServersPage);
+		await page.getByRole('button', { name: 'Edit env vars' }).click();
+		await page.getByRole('button', { name: 'Clear all' }).click();
+
+		await expect.element(page.getByText('Vault unreachable')).toBeInTheDocument();
+	});
 });

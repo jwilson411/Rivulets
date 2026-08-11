@@ -12,7 +12,8 @@ import {
 	type Workflow,
 	type WorkflowNode,
 	type WorkflowConnection,
-	type WorkflowSchedule
+	type WorkflowSchedule,
+	type WorkflowWebhook
 } from '$lib/api/workflows';
 import { agents } from '$lib/api/agents';
 import { channels } from '$lib/api/channels';
@@ -124,6 +125,30 @@ const digestChannel = {
 	team_id: null,
 	position: 0,
 	archived: false
+};
+
+const namedWebhook: WorkflowWebhook = {
+	id: 'wh-1',
+	workflow_id: 'wf-1',
+	channel_id: 'ch-1',
+	name: 'GitHub',
+	input_template: null,
+	enabled: true,
+	last_triggered_at: '2026-08-08T00:00:00Z',
+	created_at: '2026-08-01T00:00:00Z',
+	updated_at: '2026-08-01T00:00:00Z'
+};
+
+const unnamedWebhook: WorkflowWebhook = {
+	id: 'wh-2',
+	workflow_id: 'wf-1',
+	channel_id: 'missing-channel',
+	name: null,
+	input_template: null,
+	enabled: false,
+	last_triggered_at: null,
+	created_at: '2026-08-01T00:00:00Z',
+	updated_at: '2026-08-01T00:00:00Z'
 };
 
 const orphanNode: WorkflowNode = {
@@ -1310,5 +1335,306 @@ describe('workflows/[id]/+page.svelte', () => {
 		await page.getByText('failed', { exact: true }).first().click();
 
 		await expect.element(page.getByText('agent timed out')).toBeInTheDocument();
+	});
+
+	it('creates a webhook for a chosen channel, revealing its secret once with select-to-copy fields, and can dismiss the reveal panel', async () => {
+		mockLoad();
+		const secondChannel = { ...digestChannel, id: 'ch-2', name: 'alerts-channel' };
+		vi.mocked(channels.list).mockResolvedValue([digestChannel, secondChannel]);
+		const created = { ...namedWebhook, channel_id: 'ch-2', secret: 'shh-secret' };
+		vi.mocked(workflows.createWebhook).mockResolvedValueOnce(created);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// Initial load() already consumed mockLoad()'s `[]` default -- queue
+		// the post-creation response for the refresh inside handleAddWebhook.
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([created]);
+
+		await page.getByRole('button', { name: '+ Add webhook' }).click();
+		await page.getByPlaceholder('e.g. GitHub').fill('GitHub');
+		await page.getByLabelText('Channel').selectOptions('ch-2');
+		await page.getByRole('button', { name: 'Add webhook', exact: true }).click();
+
+		expect(workflows.createWebhook).toHaveBeenCalledWith('wf-1', {
+			channel_id: 'ch-2',
+			name: 'GitHub'
+		});
+		await expect
+			.element(page.getByText("Save this secret now — it won't be shown again."))
+			.toBeInTheDocument();
+		const urlField = page.getByLabelText('URL');
+		const secretField = page.getByLabelText('Secret');
+		await expect.element(urlField).toHaveValue(`${window.location.origin}/api/v1/webhooks/wh-1`);
+		await expect.element(secretField).toHaveValue('shh-secret');
+		// Clicking either readonly field selects its text for easy copying.
+		await urlField.click();
+		await secretField.click();
+
+		await page.getByRole('button', { name: 'Done' }).click();
+		await expect
+			.element(page.getByText("Save this secret now — it won't be shown again."))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows an error when creating a webhook fails', async () => {
+		mockLoad();
+		vi.mocked(workflows.createWebhook).mockRejectedValueOnce(new Error('Cannot create webhook'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '+ Add webhook' }).click();
+		await page.getByRole('button', { name: 'Add webhook', exact: true }).click();
+
+		// The webhook error paragraph is shown both above the webhook list and
+		// inside the open add-webhook form -- both match this text.
+		await expect.element(page.getByText('Cannot create webhook').first()).toBeInTheDocument();
+	});
+
+	it('cancels adding a webhook without submitting', async () => {
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '+ Add webhook' }).click();
+		await page.getByPlaceholder('e.g. GitHub').fill('abandoned');
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		expect(workflows.createWebhook).not.toHaveBeenCalled();
+		await expect.element(page.getByPlaceholder('e.g. GitHub')).not.toBeInTheDocument();
+	});
+
+	it('shows webhook metadata including a named webhook, a deleted channel, and never-triggered state', async () => {
+		mockLoad();
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([namedWebhook, unnamedWebhook]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await expect.element(page.getByText('GitHub')).toBeInTheDocument();
+		// The unnamed webhook falls back to its id's first 8 characters.
+		await expect.element(page.getByText(unnamedWebhook.id.slice(0, 8))).toBeInTheDocument();
+		await expect.element(page.getByText('digest-channel', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByText('Deleted channel', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByText('never', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Disable' })).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Enable' })).toBeInTheDocument();
+	});
+
+	it('toggles a webhook enabled state, and surfaces an error on failure', async () => {
+		mockLoad();
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([namedWebhook]);
+		vi.mocked(workflows.updateWebhook).mockResolvedValueOnce({ ...namedWebhook, enabled: false });
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Disable' }).click();
+		expect(workflows.updateWebhook).toHaveBeenCalledWith('wf-1', 'wh-1', { enabled: false });
+		await expect.element(page.getByRole('button', { name: 'Enable' })).toBeInTheDocument();
+
+		vi.mocked(workflows.updateWebhook).mockRejectedValueOnce(new Error('Cannot toggle webhook'));
+		await page.getByRole('button', { name: 'Enable' }).click();
+
+		await expect.element(page.getByText('Cannot toggle webhook')).toBeInTheDocument();
+	});
+
+	it('rotates a webhook secret and reveals the new value, and surfaces an error on failure', async () => {
+		mockLoad();
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([namedWebhook]);
+		vi.mocked(workflows.rotateWebhookSecret).mockResolvedValueOnce({
+			...namedWebhook,
+			secret: 'new-secret'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Rotate secret' }).click();
+
+		expect(workflows.rotateWebhookSecret).toHaveBeenCalledWith('wf-1', 'wh-1');
+		await expect.element(page.getByLabelText('Secret')).toHaveValue('new-secret');
+
+		vi.mocked(workflows.rotateWebhookSecret).mockRejectedValueOnce(
+			new Error('Cannot rotate secret')
+		);
+		await page.getByRole('button', { name: 'Rotate secret' }).click();
+
+		await expect.element(page.getByText('Cannot rotate secret')).toBeInTheDocument();
+	});
+
+	it('removes a webhook, clearing its revealed secret panel, and surfaces an error on failure', async () => {
+		mockLoad();
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([namedWebhook]);
+		vi.mocked(workflows.rotateWebhookSecret).mockResolvedValueOnce({
+			...namedWebhook,
+			secret: 'shown-secret'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// Reveal the secret panel first so removal's "clear it if it matches"
+		// branch has something to clear.
+		await page.getByRole('button', { name: 'Rotate secret' }).click();
+		await expect.element(page.getByLabelText('Secret')).toHaveValue('shown-secret');
+
+		// The webhooks section renders above the step chain, so the first
+		// "Remove" button on the page belongs to this webhook, not a step.
+		vi.mocked(workflows.removeWebhook).mockRejectedValueOnce(new Error('Cannot remove webhook'));
+		await page.getByRole('button', { name: 'Remove' }).first().click();
+		await expect.element(page.getByText('Cannot remove webhook')).toBeInTheDocument();
+		await expect.element(page.getByLabelText('Secret')).toHaveValue('shown-secret');
+
+		vi.mocked(workflows.removeWebhook).mockResolvedValueOnce(undefined);
+		await page.getByRole('button', { name: 'Remove' }).first().click();
+
+		expect(workflows.removeWebhook).toHaveBeenCalledWith('wf-1', 'wh-1');
+		await expect.element(page.getByLabelText('Secret')).not.toBeInTheDocument();
+		await expect.element(page.getByText('GitHub')).not.toBeInTheDocument();
+	});
+
+	it('toggles between simple and advanced schedule builder modes', async () => {
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		await page.getByRole('button', { name: 'Advanced (cron)' }).click();
+		await expect.element(page.getByPlaceholder('0 9 * * *')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Simple' }).click();
+		await expect.element(page.getByPlaceholder('0 9 * * *')).not.toBeInTheDocument();
+		await expect.element(page.getByLabelText('Frequency')).toBeInTheDocument();
+	});
+
+	it('builds a cron expression from the simple hourly picker (#131)', async () => {
+		mockLoad();
+		const created: WorkflowSchedule = {
+			id: 'sched-hourly',
+			workflow_id: 'wf-1',
+			channel_id: 'ch-1',
+			cron_expression: '30 * * * *',
+			run_once: false,
+			input_content: '',
+			enabled: true,
+			next_fire_at: '2026-08-09T09:30:00Z',
+			last_fired_at: null,
+			consecutive_failures: 0,
+			name: null,
+			created_by: 'human',
+			created_at: '2026-08-08T00:00:00Z',
+			updated_at: '2026-08-08T00:00:00Z'
+		};
+		vi.mocked(workflows.createSchedule).mockResolvedValueOnce(created);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		vi.mocked(workflows.listSchedules).mockResolvedValueOnce([created]);
+
+		await page.getByRole('button', { name: '+ Add schedule' }).click();
+		// combobox 2 is Frequency; selecting "hourly" swaps the Time field
+		// for a "Minute past the hour" input.
+		await page.getByRole('combobox').nth(2).selectOptions('hourly');
+		await page.getByLabelText('Minute past the hour').fill('30');
+		await expect.element(page.getByText('30 * * * *')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add schedule', exact: true }).click();
+
+		expect(workflows.createSchedule).toHaveBeenCalledWith('wf-1', {
+			channel_id: 'ch-1',
+			cron_expression: '30 * * * *',
+			input_content: ''
+		});
+	});
+
+	it('inserts a nested workflow step after an existing step in the chain, not just at the top', async () => {
+		mockLoad();
+		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
+		vi.mocked(workflows.createNode).mockResolvedValueOnce({
+			id: 'n3',
+			workflow_id: 'wf-1',
+			name: 'Nested mid',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		// index 1 is the "+ Add step" between Fetch (n1) and Format (n2).
+		await page.getByRole('button', { name: '+ Add step' }).nth(1).click();
+		await page.getByPlaceholder('Step name').fill('Nested mid');
+		await page.getByRole('combobox').nth(2).selectOptions('workflow');
+		await page.getByRole('combobox').nth(3).selectOptions('wf-2');
+		await page.getByRole('button', { name: 'Add step', exact: true }).click();
+
+		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
+			name: 'Nested mid',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
+		});
+	});
+
+	it('edits an existing nested-workflow step with the node type locked, keeping the selected child workflow', async () => {
+		mockLoad();
+		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
+		const nestedNode: WorkflowNode = {
+			id: 'n3',
+			workflow_id: 'wf-1',
+			name: 'Nested',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
+		};
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, nestedNode]);
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3' }
+		]);
+		vi.mocked(workflows.updateNode).mockResolvedValueOnce(nestedNode);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Nested')).toBeInTheDocument();
+
+		// Buttons: header rename Edit (0), Fetch's Edit (1), Format's Edit (2),
+		// Nested's Edit (3).
+		await page.getByRole('button', { name: 'Edit' }).nth(3).click();
+
+		// lockNodeType renders the type as static text, not a select -- and the
+		// workflow picker still needs workflowOptions to list the current pick.
+		await expect.element(page.getByText('Workflow', { exact: true })).toBeInTheDocument();
+		const workflowPicker = page.getByRole('combobox').last();
+		await expect
+			.element(workflowPicker.getByRole('option', { name: '/other-flow' }))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Save changes' }).click();
+
+		expect(workflows.updateNode).toHaveBeenCalledWith('wf-1', 'n3', {
+			name: 'Nested',
+			agent_id: undefined,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5
+		});
 	});
 });

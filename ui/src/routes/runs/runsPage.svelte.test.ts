@@ -6,7 +6,13 @@ import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import RunsPage from './+page.svelte';
-import { runs, type RunTrace, type RunTraceDetail, type ToolCall } from '$lib/api/runs';
+import {
+	runs,
+	type RunTrace,
+	type RunTraceDetail,
+	type RunSpanType,
+	type ToolCall
+} from '$lib/api/runs';
 
 vi.mock('$lib/api/runs', () => ({
 	runs: {
@@ -160,5 +166,143 @@ describe('runs/+page.svelte', () => {
 		const link = page.getByText('View rivulet');
 		await expect.element(link).toBeInTheDocument();
 		await expect.element(link).toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
+	});
+
+	it('collapses an expanded trace on a second click, and does not refetch its spans on re-expand', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue(traceDetail);
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('dispatch (deterministic)')).toBeInTheDocument();
+
+		// collapse
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('dispatch (deterministic)')).not.toBeInTheDocument();
+		expect(runs.get).toHaveBeenCalledTimes(1);
+
+		// re-expand -- spans are already cached, so no second fetch
+		await page.getByText('hello there').click();
+		await expect.element(page.getByText('dispatch (deterministic)')).toBeInTheDocument();
+		expect(runs.get).toHaveBeenCalledTimes(1);
+	});
+
+	it('shows an error when loading a trace detail fails', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockRejectedValueOnce(new Error('Failed to load run detail'));
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('Failed to load run detail')).toBeInTheDocument();
+	});
+
+	it('shows "No spans recorded" when an expanded trace has an empty span list', async () => {
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue({ ...traceDetail, spans: [] });
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('No spans recorded for this run.')).toBeInTheDocument();
+	});
+
+	it('shows an error status style and dash placeholders for a null cost/duration trace', async () => {
+		const erroredTrace: RunTrace = {
+			...messageTrace,
+			id: 'trace-2',
+			label: 'oops',
+			status: 'error',
+			total_cost_usd: null
+		};
+		vi.mocked(runs.list).mockResolvedValue([erroredTrace]);
+
+		render(RunsPage);
+
+		await expect.element(page.getByText('oops')).toBeInTheDocument();
+		await expect.element(page.getByText('error', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('—', { exact: true })).toBeInTheDocument();
+	});
+
+	it('falls back to the neutral status style for an in-progress trace', async () => {
+		const runningTrace: RunTrace = {
+			...messageTrace,
+			id: 'trace-3',
+			label: 'still going',
+			status: 'running'
+		};
+		vi.mocked(runs.list).mockResolvedValue([runningTrace]);
+
+		render(RunsPage);
+
+		await expect.element(page.getByText('still going')).toBeInTheDocument();
+		await expect.element(page.getByText('running', { exact: true })).toBeInTheDocument();
+	});
+
+	it('labels workflow_run, workflow_node_run, and unrecognized span types, and shows a dash duration', async () => {
+		const workflowSpanDetail: RunTraceDetail = {
+			...traceDetail,
+			spans: [
+				{
+					id: 'span-w1',
+					parent_span_id: null,
+					span_type: 'workflow_run',
+					entity_id: 'wf-1',
+					name: 'Nightly digest',
+					status: 'completed',
+					model: null,
+					cost_usd: null,
+					total_tokens: null,
+					started_at: '2026-08-09T06:00:00Z',
+					completed_at: null,
+					duration_ms: null,
+					tool_calls: []
+				},
+				{
+					id: 'span-w2',
+					parent_span_id: 'span-w1',
+					span_type: 'workflow_node_run',
+					entity_id: 'node-1',
+					name: 'Fetch data',
+					status: 'completed',
+					model: null,
+					cost_usd: null,
+					total_tokens: null,
+					started_at: '2026-08-09T06:00:00Z',
+					completed_at: '2026-08-09T06:00:01Z',
+					duration_ms: 500,
+					tool_calls: []
+				},
+				{
+					id: 'span-w3',
+					parent_span_id: null,
+					// Not a real RunSpanType -- spanTypeLabel()'s default branch is
+					// defensive against span types the backend adds before this
+					// union is updated, so we deliberately smuggle one past the
+					// type system to exercise it.
+					span_type: 'custom_future_span_type' as unknown as RunSpanType,
+					entity_id: 'x-1',
+					name: 'Something new',
+					status: 'completed',
+					model: null,
+					cost_usd: null,
+					total_tokens: null,
+					started_at: '2026-08-09T06:00:00Z',
+					completed_at: '2026-08-09T06:00:01Z',
+					duration_ms: 10,
+					tool_calls: []
+				}
+			]
+		};
+		vi.mocked(runs.list).mockResolvedValue([messageTrace]);
+		vi.mocked(runs.get).mockResolvedValue(workflowSpanDetail);
+
+		render(RunsPage);
+		await page.getByText('hello there').click();
+
+		await expect.element(page.getByText('workflow', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('step', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('custom_future_span_type')).toBeInTheDocument();
+		await expect.element(page.getByText('—', { exact: true })).toBeInTheDocument();
 	});
 });
