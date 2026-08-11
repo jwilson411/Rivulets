@@ -21,7 +21,9 @@ _MAX_ATTEMPTS = 5
 
 
 class LoginRateLimiter:
-    def __init__(self, window_seconds: float = _WINDOW_SECONDS, max_attempts: int = _MAX_ATTEMPTS) -> None:
+    def __init__(
+        self, window_seconds: float = _WINDOW_SECONDS, max_attempts: int = _MAX_ATTEMPTS
+    ) -> None:
         self._lock = threading.Lock()
         self._attempts: dict[str, list[float]] = {}
         self._window_seconds = window_seconds

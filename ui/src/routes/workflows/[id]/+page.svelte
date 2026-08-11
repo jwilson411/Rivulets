@@ -854,8 +854,8 @@
 			{/if}
 			<p class="text-xs text-neutral-500">
 				An external system can POST to a webhook's URL to trigger this workflow, signed with its
-				secret (see the docs for the signing headers). Only reachable from outside this machine
-				if you've deliberately exposed it beyond localhost — same caveat as an invite link.
+				secret (see the docs for the signing headers). Only reachable from outside this machine if
+				you've deliberately exposed it beyond localhost — same caveat as an invite link.
 			</p>
 			{#if webhookError}
 				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{webhookError}</p>
@@ -863,7 +863,7 @@
 
 			{#if revealedWebhook}
 				<div
-					class="flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 bg-agent-cyan-50 p-3 text-xs dark:bg-agent-cyan-950/20"
+					class="bg-agent-cyan-50 dark:bg-agent-cyan-950/20 flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 p-3 text-xs"
 				>
 					<p class="font-medium text-ink dark:text-ink-dark">
 						Save this secret now — it won't be shown again.

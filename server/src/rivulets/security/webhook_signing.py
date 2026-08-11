@@ -20,9 +20,7 @@ DEFAULT_MAX_AGE_SECONDS = 300  # 5 minutes -- generous for clock drift/queueing
 
 
 def sign(secret: str, timestamp: str, body: bytes) -> str:
-    mac = hmac.new(
-        secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256
-    )
+    mac = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256)
     return mac.hexdigest()
 
 

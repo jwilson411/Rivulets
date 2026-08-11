@@ -62,7 +62,9 @@ class WebhookTriggerResponse(BaseModel):
     response_model=WebhookTriggerResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def trigger_webhook(webhook_id: str, request: Request, db: DbSession) -> WebhookTriggerResponse:
+async def trigger_webhook(
+    webhook_id: str, request: Request, db: DbSession
+) -> WebhookTriggerResponse:
     """Deliberately not CurrentWorkspaceId-gated -- see module docstring."""
     client_ip = request.client.host if request.client else "unknown"
     if not get_webhook_trigger_rate_limiter().check(client_ip):
@@ -77,7 +79,11 @@ async def trigger_webhook(webhook_id: str, request: Request, db: DbSession) -> W
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook not found")
 
     content_length = request.headers.get("content-length")
-    if content_length is not None and content_length.isdigit() and int(content_length) > _MAX_BODY_BYTES:
+    if (
+        content_length is not None
+        and content_length.isdigit()
+        and int(content_length) > _MAX_BODY_BYTES
+    ):
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Payload too large")
     raw_body = await request.body()
     if len(raw_body) > _MAX_BODY_BYTES:

@@ -29,8 +29,10 @@ MAX_INPUT_CONTENT_CHARS = 20_000
 
 def build_input_content(webhook: WorkflowWebhook, raw_body: bytes) -> str:
     body_text = raw_body.decode("utf-8", errors="replace")
-    content = body_text if not webhook.input_template else webhook.input_template.replace(
-        "{input}", body_text
+    content = (
+        body_text
+        if not webhook.input_template
+        else webhook.input_template.replace("{input}", body_text)
     )
     return content[:MAX_INPUT_CONTENT_CHARS]
 
