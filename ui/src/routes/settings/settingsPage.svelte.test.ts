@@ -172,6 +172,8 @@ describe('settings/+page.svelte', () => {
 		await expect.element(page.getByText('Turn limit', { exact: false })).toBeInTheDocument();
 		const turnLimitInput = page.getByRole('spinbutton', { name: /Turn limit/ });
 		await expect.element(turnLimitInput).toHaveValue(10);
+		const cycleThresholdInput = page.getByRole('spinbutton', { name: /Cycle threshold/ });
+		await expect.element(cycleThresholdInput).toHaveValue(3);
 		const lanCheckbox = page.getByRole('checkbox', { name: 'Eager sync on LAN' });
 		await expect.element(lanCheckbox).toBeChecked();
 		const wanCheckbox = page.getByRole('checkbox', { name: 'Eager sync on WAN' });
@@ -190,6 +192,24 @@ describe('settings/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Save changes' }).click();
 
 		expect(settings.update).toHaveBeenCalledWith({ 'guard.turn_limit': 25 });
+		await expect.element(page.getByText('Saved.')).toBeInTheDocument();
+	});
+
+	it('saves a changed cycle threshold', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(settings.update).mockResolvedValueOnce({
+			...loadedSettings,
+			'guard.cycle_threshold': 5
+		});
+
+		render(SettingsPage);
+		const cycleThresholdInput = page.getByRole('spinbutton', { name: /Cycle threshold/ });
+		await expect.element(cycleThresholdInput).toHaveValue(3);
+
+		await cycleThresholdInput.fill('5');
+		await page.getByRole('button', { name: 'Save changes' }).click();
+
+		expect(settings.update).toHaveBeenCalledWith({ 'guard.cycle_threshold': 5 });
 		await expect.element(page.getByText('Saved.')).toBeInTheDocument();
 	});
 
