@@ -24,20 +24,35 @@ returning api_key/api_key_ref. Setting/replacing headers is owner-gated
 backups, sync config, invite management itself, etc.") since it's
 entering a credential on the workspace's behalf; registering/reading/
 reconnecting/removing a server with no headers stays open to any grant,
-unchanged from before this feature existed."""
+unchanged from before this feature existed.
+
+Stdio transport (#187): a `transport="stdio"` server has Rivulets spawn
+and run `command`/`args` as a local subprocess, rather than making an
+outbound HTTP call -- a materially bigger security surface (arbitrary
+local code execution with an env this app controls, not just a network
+request), so *all* of registering, reconnecting, and setting env vars for
+a stdio server require an owner session, unlike streamable-http's
+"only owner-gated when headers are involved" split. `env` vars follow the
+exact same names-on-the-row/values-in-the-keychain pattern as headers
+(agentos.mcp.get_server_env/mcp_env_ref, MCPServer.env_names_json).
+Command validation/sandboxing itself (shell-metacharacter rejection,
+executable allowlisting) lives in agno's own prepare_command(), invoked
+via agentos.mcp.build_stdio_command -- see that function's docstring."""
 
 import json
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import delete, select
 
 from rivulets.agentos.mcp import (
     MCPConnectionError,
     discover_tools,
+    get_server_env,
     get_server_headers,
+    mcp_env_ref,
     mcp_header_ref,
 )
 from rivulets.api.deps import (
@@ -59,11 +74,33 @@ router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
 
 class MCPServerCreate(BaseModel):
     name: str
-    url: str
+    transport: Literal["streamable-http", "stdio"] = "streamable-http"
+    # streamable-http fields
+    url: str | None = None
     # Auth headers (e.g. {"Authorization": "Bearer ..."}) for streamable-
     # HTTP servers that require them. Entering these requires an owner
     # session (module docstring) -- plain name/url registration doesn't.
     headers: dict[str, str] | None = None
+    # stdio fields (#187) -- the whole registration is owner-gated
+    # (module docstring), so there's no headers-style "only owner-gated
+    # when this is set" split on env.
+    command: str | None = None
+    args: list[str] | None = None
+    env: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _check_transport_fields(self) -> "MCPServerCreate":
+        if self.transport == "streamable-http":
+            if not self.url or not self.url.strip():
+                raise ValueError("url is required for streamable-http transport")
+            if self.command or self.args or self.env:
+                raise ValueError("command/args/env only apply to stdio transport")
+        else:
+            if not self.command or not self.command.strip():
+                raise ValueError("command is required for stdio transport")
+            if self.url or self.headers:
+                raise ValueError("url/headers only apply to streamable-http transport")
+        return self
 
 
 class MCPServerHeadersUpdate(BaseModel):
@@ -74,13 +111,23 @@ class MCPServerHeadersUpdate(BaseModel):
     headers: dict[str, str]
 
 
+class MCPServerEnvUpdate(BaseModel):
+    # Same full-replace semantics as MCPServerHeadersUpdate, for a stdio
+    # server's subprocess env vars instead of HTTP headers.
+    env: dict[str, str]
+
+
 class MCPServerOut(BaseModel):
     id: str
     name: str
-    url: str
+    transport: str
+    url: str | None
+    command: str | None
+    args: list[str]
     connected: bool
     last_connected_at: str | None
     header_names: list[str]
+    env_names: list[str]
 
 
 class MCPToolOut(BaseModel):
@@ -108,14 +155,26 @@ def _header_names(server: MCPServer) -> list[str]:
     return json.loads(server.header_names_json) if server.header_names_json else []
 
 
+def _env_names(server: MCPServer) -> list[str]:
+    return json.loads(server.env_names_json) if server.env_names_json else []
+
+
+def _args(server: MCPServer) -> list[str]:
+    return json.loads(server.args_json) if server.args_json else []
+
+
 def _to_out(server: MCPServer) -> MCPServerOut:
     return MCPServerOut(
         id=server.id,
         name=server.name,
+        transport=server.transport,
         url=server.url,
+        command=server.command,
+        args=_args(server),
         connected=server.connected,
         last_connected_at=server.last_connected_at,
         header_names=_header_names(server),
+        env_names=_env_names(server),
     )
 
 
@@ -151,16 +210,40 @@ def _set_headers(server: MCPServer, headers: dict[str, str] | None) -> None:
         server.header_names_json = None
 
 
+def _set_env(server: MCPServer, env: dict[str, str] | None) -> None:
+    """Same store/replace/clear semantics as _set_headers, for a stdio
+    server's subprocess env vars."""
+    if env:
+        store_secret(mcp_env_ref(server.id), json.dumps(env))
+        server.env_names_json = json.dumps(sorted(env.keys()))
+    else:
+        if server.env_names_json:
+            delete_secret(mcp_env_ref(server.id))
+        server.env_names_json = None
+
+
 async def _connect_and_sync_tools(db: DbSession, server: MCPServer) -> None:
     """(Re)discover `server`'s tools and replace its Tool rows with the
     current set — used by both registration and /reconnect. Doesn't
     commit; callers own the transaction."""
     await db.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
     try:
-        discovered = await discover_tools(server.url, headers=get_server_headers(server))
+        if server.transport == "stdio":
+            discovered = await discover_tools(
+                command=server.command,
+                args=_args(server),
+                env=get_server_env(server),
+            )
+        else:
+            discovered = await discover_tools(server.url, headers=get_server_headers(server))
     except MCPConnectionError:
         logger.warning(
-            "Could not connect to MCP server %r at %s", server.name, server.url, exc_info=True
+            "Could not connect to MCP server %r (transport=%s) -- url=%s command=%s",
+            server.name,
+            server.transport,
+            server.url,
+            server.command,
+            exc_info=True,
         )
         server.connected = False
         return
@@ -193,12 +276,25 @@ async def register_mcp_server(
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> MCPServerDetailOut:
-    if body.headers and claims.grant != "owner":
+    if body.transport == "stdio":
+        if claims.grant != "owner":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Owner access required to register a stdio MCP server"
+            )
+    elif body.headers and claims.grant != "owner":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required to set auth headers")
-    server = MCPServer(name=body.name, url=body.url)
+
+    server = MCPServer(
+        name=body.name,
+        transport=body.transport,
+        url=body.url,
+        command=body.command,
+        args_json=json.dumps(body.args) if body.args else None,
+    )
     db.add(server)
     await db.flush()  # populates server.id (uuid7 default), needed by _set_headers' keychain ref
     _set_headers(server, body.headers)
+    _set_env(server, body.env)
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)
@@ -229,7 +325,36 @@ async def set_mcp_server_headers(
     MCPServerCreate.headers, there's no headerless case here to leave
     open to any grant."""
     server = await _get_or_404(db, server_id)
+    if server.transport != "streamable-http":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "auth headers only apply to streamable-http MCP servers"
+        )
     _set_headers(server, body.headers)
+    await _connect_and_sync_tools(db, server)
+    await db.commit()
+    await db.refresh(server)
+    return await _to_detail(db, server)
+
+
+@router.put("/{server_id}/env", response_model=MCPServerDetailOut)
+async def set_mcp_server_env(
+    server_id: str,
+    body: MCPServerEnvUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    _o: OwnerGrant,
+) -> MCPServerDetailOut:
+    """Replace `server_id`'s subprocess env vars wholesale (empty dict
+    clears them), then reconnect -- mirrors set_mcp_server_headers, for a
+    stdio server's env instead of a streamable-http server's auth
+    headers. Always owner-gated, same as registering a stdio server in
+    the first place (module docstring)."""
+    server = await _get_or_404(db, server_id)
+    if server.transport != "stdio":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "env vars only apply to stdio MCP servers"
+        )
+    _set_env(server, body.env)
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)
@@ -241,6 +366,8 @@ async def unregister_mcp_server(server_id: str, db: DbSession, _: CurrentWorkspa
     server = await _get_or_404(db, server_id)
     if server.header_names_json:
         delete_secret(mcp_header_ref(server.id))
+    if server.env_names_json:
+        delete_secret(mcp_env_ref(server.id))
     # No ON DELETE CASCADE on tool.mcp_server_id — clear its discovered
     # tools first or SQLite's FK enforcement (session.py enables it) rejects
     # the delete.

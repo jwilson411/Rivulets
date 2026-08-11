@@ -194,7 +194,9 @@ AGENT_SPEC = EntitySpec(
 )
 CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
-MCP_SERVER_SPEC = EntitySpec("mcp_server", MCPServer, ("name", "url"))
+MCP_SERVER_SPEC = EntitySpec(
+    "mcp_server", MCPServer, ("name", "url", "transport", "command", "args_json")
+)
 RIVULET_SPEC = EntitySpec("rivulet", Rivulet, ("channel_id", "title", "status", "created_by"))
 MESSAGE_SPEC = EntitySpec(
     "message",

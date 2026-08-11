@@ -15,6 +15,7 @@ vi.mock('$lib/api/mcpServers', () => ({
 		get: vi.fn(),
 		create: vi.fn(),
 		setHeaders: vi.fn(),
+		setEnv: vi.fn(),
 		reconnect: vi.fn(),
 		remove: vi.fn()
 	}
@@ -23,10 +24,14 @@ vi.mock('$lib/api/mcpServers', () => ({
 const fsServerSummary: MCPServer = {
 	id: 'mcp-1',
 	name: 'Filesystem tools',
+	transport: 'streamable-http',
 	url: 'http://localhost:9001',
+	header_names: [],
+	command: null,
+	args: [],
+	env_names: [],
 	connected: true,
-	last_connected_at: '2026-08-01T00:00:00Z',
-	header_names: []
+	last_connected_at: '2026-08-01T00:00:00Z'
 };
 
 const fsServerDetail: MCPServerDetail = {
@@ -123,13 +128,12 @@ describe('mcp-servers/+page.svelte', () => {
 			.toBeInTheDocument();
 
 		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Filesystem tools');
-		await page
-			.getByPlaceholder('URL (e.g. http://localhost:3001/mcp)')
-			.fill('http://localhost:9001');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('http://localhost:9001');
 		await page.getByRole('button', { name: 'Register server' }).click();
 
 		expect(mcpServers.create).toHaveBeenCalledWith({
 			name: 'Filesystem tools',
+			transport: 'streamable-http',
 			url: 'http://localhost:9001',
 			headers: undefined
 		});
@@ -158,6 +162,7 @@ describe('mcp-servers/+page.svelte', () => {
 
 		expect(mcpServers.create).toHaveBeenCalledWith({
 			name: 'Filesystem tools',
+			transport: 'streamable-http',
 			url: 'http://localhost:9001',
 			headers: { Authorization: 'Bearer sk-real-secret' }
 		});
@@ -308,7 +313,7 @@ describe('mcp-servers/+page.svelte', () => {
 
 		render(McpServersPage);
 		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Bad server');
-		await page.getByPlaceholder('URL (e.g. http://localhost:3001/mcp)').fill('not-a-url');
+		await page.getByPlaceholder('URL (streamable-http endpoint)').fill('not-a-url');
 		await page.getByRole('button', { name: 'Register server' }).click();
 
 		await expect
@@ -360,5 +365,138 @@ describe('mcp-servers/+page.svelte', () => {
 
 		await expect.element(page.getByText('disconnected', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('connected', { exact: true })).not.toBeInTheDocument();
+	});
+
+	// --- stdio transport (#187) ---
+
+	const localServerSummary: MCPServer = {
+		id: 'mcp-3',
+		name: 'Local filesystem',
+		transport: 'stdio',
+		url: null,
+		header_names: [],
+		command: 'npx',
+		args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+		env_names: [],
+		connected: true,
+		last_connected_at: '2026-08-01T00:00:00Z'
+	};
+
+	const localServerDetail: MCPServerDetail = { ...localServerSummary, tools: [] };
+
+	it('switches the form fields when the stdio transport is selected', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+
+		await expect
+			.element(page.getByPlaceholder('URL (streamable-http endpoint)'))
+			.toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Command (e.g. npx)')).not.toBeInTheDocument();
+
+		await page.getByText('Stdio (local command)').click();
+
+		await expect.element(page.getByPlaceholder('Command (e.g. npx)')).toBeInTheDocument();
+		await expect
+			.element(page.getByPlaceholder('URL (streamable-http endpoint)'))
+			.not.toBeInTheDocument();
+	});
+
+	it('registers a stdio server with command, args, and env via mcpServers.create', async () => {
+		vi.mocked(mcpServers.list)
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([localServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(localServerDetail);
+		vi.mocked(mcpServers.create).mockResolvedValueOnce(localServerDetail);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Local filesystem');
+		await page.getByText('Stdio (local command)').click();
+		await page.getByPlaceholder('Command (e.g. npx)').fill('npx');
+		await page
+			.getByPlaceholder('/path/to/dir')
+			.fill('-y\n@modelcontextprotocol/server-filesystem\n/tmp');
+		await page.getByText('Advanced: env vars').click();
+		await page.getByPlaceholder('API_KEY: sk-...').fill('API_KEY: sk-real-secret');
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).toHaveBeenCalledWith({
+			name: 'Local filesystem',
+			transport: 'stdio',
+			command: 'npx',
+			args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+			env: { API_KEY: 'sk-real-secret' }
+		});
+		await expect.element(page.getByText('Local filesystem')).toBeInTheDocument();
+	});
+
+	it('does not submit a stdio registration while the command is blank', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([]);
+
+		render(McpServersPage);
+		await page.getByPlaceholder('Name (e.g. Filesystem tools)').fill('Local filesystem');
+		await page.getByText('Stdio (local command)').click();
+		await page.getByRole('button', { name: 'Register server' }).click();
+
+		expect(mcpServers.create).not.toHaveBeenCalled();
+	});
+
+	it('shows a stdio server’s command/args and env var names', async () => {
+		const withEnv: MCPServerDetail = { ...localServerDetail, env_names: ['API_KEY'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...localServerSummary, env_names: ['API_KEY'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(withEnv);
+
+		render(McpServersPage);
+
+		await expect
+			.element(page.getByText('npx -y @modelcontextprotocol/server-filesystem /tmp'))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Env vars: API_KEY')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Edit env vars' })).toBeInTheDocument();
+	});
+
+	it('adds env vars to an existing stdio server via mcpServers.setEnv', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([localServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(localServerDetail);
+		vi.mocked(mcpServers.setEnv).mockResolvedValueOnce({
+			...localServerDetail,
+			env_names: ['API_KEY']
+		});
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Local filesystem')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Add env vars' }).click();
+		await page.getByPlaceholder('API_KEY: sk-...').fill('API_KEY: sk-real-secret');
+		await page.getByRole('button', { name: 'Save env vars' }).click();
+
+		expect(mcpServers.setEnv).toHaveBeenCalledWith('mcp-3', { API_KEY: 'sk-real-secret' });
+	});
+
+	it('clears env vars on a stdio server via mcpServers.setEnv', async () => {
+		const withEnv: MCPServerDetail = { ...localServerDetail, env_names: ['API_KEY'] };
+		vi.mocked(mcpServers.list).mockResolvedValue([
+			{ ...localServerSummary, env_names: ['API_KEY'] }
+		]);
+		vi.mocked(mcpServers.get).mockResolvedValue(withEnv);
+		vi.mocked(mcpServers.setEnv).mockResolvedValueOnce({ ...localServerDetail, env_names: [] });
+
+		render(McpServersPage);
+		await page.getByRole('button', { name: 'Edit env vars' }).click();
+		await page.getByRole('button', { name: 'Clear all' }).click();
+
+		expect(mcpServers.setEnv).toHaveBeenCalledWith('mcp-3', {});
+	});
+
+	it('does not show an "Edit headers"/"Add headers" action for a stdio server', async () => {
+		vi.mocked(mcpServers.list).mockResolvedValue([localServerSummary]);
+		vi.mocked(mcpServers.get).mockResolvedValue(localServerDetail);
+
+		render(McpServersPage);
+		await expect.element(page.getByText('Local filesystem')).toBeInTheDocument();
+
+		await expect.element(page.getByRole('button', { name: 'Add headers' })).not.toBeInTheDocument();
 	});
 });

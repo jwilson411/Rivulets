@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
-	import { mcpServers, type MCPServerDetail, type MCPTool } from '$lib/api/mcpServers';
+	import {
+		mcpServers,
+		type MCPServerDetail,
+		type MCPTool,
+		type MCPTransport
+	} from '$lib/api/mcpServers';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
 	// JSON Schema keywords that make one argument's requiredness/shape depend
@@ -12,24 +17,34 @@
 		return CONDITIONAL_SCHEMA_KEYWORDS.some((keyword) => keyword in tool.input_schema);
 	}
 
-	// "Header-Name: value" per line -- simpler to type/paste than a dynamic
-	// row-add-remove widget for what's usually one or two headers, and
+	// "Name: value" per line -- simpler to type/paste than a dynamic
+	// row-add-remove widget for what's usually one or two entries, and
 	// matches the shape a user copies straight out of an MCP server's docs.
-	function parseHeaderLines(text: string): Record<string, string> {
-		const headers: Record<string, string> = {};
+	// Shared by auth headers and stdio env vars, which have identical shape.
+	function parseKeyValueLines(text: string): Record<string, string> {
+		const entries: Record<string, string> = {};
 		for (const rawLine of text.split('\n')) {
 			const line = rawLine.trim();
 			if (!line) continue;
 			const separator = line.indexOf(':');
 			if (separator === -1) {
-				throw new Error(`Header line missing ":" — "${line}"`);
+				throw new Error(`Line missing ":" — "${line}"`);
 			}
 			const key = line.slice(0, separator).trim();
 			const value = line.slice(separator + 1).trim();
-			if (!key) throw new Error(`Header line missing a name — "${line}"`);
-			headers[key] = value;
+			if (!key) throw new Error(`Line missing a name — "${line}"`);
+			entries[key] = value;
 		}
-		return headers;
+		return entries;
+	}
+
+	// One arg per line -- avoids the ambiguity of splitting a single string
+	// on spaces when an arg (e.g. a file path) legitimately contains one.
+	function parseArgLines(text: string): string[] {
+		return text
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
 	}
 
 	const serverFilters: ListFilter<MCPServerDetail>[] = [
@@ -48,8 +63,12 @@
 	let loadError = $state<string | null>(null);
 
 	let name = $state('');
+	let transport = $state<MCPTransport>('streamable-http');
 	let url = $state('');
 	let headerLines = $state('');
+	let command = $state('');
+	let argLines = $state('');
+	let envLines = $state('');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 	let rowError = $state<string | null>(null);
@@ -59,6 +78,11 @@
 	let editHeaderLines = $state('');
 	let savingHeaders = $state(false);
 	let headersError = $state<string | null>(null);
+
+	let editingEnvId = $state<string | null>(null);
+	let editEnvLines = $state('');
+	let savingEnv = $state(false);
+	let envError = $state<string | null>(null);
 
 	async function refresh() {
 		loadError = null;
@@ -74,25 +98,65 @@
 
 	refresh();
 
+	function resetForm() {
+		name = '';
+		url = '';
+		headerLines = '';
+		command = '';
+		argLines = '';
+		envLines = '';
+	}
+
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		createError = null;
-		if (!name.trim() || !url.trim()) return;
-		let headers: Record<string, string> | undefined;
-		if (headerLines.trim()) {
+		if (!name.trim()) return;
+
+		if (transport === 'streamable-http') {
+			if (!url.trim()) return;
+			let headers: Record<string, string> | undefined;
+			if (headerLines.trim()) {
+				try {
+					headers = parseKeyValueLines(headerLines);
+				} catch (err) {
+					createError = err instanceof Error ? err.message : 'Invalid headers';
+					return;
+				}
+			}
+			creating = true;
 			try {
-				headers = parseHeaderLines(headerLines);
+				await mcpServers.create({ name: name.trim(), transport, url: url.trim(), headers });
+				resetForm();
+				await refresh();
 			} catch (err) {
-				createError = err instanceof Error ? err.message : 'Invalid headers';
+				createError = err instanceof ApiError ? err.message : 'Failed to register MCP server';
+			} finally {
+				creating = false;
+			}
+			return;
+		}
+
+		if (!command.trim()) return;
+		const args = parseArgLines(argLines);
+		let env: Record<string, string> | undefined;
+		if (envLines.trim()) {
+			try {
+				env = parseKeyValueLines(envLines);
+			} catch (err) {
+				createError = err instanceof Error ? err.message : 'Invalid env vars';
 				return;
 			}
 		}
 		creating = true;
 		try {
-			await mcpServers.create({ name: name.trim(), url: url.trim(), headers });
-			name = '';
-			url = '';
-			headerLines = '';
+			await mcpServers.create({
+				name: name.trim(),
+				transport,
+				command: command.trim(),
+				args: args.length > 0 ? args : undefined,
+				env
+			});
+			resetForm();
 			await refresh();
 		} catch (err) {
 			createError = err instanceof ApiError ? err.message : 'Failed to register MCP server';
@@ -111,7 +175,7 @@
 		headersError = null;
 		let headers: Record<string, string>;
 		try {
-			headers = parseHeaderLines(editHeaderLines);
+			headers = parseKeyValueLines(editHeaderLines);
 		} catch (err) {
 			headersError = err instanceof Error ? err.message : 'Invalid headers';
 			return;
@@ -139,6 +203,47 @@
 			headersError = err instanceof ApiError ? err.message : 'Failed to clear headers';
 		} finally {
 			savingHeaders = false;
+		}
+	}
+
+	function openEnvEditor(id: string) {
+		envError = null;
+		editEnvLines = '';
+		editingEnvId = id;
+	}
+
+	async function handleSaveEnv(id: string) {
+		envError = null;
+		let env: Record<string, string>;
+		try {
+			env = parseKeyValueLines(editEnvLines);
+		} catch (err) {
+			envError = err instanceof Error ? err.message : 'Invalid env vars';
+			return;
+		}
+		savingEnv = true;
+		try {
+			await mcpServers.setEnv(id, env);
+			editingEnvId = null;
+			await refresh();
+		} catch (err) {
+			envError = err instanceof ApiError ? err.message : 'Failed to save env vars';
+		} finally {
+			savingEnv = false;
+		}
+	}
+
+	async function handleClearEnv(id: string) {
+		envError = null;
+		savingEnv = true;
+		try {
+			await mcpServers.setEnv(id, {});
+			editingEnvId = null;
+			await refresh();
+		} catch (err) {
+			envError = err instanceof ApiError ? err.message : 'Failed to clear env vars';
+		} finally {
+			savingEnv = false;
 		}
 	}
 
@@ -183,8 +288,10 @@
 				to use, alongside Rivulets' built-in tools.
 			</p>
 			<p class="text-neutral-600 dark:text-neutral-400">
-				You'll need the server's streamable-HTTP endpoint URL, e.g.
-				<code class="font-mono">http://localhost:3001/mcp</code>. See the
+				Streamable-HTTP servers need an endpoint URL, e.g.
+				<code class="font-mono">http://localhost:3001/mcp</code>. Stdio servers run as a local
+				command Rivulets spawns itself, e.g. <code class="font-mono">npx -y some-mcp-server</code>.
+				See the
 				<a
 					href="https://modelcontextprotocol.io"
 					target="_blank"
@@ -209,32 +316,88 @@
 			placeholder="Name (e.g. Filesystem tools)"
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		/>
-		<input
-			type="text"
-			bind:value={url}
-			placeholder="URL (e.g. http://localhost:3001/mcp)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<details class="group">
-			<summary
-				class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
+		<fieldset class="flex items-center gap-4 text-sm text-ink dark:text-ink-dark">
+			<legend class="sr-only">Transport</legend>
+			<label class="flex items-center gap-1.5">
+				<input type="radio" bind:group={transport} value="streamable-http" />
+				Streamable-HTTP
+			</label>
+			<label class="flex items-center gap-1.5">
+				<input type="radio" bind:group={transport} value="stdio" />
+				Stdio (local command)
+			</label>
+		</fieldset>
+
+		{#if transport === 'streamable-http'}
+			<input
+				type="text"
+				bind:value={url}
+				placeholder="URL (streamable-http endpoint)"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			<details class="group">
+				<summary
+					class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
+				>
+					Advanced: auth headers
+				</summary>
+				<div class="mt-2 flex flex-col gap-1">
+					<p class="text-xs text-neutral-500">
+						One per line, as <code>Header-Name: value</code> — e.g.
+						<code>Authorization: Bearer sk-...</code>. Requires an owner session; values are stored
+						in your OS keychain, never shown again once saved.
+					</p>
+					<textarea
+						bind:value={headerLines}
+						rows="2"
+						placeholder="Authorization: Bearer sk-..."
+						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					></textarea>
+				</div>
+			</details>
+		{:else}
+			<p
+				class="bg-agent-magenta-50 dark:bg-agent-magenta-950/20 rounded-md border border-agent-magenta-600/40 p-2 text-xs text-ink dark:text-ink-dark"
 			>
-				Advanced: auth headers
-			</summary>
-			<div class="mt-2 flex flex-col gap-1">
-				<p class="text-xs text-neutral-500">
-					One per line, as <code>Header-Name: value</code> — e.g.
-					<code>Authorization: Bearer sk-...</code>. Requires an owner session; values are stored in
-					your OS keychain, never shown again once saved.
-				</p>
-				<textarea
-					bind:value={headerLines}
-					rows="2"
-					placeholder="Authorization: Bearer sk-..."
-					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				></textarea>
-			</div>
-		</details>
+				Stdio servers run as a local subprocess Rivulets spawns and controls — a bigger security
+				surface than a network call. Requires an owner session.
+			</p>
+			<input
+				type="text"
+				bind:value={command}
+				placeholder="Command (e.g. npx)"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			<textarea
+				bind:value={argLines}
+				rows="2"
+				placeholder="-y
+@modelcontextprotocol/server-filesystem
+/path/to/dir"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			></textarea>
+			<p class="text-xs text-neutral-500">One argument per line.</p>
+			<details class="group">
+				<summary
+					class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
+				>
+					Advanced: env vars
+				</summary>
+				<div class="mt-2 flex flex-col gap-1">
+					<p class="text-xs text-neutral-500">
+						One per line, as <code>NAME: value</code> — e.g. <code>API_KEY: sk-...</code>. Values
+						are stored in your OS keychain, never shown again once saved.
+					</p>
+					<textarea
+						bind:value={envLines}
+						rows="2"
+						placeholder="API_KEY: sk-..."
+						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					></textarea>
+				</div>
+			</details>
+		{/if}
+
 		<button
 			type="submit"
 			disabled={creating}
@@ -276,11 +439,23 @@
 									{server.connected ? 'connected' : 'disconnected'}
 								</span>
 							</p>
-							<p class="text-xs text-neutral-500">{server.url}</p>
-							{#if server.header_names.length > 0}
-								<p class="mt-1 text-xs text-neutral-500">
-									Auth headers: {server.header_names.join(', ')}
+							{#if server.transport === 'stdio'}
+								<p class="font-mono text-xs text-neutral-500">
+									{server.command}
+									{server.args.join(' ')}
 								</p>
+								{#if server.env_names.length > 0}
+									<p class="mt-1 text-xs text-neutral-500">
+										Env vars: {server.env_names.join(', ')}
+									</p>
+								{/if}
+							{:else}
+								<p class="text-xs text-neutral-500">{server.url}</p>
+								{#if server.header_names.length > 0}
+									<p class="mt-1 text-xs text-neutral-500">
+										Auth headers: {server.header_names.join(', ')}
+									</p>
+								{/if}
 							{/if}
 							{#if server.connected}
 								<p class="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
@@ -320,12 +495,21 @@
 							{/if}
 						</div>
 						<div class="flex shrink-0 items-center gap-3">
-							<button
-								onclick={() => openHeaderEditor(server.id)}
-								class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
-							>
-								{server.header_names.length > 0 ? 'Edit headers' : 'Add headers'}
-							</button>
+							{#if server.transport === 'stdio'}
+								<button
+									onclick={() => openEnvEditor(server.id)}
+									class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
+								>
+									{server.env_names.length > 0 ? 'Edit env vars' : 'Add env vars'}
+								</button>
+							{:else}
+								<button
+									onclick={() => openHeaderEditor(server.id)}
+									class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
+								>
+									{server.header_names.length > 0 ? 'Edit headers' : 'Add headers'}
+								</button>
+							{/if}
 							<button
 								onclick={() => handleReconnect(server.id)}
 								disabled={reconnectingId === server.id}
@@ -377,6 +561,49 @@
 								{/if}
 								<button
 									onclick={() => (editingHeadersId = null)}
+									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
+					{#if editingEnvId === server.id}
+						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
+							<p class="text-xs text-neutral-500">
+								One per line, as <code>NAME: value</code>. Replaces the full set — leave blank and
+								save to clear all env vars. Requires an owner session.
+							</p>
+							<textarea
+								bind:value={editEnvLines}
+								rows="2"
+								placeholder="API_KEY: sk-..."
+								class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+							></textarea>
+							{#if envError}
+								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+									{envError}
+								</p>
+							{/if}
+							<div class="flex items-center gap-3">
+								<button
+									onclick={() => handleSaveEnv(server.id)}
+									disabled={savingEnv}
+									class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+								>
+									{savingEnv ? 'Saving…' : 'Save env vars'}
+								</button>
+								{#if server.env_names.length > 0}
+									<button
+										onclick={() => handleClearEnv(server.id)}
+										disabled={savingEnv}
+										class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
+									>
+										Clear all
+									</button>
+								{/if}
+								<button
+									onclick={() => (editingEnvId = null)}
 									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
 								>
 									Cancel

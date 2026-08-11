@@ -405,13 +405,36 @@ class MCPServer(Base):
     never puts a raw key in this database. Per-node like `connected`/
     `last_connected_at` (module docstring on api/mcp_servers.py) -- not
     in MCP_SERVER_SPEC's synced fields, so each node configures its own
-    auth for a given server rather than a secret propagating over sync."""
+    auth for a given server rather than a secret propagating over sync.
+
+    `transport` (#187): "streamable-http" (the original, still the
+    default) or "stdio" -- a locally-spawned subprocess Rivulets itself
+    execs, per the `mcp` SDK's stdio transport. `url`/`header_names_json`
+    apply only to the former; `command`/`args_json`/`env_names_json` only
+    to the latter -- api/mcp_servers.py's MCPServerCreate validates the
+    pairing so a row never carries a mix. `env_names_json` mirrors
+    `header_names_json` exactly: names only here, values in the keychain
+    under `agentos.mcp.mcp_env_ref(id)` -- same "never a raw secret in
+    this database" guarantee, just for a subprocess's environment instead
+    of HTTP headers.
+
+    `command`/`args_json` are synced (MCP_SERVER_SPEC), same as `url`:
+    they describe *what to run*, not a secret, and each node spawns its
+    own local subprocess from that description the same way each node
+    makes its own outbound connection to a synced `url` -- neither one
+    propagates a live connection or process across nodes, just the
+    config to start one. `env_names_json` stays unsynced like
+    `header_names_json`, for the same reason."""
 
     __tablename__ = "mcp_server"
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str]
-    url: Mapped[str]
+    transport: Mapped[str] = mapped_column(default="streamable-http")
+    url: Mapped[str | None] = mapped_column(default=None)
+    command: Mapped[str | None] = mapped_column(default=None)
+    args_json: Mapped[str | None] = mapped_column(default=None)
+    env_names_json: Mapped[str | None] = mapped_column(default=None)
     connected: Mapped[bool] = mapped_column(default=False)
     last_connected_at: Mapped[str | None] = mapped_column(default=None)
     header_names_json: Mapped[str | None] = mapped_column(default=None)
