@@ -82,6 +82,7 @@ from rivulets.security import keys
 from rivulets.security.session import get_session_key_store
 from rivulets.security.webhook_secret_store import encrypt_webhook_secret
 from rivulets.sync.publish import publish_current_state
+from rivulets.workflows.layout import auto_layout
 from rivulets.workflows.nodes import NODE_TYPES
 from rivulets.workflows.scheduler import compute_next_fire_at
 
@@ -134,6 +135,8 @@ class WorkflowNodeCreate(BaseModel):
     config: dict[str, object] = Field(default_factory=dict)
     retry_max_attempts: int = Field(default=0, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=5, ge=0, le=3600)
+    position_x: float | None = None
+    position_y: float | None = None
 
 
 class WorkflowNodeUpdate(BaseModel):
@@ -143,6 +146,8 @@ class WorkflowNodeUpdate(BaseModel):
     config: dict[str, object] | None = None
     retry_max_attempts: int | None = Field(default=None, ge=0, le=10)
     retry_backoff_seconds: int | None = Field(default=None, ge=0, le=3600)
+    position_x: float | None = None
+    position_y: float | None = None
 
 
 class WorkflowNodeOut(BaseModel):
@@ -155,6 +160,8 @@ class WorkflowNodeOut(BaseModel):
     config: dict[str, object]
     retry_max_attempts: int
     retry_backoff_seconds: int
+    position_x: float | None
+    position_y: float | None
 
     @classmethod
     def from_row(cls, row: WorkflowNode) -> "WorkflowNodeOut":
@@ -168,6 +175,8 @@ class WorkflowNodeOut(BaseModel):
             config=json.loads(row.config_json) if row.config_json else {},
             retry_max_attempts=row.retry_max_attempts,
             retry_backoff_seconds=row.retry_backoff_seconds,
+            position_x=row.position_x,
+            position_y=row.position_y,
         )
 
 
@@ -545,6 +554,8 @@ async def create_node(
         config_json=json.dumps(body.config) if body.config else None,
         retry_max_attempts=body.retry_max_attempts,
         retry_backoff_seconds=body.retry_backoff_seconds,
+        position_x=body.position_x,
+        position_y=body.position_y,
     )
     db.add(node)
     await db.commit()
@@ -563,7 +574,23 @@ async def list_nodes(
         .where(WorkflowNode.workflow_id == workflow_id)
         .order_by(WorkflowNode.created_at)
     )
-    return [WorkflowNodeOut.from_row(row) for row in result.scalars().all()]
+    out = [WorkflowNodeOut.from_row(row) for row in result.scalars().all()]
+    # #194: workflows saved before the canvas existed (or nodes created
+    # without an explicit position) have position_x/position_y = None.
+    # Fill those in from the auto-layout fallback rather than persisting
+    # anything here -- a GET shouldn't have a write side effect, and this
+    # is deterministic from the graph shape so recomputing on each read
+    # costs nothing and stays consistent.
+    if any(node.position_x is None or node.position_y is None for node in out):
+        connections_result = await db.execute(
+            select(WorkflowConnection).where(WorkflowConnection.workflow_id == workflow_id)
+        )
+        edges = [(c.from_node_id, c.to_node_id) for c in connections_result.scalars().all()]
+        computed = auto_layout([node.id for node in out], edges)
+        for node in out:
+            if node.position_x is None or node.position_y is None:
+                node.position_x, node.position_y = computed[node.id]
+    return out
 
 
 @router.patch("/{workflow_id}/nodes/{node_id}", response_model=WorkflowNodeOut)
@@ -595,6 +622,10 @@ async def update_node(
         node.retry_max_attempts = body.retry_max_attempts
     if body.retry_backoff_seconds is not None:
         node.retry_backoff_seconds = body.retry_backoff_seconds
+    if body.position_x is not None:
+        node.position_x = body.position_x
+    if body.position_y is not None:
+        node.position_y = body.position_y
     await db.commit()
     await db.refresh(node)
     await publish_current_state(db, "workflow_node", node.id)
