@@ -1,6 +1,6 @@
 [project]
 name = "rivulets"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-first, P2P-synced workspace for humans and AI agent teams, built on AgentOS."
 readme = "README.md"
 authors = [
