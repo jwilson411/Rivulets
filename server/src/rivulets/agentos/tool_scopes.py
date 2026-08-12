@@ -28,6 +28,7 @@ TOOL_SCOPES: frozenset[str] = frozenset(
         "mcp_servers:manage",
         "workflows:manage",
         "settings:manage",
+        "invites:manage",
     }
 )
 
@@ -68,6 +69,24 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # tools/builtin/workflows.py's module docstring. list_workflows is
 # read-only and deliberately left out, same as list_channels/list_agents/
 # list_mcp_servers.
+#
+# #193 (tools/builtin/settings.py, tools/builtin/invites.py) is the fifth
+# and last of #125's originally-scoped sub-issues, and the first to cover
+# two distinct resource categories at once -- api/settings.py and api/
+# invites.py are separate routers, each entirely OwnerGrant-gated
+# (unlike every category above, where only the *mutating* routes were
+# owner-gated and reads were open to any session). That's why, uniquely
+# here, the read-only tools (get_workspace_settings, list_invites) are
+# scoped too, rather than left unscoped like list_channels/list_agents/
+# list_mcp_servers/list_workflows -- an agent with no grant at all
+# shouldn't be able to read workspace settings or enumerate outstanding
+# invites any more than it could through the HTTP API. get_workspace_settings/
+# update_workspace_settings share "settings:manage"; create_invite/
+# list_invites/revoke_invite share "invites:manage" -- a separate scope
+# because an invite is a distinct, more security-sensitive resource than a
+# settings key/value pair (it's a credential capable of admitting a new
+# human to the workspace), so a workspace owner may want to grant one
+# without the other.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -91,4 +110,9 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "delete_workflow": "workflows:manage",
     "publish_workflow": "workflows:manage",
     "unpublish_workflow": "workflows:manage",
+    "get_workspace_settings": "settings:manage",
+    "update_workspace_settings": "settings:manage",
+    "create_invite": "invites:manage",
+    "list_invites": "invites:manage",
+    "revoke_invite": "invites:manage",
 }

@@ -43,7 +43,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from agno.run.agent import RunOutput
@@ -81,6 +81,7 @@ from rivulets.db.models import (
     Channel,
     DispatchDecision,
     File,
+    Invite,
     MCPServer,
     Message,
     Rivulet,
@@ -91,6 +92,7 @@ from rivulets.db.models import (
     Workflow,
     WorkflowConnection,
     WorkflowSchedule,
+    WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
 from rivulets.dispatch.approvals import create_or_get_pending_approval
@@ -104,7 +106,9 @@ from rivulets.dispatch.guards import (
 )
 from rivulets.dispatch.llm_fallback import build_llm_fallback
 from rivulets.dispatch.rules import Rule, RuleType
+from rivulets.security import keys
 from rivulets.security.credentials import delete_secret
+from rivulets.security.network import detect_lan_address
 from rivulets.streaming import publish
 from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
@@ -717,6 +721,77 @@ def _find_list_workflows_call(run_output: RunOutput) -> bool:
     """Same shape as _find_list_schedules_call, for the argument-less
     list_workflows tool (tools/builtin/workflows.py, #192)."""
     return any(tool_call.tool_name == "list_workflows" for tool_call in run_output.tools or [])
+
+
+def _find_get_workspace_settings_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_workflows_call, for the argument-less
+    get_workspace_settings tool (tools/builtin/settings.py, #193)."""
+    return any(
+        tool_call.tool_name == "get_workspace_settings" for tool_call in run_output.tools or []
+    )
+
+
+def _find_update_workspace_settings_call(run_output: RunOutput) -> dict[str, object] | None:
+    """Same shape as _find_update_agent_routing_rules_call, for the
+    update_workspace_settings tool (tools/builtin/settings.py, #193).
+    `settings` must be a dict to even be considered a call worth
+    handling -- each key's validity against the known-settings catalog is
+    checked later, in _handle_update_workspace_settings_trigger."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_workspace_settings":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        settings = args.get("settings")
+        if isinstance(settings, dict):
+            return cast(dict[str, object], settings)
+    return None
+
+
+class CreateInviteCall:
+    """Parsed args for a create_invite tool call (#193). Every field is
+    optional -- falls back to the same defaults InviteCreate (api/
+    invites.py) uses when the model didn't supply them."""
+
+    def __init__(self, args: dict[str, object]) -> None:
+        self.display_name_hint = _str_or_none(args, "display_name_hint")
+        raw_max_uses = args.get("max_uses", 1)
+        self.max_uses = raw_max_uses if isinstance(raw_max_uses, int) else 1
+        raw_expires_in_hours = args.get("expires_in_hours", 168)
+        self.expires_in_hours = (
+            raw_expires_in_hours if isinstance(raw_expires_in_hours, int) else 168
+        )
+
+
+def _find_create_invite_call(run_output: RunOutput) -> CreateInviteCall | None:
+    """Same shape as _find_run_workflow_call, for the create_invite tool
+    (tools/builtin/invites.py, #193). Unlike most create_* tools, every
+    argument is optional, so any actual create_invite call -- even with
+    an empty args dict -- is handled."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "create_invite":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        return CreateInviteCall(args)
+    return None
+
+
+def _find_list_invites_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_workflows_call, for the argument-less
+    list_invites tool (tools/builtin/invites.py, #193)."""
+    return any(tool_call.tool_name == "list_invites" for tool_call in run_output.tools or [])
+
+
+def _find_revoke_invite_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the revoke_invite
+    tool (tools/builtin/invites.py, #193)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "revoke_invite":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        invite_id = args.get("invite_id")
+        if isinstance(invite_id, str):
+            return invite_id
+    return None
 
 
 async def dispatch_and_respond(
@@ -1607,6 +1682,32 @@ async def _invoke_agent(
 
     if _find_list_workflows_call(run_output):
         new_messages.extend(await _handle_list_workflows_trigger(db, rivulet, agent))
+
+    if _find_get_workspace_settings_call(run_output):
+        new_messages.extend(await _handle_get_workspace_settings_trigger(db, rivulet, agent))
+
+    update_workspace_settings_call = _find_update_workspace_settings_call(run_output)
+    if update_workspace_settings_call is not None:
+        new_messages.extend(
+            await _handle_update_workspace_settings_trigger(
+                db, rivulet, agent, update_workspace_settings_call
+            )
+        )
+
+    create_invite_call = _find_create_invite_call(run_output)
+    if create_invite_call is not None:
+        new_messages.extend(
+            await _handle_create_invite_trigger(db, rivulet, agent, create_invite_call)
+        )
+
+    if _find_list_invites_call(run_output):
+        new_messages.extend(await _handle_list_invites_trigger(db, rivulet, agent))
+
+    revoke_invite_call = _find_revoke_invite_call(run_output)
+    if revoke_invite_call is not None:
+        new_messages.extend(
+            await _handle_revoke_invite_trigger(db, rivulet, agent, revoke_invite_call)
+        )
 
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
@@ -3501,4 +3602,219 @@ async def _handle_list_workflows_trigger(
         content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)
+    return [message]
+
+
+# #193: mirrors api/settings.py's _DEFAULTS/_NOT_SYNCED_KEYS -- duplicated
+# rather than imported, the same "small validation constant lives in both
+# layers" split _WORKFLOW_NAME_PATTERN above already takes with api/
+# workflows.py's _NAME_PATTERN, so dispatch/ never has to import from
+# api/ (api/ already imports from dispatch/ in the other direction, e.g.
+# api/rivulets.py -> dispatch_and_respond -- a reverse import here would
+# risk a cycle).
+_SETTINGS_DEFAULTS: dict[str, object] = {
+    "dispatcher.model_override": None,
+    "dispatcher.fallback_enabled": True,
+    "model_tiers.override": None,
+    "guard.turn_limit": 10,
+    "guard.cycle_window": 8,
+    "guard.cycle_threshold": 3,
+    "guard.timeout_minutes": 30,
+    "rivulet.summarization_enabled": True,
+    "rivulet.context_threshold_pct": 80,
+    "rivulet.recent_messages_kept": 20,
+    "sync.eager_files_lan": True,
+    "sync.eager_files_wan": False,
+    "ui.port": 8484,
+    "workflows.default_on_call_agent_id": None,
+}
+
+_NOT_SYNCED_SETTINGS_KEYS = frozenset({"ui.port"})
+
+
+async def _handle_get_workspace_settings_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#193: an agent called the get_workspace_settings tool. Mirrors
+    api/settings.py's get_settings_values handler -- every known setting,
+    defaults merged with whatever's actually been stored. Unlike
+    list_workflows/list_channels/etc, this tool carries a required_scope
+    (tool_scopes.py's BUILTIN_TOOL_SCOPES) since the underlying route is
+    OwnerGrant-gated for reads too, not just writes."""
+    result = await db.execute(select(WorkspaceSetting))
+    stored = {row.key: json.loads(row.value) for row in result.scalars().all()}
+    current = {**_SETTINGS_DEFAULTS, **stored}
+
+    lines = [f"@{agent.name} looked up the workspace's settings:"]
+    for key in sorted(current):
+        lines.append(f"- {key}: {current[key]!r}")
+    content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+async def _handle_update_workspace_settings_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, settings: dict[str, object]
+) -> list[Message]:
+    """#193: an agent called the update_workspace_settings tool. Mirrors
+    api/settings.py's patch_settings handler (unknown key rejects the
+    whole update; existing rows get a vector_clock bump; every changed
+    key except ui.port gets published for sync) plus an empty-dict guard
+    Pydantic's own model_dump() doesn't need but a model-generated call
+    does, the same "loosely parsed, meaningfully validated here" split
+    _handle_update_agent_routing_rules_trigger already takes."""
+    if not settings:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update workspace settings, but didn't specify any "
+                "changes.",
+            )
+        ]
+    unknown = sorted(key for key in settings if key not in _SETTINGS_DEFAULTS)
+    if unknown:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update workspace settings, but "
+                f"{', '.join(repr(key) for key in unknown)} "
+                f"{'is' if len(unknown) == 1 else 'are'} not a known setting.",
+            )
+        ]
+
+    for key, value in settings.items():
+        row = await db.get(WorkspaceSetting, key)
+        if row is None:
+            row = WorkspaceSetting(key=key, value=json.dumps(value))
+            db.add(row)
+        else:
+            row.value = json.dumps(value)
+            row.vector_clock += 1
+    await db.commit()
+    for key in settings:
+        if key not in _NOT_SYNCED_SETTINGS_KEYS:
+            await publish_current_state(db, "workspace_setting", key)
+
+    message = _system_message(
+        db,
+        rivulet,
+        f"@{agent.name} updated workspace settings: {', '.join(sorted(settings))}.",
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workspace_settings_updated", "keys": sorted(settings), "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_create_invite_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: CreateInviteCall
+) -> list[Message]:
+    """#193: an agent called the create_invite tool. Mirrors api/
+    invites.py's create_invite handler, except the invite URL's host
+    comes from a best-effort LAN address lookup (security/network.py's
+    detect_lan_address) rather than the owner's own browser request --
+    there's no live HTTP request to read a Host header from here, unlike
+    the API route. Falls back to loopback (with a warning that the link
+    only works from this machine) when no LAN address can be detected --
+    the same fallback api/invites.py's lan_url logic reaches for, just
+    without a request to compare against first.
+
+    The raw secret is embedded in the chat message returned here and
+    nowhere else -- never in the tool's own return value (read by the
+    calling model) and never in the websocket payload below -- see
+    tools/builtin/invites.py's module docstring for why."""
+    secret = keys.generate_invite_secret()
+    expires_at = datetime.now(UTC) + timedelta(hours=call.expires_in_hours)
+    invite = Invite(
+        secret_hash=keys.hash_invite_secret(secret),
+        display_name_hint=call.display_name_hint,
+        max_uses=call.max_uses,
+        expires_at=expires_at.isoformat(),
+    )
+    db.add(invite)
+    await db.commit()
+    await db.refresh(invite)
+
+    lan_ip = detect_lan_address()
+    port = get_settings().app_server_port
+    url = f"http://{lan_ip or '127.0.0.1'}:{port}/invite/{invite.id}.{secret}"
+
+    lines = [f"@{agent.name} created a workspace invite (id: {invite.id}): {url}"]
+    if lan_ip is None:
+        lines.append(
+            "Couldn't detect a LAN address, so this link only works from this machine -- "
+            "share the workspace's real network address manually if the invitee is remote."
+        )
+    lines.append("This link is shown only once here -- make sure it reaches whoever needs it.")
+    content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "invite_created", "invite_id": invite.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_invites_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#193: an agent called the list_invites tool. Mirrors api/
+    invites.py's list_invites handler -- never surfaces a secret, only
+    ever stored as a bcrypt hash to begin with. Unlike list_workflows/
+    list_channels/etc, this tool carries a required_scope (tool_scopes.py's
+    BUILTIN_TOOL_SCOPES) since the underlying route is OwnerGrant-gated
+    for reads too, not just writes."""
+    result = await db.execute(select(Invite).order_by(Invite.created_at.desc()))
+    invites = list(result.scalars().all())
+    if not invites:
+        content = f"@{agent.name} looked up the workspace's invites: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's invites:"]
+        for invite in invites:
+            status = "revoked" if invite.revoked else "active"
+            hint = f" for {invite.display_name_hint!r}" if invite.display_name_hint else ""
+            lines.append(
+                f"- {invite.id}{hint}: {invite.use_count}/{invite.max_uses} used, "
+                f"expires {invite.expires_at}, {status}"
+            )
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+async def _handle_revoke_invite_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, invite_id: str
+) -> list[Message]:
+    """#193: an agent called the revoke_invite tool. Mirrors api/
+    invites.py's revoke_invite handler exactly -- including its
+    idempotence (revoking an already-revoked invite still succeeds, no
+    special-cased rejection)."""
+    invite = await db.get(Invite, invite_id)
+    if invite is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to revoke invite {invite_id!r}, but no invite with that id "
+                "was found.",
+            )
+        ]
+
+    invite.revoked = True
+    await db.commit()
+
+    message = _system_message(db, rivulet, f"@{agent.name} revoked invite {invite_id!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "invite_revoked", "invite_id": invite_id, "agent_id": agent.id},
+    )
     return [message]
