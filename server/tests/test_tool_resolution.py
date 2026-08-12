@@ -209,6 +209,54 @@ async def test_update_agent_tool_skipped_without_agents_teams_manage_grant(
     assert [fn.name for fn in resolved] == ["update_agent"]
 
 
+async def test_seed_builtin_tools_sets_mcp_servers_manage_scope(db_session: AsyncSession) -> None:
+    """#191: register_mcp_server/reconnect_mcp_server/delete_mcp_server are
+    the third real consumer of BUILTIN_TOOL_SCOPES -- confirms seeding
+    wires up "mcp_servers:manage" for the three mutating tools while
+    leaving the read-only list_mcp_servers unscoped, same shape as
+    test_seed_builtin_tools_sets_channels_manage_scope above."""
+    await seed_builtin_tools(db_session)
+
+    register_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "register_mcp_server"))
+    ).scalar_one()
+    assert register_row.required_scope == "mcp_servers:manage"
+
+    reconnect_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "reconnect_mcp_server"))
+    ).scalar_one()
+    assert reconnect_row.required_scope == "mcp_servers:manage"
+
+    delete_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "delete_mcp_server"))
+    ).scalar_one()
+    assert delete_row.required_scope == "mcp_servers:manage"
+
+    list_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "list_mcp_servers"))
+    ).scalar_one()
+    assert list_row.required_scope is None
+
+
+async def test_register_mcp_server_tool_skipped_without_mcp_servers_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    register_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "register_mcp_server"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, register_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="mcp_servers:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["register_mcp_server"]
+
+
 async def test_resolve_agent_tools_skips_unknown_builtin(db_session: AsyncSession) -> None:
     agent = await _make_agent(db_session)
     tool_row = Tool(name="not_a_real_builtin", description="stale", tool_type="builtin")

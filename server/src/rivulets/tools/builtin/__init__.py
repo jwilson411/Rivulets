@@ -33,6 +33,12 @@ from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
 from rivulets.tools.builtin.knowledge_base import search_knowledge_base
+from rivulets.tools.builtin.mcp_servers import (
+    delete_mcp_server,
+    list_mcp_servers,
+    reconnect_mcp_server,
+    register_mcp_server,
+)
 from rivulets.tools.builtin.run_workflow import run_workflow
 from rivulets.tools.builtin.schedules import cancel_schedule, list_schedules, schedule_workflow
 from rivulets.tools.builtin.web_search import web_search
@@ -44,6 +50,7 @@ __all__ = [
     "create_channel",
     "create_team",
     "delete_agent",
+    "delete_mcp_server",
     "delete_team",
     "execute_python",
     "handoff",
@@ -51,11 +58,14 @@ __all__ = [
     "list_agents",
     "list_channels",
     "list_files",
+    "list_mcp_servers",
     "list_schedules",
     "list_teams",
     "query_workspace_db",
     "read_attached_file",
     "read_file",
+    "reconnect_mcp_server",
+    "register_mcp_server",
     "reorder_channels",
     "rollback_agent_version",
     "run_workflow",

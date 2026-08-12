@@ -338,3 +338,9 @@ def test_list_tools_exposes_required_scope(
     assert tools["delete_team"] == "agents_teams:manage"
     assert tools["list_agents"] is None
     assert tools["list_teams"] is None
+    # #191: the three mutating MCP server tools require "mcp_servers:manage";
+    # list_mcp_servers, like list_channels/list_agents above, reports None.
+    assert tools["register_mcp_server"] == "mcp_servers:manage"
+    assert tools["reconnect_mcp_server"] == "mcp_servers:manage"
+    assert tools["delete_mcp_server"] == "mcp_servers:manage"
+    assert tools["list_mcp_servers"] is None
