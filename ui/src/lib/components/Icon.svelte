@@ -251,4 +251,35 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
+{:else if name === 'check-circle'}
+	<svg viewBox="0 0 20 20" width="20" height="20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" />
+		<path
+			d="M6.8 10.2l2.1 2.1 4.3-4.6"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+	</svg>
+{:else if name === 'x-circle'}
+	<svg viewBox="0 0 20 20" width="20" height="20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" />
+		<path
+			d="M7.5 7.5l5 5M12.5 7.5l-5 5"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+		/>
+	</svg>
+{:else if name === 'minus-circle'}
+	<svg viewBox="0 0 20 20" width="20" height="20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" />
+		<path d="M6.8 10h6.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+	</svg>
+{:else if name === 'clock'}
+	<svg viewBox="0 0 20 20" width="20" height="20" fill="none" class={className} aria-hidden="true">
+		<circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" />
+		<path d="M10 6v4l2.8 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+	</svg>
 {/if}
