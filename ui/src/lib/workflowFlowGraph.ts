@@ -12,6 +12,12 @@ export interface WorkflowFlowNodeData {
 	// branches diverged at, 'branch' for every other node/the merge itself
 	// on a path between them, null otherwise.
 	mergeHighlight: 'ancestor' | 'branch' | null;
+	// #201: the id to drill into for a 'workflow' node's own canvas. Null
+	// when this node isn't a workflow node, has no child workflow selected,
+	// or the referenced workflow no longer exists (see buildFlowGraph's
+	// childWorkflowExists param) -- WorkflowFlowNode.svelte only renders the
+	// "Open workflow" affordance when this is non-null.
+	childWorkflowId: string | null;
 }
 
 export type WorkflowFlowNode = Node<WorkflowFlowNodeData, 'workflowNode'>;
@@ -227,7 +233,14 @@ export function buildFlowGraph(
 	// mergeFanOut/highlighting when it names an actual merge node. Passing
 	// a non-merge node id (or omitting it) leaves every node/edge exactly
 	// as buildFlowGraph produced them before #200.
-	selectedNodeId?: string | null
+	selectedNodeId?: string | null,
+	// #201: only used to gate the canvas drill-in affordance -- a workflow
+	// node whose child_workflow_id no longer resolves to a real workflow
+	// (same "Deleted workflow" case subtitleFor already handles) gets no
+	// link, since there's nowhere to drill into. Omitting this callback
+	// treats every non-null child_workflow_id as live, which is what every
+	// existing call site/test wants.
+	childWorkflowExists: (childWorkflowId: string) => boolean = () => true
 ): BuildFlowGraphResult {
 	const nodeIds = new Set(nodes.map((n) => n.id));
 	const entryNodeId = connections.find((c) => c.from_node_id === null)?.to_node_id ?? null;
@@ -251,7 +264,13 @@ export function buildFlowGraph(
 					? 'ancestor'
 					: mergeFanOut.nodeIds.has(node.id)
 						? 'branch'
-						: null
+						: null,
+			childWorkflowId:
+				node.node_type === 'workflow' &&
+				node.child_workflow_id &&
+				childWorkflowExists(node.child_workflow_id)
+					? node.child_workflow_id
+					: null
 		}
 	}));
 

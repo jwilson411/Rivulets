@@ -103,7 +103,15 @@
 	// #200: passing editingNodeId lets buildFlowGraph highlight a selected
 	// merge node's fan-out ancestor and branch paths -- a no-op unless the
 	// selected node is actually type 'merge' (see buildFlowGraph).
-	const flowGraph = $derived(buildFlowGraph(nodeList, connectionList, subtitleFor, editingNodeId));
+	// #201: the last arg gates the canvas drill-in affordance to nested
+	// workflow nodes whose child_workflow_id still resolves to a real
+	// workflow in workflowList -- same source subtitleFor's "Deleted
+	// workflow" fallback already checks.
+	const flowGraph = $derived(
+		buildFlowGraph(nodeList, connectionList, subtitleFor, editingNodeId, (id) =>
+			workflowList.some((w) => w.id === id)
+		)
+	);
 
 	// #199: whether the edge currently open in the inspector is a loop edge,
 	// so that panel can add the visit-cap explainer only when it's relevant

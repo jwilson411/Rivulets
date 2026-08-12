@@ -273,6 +273,40 @@ describe('buildFlowGraph', () => {
 			expect(edge.domAttributes).toMatchObject({ 'data-merge-highlight': 'true' });
 		}
 	});
+
+	it('#201: exposes childWorkflowId for a workflow node whose child workflow exists', () => {
+		const n1 = node({ id: 'n1', node_type: 'workflow', child_workflow_id: 'wf-2' });
+
+		const result = buildFlowGraph([n1], [], noSubtitle, null, () => true);
+
+		expect(result.nodes[0].data.childWorkflowId).toBe('wf-2');
+	});
+
+	it('#201: nulls out childWorkflowId when the child workflow no longer exists', () => {
+		const n1 = node({ id: 'n1', node_type: 'workflow', child_workflow_id: 'wf-missing' });
+
+		const result = buildFlowGraph([n1], [], noSubtitle, null, () => false);
+
+		expect(result.nodes[0].data.childWorkflowId).toBeNull();
+	});
+
+	it('#201: defaults childWorkflowExists to true when the callback is omitted', () => {
+		const n1 = node({ id: 'n1', node_type: 'workflow', child_workflow_id: 'wf-2' });
+
+		const result = buildFlowGraph([n1], [], noSubtitle);
+
+		expect(result.nodes[0].data.childWorkflowId).toBe('wf-2');
+	});
+
+	it('#201: is null for non-workflow nodes and workflow nodes with no child selected', () => {
+		const agentNode = node({ id: 'n1' });
+		const unsetWorkflowNode = node({ id: 'n2', node_type: 'workflow', child_workflow_id: null });
+
+		const result = buildFlowGraph([agentNode, unsetWorkflowNode], [], noSubtitle);
+
+		expect(result.nodes.find((n) => n.id === 'n1')?.data.childWorkflowId).toBeNull();
+		expect(result.nodes.find((n) => n.id === 'n2')?.data.childWorkflowId).toBeNull();
+	});
 });
 
 describe('isLoopEdge', () => {

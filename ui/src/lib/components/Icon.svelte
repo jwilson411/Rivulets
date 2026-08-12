@@ -234,4 +234,21 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
+{:else if name === 'external-link'}
+	<svg viewBox="0 0 20 20" width="20" height="20" fill="none" class={className} aria-hidden="true">
+		<path
+			d="M8.5 4.5H5A1.5 1.5 0 0 0 3.5 6v8.5A1.5 1.5 0 0 0 5 16h8.5a1.5 1.5 0 0 0 1.5-1.5V11"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+		<path
+			d="M11.5 3.5H16v4.5M16 3.5 9.5 10"
+			stroke="currentColor"
+			stroke-width="1.5"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		/>
+	</svg>
 {/if}
