@@ -45,3 +45,7 @@ docs/*/CLAUDE.md
 # Env
 .env
 .env.local
+
+# Internal planning docs — not for public distribution
+/hosted-solution-plan/
+/marketing/
