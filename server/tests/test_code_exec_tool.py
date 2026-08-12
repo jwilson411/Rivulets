@@ -99,6 +99,29 @@ def test_execute_python_cannot_write_outside_the_sandbox_directory() -> None:
     assert "Process exited with code" in result
 
 
+@pytest.mark.skipif(
+    not (_sandbox_ready and sys.platform == "darwin"),
+    reason="macOS-only: firejail (Linux) replaces $HOME with sandbox_dir entirely, so this "
+    "class of gap doesn't exist there (see code_exec.py's module docstring)",
+)
+def test_execute_python_cannot_read_workspace_dir_outside_the_sandbox_subpath() -> None:
+    """_macos_profile denies reads of workspace_dir except the
+    tool_code_exec subpath -- regression test for a real bug caught by
+    hand: workspace_dir under $TMPDIR (as it is in this very test suite,
+    see conftest.py) lives under macOS's /var -> /private/var symlink,
+    and a subpath rule built from the *unresolved* path silently never
+    matched, leaving it fully readable. _macos_profile now .resolve()s
+    every path it builds a rule from."""
+    secret = get_settings().workspace_dir / "read_should_be_blocked.txt"
+    secret.write_text("outside the sandbox subpath")
+
+    result = _call(code=f"print(open({str(secret)!r}).read())")
+
+    assert "outside the sandbox subpath" not in result
+    assert "Process exited with code" in result
+    assert "PermissionError" in result
+
+
 @pytest.mark.skipif(not _sandbox_ready, reason="no sandbox backend installed on this machine")
 def test_execute_python_denies_network_by_default() -> None:
     """A local loopback socket bind is used as the probe rather than a

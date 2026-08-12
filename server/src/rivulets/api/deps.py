@@ -32,6 +32,11 @@ class SessionClaims:
     workspace_id: str
     human_id: str | None
     grant: str
+    # None for every normal session token (login/identity/invite-accept).
+    # "stream" marks a short-lived ticket minted by POST /auth/stream-ticket
+    # (api/auth.py) -- see get_current_workspace_id_for_stream below for
+    # why that distinction exists at all.
+    purpose: str | None = None
 
 
 def _decode_token(token: str) -> SessionClaims:
@@ -47,6 +52,7 @@ def _decode_token(token: str) -> SessionClaims:
         workspace_id=payload["sub"],
         human_id=payload.get("human_id"),
         grant=payload.get("grant", "owner"),
+        purpose=payload.get("purpose"),
     )
 
 
@@ -70,18 +76,36 @@ async def get_current_workspace_id_for_stream(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> str:
-    """Same validation as get_current_workspace_id, but also accepts the
+    """Same validation as get_current_workspace_id, but also accepts a
     token via a `token` query parameter — needed only for the SSE stream
     route (api/rivulets.py), since the browser's native EventSource API
     can't set custom headers, and SSE (ADR-004) was chosen specifically
     because it works with plain EventSource. Every other route keeps
     header-only auth; a query-string token is more exposure (server logs,
-    browser history) than we want to accept anywhere it isn't required.
+    browser history, Referer headers on any cross-origin sub-resource load
+    from that page) than we want to accept anywhere it isn't required.
+
+    A token arriving via the header is any normal session token, same as
+    every other route. A token arriving via the query param must instead
+    be a short-lived, purpose-scoped ticket from POST /auth/stream-ticket
+    (`purpose == "stream"`, api/auth.py's mint_stream_ticket) — a full,
+    hours-long session token is rejected there even though it would
+    decode successfully, so the only thing that can ever end up in a URL
+    is something that expires in seconds and is useless anywhere else.
     """
-    token = credentials.credentials if credentials else request.query_params.get("token")
+    if credentials is not None:
+        return _decode_token(credentials.credentials).workspace_id
+    token = request.query_params.get("token")
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
-    return _decode_token(token).workspace_id
+    claims = _decode_token(token)
+    if claims.purpose != "stream":
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "A query-string token must be a short-lived stream ticket "
+            "(POST /auth/stream-ticket), not a full session token",
+        )
+    return claims.workspace_id
 
 
 async def get_current_human_id(

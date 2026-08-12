@@ -1,3 +1,6 @@
+from datetime import UTC, datetime, timedelta
+
+import jwt as pyjwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -134,3 +137,29 @@ def test_login_derives_a_credential_store_key(client: TestClient) -> None:
     assert response.status_code == 200
 
     assert get_session_key_store().get_credential_store_key()
+
+
+def test_stream_ticket_requires_a_valid_session(client: TestClient) -> None:
+    response = client.post("/api/v1/auth/stream-ticket")
+    assert response.status_code == 401
+
+
+def test_stream_ticket_is_a_short_lived_purpose_scoped_token(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The one thing the SSE route's query-param auth path (api/deps.py's
+    get_current_workspace_id_for_stream) accepts -- a normal session token
+    passed the same way is rejected, closing off the long-lived-token-in-a-
+    URL leak this ticket exists to replace."""
+    response = client.post("/api/v1/auth/stream-ticket", headers=auth_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ticket"]
+    assert body["expires_at"]
+
+    payload = pyjwt.decode(body["ticket"], options={"verify_signature": False})
+    assert payload["purpose"] == "stream"
+
+    # Expires in roughly a minute, not the ~24h a normal session token gets.
+    expires_at = datetime.fromisoformat(body["expires_at"])
+    assert expires_at - datetime.now(UTC) < timedelta(minutes=2)

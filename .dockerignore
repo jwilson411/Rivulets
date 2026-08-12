@@ -24,6 +24,12 @@ server/src/rivulets/static/
 # Local workspace data — never bake this into an image
 .rivulets/
 
+# Local secrets — never bake these into an image
+.env
+.env.*
+**/.env
+**/.env.*
+
 # Editors / OS
 .vscode/
 .idea/

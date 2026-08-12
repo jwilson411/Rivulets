@@ -5,11 +5,22 @@ directly in this process: firejail on Linux, `sandbox-exec` on macOS.
 Both backends give the same two guarantees:
 
   - Filesystem writes are confined to a workspace-bounded directory
-    (`<workspace_dir>/tool_code_exec`). Reads are left open — the
+    (`<workspace_dir>/tool_code_exec`). Reads are mostly left open — the
     sandboxed interpreter still needs to read Python itself, the
-    stdlib, and installed site-packages to start at all, so read
-    isolation isn't attempted. Combined with network access being
-    denied by default (below), open reads aren't an exfiltration path.
+    stdlib, and installed site-packages to start at all, so full read
+    isolation isn't attempted (there's no fixed set of paths that
+    covers every real Python install layout without risking silently
+    breaking code execution). On macOS, `_macos_profile` layers
+    best-effort deny rules on top for the highest-value targets this
+    app can reason about completely: its own workspace_dir (the SQLite
+    DB, encrypted credential fallback store) and common credential
+    locations under $HOME (~/.ssh, ~/.aws, ~/.gnupg, ~/.docker,
+    ~/.kube, ~/.netrc) — not a completeness guarantee, just defense in
+    depth. On Linux, firejail's `--private=<dir>` (below) already
+    replaces $HOME with sandbox_dir entirely, so this class of gap
+    doesn't exist there. Combined with network access being denied by
+    default (below), what remains readable isn't an exfiltration path
+    unless RIVULETS_CODE_EXEC_NETWORK_ACCESS=1 is also set.
   - Outbound network access is denied by default (NFR-3.5). Set
     RIVULETS_CODE_EXEC_NETWORK_ACCESS=1 (config.py) to allow it
     workspace-wide — there's no per-run toggle.
@@ -39,6 +50,15 @@ from agno.tools import tool
 
 from rivulets.config import get_settings
 
+# Best-effort read denials layered on top of macOS's otherwise-unrestricted
+# (allow file-read*) -- see _macos_profile's docstring for why a full
+# allowlist isn't feasible. Covers this app's own workspace (the SQLite DB,
+# encrypted credential fallback store, sync state -- all higher-value than
+# generic dotfiles, and a set this module can reason about completely) plus
+# the handful of credential locations most likely to sit under $HOME.
+_SENSITIVE_HOME_DIRS = (".ssh", ".aws", ".gnupg", ".docker", ".kube")
+_SENSITIVE_HOME_FILES = (".netrc",)
+
 _TIMEOUT_SECONDS = 30
 _MAX_OUTPUT_CHARS = 20_000
 
@@ -64,8 +84,41 @@ def is_available() -> bool:
 
 def _macos_profile(sandbox_dir: Path, allow_network: bool) -> str:
     network_rule = "(allow network*)" if allow_network else "(deny network*)"
-    # (allow file-read*): see module docstring — read isolation isn't
-    # attempted, only write confinement + network denial.
+    # (allow file-read*): full read isolation isn't attempted -- the
+    # sandboxed interpreter still needs to read Python itself, the
+    # stdlib, and installed site-packages to start at all, and those
+    # can live anywhere (a pyenv/uv install under $HOME, a venv next to
+    # a from-source checkout, etc.), so there's no fixed allowlist that
+    # covers every real deployment without risking silently breaking
+    # code execution. Instead, deny rules below carve out the specific,
+    # known-sensitive locations most worth protecting; Seatbelt resolves
+    # a read against the *most specific* matching subpath rule, so a
+    # deny on workspace_dir is overridden by the narrower allow on
+    # sandbox_dir (a subdirectory of it) below. This is defense in
+    # depth, not a completeness guarantee -- see the module docstring's
+    # RIVULETS_CODE_EXEC_NETWORK_ACCESS note.
+    # .resolve() everything below: macOS's sandbox kernel extension
+    # matches against the *canonical* (symlinks-resolved) path, and
+    # several common roots are themselves symlinks on macOS (/tmp ->
+    # /private/tmp, /var -> /private/var -- the latter matters because
+    # $TMPDIR, and therefore any workspace_dir pointed under it, lives
+    # under /var/folders/...). A subpath rule built from the unresolved
+    # form silently never matches in that case -- confirmed by hand: an
+    # unresolved-path profile with workspace_dir under $TMPDIR left it
+    # fully readable despite the (deny ...) rule being present.
+    sandbox_dir = sandbox_dir.resolve()
+    home = Path.home().resolve()
+    deny_dirs = [
+        get_settings().workspace_dir.resolve(),
+        *(home / name for name in _SENSITIVE_HOME_DIRS),
+    ]
+    deny_files = [home / name for name in _SENSITIVE_HOME_FILES]
+    deny_rules = "\n".join(
+        [
+            *(f'(deny file-read* (subpath "{p}"))' for p in deny_dirs),
+            *(f'(deny file-read* (literal "{p}"))' for p in deny_files),
+        ]
+    )
     # mach-lookup/sysctl-read/iokit-open: the CPython interpreter itself
     # needs these to start up on macOS (thread/clock/entropy services);
     # without them the sandboxed process fails before running any
@@ -75,6 +128,8 @@ def _macos_profile(sandbox_dir: Path, allow_network: bool) -> str:
 (allow process-fork)
 (allow process-exec)
 (allow file-read*)
+{deny_rules}
+(allow file-read* (subpath "{sandbox_dir}"))
 (allow file-write* (subpath "{sandbox_dir}"))
 (allow file-write-data (literal "/dev/null"))
 (allow file-write-data (literal "/dev/dtracehelper"))

@@ -26,6 +26,19 @@ entering a credential on the workspace's behalf; registering/reading/
 reconnecting/removing a server with no headers stays open to any grant,
 unchanged from before this feature existed.
 
+A non-owner (invite-grant) session registering a streamable-http server
+also has its `url` checked against security/network.py's
+check_host_is_public before the row is created -- the same SSRF guard
+tools/builtin/http_request.py applies to agent-driven fetches. An owner
+choosing that URL is a deliberate, trusted configuration action (a
+self-hosted local MCP server on loopback/LAN is a real, supported use
+case -- see test_register_mcp_server_with_headers_requires_owner_grant's
+"Registering without headers stays open to any grant" case), so owners
+are never run through this check; an invite-grant session picking the
+target is the same untrusted-input-driven risk as any other outbound
+fetch it shouldn't be able to aim at this node's own localhost services
+or LAN.
+
 Stdio transport (#187): a `transport="stdio"` server has Rivulets spawn
 and run `command`/`args` as a local subprocess, rather than making an
 outbound HTTP call -- a materially bigger security surface (arbitrary
@@ -42,6 +55,7 @@ via agentos.mcp.build_stdio_command -- see that function's docstring."""
 import json
 import logging
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, model_validator
@@ -65,6 +79,7 @@ from rivulets.api.deps import (
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import MCPServer, Tool
 from rivulets.security.credentials import delete_secret, store_secret
+from rivulets.security.network import BlockedHostError, check_host_is_public
 from rivulets.sync.publish import publish_current_state
 
 logger = logging.getLogger(__name__)
@@ -281,8 +296,30 @@ async def register_mcp_server(
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "Owner access required to register a stdio MCP server"
             )
-    elif body.headers and claims.grant != "owner":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required to set auth headers")
+    else:
+        if body.headers and claims.grant != "owner":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Owner access required to set auth headers"
+            )
+        if claims.grant != "owner":
+            # An owner pointing a streamable-http registration at a
+            # loopback/private/LAN address is a deliberate, trusted
+            # configuration action (e.g. a self-hosted local MCP server) --
+            # same category as a Provider base_url, so owners aren't run
+            # through this check. A non-owner (invite-grant) session
+            # picking the target is different: that's the same
+            # untrusted-input-driven SSRF risk http_request.py's tool
+            # guards against, just via a different entry point. assert
+            # below: MCPServerCreate's own validator already requires
+            # a non-empty url for streamable-http.
+            assert body.url is not None
+            host = urlsplit(body.url).hostname
+            if host is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Could not determine URL host")
+            try:
+                check_host_is_public(host)
+            except BlockedHostError as exc:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
 
     server = MCPServer(
         name=body.name,

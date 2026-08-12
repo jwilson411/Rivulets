@@ -15,6 +15,7 @@ test_rivulet_dispatch.py monkeypatches dispatch.service.run_agent.
 """
 
 import asyncio
+import socket
 from collections.abc import Sequence
 from typing import Any
 
@@ -459,13 +460,49 @@ def test_register_mcp_server_with_headers_requires_owner_grant(
     )
     assert response.status_code == 403
 
-    # Registering without headers stays open to any grant, unchanged.
+    # Registering without headers stays open to any grant -- as long as
+    # the URL resolves to a public address (see the SSRF tests below for
+    # the loopback/private case, which *is* blocked for a non-owner grant
+    # now, unlike before this guard existed).
+    def fake_getaddrinfo(_host: str, _port: object) -> list[tuple[object, ...]]:
+        return [(None, None, None, None, ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     plain = client.post(
         "/api/v1/mcp-servers",
-        json={"name": "Plain server", "url": "http://127.0.0.1:9999/mcp"},
+        json={"name": "Plain server", "url": "http://mcp.example.com/mcp"},
         headers=invite_headers,
     )
     assert plain.status_code == 201, plain.text
+
+
+def test_register_mcp_server_at_a_private_address_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SSRF guard (security/network.py's check_host_is_public): a
+    non-owner (invite-grant) session can't point a streamable-http
+    registration at this node's own loopback/LAN services, even with no
+    headers involved. An owner can -- a self-hosted local MCP server is a
+    real, supported use case (the test above)."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Internal server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An owner session registering the exact same loopback URL still
+    # works, unchanged (this is the existing, tested "local MCP server"
+    # path exercised throughout the rest of this file).
+    owner_response = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Internal server (owner)", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 201, owner_response.text
 
 
 def test_set_mcp_server_headers_replaces_and_reconnects(

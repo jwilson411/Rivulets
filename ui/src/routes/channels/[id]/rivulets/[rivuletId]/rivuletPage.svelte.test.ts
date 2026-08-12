@@ -38,7 +38,13 @@ vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		get token() {
 			return authState.token;
-		}
+		},
+		// The component exchanges the session token for one of these before
+		// opening the EventSource (see +page.svelte's mintStreamTicket call)
+		// -- returning a fixed, distinct value here (rather than echoing
+		// authState.token) is what proves the FakeEventSource URL assertion
+		// below is actually observing the ticket, not the raw session token.
+		mintStreamTicket: vi.fn(async () => 'test-ticket')
 	}
 }));
 
@@ -270,7 +276,9 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
 		const source = FakeEventSource.instances[0];
-		expect(source.url).toContain('/api/v1/rivulets/riv-1/stream?token=test-token');
+		// The URL carries the short-lived ticket mintStreamTicket() resolved
+		// to, never the raw session token (authState.token above).
+		expect(source.url).toContain('/api/v1/rivulets/riv-1/stream?token=test-ticket');
 
 		source.emit('agent_token', {
 			agent_id: 'agent-1',

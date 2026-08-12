@@ -26,6 +26,11 @@ export interface SessionInfo {
 	grant: string;
 }
 
+interface StreamTicketResponse {
+	ticket: string;
+	expires_at: string;
+}
+
 let token = $state<string | null>(null);
 let humanId = $state<string | null>(null);
 let displayName = $state<string | null>(null);
@@ -79,6 +84,22 @@ export const auth = {
 	clearIdentity(): void {
 		humanId = null;
 		displayName = null;
+	},
+	// A short-lived, purpose-scoped token for the one endpoint that can't
+	// use a normal Authorization header: the SSE stream (api/deps.py's
+	// get_current_workspace_id_for_stream) -- EventSource can't set custom
+	// headers, so *some* token has to go in the URL. Minting one of these
+	// right before opening the connection, instead of putting the actual
+	// session token there, is what keeps a leak of it into server logs /
+	// browser history / Referer headers low-value: it expires in about a
+	// minute and is rejected everywhere except that one route.
+	async mintStreamTicket(): Promise<string> {
+		const response = await api.post<StreamTicketResponse>(
+			'/auth/stream-ticket',
+			{},
+			token ?? undefined
+		);
+		return response.ticket;
 	},
 	async logout(): Promise<void> {
 		const activeToken = token;

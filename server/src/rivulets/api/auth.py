@@ -195,3 +195,46 @@ async def claim_identity(
         display_name=human.display_name,
         grant=claims.grant,
     )
+
+
+_STREAM_TICKET_TTL = timedelta(seconds=60)
+
+
+class StreamTicketResponse(BaseModel):
+    ticket: str
+    expires_at: str
+
+
+@router.post("/stream-ticket", response_model=StreamTicketResponse)
+async def mint_stream_ticket(
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> StreamTicketResponse:
+    """A short-lived, purpose-scoped token for the one route that can't use
+    a normal Authorization header: GET /rivulets/{id}/stream, since the
+    browser's native EventSource API can't set custom headers (api/deps.py's
+    get_current_workspace_id_for_stream). The frontend calls this
+    immediately before opening each stream connection and puts the ticket
+    -- never the actual session token -- in that URL's query string.
+    Bounding what a query-string token can do to `_STREAM_TICKET_TTL` and
+    "open one SSE connection, nothing else" (the `purpose` claim rejects it
+    everywhere else, including a *header*-borne use of it as a real session
+    token) is what keeps a leak of it in server logs / browser history /
+    Referer headers low-value, unlike the multi-hour session token that
+    used to be passed the same way. No `OwnerGrant` here -- any session
+    that can already open the stream itself (owner or invite-grant) can
+    mint the ticket that lets it do so."""
+    jwt_signing_key = get_session_key_store().get_key()
+    expires_at = datetime.now(UTC) + _STREAM_TICKET_TTL
+    ticket = jwt.encode(
+        {
+            "sub": claims.workspace_id,
+            "iat": datetime.now(UTC),
+            "exp": expires_at,
+            "grant": claims.grant,
+            "human_id": claims.human_id,
+            "purpose": "stream",
+        },
+        jwt_signing_key,
+        algorithm="HS256",
+    )
+    return StreamTicketResponse(ticket=ticket, expires_at=expires_at.isoformat())
