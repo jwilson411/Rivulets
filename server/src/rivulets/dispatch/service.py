@@ -44,7 +44,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -221,6 +221,99 @@ def _find_cancel_schedule_call(run_output: RunOutput) -> str | None:
         if isinstance(schedule_ref, str):
             return schedule_ref
     return None
+
+
+class CreateChannelCall:
+    """Parsed args for a create_channel tool call (#189)."""
+
+    def __init__(self, name: str, args: dict[str, object]) -> None:
+        self.name = name
+        self.description = _str_or_none(args, "description")
+
+
+class UpdateChannelCall:
+    """Parsed args for an update_channel tool call (#189). Only `channel`
+    (the id-or-name reference) is required; `name`/`description` fall
+    back to None when the model didn't supply them, same as
+    ScheduleWorkflowCall above."""
+
+    def __init__(self, channel_ref: str, args: dict[str, object]) -> None:
+        self.channel_ref = channel_ref
+        self.name = _str_or_none(args, "name")
+        self.description = _str_or_none(args, "description")
+
+
+def _find_create_channel_call(run_output: RunOutput) -> CreateChannelCall | None:
+    """Same shape as _find_run_workflow_call, for the create_channel tool
+    (tools/builtin/channels.py, #189)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "create_channel":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        if isinstance(name, str):
+            return CreateChannelCall(name, args)
+    return None
+
+
+def _find_update_channel_call(run_output: RunOutput) -> UpdateChannelCall | None:
+    """Same shape as _find_run_workflow_call, for the update_channel tool
+    (tools/builtin/channels.py, #189)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_channel":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        channel_ref = args.get("channel")
+        if isinstance(channel_ref, str):
+            return UpdateChannelCall(channel_ref, args)
+    return None
+
+
+def _find_archive_channel_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the archive_channel
+    tool (tools/builtin/channels.py, #189)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "archive_channel":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        channel_ref = args.get("channel")
+        if isinstance(channel_ref, str):
+            return channel_ref
+    return None
+
+
+def _find_unarchive_channel_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the unarchive_channel
+    tool (tools/builtin/channels.py, #189)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "unarchive_channel":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        channel_ref = args.get("channel")
+        if isinstance(channel_ref, str):
+            return channel_ref
+    return None
+
+
+def _find_reorder_channels_call(run_output: RunOutput) -> list[str] | None:
+    """Same shape as _find_run_workflow_call, for the reorder_channels
+    tool (tools/builtin/channels.py, #189)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "reorder_channels":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        order = args.get("order")
+        if isinstance(order, list):
+            items = cast(list[Any], order)
+            if all(isinstance(item, str) for item in items):
+                return cast(list[str], order)
+    return None
+
+
+def _find_list_channels_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_schedules_call, for the argument-less
+    list_channels tool (tools/builtin/channels.py, #189)."""
+    return any(tool_call.tool_name == "list_channels" for tool_call in run_output.tools or [])
 
 
 async def dispatch_and_respond(
@@ -963,6 +1056,39 @@ async def _invoke_agent(
             await _handle_cancel_schedule_trigger(db, rivulet, agent, cancel_schedule_call)
         )
 
+    create_channel_call = _find_create_channel_call(run_output)
+    if create_channel_call is not None:
+        new_messages.extend(
+            await _handle_create_channel_trigger(db, rivulet, agent, create_channel_call)
+        )
+
+    update_channel_call = _find_update_channel_call(run_output)
+    if update_channel_call is not None:
+        new_messages.extend(
+            await _handle_update_channel_trigger(db, rivulet, agent, update_channel_call)
+        )
+
+    archive_channel_call = _find_archive_channel_call(run_output)
+    if archive_channel_call is not None:
+        new_messages.extend(
+            await _handle_archive_channel_trigger(db, rivulet, agent, archive_channel_call)
+        )
+
+    unarchive_channel_call = _find_unarchive_channel_call(run_output)
+    if unarchive_channel_call is not None:
+        new_messages.extend(
+            await _handle_unarchive_channel_trigger(db, rivulet, agent, unarchive_channel_call)
+        )
+
+    reorder_channels_call = _find_reorder_channels_call(run_output)
+    if reorder_channels_call is not None:
+        new_messages.extend(
+            await _handle_reorder_channels_trigger(db, rivulet, agent, reorder_channels_call)
+        )
+
+    if _find_list_channels_call(run_output):
+        new_messages.extend(await _handle_list_channels_trigger(db, rivulet, agent))
+
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
@@ -1311,6 +1437,328 @@ async def _handle_cancel_schedule_trigger(
                 f"@{agent.name} tried to cancel schedule {schedule_ref!r}, but no schedule with "
                 "that id or name was found among the ones it created."
             )
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+_CHANNEL_NAME_MIN_LEN = 3
+_CHANNEL_NAME_MAX_LEN = 80
+
+
+async def _resolve_channel_ref(
+    db: AsyncSession, channel_ref: str
+) -> Channel | list[Channel] | None:
+    """Resolves a channel tool's `channel` arg, which may be the
+    channel's id or its name. An id match (the primary key) is checked
+    first and is always unambiguous. Name is only unique among
+    non-archived channels (db/models.py's idx_channel_name), so a name
+    match can, in principle, hit more than one archived channel sharing
+    a name -- returned as a list so callers can report that ambiguity
+    the same way _handle_cancel_schedule_trigger does for schedule
+    names, rather than silently acting on whichever one sorts first."""
+    channel = await db.get(Channel, channel_ref)
+    if channel is not None:
+        return channel
+    matches = list((await db.scalars(select(Channel).where(Channel.name == channel_ref))).all())
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return matches
+    return None
+
+
+async def _handle_create_channel_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: CreateChannelCall
+) -> list[Message]:
+    """#189: an agent called the create_channel tool. Validation mirrors
+    api/channels.py's create_channel handler (name length, name
+    uniqueness among non-archived channels via idx_channel_name) so a
+    request that would 400 through the API is rejected the same way
+    here, as a visible message rather than an unhandled IntegrityError."""
+    if not (_CHANNEL_NAME_MIN_LEN <= len(call.name) <= _CHANNEL_NAME_MAX_LEN):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create channel {call.name!r}, but channel names must "
+                f"be {_CHANNEL_NAME_MIN_LEN}-{_CHANNEL_NAME_MAX_LEN} characters.",
+            )
+        ]
+    existing = (
+        await db.scalars(
+            select(Channel).where(Channel.name == call.name, Channel.archived.is_(False))
+        )
+    ).first()
+    if existing is not None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create channel {call.name!r}, but a channel with that "
+                "name already exists.",
+            )
+        ]
+
+    channel = Channel(name=call.name, description=call.description)
+    db.add(channel)
+    await db.flush()
+    await publish_current_state(db, "channel", channel.id)
+    message = _system_message(
+        db, rivulet, f"@{agent.name} created channel /{channel.name} (id: {channel.id})."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "channel_created", "channel_id": channel.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_channel_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateChannelCall
+) -> list[Message]:
+    """#189: an agent called the update_channel tool. Mirrors api/
+    channels.py's update_channel handler (name length + uniqueness
+    checks, updated_at/vector_clock bump)."""
+    result = await _resolve_channel_ref(db, call.channel_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update channel {call.channel_ref!r}, but no channel "
+                "with that id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(c.id for c in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update channel {call.channel_ref!r}, but that name "
+                f"matches {len(result)} channels ({ids}) -- specify by id instead.",
+            )
+        ]
+    channel = result
+
+    if call.name is None and call.description is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update channel /{channel.name}, but didn't specify "
+                "any changes.",
+            )
+        ]
+
+    if call.name is not None:
+        if not (_CHANNEL_NAME_MIN_LEN <= len(call.name) <= _CHANNEL_NAME_MAX_LEN):
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename channel /{channel.name}, but channel names "
+                    f"must be {_CHANNEL_NAME_MIN_LEN}-{_CHANNEL_NAME_MAX_LEN} characters.",
+                )
+            ]
+        if call.name != channel.name:
+            conflict = (
+                await db.scalars(
+                    select(Channel).where(Channel.name == call.name, Channel.archived.is_(False))
+                )
+            ).first()
+            if conflict is not None:
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to rename channel /{channel.name} to "
+                        f"{call.name!r}, but a channel with that name already exists.",
+                    )
+                ]
+        previous_name = channel.name
+        channel.name = call.name
+    else:
+        previous_name = channel.name
+
+    if call.description is not None:
+        channel.description = call.description
+
+    channel.updated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    channel.vector_clock += 1
+    await db.flush()
+    await publish_current_state(db, "channel", channel.id)
+    message = _system_message(db, rivulet, f"@{agent.name} updated channel /{previous_name}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "channel_updated", "channel_id": channel.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_archive_channel_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, channel_ref: str
+) -> list[Message]:
+    """#189: an agent called the archive_channel tool. Mirrors api/
+    channels.py's archive_channel handler (soft delete, FR-2.5)."""
+    result = await _resolve_channel_ref(db, channel_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to archive channel {channel_ref!r}, but no channel with "
+                "that id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(c.id for c in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to archive channel {channel_ref!r}, but that name matches "
+                f"{len(result)} channels ({ids}) -- specify by id instead.",
+            )
+        ]
+    channel = result
+    if channel.archived:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to archive channel /{channel.name}, but it's already "
+                "archived.",
+            )
+        ]
+
+    channel.archived = True
+    await db.flush()
+    await publish_current_state(db, "channel", channel.id)
+    message = _system_message(db, rivulet, f"@{agent.name} archived channel /{channel.name}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "channel_archived", "channel_id": channel.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_unarchive_channel_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, channel_ref: str
+) -> list[Message]:
+    """#189: an agent called the unarchive_channel tool. Mirrors api/
+    channels.py's unarchive_channel handler. Unlike archive_channel,
+    a name match here can genuinely be ambiguous (idx_channel_name only
+    enforces uniqueness while archived=0, so more than one archived
+    channel can share a name) -- _resolve_channel_ref already surfaces
+    that as a list rather than picking one."""
+    result = await _resolve_channel_ref(db, channel_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to unarchive channel {channel_ref!r}, but no channel with "
+                "that id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(c.id for c in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to unarchive channel {channel_ref!r}, but that name "
+                f"matches {len(result)} channels ({ids}) -- specify by id instead.",
+            )
+        ]
+    channel = result
+    if not channel.archived:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to unarchive channel /{channel.name}, but it isn't archived.",
+            )
+        ]
+
+    channel.archived = False
+    await db.flush()
+    await publish_current_state(db, "channel", channel.id)
+    message = _system_message(db, rivulet, f"@{agent.name} unarchived channel /{channel.name}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "channel_unarchived", "channel_id": channel.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_reorder_channels_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, order: list[str]
+) -> list[Message]:
+    """#189: an agent called the reorder_channels tool. Mirrors api/
+    channels.py's reorder_channels handler (full-list reorder, not a
+    single-item move) -- every ref in `order` must resolve to exactly
+    one channel before any position is actually changed, so a bad
+    request doesn't leave channels half-reordered."""
+    channels: list[Channel] = []
+    for ref in order:
+        result = await _resolve_channel_ref(db, ref)
+        if result is None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to reorder channels, but {ref!r} doesn't match any "
+                    "channel.",
+                )
+            ]
+        if isinstance(result, list):
+            ids = ", ".join(c.id for c in result)
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to reorder channels, but {ref!r} matches "
+                    f"{len(result)} channels ({ids}) -- specify by id instead.",
+                )
+            ]
+        channels.append(result)
+
+    for position, channel in enumerate(channels):
+        channel.position = position
+    await db.flush()
+    for channel in channels:
+        await publish_current_state(db, "channel", channel.id)
+
+    message = _system_message(db, rivulet, f"@{agent.name} reordered {len(channels)} channels.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "channels_reordered", "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_channels_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#189: an agent called the (unscoped, read-only) list_channels
+    tool."""
+    channels = list((await db.scalars(select(Channel).order_by(Channel.position))).all())
+    if not channels:
+        content = f"@{agent.name} looked up the workspace's channels: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's channels:"]
+        for c in channels:
+            status = " (archived)" if c.archived else ""
+            lines.append(f"- /{c.name}{status} (id: {c.id})")
+        content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)
     return [message]

@@ -52,17 +52,23 @@ from rivulets.agentos.mcp import build_stdio_command, get_server_env, get_server
 from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
 from rivulets.db.models import Agent, AgentTool, AgentToolScope, MCPServer, Tool
 from rivulets.tools.builtin import (
+    archive_channel,
     cancel_schedule,
+    create_channel,
     execute_python,
     http_request,
+    list_channels,
     list_files,
     list_schedules,
     query_workspace_db,
     read_attached_file,
     read_file,
+    reorder_channels,
     run_workflow,
     schedule_workflow,
     search_knowledge_base,
+    unarchive_channel,
+    update_channel,
     web_search,
     write_file,
 )
@@ -70,17 +76,23 @@ from rivulets.tools.builtin import (
 logger = logging.getLogger(__name__)
 
 _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
+    archive_channel,
     cancel_schedule,
+    create_channel,
     execute_python,
     http_request,
+    list_channels,
     list_files,
     list_schedules,
     query_workspace_db,
     read_attached_file,
     read_file,
+    reorder_channels,
     run_workflow,
     schedule_workflow,
     search_knowledge_base,
+    unarchive_channel,
+    update_channel,
     web_search,
     write_file,
 )

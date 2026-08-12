@@ -124,6 +124,43 @@ async def test_resolve_agent_tools_resolves_tool_with_granted_scope(
     assert resolved[0].name == "read_file"
 
 
+async def test_seed_builtin_tools_sets_channels_manage_scope(db_session: AsyncSession) -> None:
+    """#189: create_channel is the first real (non-synthetic) consumer of
+    BUILTIN_TOOL_SCOPES -- confirms seeding actually wires it up, not just
+    the generic required_scope mechanism exercised above with a hand-built
+    Tool row."""
+    await seed_builtin_tools(db_session)
+
+    create_channel_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_channel"))
+    ).scalar_one()
+    assert create_channel_row.required_scope == "channels:manage"
+
+    list_channels_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "list_channels"))
+    ).scalar_one()
+    assert list_channels_row.required_scope is None
+
+
+async def test_create_channel_tool_skipped_without_channels_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    create_channel_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_channel"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, create_channel_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="channels:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["create_channel"]
+
+
 async def test_resolve_agent_tools_skips_unknown_builtin(db_session: AsyncSession) -> None:
     agent = await _make_agent(db_session)
     tool_row = Tool(name="not_a_real_builtin", description="stale", tool_type="builtin")
