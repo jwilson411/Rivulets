@@ -310,8 +310,18 @@ def test_list_tool_scopes_returns_the_known_catalog(
 def test_list_tools_exposes_required_scope(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    # No builtin tool declares a required_scope yet (#188 is the
-    # mechanism, not the first scoped tool) -- every tool reports None.
-    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    # #189 is the first real consumer of #188's mechanism: the five
+    # mutating channel tools require "channels:manage"; everything else,
+    # including the read-only list_channels, still reports None.
+    tools = {
+        tool["name"]: tool["required_scope"]
+        for tool in client.get("/api/v1/tools", headers=auth_headers).json()
+    }
     assert tools
-    assert all(tool["required_scope"] is None for tool in tools)
+    assert tools["create_channel"] == "channels:manage"
+    assert tools["update_channel"] == "channels:manage"
+    assert tools["archive_channel"] == "channels:manage"
+    assert tools["unarchive_channel"] == "channels:manage"
+    assert tools["reorder_channels"] == "channels:manage"
+    assert tools["list_channels"] is None
+    assert tools["read_file"] is None
