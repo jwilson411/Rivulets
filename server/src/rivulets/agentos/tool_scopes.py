@@ -47,6 +47,17 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) with no
 # built-in tool exposing it. list_agents/list_teams are read-only and
 # deliberately left out, same as list_channels.
+#
+# #191 (tools/builtin/mcp_servers.py) is the third: register_mcp_server/
+# reconnect_mcp_server/delete_mcp_server share one "mcp_servers:manage"
+# scope. Deliberately narrower than api/mcp_servers.py's full HTTP surface
+# -- no built-in tool sets auth headers or a stdio server's env vars (both
+# hold secret values with nowhere safe to travel except a model-generated
+# tool argument), and register_mcp_server only offers streamable-http, not
+# stdio (local subprocess execution, gated by a live owner session at the
+# HTTP route, not just a standing grant) -- see tools/builtin/
+# mcp_servers.py's module docstring for the full reasoning. list_mcp_servers
+# is read-only and deliberately left out, same as list_channels/list_agents.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -62,4 +73,7 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_team": "agents_teams:manage",
     "update_team": "agents_teams:manage",
     "delete_team": "agents_teams:manage",
+    "register_mcp_server": "mcp_servers:manage",
+    "reconnect_mcp_server": "mcp_servers:manage",
+    "delete_mcp_server": "mcp_servers:manage",
 }

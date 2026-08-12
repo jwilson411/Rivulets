@@ -62,8 +62,17 @@ from rivulets.agentos.agent_lifecycle import (
     set_agent_teams,
     set_agent_tools,
 )
+from rivulets.agentos.mcp import (
+    MCPConnectionError,
+    discover_tools,
+    get_server_env,
+    get_server_headers,
+    mcp_env_ref,
+    mcp_header_ref,
+)
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.config import get_settings
+from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
@@ -72,6 +81,7 @@ from rivulets.db.models import (
     Channel,
     DispatchDecision,
     File,
+    MCPServer,
     Message,
     Rivulet,
     RivuletGuardState,
@@ -93,6 +103,7 @@ from rivulets.dispatch.guards import (
 )
 from rivulets.dispatch.llm_fallback import build_llm_fallback
 from rivulets.dispatch.rules import Rule, RuleType
+from rivulets.security.credentials import delete_secret
 from rivulets.streaming import publish
 from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
@@ -560,6 +571,60 @@ def _find_list_teams_call(run_output: RunOutput) -> bool:
     """Same shape as _find_list_schedules_call, for the argument-less
     list_teams tool (tools/builtin/agents_teams.py, #190)."""
     return any(tool_call.tool_name == "list_teams" for tool_call in run_output.tools or [])
+
+
+class RegisterMcpServerCall:
+    """Parsed args for a register_mcp_server tool call (#191)."""
+
+    def __init__(self, name: str, url: str) -> None:
+        self.name = name
+        self.url = url
+
+
+def _find_register_mcp_server_call(run_output: RunOutput) -> RegisterMcpServerCall | None:
+    """Same shape as _find_run_workflow_call, for the register_mcp_server
+    tool (tools/builtin/mcp_servers.py, #191)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "register_mcp_server":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        url = args.get("url")
+        if isinstance(name, str) and isinstance(url, str):
+            return RegisterMcpServerCall(name, url)
+    return None
+
+
+def _find_reconnect_mcp_server_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the
+    reconnect_mcp_server tool (tools/builtin/mcp_servers.py, #191)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "reconnect_mcp_server":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        server_ref = args.get("server")
+        if isinstance(server_ref, str):
+            return server_ref
+    return None
+
+
+def _find_delete_mcp_server_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the delete_mcp_server
+    tool (tools/builtin/mcp_servers.py, #191)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "delete_mcp_server":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        server_ref = args.get("server")
+        if isinstance(server_ref, str):
+            return server_ref
+    return None
+
+
+def _find_list_mcp_servers_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_schedules_call, for the argument-less
+    list_mcp_servers tool (tools/builtin/mcp_servers.py, #191)."""
+    return any(tool_call.tool_name == "list_mcp_servers" for tool_call in run_output.tools or [])
 
 
 async def dispatch_and_respond(
@@ -1394,6 +1459,29 @@ async def _invoke_agent(
 
     if _find_list_teams_call(run_output):
         new_messages.extend(await _handle_list_teams_trigger(db, rivulet, agent))
+
+    register_mcp_server_call = _find_register_mcp_server_call(run_output)
+    if register_mcp_server_call is not None:
+        new_messages.extend(
+            await _handle_register_mcp_server_trigger(db, rivulet, agent, register_mcp_server_call)
+        )
+
+    reconnect_mcp_server_call = _find_reconnect_mcp_server_call(run_output)
+    if reconnect_mcp_server_call is not None:
+        new_messages.extend(
+            await _handle_reconnect_mcp_server_trigger(
+                db, rivulet, agent, reconnect_mcp_server_call
+            )
+        )
+
+    delete_mcp_server_call = _find_delete_mcp_server_call(run_output)
+    if delete_mcp_server_call is not None:
+        new_messages.extend(
+            await _handle_delete_mcp_server_trigger(db, rivulet, agent, delete_mcp_server_call)
+        )
+
+    if _find_list_mcp_servers_call(run_output):
+        new_messages.extend(await _handle_list_mcp_servers_trigger(db, rivulet, agent))
 
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
@@ -2769,6 +2857,239 @@ async def _handle_list_teams_trigger(
                     names.append(f"@{member.name}")
             members = ", ".join(names) if names else "no members"
             lines.append(f"- {t.name!r} (id: {t.id}): {members}")
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+async def _resolve_mcp_server_ref(
+    db: AsyncSession, server_ref: str
+) -> MCPServer | list[MCPServer] | None:
+    """Resolves an MCP server tool's `server` arg, which may be the
+    server's id or its name. An id match is checked first and is always
+    unambiguous. MCPServer.name carries no uniqueness constraint (db/
+    models.py's MCPServer), same as Team.name, so a name match can hit
+    more than one server -- returned as a list so callers can report that
+    ambiguity the same way _resolve_team_ref does."""
+    server = await db.get(MCPServer, server_ref)
+    if server is not None:
+        return server
+    matches = list((await db.scalars(select(MCPServer).where(MCPServer.name == server_ref))).all())
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return matches
+    return None
+
+
+async def _sync_mcp_server_tools(db: AsyncSession, server: MCPServer) -> None:
+    """(Re)discover `server`'s tools and replace its Tool rows with the
+    current set -- used by both register_mcp_server and
+    reconnect_mcp_server below (#191). Mirrors api/mcp_servers.py's
+    private _connect_and_sync_tools; duplicated rather than shared since
+    dispatch/service.py never imports from api/ (agentos/agent_lifecycle.py
+    is the shared-logic exception, extracted because create_agent's
+    registration is too stateful to safely duplicate -- this is a much
+    smaller "discover + replace Tool rows" step). Doesn't commit --
+    callers own the transaction."""
+    await db.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
+    try:
+        if server.transport == "stdio":
+            assert server.command is not None
+            args: list[str] = json.loads(server.args_json) if server.args_json else []
+            discovered = await discover_tools(
+                command=server.command, args=args, env=get_server_env(server)
+            )
+        else:
+            assert server.url is not None
+            discovered = await discover_tools(server.url, headers=get_server_headers(server))
+    except MCPConnectionError:
+        logger.warning(
+            "Could not connect to MCP server %r (transport=%s) -- url=%s command=%s",
+            server.name,
+            server.transport,
+            server.url,
+            server.command,
+            exc_info=True,
+        )
+        server.connected = False
+        return
+
+    server.connected = True
+    server.last_connected_at = utcnow_iso()
+    for discovered_tool in discovered:
+        db.add(
+            Tool(
+                name=discovered_tool.name,
+                description=discovered_tool.description,
+                tool_type="mcp",
+                mcp_server_id=server.id,
+                mcp_tool_name=discovered_tool.name,
+                mcp_input_schema_json=json.dumps(discovered_tool.input_schema),
+            )
+        )
+
+
+async def _handle_register_mcp_server_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: RegisterMcpServerCall
+) -> list[Message]:
+    """#191: an agent called the register_mcp_server tool. Only the
+    streamable-http, headerless case this tool accepts (tools/builtin/
+    mcp_servers.py's module docstring) -- registration always persists
+    the row even if the connection attempt fails (NFR-2.4), matching api/
+    mcp_servers.py's register_mcp_server handler; reconnect_mcp_server can
+    retry later."""
+    if not call.url.strip():
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to register MCP server {call.name!r}, but didn't provide "
+                "a url.",
+            )
+        ]
+
+    server = MCPServer(name=call.name, transport="streamable-http", url=call.url)
+    db.add(server)
+    await db.flush()  # populates server.id (uuid7 default), needed to tag discovered Tool rows
+    await _sync_mcp_server_tools(db, server)
+    await db.commit()
+    await publish_current_state(db, "mcp_server", server.id)
+
+    if server.connected:
+        message = _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} registered MCP server {server.name!r} (id: {server.id}) -- connected.",
+        )
+    else:
+        message = _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} registered MCP server {server.name!r} (id: {server.id}), but "
+            "couldn't connect to it -- use reconnect_mcp_server to retry.",
+        )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "mcp_server_registered", "mcp_server_id": server.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_reconnect_mcp_server_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, server_ref: str
+) -> list[Message]:
+    """#191: an agent called the reconnect_mcp_server tool. Works for
+    either transport and reuses whatever auth headers/env vars are
+    already stored -- reconnecting doesn't enter a new secret, so it
+    isn't subject to the same restriction register_mcp_server is (tools/
+    builtin/mcp_servers.py's module docstring). Mirrors api/
+    mcp_servers.py's reconnect_mcp_server handler."""
+    result = await _resolve_mcp_server_ref(db, server_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to reconnect MCP server {server_ref!r}, but no server with "
+                "that id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(s.id for s in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to reconnect MCP server {server_ref!r}, but that name "
+                f"matches {len(result)} servers ({ids}) -- specify by id instead.",
+            )
+        ]
+    server = result
+
+    await _sync_mcp_server_tools(db, server)
+    await db.commit()
+
+    if server.connected:
+        message = _system_message(
+            db, rivulet, f"@{agent.name} reconnected MCP server {server.name!r}."
+        )
+    else:
+        message = _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} tried to reconnect MCP server {server.name!r}, but couldn't connect "
+            "to it.",
+        )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "mcp_server_reconnected", "mcp_server_id": server.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_delete_mcp_server_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, server_ref: str
+) -> list[Message]:
+    """#191: an agent called the delete_mcp_server tool. Mirrors api/
+    mcp_servers.py's unregister_mcp_server handler (stored secret
+    cleanup, Tool rows cleared first for the FK)."""
+    result = await _resolve_mcp_server_ref(db, server_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete MCP server {server_ref!r}, but no server with "
+                "that id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(s.id for s in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete MCP server {server_ref!r}, but that name matches "
+                f"{len(result)} servers ({ids}) -- specify by id instead.",
+            )
+        ]
+    server = result
+    server_name = server.name
+    if server.header_names_json:
+        delete_secret(mcp_header_ref(server.id))
+    if server.env_names_json:
+        delete_secret(mcp_env_ref(server.id))
+    await db.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
+    await db.delete(server)
+    await db.commit()
+
+    message = _system_message(db, rivulet, f"@{agent.name} deleted MCP server {server_name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "mcp_server_deleted", "mcp_server_name": server_name, "deleted_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_mcp_servers_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#191: an agent called the (unscoped, read-only) list_mcp_servers
+    tool."""
+    servers = list((await db.scalars(select(MCPServer).order_by(MCPServer.name))).all())
+    if not servers:
+        content = f"@{agent.name} looked up the workspace's MCP servers: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's MCP servers:"]
+        for s in servers:
+            status = "connected" if s.connected else "not connected"
+            target = s.url if s.transport == "streamable-http" else s.command
+            lines.append(f"- {s.name!r} (id: {s.id}, {s.transport}, {status}): {target}")
         content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)
