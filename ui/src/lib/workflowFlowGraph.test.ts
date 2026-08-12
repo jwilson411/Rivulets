@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	buildFlowGraph,
+	buildRunOverlay,
 	conditionEdgeLabel,
 	findMergeFanOut,
 	isLoopEdge
@@ -306,6 +307,137 @@ describe('buildFlowGraph', () => {
 
 		expect(result.nodes.find((n) => n.id === 'n1')?.data.childWorkflowId).toBeNull();
 		expect(result.nodes.find((n) => n.id === 'n2')?.data.childWorkflowId).toBeNull();
+	});
+
+	describe('#202: run overlay', () => {
+		it('leaves runStatus null and runOverlayActive false when no run is overlaid', () => {
+			const n1 = node({ id: 'n1' });
+
+			const result = buildFlowGraph([n1], [], noSubtitle);
+
+			expect(result.nodes[0].data.runStatus).toBeNull();
+			expect(result.nodes[0].data.runOverlayActive).toBe(false);
+		});
+
+		it('marks a reached node with its overlay status and an unreached node as off-path once the run is over', () => {
+			const n1 = node({ id: 'n1' });
+			const n2 = node({ id: 'n2' });
+			const entry = connection({ id: 'c-entry', from_node_id: null, to_node_id: 'n1' });
+			const chain = connection({ id: 'c-chain', from_node_id: 'n1', to_node_id: 'n2' });
+			const overlay = buildRunOverlay([{ node_id: 'n1', attempt: 1, status: 'completed' }], false);
+
+			const result = buildFlowGraph([n1, n2], [entry, chain], noSubtitle, null, undefined, overlay);
+
+			expect(result.nodes.find((n) => n.id === 'n1')?.data.runStatus).toBe('succeeded');
+			expect(result.nodes.find((n) => n.id === 'n1')?.data.runOverlayActive).toBe(true);
+			expect(result.nodes.find((n) => n.id === 'n2')?.data.runStatus).toBeNull();
+			expect(result.nodes.find((n) => n.id === 'n2')?.data.runOverlayActive).toBe(true);
+		});
+
+		it('marks an unreached node as pending while the overlaid run is still in progress', () => {
+			const n1 = node({ id: 'n1' });
+			const n2 = node({ id: 'n2' });
+			const chain = connection({ id: 'c-chain', from_node_id: 'n1', to_node_id: 'n2' });
+			const overlay = buildRunOverlay([{ node_id: 'n1', attempt: 1, status: 'running' }], true);
+
+			const result = buildFlowGraph([n1, n2], [chain], noSubtitle, null, undefined, overlay);
+
+			expect(result.nodes.find((n) => n.id === 'n2')?.data.runStatus).toBe('pending');
+		});
+
+		it('marks an edge as on the run path only when the run reached both endpoints', () => {
+			const n1 = node({ id: 'n1' });
+			const n2 = node({ id: 'n2' });
+			const n3 = node({ id: 'n3' });
+			const taken = connection({ id: 'c-taken', from_node_id: 'n1', to_node_id: 'n2' });
+			const untaken = connection({ id: 'c-untaken', from_node_id: 'n1', to_node_id: 'n3' });
+			const overlay = buildRunOverlay(
+				[
+					{ node_id: 'n1', attempt: 1, status: 'completed' },
+					{ node_id: 'n2', attempt: 1, status: 'completed' }
+				],
+				false
+			);
+
+			const result = buildFlowGraph(
+				[n1, n2, n3],
+				[taken, untaken],
+				noSubtitle,
+				null,
+				undefined,
+				overlay
+			);
+
+			const takenEdge = result.edges.find((e) => e.id === 'c-taken')!;
+			expect(takenEdge.domAttributes).toMatchObject({ 'data-run-path': 'true' });
+			expect(takenEdge.style).toContain('var(--color-agent-cyan-600)');
+
+			const untakenEdge = result.edges.find((e) => e.id === 'c-untaken')!;
+			expect(untakenEdge.domAttributes).toMatchObject({ 'data-run-path': 'false' });
+			expect(untakenEdge.style).toContain('opacity: 0.3');
+		});
+
+		it('skips merge fan-out highlighting while a run is overlaid, even for a selected merge node', () => {
+			const n1 = node({ id: 'n1' });
+			const n2 = node({ id: 'n2' });
+			const n3 = node({ id: 'n3' });
+			const merge = node({ id: 'm', node_type: 'merge' });
+			const toN2 = connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n2' });
+			const toN3 = connection({ id: 'c-b', from_node_id: 'n1', to_node_id: 'n3' });
+			const n2ToMerge = connection({ id: 'c-c', from_node_id: 'n2', to_node_id: 'm' });
+			const n3ToMerge = connection({ id: 'c-d', from_node_id: 'n3', to_node_id: 'm' });
+			const overlay = buildRunOverlay([], false);
+
+			const result = buildFlowGraph(
+				[n1, n2, n3, merge],
+				[toN2, toN3, n2ToMerge, n3ToMerge],
+				noSubtitle,
+				'm',
+				undefined,
+				overlay
+			);
+
+			expect(result.mergeFanOut).toBeNull();
+			expect(result.nodes.every((n) => n.data.mergeHighlight === null)).toBe(true);
+		});
+	});
+});
+
+describe('buildRunOverlay', () => {
+	it('keeps only the latest attempt per node', () => {
+		const overlay = buildRunOverlay(
+			[
+				{ node_id: 'n1', attempt: 1, status: 'failed' },
+				{ node_id: 'n1', attempt: 2, status: 'completed' }
+			],
+			false
+		);
+
+		expect(overlay.nodeStatus.get('n1')).toBe('succeeded');
+	});
+
+	it('maps every known raw status onto the overlay vocabulary', () => {
+		const overlay = buildRunOverlay(
+			[
+				{ node_id: 'n1', attempt: 1, status: 'running' },
+				{ node_id: 'n2', attempt: 1, status: 'completed' },
+				{ node_id: 'n3', attempt: 1, status: 'failed' },
+				{ node_id: 'n4', attempt: 1, status: 'skipped' },
+				{ node_id: 'n5', attempt: 1, status: 'awaiting_human' }
+			],
+			false
+		);
+
+		expect(overlay.nodeStatus.get('n1')).toBe('running');
+		expect(overlay.nodeStatus.get('n2')).toBe('succeeded');
+		expect(overlay.nodeStatus.get('n3')).toBe('failed');
+		expect(overlay.nodeStatus.get('n4')).toBe('skipped');
+		expect(overlay.nodeStatus.get('n5')).toBe('awaiting_human');
+	});
+
+	it('carries the inProgress flag through unchanged', () => {
+		expect(buildRunOverlay([], true).inProgress).toBe(true);
+		expect(buildRunOverlay([], false).inProgress).toBe(false);
 	});
 });
 

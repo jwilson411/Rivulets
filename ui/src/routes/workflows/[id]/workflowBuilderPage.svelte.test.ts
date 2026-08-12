@@ -323,6 +323,122 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('fetched stuff')).toBeInTheDocument();
 	});
 
+	it("#202: overlays a completed run's path on the canvas, then clears it", async () => {
+		mockLoad();
+		vi.mocked(workflows.listRuns).mockResolvedValueOnce([
+			{
+				id: 'run-1',
+				workflow_id: 'wf-1',
+				rivulet_id: 'riv-1',
+				triggered_by: 'human',
+				triggered_by_id: null,
+				status: 'completed',
+				current_node_id: null,
+				error_message: null,
+				final_output: 'fetched stuff',
+				started_at: '2026-08-01T00:00:00Z',
+				completed_at: '2026-08-01T00:01:00Z'
+			}
+		]);
+		vi.mocked(workflows.listNodeRuns).mockResolvedValueOnce([
+			{
+				id: 'nr-1',
+				node_id: 'n1',
+				attempt: 1,
+				status: 'completed',
+				output_content: 'fetched stuff',
+				error_message: null,
+				started_at: '2026-08-01T00:00:00Z',
+				completed_at: '2026-08-01T00:00:30Z'
+			},
+			{
+				id: 'nr-2',
+				node_id: 'n2',
+				attempt: 1,
+				status: 'completed',
+				output_content: 'fetched stuff!',
+				error_message: null,
+				started_at: '2026-08-01T00:00:30Z',
+				completed_at: '2026-08-01T00:00:45Z'
+			}
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		expect(page.getByTestId('workflow-node-n1-run-status').elements()).toHaveLength(0);
+
+		await page.getByRole('button', { name: 'Load runs' }).click();
+		await page.getByText('completed').first().click();
+		await page.getByRole('button', { name: 'Show path on canvas' }).click();
+
+		await expect.element(page.getByTestId('workflow-run-overlay-banner')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n1-run-status')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n2-run-status')).toBeInTheDocument();
+		expect(page.getByTestId('workflow-edge-c2').element().getAttribute('data-run-path')).toBe(
+			'true'
+		);
+
+		await page.getByRole('button', { name: 'Clear' }).click();
+
+		expect(page.getByTestId('workflow-run-overlay-banner').elements()).toHaveLength(0);
+		expect(page.getByTestId('workflow-node-n1-run-status').elements()).toHaveLength(0);
+	});
+
+	it('#202: shows an awaiting_human banner and badge for a paused run', async () => {
+		mockLoad();
+		vi.mocked(workflows.listRuns).mockResolvedValueOnce([
+			{
+				id: 'run-1',
+				workflow_id: 'wf-1',
+				rivulet_id: 'riv-1',
+				triggered_by: 'human',
+				triggered_by_id: null,
+				status: 'awaiting_human',
+				current_node_id: 'n2',
+				error_message: null,
+				final_output: null,
+				started_at: '2026-08-01T00:00:00Z',
+				completed_at: null
+			}
+		]);
+		vi.mocked(workflows.listNodeRuns).mockResolvedValueOnce([
+			{
+				id: 'nr-1',
+				node_id: 'n1',
+				attempt: 1,
+				status: 'completed',
+				output_content: 'fetched stuff',
+				error_message: null,
+				started_at: '2026-08-01T00:00:00Z',
+				completed_at: '2026-08-01T00:00:30Z'
+			},
+			{
+				id: 'nr-2',
+				node_id: 'n2',
+				attempt: 1,
+				status: 'awaiting_human',
+				output_content: null,
+				error_message: null,
+				started_at: '2026-08-01T00:00:30Z',
+				completed_at: null
+			}
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Load runs' }).click();
+		await page.getByText('awaiting_human').first().click();
+		await page.getByRole('button', { name: 'Show path on canvas' }).click();
+
+		await expect
+			.element(page.getByTestId('workflow-run-overlay-banner'))
+			.toHaveTextContent('Awaiting human input at Format');
+		await expect
+			.element(page.getByTestId('workflow-node-n2-run-status'))
+			.toHaveAttribute('title', 'Awaiting human input');
+	});
+
 	it('creates a schedule and shows it in the list', async () => {
 		mockLoad();
 		const created: WorkflowSchedule = {

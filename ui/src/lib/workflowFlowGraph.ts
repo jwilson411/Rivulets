@@ -18,9 +18,72 @@ export interface WorkflowFlowNodeData {
 	// childWorkflowExists param) -- WorkflowFlowNode.svelte only renders the
 	// "Open workflow" affordance when this is non-null.
 	childWorkflowId: string | null;
+	// #202: this node's status within the currently-overlaid run (see
+	// RunOverlay) -- 'pending' means the overlay's run hasn't reached it yet
+	// but might still (run still in progress); null means either no run is
+	// overlaid at all, or the overlaid run is over and never reached this
+	// node. runOverlayActive disambiguates those two null cases for
+	// WorkflowFlowNode.svelte, which dims a node only in the latter.
+	runStatus: NodeRunStatus | null;
+	runOverlayActive: boolean;
 }
 
 export type WorkflowFlowNode = Node<WorkflowFlowNodeData, 'workflowNode'>;
+
+// #202: the per-node status vocabulary the run overlay paints onto the
+// canvas -- deliberately narrower than WorkflowNodeRun.status (engine.py's
+// raw values, see RAW_NODE_RUN_STATUS below): 'pending' has no equivalent
+// raw status since it means "no WorkflowNodeRun row exists yet for this
+// node", not a status a row can hold.
+export type NodeRunStatus =
+	'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'awaiting_human';
+
+// #202: WorkflowNodeRun.status (server db/models.py) -> the overlay
+// vocabulary above. 'completed' becomes 'succeeded' since a bare
+// "completed" reads ambiguously next to a run's own 'completed' status;
+// everything else is already the same word. Falls back to 'running' for any
+// unrecognized value rather than throwing -- matches this module's existing
+// convention of degrading gracefully on stale-shaped data (see the dangling
+// connection handling in buildFlowGraph below) rather than crashing the
+// whole canvas over one bad row.
+const RAW_NODE_RUN_STATUS: Record<string, NodeRunStatus> = {
+	running: 'running',
+	completed: 'succeeded',
+	failed: 'failed',
+	skipped: 'skipped',
+	awaiting_human: 'awaiting_human'
+};
+
+// #202: node_id -> that node's latest-attempt status for one run -- the
+// shape buildFlowGraph needs to paint a run's outcome onto the graph.
+// `inProgress` gates whether a node buildFlowGraph can't find in
+// `nodeStatus` reads as 'pending' (run still running, might still reach it)
+// or is left off the path entirely (run is over).
+export interface RunOverlay {
+	inProgress: boolean;
+	nodeStatus: Map<string, NodeRunStatus>;
+}
+
+// #202: builds a RunOverlay from one run's WorkflowNodeRun rows. A node can
+// have more than one row if it retried (WorkflowNodeRun.attempt, one row
+// per attempt -- see engine.py's _run_node_with_retries), in which case the
+// highest attempt wins: that's the outcome a viewer actually cares about,
+// not the failed attempts that preceded it.
+export function buildRunOverlay(
+	nodeRuns: { node_id: string; attempt: number; status: string }[],
+	inProgress: boolean
+): RunOverlay {
+	const latestByNode = new Map<string, { attempt: number; status: string }>();
+	for (const run of nodeRuns) {
+		const existing = latestByNode.get(run.node_id);
+		if (!existing || run.attempt > existing.attempt) latestByNode.set(run.node_id, run);
+	}
+	const nodeStatus = new Map<string, NodeRunStatus>();
+	for (const [nodeId, run] of latestByNode) {
+		nodeStatus.set(nodeId, RAW_NODE_RUN_STATUS[run.status] ?? 'running');
+	}
+	return { inProgress, nodeStatus };
+}
 
 // #200: the nearest ancestor upstream of a merge node from which 2+ of its
 // outbound paths reconverge at that merge, plus everything on the paths
@@ -108,12 +171,22 @@ export function isLoopEdge(
 // to mean "structurally significant, look here", overriding any condition
 // color since the highlight is a transient "look at this" state rather
 // than a permanent property of the edge.
+//
+// #202: `runOverlay` layers on top of all of the above once more -- while a
+// run is overlaid, an edge between two nodes the run actually reached
+// (`onRunPath`) gets the same cyan "look here" treatment merge-highlighting
+// uses (buildFlowGraph never computes a merge highlight while a run is
+// overlaid, so the two never compete for the same edge), and every other
+// edge fades to a low opacity so the executed path reads clearly against
+// the rest of the graph.
 function edgeVisual(
 	conditionLabel: string | null,
 	loop: boolean,
-	highlighted: boolean
+	highlighted: boolean,
+	runOverlay: RunOverlay | null,
+	onRunPath: boolean
 ): { label?: string; labelStyle?: string; style: string } | null {
-	if (!conditionLabel && !loop && !highlighted) return null;
+	if (!conditionLabel && !loop && !highlighted && !runOverlay) return null;
 	const label = loop ? `↻ ${conditionLabel ?? 'loop back'}` : (conditionLabel ?? undefined);
 	const color = conditionLabel ? 'stroke: var(--color-agent-magenta); ' : '';
 	let style = loop
@@ -123,6 +196,11 @@ function edgeVisual(
 			: '';
 	if (highlighted) {
 		style = `${style} stroke: var(--color-agent-cyan-600); stroke-width: 3px;`;
+	}
+	if (runOverlay) {
+		style = onRunPath
+			? `${style} stroke: var(--color-agent-cyan-600); stroke-width: 3px;`
+			: `${style} opacity: 0.3;`;
 	}
 	const labelStyle = conditionLabel
 		? 'font-size: 11px; font-weight: 600; fill: var(--color-agent-magenta);'
@@ -240,14 +318,21 @@ export function buildFlowGraph(
 	// link, since there's nowhere to drill into. Omitting this callback
 	// treats every non-null child_workflow_id as live, which is what every
 	// existing call site/test wants.
-	childWorkflowExists: (childWorkflowId: string) => boolean = () => true
+	childWorkflowExists: (childWorkflowId: string) => boolean = () => true,
+	// #202: the run currently overlaid on the canvas, if any -- see
+	// RunOverlay/buildRunOverlay. Selection-driven merge highlighting is
+	// skipped while a run is overlaid (below) so the two "look here" cues
+	// never have to compete for the same cyan.
+	runOverlay: RunOverlay | null = null
 ): BuildFlowGraphResult {
 	const nodeIds = new Set(nodes.map((n) => n.id));
 	const entryNodeId = connections.find((c) => c.from_node_id === null)?.to_node_id ?? null;
 
 	const selectedNode = selectedNodeId ? nodes.find((n) => n.id === selectedNodeId) : undefined;
 	const mergeFanOut =
-		selectedNode?.node_type === 'merge' ? findMergeFanOut(connections, selectedNode.id) : null;
+		!runOverlay && selectedNode?.node_type === 'merge'
+			? findMergeFanOut(connections, selectedNode.id)
+			: null;
 
 	const flowNodes: WorkflowFlowNode[] = nodes.map((node) => ({
 		id: node.id,
@@ -270,7 +355,11 @@ export function buildFlowGraph(
 				node.child_workflow_id &&
 				childWorkflowExists(node.child_workflow_id)
 					? node.child_workflow_id
-					: null
+					: null,
+			runStatus: !runOverlay
+				? null
+				: (runOverlay.nodeStatus.get(node.id) ?? (runOverlay.inProgress ? 'pending' : null)),
+			runOverlayActive: !!runOverlay
 		}
 	}));
 
@@ -297,6 +386,14 @@ export function buildFlowGraph(
 			const loop = isLoopEdge(connections, c);
 			if (loop) hasLoop = true;
 			const highlighted = mergeFanOut?.edgeIds.has(c.id) ?? false;
+			// #202: an edge is "on the path this run took" when the run actually
+			// reached both of its endpoints -- untaken conditional branches never
+			// produce a WorkflowNodeRun row for their target (see engine.py's
+			// _follow_edges, which only ever advances onto matching edges), so
+			// this can't mistake a sibling branch for the one that ran.
+			const onRunPath = runOverlay
+				? runOverlay.nodeStatus.has(c.from_node_id) && runOverlay.nodeStatus.has(c.to_node_id)
+				: false;
 			return {
 				id: c.id,
 				source: c.from_node_id,
@@ -307,15 +404,17 @@ export function buildFlowGraph(
 				// spread straight onto the rendered <g class="svelte-flow__edge">.
 				domAttributes: {
 					'data-testid': `workflow-edge-${c.id}`,
-					'data-merge-highlight': highlighted ? 'true' : undefined
+					'data-merge-highlight': highlighted ? 'true' : undefined,
+					'data-run-path': runOverlay ? (onRunPath ? 'true' : 'false') : undefined
 				},
 				// A conditional and/or loop edge gets a label plus a distinct
 				// stroke so branching/looping is visible on the canvas itself,
 				// not just in the inspector -- a plain edge keeps the solid line
 				// it always had (no extra keys, so existing snapshots/tests for
 				// those are untouched). #200 layers a highlight on top when this
-				// edge is on the selected merge node's fan-out path.
-				...(edgeVisual(conditionLabel, loop, highlighted) ?? {})
+				// edge is on the selected merge node's fan-out path. #202 layers a
+				// run-path highlight/fade on top of all of that once more.
+				...(edgeVisual(conditionLabel, loop, highlighted, runOverlay, onRunPath) ?? {})
 			};
 		});
 

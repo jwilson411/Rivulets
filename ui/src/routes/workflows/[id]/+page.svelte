@@ -25,6 +25,7 @@
 	import WorkflowFlowCanvas from '$lib/components/WorkflowFlowCanvas.svelte';
 	import {
 		buildFlowGraph,
+		buildRunOverlay,
 		isLoopEdge,
 		LOOP_MAX_NODE_VISITS,
 		LOOP_MAX_TOTAL_STEPS
@@ -83,6 +84,11 @@
 	let expandedRunId = $state<string | null>(null);
 	let nodeRunsByRun = $state<Record<string, WorkflowNodeRun[]>>({});
 	let nodeRunsError = $state<string | null>(null);
+	// #202: the run currently painted onto the canvas, if any -- only ever
+	// set once that run's node-runs are already in nodeRunsByRun (see
+	// viewRunOnCanvas), so runOverlay below never needs a loading state of
+	// its own.
+	let overlayRunId = $state<string | null>(null);
 
 	function subtitleFor(node: WorkflowNode): string | null {
 		if (node.node_type === 'agent') {
@@ -100,16 +106,35 @@
 		return null;
 	}
 
+	// #202: null unless a run is currently overlaid on the canvas -- built
+	// from that run's already-loaded node-runs (see viewRunOnCanvas) rather
+	// than fetching separately. `inProgress` gates whether a node the run
+	// hasn't reached yet reads as "pending" or "never reached".
+	const runOverlay = $derived.by(() => {
+		if (!overlayRunId) return null;
+		const run = runList?.find((r) => r.id === overlayRunId);
+		const nodeRuns = nodeRunsByRun[overlayRunId];
+		if (!run || !nodeRuns) return null;
+		return buildRunOverlay(nodeRuns, run.status === 'running' || run.status === 'awaiting_human');
+	});
+
 	// #200: passing editingNodeId lets buildFlowGraph highlight a selected
 	// merge node's fan-out ancestor and branch paths -- a no-op unless the
 	// selected node is actually type 'merge' (see buildFlowGraph).
-	// #201: the last arg gates the canvas drill-in affordance to nested
-	// workflow nodes whose child_workflow_id still resolves to a real
-	// workflow in workflowList -- same source subtitleFor's "Deleted
+	// #201: the next-to-last arg gates the canvas drill-in affordance to
+	// nested workflow nodes whose child_workflow_id still resolves to a
+	// real workflow in workflowList -- same source subtitleFor's "Deleted
 	// workflow" fallback already checks.
+	// #202: the last arg paints runOverlay onto the graph when a run is
+	// selected for viewing (see the run-history panel below).
 	const flowGraph = $derived(
-		buildFlowGraph(nodeList, connectionList, subtitleFor, editingNodeId, (id) =>
-			workflowList.some((w) => w.id === id)
+		buildFlowGraph(
+			nodeList,
+			connectionList,
+			subtitleFor,
+			editingNodeId,
+			(id) => workflowList.some((w) => w.id === id),
+			runOverlay
 		)
 	);
 
@@ -671,6 +696,13 @@
 		}
 	}
 
+	// #202: toggles overlaying `runId`'s node statuses onto the canvas.
+	// Only ever called from inside the expanded run panel below, once its
+	// node-runs are already loaded into nodeRunsByRun -- no fetch here.
+	function viewRunOnCanvas(runId: string) {
+		overlayRunId = overlayRunId === runId ? null : runId;
+	}
+
 	function statusClass(status: string): string {
 		if (status === 'completed')
 			return 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400';
@@ -1214,6 +1246,43 @@
 			/>
 		</section>
 
+		{#if overlayRunId}
+			{@const overlaidRun = runList?.find((r) => r.id === overlayRunId)}
+			{#if overlaidRun}
+				<div
+					data-testid="workflow-run-overlay-banner"
+					class="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs {overlaidRun.status ===
+					'awaiting_human'
+						? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-400'
+						: 'border-agent-cyan-600/30 bg-agent-cyan-100/60 text-agent-cyan-700 dark:border-agent-cyan-900/40 dark:bg-agent-cyan-900/20 dark:text-agent-cyan-400'}"
+				>
+					<span class="flex items-center gap-2">
+						<Icon
+							name={overlaidRun.status === 'awaiting_human' ? 'user-plus' : 'route'}
+							class="h-3.5 w-3.5 shrink-0"
+						/>
+						{#if overlaidRun.status === 'awaiting_human'}
+							Awaiting human input at
+							<strong>
+								{nodeList.find((n) => n.id === overlaidRun.current_node_id)?.name ?? 'a step'}
+							</strong>
+							— paused {timeAgo(overlaidRun.started_at)}.
+						{:else}
+							Viewing the path taken by the run from {timeAgo(overlaidRun.started_at)} ({overlaidRun.status}).
+						{/if}
+					</span>
+					<button
+						type="button"
+						data-testid="workflow-run-overlay-clear"
+						onclick={() => (overlayRunId = null)}
+						class="flex-none font-medium hover:underline"
+					>
+						Clear
+					</button>
+				</div>
+			{/if}
+		{/if}
+
 		{#if flowGraph.nodes.length === 0}
 			<p class="text-center text-sm text-neutral-500">
 				No steps yet — drag one from the palette above onto the canvas.
@@ -1479,34 +1548,45 @@
 										</p>
 									{:else if !nodeRunsByRun[run.id]}
 										<p class="text-xs text-neutral-500">Loading steps…</p>
-									{:else if nodeRunsByRun[run.id].length === 0}
-										<p class="text-xs text-neutral-500">No steps recorded for this run.</p>
 									{:else}
-										<ul class="flex flex-col gap-2">
-											{#each nodeRunsByRun[run.id] as nodeRun (nodeRun.id)}
-												<li class="flex flex-col gap-1 text-xs">
-													<div class="flex items-center gap-2">
-														<span class="rounded-sm px-1.5 py-0.5 {statusClass(nodeRun.status)}">
-															{nodeRun.status}
-														</span>
-														<span class="text-neutral-500">
-															{nodeList.find((n) => n.id === nodeRun.node_id)?.name ??
-																'Deleted step'}
-														</span>
-													</div>
-													{#if nodeRun.output_content}
-														<p class="text-neutral-600 dark:text-neutral-400">
-															{nodeRun.output_content}
-														</p>
-													{/if}
-													{#if nodeRun.error_message}
-														<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
-															{nodeRun.error_message}
-														</p>
-													{/if}
-												</li>
-											{/each}
-										</ul>
+										<button
+											type="button"
+											data-testid={`workflow-run-${run.id}-view-on-canvas`}
+											onclick={() => viewRunOnCanvas(run.id)}
+											class="mb-2 flex items-center gap-1 text-xs font-medium text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+										>
+											<Icon name="route" class="h-3 w-3" />
+											{overlayRunId === run.id ? 'Hide from canvas' : 'Show path on canvas'}
+										</button>
+										{#if nodeRunsByRun[run.id].length === 0}
+											<p class="text-xs text-neutral-500">No steps recorded for this run.</p>
+										{:else}
+											<ul class="flex flex-col gap-2">
+												{#each nodeRunsByRun[run.id] as nodeRun (nodeRun.id)}
+													<li class="flex flex-col gap-1 text-xs">
+														<div class="flex items-center gap-2">
+															<span class="rounded-sm px-1.5 py-0.5 {statusClass(nodeRun.status)}">
+																{nodeRun.status}
+															</span>
+															<span class="text-neutral-500">
+																{nodeList.find((n) => n.id === nodeRun.node_id)?.name ??
+																	'Deleted step'}
+															</span>
+														</div>
+														{#if nodeRun.output_content}
+															<p class="text-neutral-600 dark:text-neutral-400">
+																{nodeRun.output_content}
+															</p>
+														{/if}
+														{#if nodeRun.error_message}
+															<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
+																{nodeRun.error_message}
+															</p>
+														{/if}
+													</li>
+												{/each}
+											</ul>
+										{/if}
 									{/if}
 								</div>
 							{/if}

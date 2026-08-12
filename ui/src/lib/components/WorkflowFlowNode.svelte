@@ -4,9 +4,23 @@
 	import { resolve } from '$app/paths';
 	import Icon from './Icon.svelte';
 	import { NODE_TYPE_ICONS, NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
+	import {
+		NODE_RUN_STATUS_COLOR_CLASS,
+		NODE_RUN_STATUS_ICONS,
+		NODE_RUN_STATUS_LABELS
+	} from '$lib/workflowRunStatus';
 	import type { WorkflowFlowNode } from '$lib/workflowFlowGraph';
 
 	let { id, data }: NodeProps<WorkflowFlowNode> = $props();
+
+	// #202: a node is "on the run's path" once it's actually been reached --
+	// 'pending' means the overlaid run hasn't gotten there yet (and might
+	// still), so it doesn't count as on-path any more than an untouched node
+	// does.
+	const onRunPath = $derived(data.runStatus !== null && data.runStatus !== 'pending');
+	// #202: a run is overlaid, but this node isn't 'pending' and was never
+	// reached -- the run is over and simply never took this branch.
+	const dimmed = $derived(data.runOverlayActive && data.runStatus === null);
 
 	// #200: while a merge node is selected, its fan-out ancestor (where its
 	// branches diverged) and everything on the paths between them gets a
@@ -14,12 +28,15 @@
 	// uses a dashed border to read as the "split point" (also called out
 	// with a pill badge below), distinct from the entry node's solid cyan
 	// ring; the rest of the branch gets a lighter, plain ring.
+	// #202: `onRunPath` gets the same solid cyan ring as the entry node --
+	// buildFlowGraph never computes a merge highlight while a run is
+	// overlaid, so this never has to arbitrate between the two.
 	const highlightClass = $derived(
 		data.mergeHighlight === 'ancestor'
 			? 'border-2 border-dashed border-agent-cyan-600 ring-2 ring-agent-cyan-600/30'
 			: data.mergeHighlight === 'branch'
 				? 'border-agent-cyan-600/60 ring-1 ring-agent-cyan-600/30'
-				: data.isEntry
+				: data.isEntry || onRunPath
 					? 'border-agent-cyan-600 ring-2 ring-agent-cyan-600/40'
 					: 'border-ink/12 dark:border-white/10'
 	);
@@ -39,8 +56,26 @@
 	data-testid={`workflow-node-${id}`}
 	data-entry={data.isEntry}
 	data-merge-highlight={data.mergeHighlight ?? undefined}
-	class="w-56 rounded-lg border bg-surface p-3 shadow-sm dark:bg-surface-dark {highlightClass}"
+	data-run-status={data.runStatus ?? undefined}
+	class="relative w-56 rounded-lg border bg-surface p-3 shadow-sm dark:bg-surface-dark {highlightClass} {dimmed
+		? 'opacity-40 grayscale'
+		: ''}"
 >
+	{#if data.runStatus}
+		<span
+			data-testid={`workflow-node-${id}-run-status`}
+			title={NODE_RUN_STATUS_LABELS[data.runStatus]}
+			class="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full border-2 border-surface bg-surface dark:border-surface-dark dark:bg-surface-dark {NODE_RUN_STATUS_COLOR_CLASS[
+				data.runStatus
+			]}"
+		>
+			<Icon
+				name={NODE_RUN_STATUS_ICONS[data.runStatus]}
+				class="h-3 w-3 {data.runStatus === 'running' ? 'animate-spin' : ''}"
+			/>
+		</span>
+	{/if}
+
 	<Handle
 		type="target"
 		position={Position.Left}
