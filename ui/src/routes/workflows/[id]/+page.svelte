@@ -100,7 +100,10 @@
 		return null;
 	}
 
-	const flowGraph = $derived(buildFlowGraph(nodeList, connectionList, subtitleFor));
+	// #200: passing editingNodeId lets buildFlowGraph highlight a selected
+	// merge node's fan-out ancestor and branch paths -- a no-op unless the
+	// selected node is actually type 'merge' (see buildFlowGraph).
+	const flowGraph = $derived(buildFlowGraph(nodeList, connectionList, subtitleFor, editingNodeId));
 
 	// #199: whether the edge currently open in the inspector is a loop edge,
 	// so that panel can add the visit-cap explainer only when it's relevant
@@ -1315,6 +1318,36 @@
 				<section
 					class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 				>
+					{#if node.node_type === 'merge'}
+						{@const incomingCount = connectionList.filter(
+							(c) => c.to_node_id === node.id && c.from_node_id
+						).length}
+						<p
+							class="mb-3 flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
+							data-testid="workflow-merge-notice"
+						>
+							<Icon name="inbox-check" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+							{#if flowGraph.mergeFanOut}
+								{@const ancestorName =
+									nodeList.find((n) => n.id === flowGraph.mergeFanOut?.ancestorId)?.name ??
+									'an earlier step'}
+								<span>
+									This step joins {flowGraph.mergeFanOut.branchCount} branches that diverged at
+									<strong>{ancestorName}</strong>, highlighted on the canvas.
+								</span>
+							{:else if incomingCount < 2}
+								<span>
+									Connect at least two incoming steps to this merge to see where its branches
+									diverge.
+								</span>
+							{:else}
+								<span>
+									This step joins {incomingCount} incoming connections, but they don't share a common
+									branch point in this graph.
+								</span>
+							{/if}
+						</p>
+					{/if}
 					{#key node.id}
 						<WorkflowNodeForm
 							agentOptions={agentList}

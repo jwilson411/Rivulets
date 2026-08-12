@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildFlowGraph, conditionEdgeLabel, isLoopEdge } from './workflowFlowGraph';
+import {
+	buildFlowGraph,
+	conditionEdgeLabel,
+	findMergeFanOut,
+	isLoopEdge
+} from './workflowFlowGraph';
 import type { WorkflowConnection, WorkflowNode } from './api/workflows';
 
 function node(overrides: Partial<WorkflowNode> & { id: string }): WorkflowNode {
@@ -207,6 +212,67 @@ describe('buildFlowGraph', () => {
 		expect(backEdge?.label).toBe('↻ contains "retry"');
 		expect(backEdge?.style).toContain('var(--color-agent-magenta)');
 	});
+
+	it('#200: leaves every node/edge unhighlighted when no node is selected', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const n3 = node({ id: 'n3', node_type: 'merge' });
+		const a = connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n3' });
+		const b = connection({ id: 'c-b', from_node_id: 'n2', to_node_id: 'n3' });
+
+		const result = buildFlowGraph([n1, n2, n3], [a, b], noSubtitle);
+
+		expect(result.mergeFanOut).toBeNull();
+		expect(result.nodes.every((n) => n.data.mergeHighlight === null)).toBe(true);
+	});
+
+	it('#200: leaves everything unhighlighted when the selected node is not a merge', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const n3 = node({ id: 'n3', node_type: 'merge' });
+		const a = connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n3' });
+		const b = connection({ id: 'c-b', from_node_id: 'n2', to_node_id: 'n3' });
+
+		const result = buildFlowGraph([n1, n2, n3], [a, b], noSubtitle, 'n1');
+
+		expect(result.mergeFanOut).toBeNull();
+		expect(result.nodes.every((n) => n.data.mergeHighlight === null)).toBe(true);
+	});
+
+	it('#200: highlights the fan-out ancestor and both branches when a diamond merge is selected', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const n3 = node({ id: 'n3' });
+		const merge = node({ id: 'm', node_type: 'merge' });
+		const toN2 = connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n2' });
+		const toN3 = connection({ id: 'c-b', from_node_id: 'n1', to_node_id: 'n3' });
+		const n2ToMerge = connection({ id: 'c-c', from_node_id: 'n2', to_node_id: 'm' });
+		const n3ToMerge = connection({ id: 'c-d', from_node_id: 'n3', to_node_id: 'm' });
+
+		const result = buildFlowGraph(
+			[n1, n2, n3, merge],
+			[toN2, toN3, n2ToMerge, n3ToMerge],
+			noSubtitle,
+			'm'
+		);
+
+		expect(result.mergeFanOut).toEqual({
+			ancestorId: 'n1',
+			branchCount: 2,
+			nodeIds: new Set(['n1', 'n2', 'n3', 'm']),
+			edgeIds: new Set(['c-a', 'c-b', 'c-c', 'c-d'])
+		});
+		expect(result.nodes.find((n) => n.id === 'n1')?.data.mergeHighlight).toBe('ancestor');
+		expect(result.nodes.find((n) => n.id === 'n2')?.data.mergeHighlight).toBe('branch');
+		expect(result.nodes.find((n) => n.id === 'n3')?.data.mergeHighlight).toBe('branch');
+		expect(result.nodes.find((n) => n.id === 'm')?.data.mergeHighlight).toBe('branch');
+
+		for (const edgeId of ['c-a', 'c-b', 'c-c', 'c-d']) {
+			const edge = result.edges.find((e) => e.id === edgeId)!;
+			expect(edge.style).toContain('var(--color-agent-cyan-600)');
+			expect(edge.domAttributes).toMatchObject({ 'data-merge-highlight': 'true' });
+		}
+	});
 });
 
 describe('isLoopEdge', () => {
@@ -247,6 +313,84 @@ describe('isLoopEdge', () => {
 		// walk, so all three are loop edges, not just the one that happens to
 		// point at the original entry.
 		expect(isLoopEdge(connections, connections[0])).toBe(true);
+	});
+});
+
+describe('findMergeFanOut', () => {
+	it('returns null when the merge has fewer than two direct incoming edges', () => {
+		const connections = [connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'm' })];
+
+		expect(findMergeFanOut(connections, 'm')).toBeNull();
+	});
+
+	it('returns null when a merge is targeted with no incoming edges at all', () => {
+		expect(findMergeFanOut([], 'm')).toBeNull();
+	});
+
+	it('finds the direct fan-out ancestor of a simple diamond', () => {
+		const connections = [
+			connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c-b', from_node_id: 'n1', to_node_id: 'n3' }),
+			connection({ id: 'c-c', from_node_id: 'n2', to_node_id: 'm' }),
+			connection({ id: 'c-d', from_node_id: 'n3', to_node_id: 'm' })
+		];
+
+		const result = findMergeFanOut(connections, 'm');
+
+		expect(result?.ancestorId).toBe('n1');
+		expect(result?.branchCount).toBe(2);
+		expect(result?.nodeIds).toEqual(new Set(['n1', 'n2', 'n3', 'm']));
+		expect(result?.edgeIds).toEqual(new Set(['c-a', 'c-b', 'c-c', 'c-d']));
+	});
+
+	it('finds the same ancestor when one branch takes an extra hop the other skips', () => {
+		// n1 -> n2 -> n4 (merge), n1 -> n4 directly -- unequal branch length,
+		// same shape the engine docstring calls out explicitly.
+		const connections = [
+			connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c-b', from_node_id: 'n2', to_node_id: 'm' }),
+			connection({ id: 'c-c', from_node_id: 'n1', to_node_id: 'm' })
+		];
+
+		const result = findMergeFanOut(connections, 'm');
+
+		expect(result?.ancestorId).toBe('n1');
+		expect(result?.branchCount).toBe(2);
+		expect(result?.nodeIds).toEqual(new Set(['n1', 'n2', 'm']));
+	});
+
+	it('walks past a nested inner fan-out/merge to find the outer join point', () => {
+		// n1 forks into n2 and n5. n2 forks again into n3/n4, which merge at
+		// mInner before continuing into mOuter alongside n5. mOuter's fan-out
+		// ancestor should be n1 (nearest node with 2 paths reaching mOuter),
+		// not n2 (which only forks toward mInner, not mOuter directly).
+		const connections = [
+			connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c-b', from_node_id: 'n1', to_node_id: 'n5' }),
+			connection({ id: 'c-c', from_node_id: 'n2', to_node_id: 'n3' }),
+			connection({ id: 'c-d', from_node_id: 'n2', to_node_id: 'n4' }),
+			connection({ id: 'c-e', from_node_id: 'n3', to_node_id: 'mInner' }),
+			connection({ id: 'c-f', from_node_id: 'n4', to_node_id: 'mInner' }),
+			connection({ id: 'c-g', from_node_id: 'mInner', to_node_id: 'mOuter' }),
+			connection({ id: 'c-h', from_node_id: 'n5', to_node_id: 'mOuter' })
+		];
+
+		const result = findMergeFanOut(connections, 'mOuter');
+
+		expect(result?.ancestorId).toBe('n1');
+		expect(result?.branchCount).toBe(2);
+		expect(result?.nodeIds).toEqual(new Set(['n1', 'n2', 'n5', 'n3', 'n4', 'mInner', 'mOuter']));
+	});
+
+	it('returns null when there is no common branching ancestor to find', () => {
+		// Two disconnected incoming edges with nothing upstream that forks --
+		// e.g. two separate entry points feeding the same merge.
+		const connections = [
+			connection({ id: 'c-a', from_node_id: 'n1', to_node_id: 'm' }),
+			connection({ id: 'c-b', from_node_id: 'n2', to_node_id: 'm' })
+		];
+
+		expect(findMergeFanOut(connections, 'm')).toBeNull();
 	});
 });
 
