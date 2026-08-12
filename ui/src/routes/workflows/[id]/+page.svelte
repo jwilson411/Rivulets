@@ -17,11 +17,13 @@
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
 	import type { Connection } from '@xyflow/svelte';
 	import { channels as channelsApi, type Channel } from '$lib/api/channels';
+	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { timeAgo } from '$lib/format';
 	import Icon from '$lib/components/Icon.svelte';
 	import WorkflowNodeForm, {
 		type WorkflowNodeFormValues
 	} from '$lib/components/WorkflowNodeForm.svelte';
+	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
 	import WorkflowFlowCanvas from '$lib/components/WorkflowFlowCanvas.svelte';
 	import {
 		buildFlowGraph,
@@ -39,6 +41,7 @@
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
 	let channelList = $state<Channel[]>([]);
+	let providerList = $state<Provider[]>([]);
 	let scheduleList = $state<WorkflowSchedule[]>([]);
 	let webhookList = $state<WorkflowWebhook[]>([]);
 	let loadError = $state<string | null>(null);
@@ -64,6 +67,16 @@
 	let addingNode = $state<{ nodeType: WorkflowNodeType; x: number; y: number } | null>(null);
 	let addBusy = $state(false);
 	let addError = $state<string | null>(null);
+
+	// #203: inline "create new agent" from either node panel above -- a
+	// sibling section, not nested inside WorkflowNodeForm's own <form> (a
+	// <form> can't contain another <form>). nodeFormRef lets the created
+	// agent be pushed back into whichever panel is open without remounting
+	// it (which would lose the name/config already typed in).
+	let nodeFormRef: WorkflowNodeForm | undefined = $state();
+	let creatingAgentForNode = $state(false);
+	let createAgentBusy = $state(false);
+	let createAgentError = $state<string | null>(null);
 
 	let editingEdgeId = $state<string | null>(null);
 	let edgeDeleteBusy = $state(false);
@@ -157,7 +170,8 @@
 				loadedWorkflows,
 				loadedChannels,
 				loadedSchedules,
-				loadedWebhooks
+				loadedWebhooks,
+				loadedProviders
 			] = await Promise.all([
 				workflows.get(workflowId),
 				workflows.listNodes(workflowId),
@@ -166,7 +180,8 @@
 				workflows.list(),
 				channelsApi.list(),
 				workflows.listSchedules(workflowId),
-				workflows.listWebhooks(workflowId)
+				workflows.listWebhooks(workflowId),
+				providersApi.list()
 			]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;
@@ -176,6 +191,7 @@
 			channelList = loadedChannels;
 			scheduleList = loadedSchedules;
 			webhookList = loadedWebhooks;
+			providerList = loadedProviders;
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load workflow';
 		}
@@ -500,6 +516,7 @@
 		editError = null;
 		addingNode = null;
 		editingEdgeId = null;
+		creatingAgentForNode = false;
 		editingNodeId = nodeId;
 	}
 
@@ -549,6 +566,7 @@
 		addError = null;
 		editingNodeId = null;
 		editingEdgeId = null;
+		creatingAgentForNode = false;
 		addingNode = { nodeType, x: position.x, y: position.y };
 	}
 
@@ -574,6 +592,26 @@
 			addError = err instanceof Error ? err.message : 'Failed to add step';
 		} finally {
 			addBusy = false;
+		}
+	}
+
+	// #203: create an agent inline from either node panel above, without
+	// navigating away and losing the in-progress node draft. Pushes the new
+	// agent's id back into whichever WorkflowNodeForm is open via
+	// nodeFormRef.setAgentId rather than a reactive prop, since that form's
+	// agentId is local state seeded only once from `initial`.
+	async function handleCreateAgentInline(values: AgentFormValues) {
+		createAgentError = null;
+		createAgentBusy = true;
+		try {
+			const created = await agentsApi.create(values);
+			agentList = [...agentList, created];
+			nodeFormRef?.setAgentId(created.id);
+			creatingAgentForNode = false;
+		} catch (err) {
+			createAgentError = err instanceof Error ? err.message : 'Failed to create agent';
+		} finally {
+			createAgentBusy = false;
 		}
 	}
 
@@ -1427,6 +1465,7 @@
 					{/if}
 					{#key node.id}
 						<WorkflowNodeForm
+							bind:this={nodeFormRef}
 							agentOptions={agentList}
 							{workflowOptions}
 							lockNodeType
@@ -1445,6 +1484,10 @@
 							error={editError}
 							onsubmit={(values) => handleEditNode(node.id, values)}
 							oncancel={() => (editingNodeId = null)}
+							oncreateagent={() => {
+								creatingAgentForNode = true;
+								createAgentError = null;
+							}}
 						/>
 					{/key}
 					<button
@@ -1463,6 +1506,7 @@
 				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 			>
 				<WorkflowNodeForm
+					bind:this={nodeFormRef}
 					agentOptions={agentList}
 					{workflowOptions}
 					lockNodeType
@@ -1481,6 +1525,27 @@
 					error={addError}
 					onsubmit={handleAddNode}
 					oncancel={() => (addingNode = null)}
+					oncreateagent={() => {
+						creatingAgentForNode = true;
+						createAgentError = null;
+					}}
+				/>
+			</section>
+		{/if}
+
+		{#if creatingAgentForNode}
+			<section
+				class="rounded-lg border border-dashed border-ink/15 bg-surface p-4 dark:border-white/15 dark:bg-surface-dark"
+			>
+				<p class="mb-2 text-xs font-medium text-neutral-600 dark:text-neutral-400">New agent</p>
+				<AgentForm
+					providers={providerList}
+					submitLabel="Create agent"
+					busyLabel="Creating…"
+					busy={createAgentBusy}
+					error={createAgentError}
+					onsubmit={handleCreateAgentInline}
+					oncancel={() => (creatingAgentForNode = false)}
 				/>
 			</section>
 		{/if}
