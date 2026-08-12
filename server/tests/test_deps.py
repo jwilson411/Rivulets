@@ -48,11 +48,15 @@ async def test_get_current_workspace_id_for_stream_requires_a_token() -> None:
     assert exc_info.value.status_code == 401
 
 
-async def test_get_current_workspace_id_for_stream_accepts_a_query_param_token() -> None:
+async def test_get_current_workspace_id_for_stream_accepts_a_stream_ticket_via_query_param() -> (
+    None
+):
     signing_key = b"stream-signing-key"
     get_session_key_store().set_key(signing_key)
     try:
-        token = jwt.encode({"sub": "workspace-123"}, signing_key, algorithm="HS256")
+        token = jwt.encode(
+            {"sub": "workspace-123", "purpose": "stream"}, signing_key, algorithm="HS256"
+        )
         request = Request(
             {"type": "http", "query_string": f"token={token}".encode(), "headers": []}
         )
@@ -60,6 +64,29 @@ async def test_get_current_workspace_id_for_stream_accepts_a_query_param_token()
         workspace_id = await get_current_workspace_id_for_stream(request, None)
 
         assert workspace_id == "workspace-123"
+    finally:
+        get_session_key_store().clear()
+
+
+async def test_get_current_workspace_id_for_stream_rejects_a_full_session_token() -> None:
+    """A query-string token must be a purpose-scoped stream ticket (POST
+    /auth/stream-ticket), not a normal session token -- even though the
+    latter would decode successfully, accepting it here is exactly the
+    "long-lived, powerful token leaking into logs/history" risk this
+    split exists to close."""
+    signing_key = b"stream-signing-key"
+    get_session_key_store().set_key(signing_key)
+    try:
+        token = jwt.encode(
+            {"sub": "workspace-123", "grant": "owner"}, signing_key, algorithm="HS256"
+        )
+        request = Request(
+            {"type": "http", "query_string": f"token={token}".encode(), "headers": []}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_workspace_id_for_stream(request, None)
+        assert exc_info.value.status_code == 401
     finally:
         get_session_key_store().clear()
 

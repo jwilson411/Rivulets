@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/main/scripts/in
 rivulets
 ```
 
-This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum, and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled.
+This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum, and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled. If [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is on your PATH, the script also verifies each binary's Sigstore signature — keyless, tied to the GitHub Actions workflow that built it — which a checksum alone can't do, since the checksum is published from the same release as the binary it's checking.
 
 **Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it.
 

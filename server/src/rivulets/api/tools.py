@@ -21,15 +21,16 @@ below writes straight to disk without recording a new version, so the DB's
 the source of truth for what this node currently has.
 """
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import Tool, ToolVersion
 from rivulets.sync.publish import publish_current_state
@@ -59,16 +60,43 @@ async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
     await publish_current_state(db, "tool", tool.id)
 
 
+# body.name becomes both the Tool row's name and (via create_tool below)
+# a literal path segment in source_path -- restricted to a safe identifier
+# charset so it can never escape tools_dir (e.g. "../../etc/cron.d/x") or
+# collide with a dotfile/hidden path.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 class ToolCreate(BaseModel):
     name: str
     description: str
     mode: str = "advanced"  # "simple" | "advanced"
     prompt: str | None = None  # required when mode == "simple"
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if not _TOOL_NAME_RE.match(value):
+            raise ValueError(
+                "Tool name must be a valid Python identifier "
+                "(letters, digits, underscores; can't start with a digit)"
+            )
+        return value
+
 
 class ToolUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str | None:
+        if value is not None and not _TOOL_NAME_RE.match(value):
+            raise ValueError(
+                "Tool name must be a valid Python identifier "
+                "(letters, digits, underscores; can't start with a digit)"
+            )
+        return value
 
 
 class ToolOut(BaseModel):
@@ -124,7 +152,9 @@ async def list_tools(db: DbSession, _: CurrentWorkspaceId) -> list[ToolOut]:
 
 
 @router.post("", response_model=ToolOut, status_code=status.HTTP_201_CREATED)
-async def create_tool(body: ToolCreate, db: DbSession, _: CurrentWorkspaceId) -> Tool:
+async def create_tool(
+    body: ToolCreate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> Tool:
     if body.mode == "simple":
         # TODO(FR-8.3): send body.prompt to an LLM, generate Agno tool code,
         # return it for review before creating the Tool/ToolVersion rows.
@@ -163,7 +193,9 @@ async def get_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> ToolOu
 
 
 @router.patch("/{tool_id}", response_model=ToolOut)
-async def update_tool(tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentWorkspaceId) -> Tool:
+async def update_tool(
+    tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> Tool:
     tool = await _get_or_404(db, tool_id)
     if tool.tool_type == "builtin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be modified")
@@ -177,7 +209,7 @@ async def update_tool(tool_id: str, body: ToolUpdate, db: DbSession, _: CurrentW
 
 
 @router.delete("/{tool_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant) -> None:
     tool = await _get_or_404(db, tool_id)
     if tool.tool_type == "builtin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be deleted")
@@ -202,14 +234,21 @@ async def list_tool_versions(
     "/{tool_id}/versions", response_model=ToolVersionOut, status_code=status.HTTP_201_CREATED
 )
 async def save_tool_version(
-    tool_id: str, body: ToolVersionCreate, db: DbSession, _: CurrentWorkspaceId
+    tool_id: str, body: ToolVersionCreate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> ToolVersion:
     """The "Save" side of the editor handoff (FR-8.4) — writes new source
     to the tool's file and records it as the next version. Rejects
     syntactically invalid Python outright (compile-only, not executed —
     running arbitrary just-submitted code as part of a save request would
     be its own risk) rather than silently accepting code that would just
-    make the tool unresolvable at agent-build time."""
+    make the tool unresolvable at agent-build time.
+
+    Owner-gated: this is the one place arbitrary Python becomes a custom
+    tool's source, and _load_custom_tool (agentos/tool_resolution.py) execs
+    that file directly in the app-server process, unsandboxed, the moment
+    the tool is assigned to and run by an agent. An invite-grant session
+    must never reach this -- same "sensitive surface" bucket as provider
+    credentials/backups/sync/settings (api/deps.py's require_owner_grant)."""
     tool = await _get_or_404(db, tool_id)
     if tool.tool_type != "custom":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only custom tools have editable source")
@@ -240,7 +279,7 @@ async def save_tool_version(
 
 @router.post("/{tool_id}/versions/{version}/rollback", response_model=ToolOut)
 async def rollback_tool_version(
-    tool_id: str, version: int, db: DbSession, _: CurrentWorkspaceId
+    tool_id: str, version: int, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> Tool:
     tool = await _get_or_404(db, tool_id)
     target = await db.scalar(
@@ -258,7 +297,9 @@ async def rollback_tool_version(
 
 
 @router.post("/{tool_id}/open-editor")
-async def open_tool_editor(tool_id: str, db: DbSession, _: CurrentWorkspaceId) -> dict[str, str]:
+async def open_tool_editor(
+    tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> dict[str, str]:
     """Returns the tool's file path for the UI to hand to the OS "open with
     default editor" call (FR-8.4). Detecting/launching the editor itself is
     a UI-side concern, not this endpoint's."""

@@ -9,9 +9,11 @@ name: CI
 # real branch in this repo and meant CI silently never ran on PRs into dev
 # or staging.
 #
-# NOTE: Actions below are pinned to major-version tags, not commit SHAs.
-# Pinning to verified commit SHAs would be a stronger supply-chain posture
-# and hasn't been done yet; don't treat this file as meeting that bar as-is.
+# Actions below are pinned to commit SHAs (with the version they currently
+# resolve to as a trailing comment, for readability and Dependabot) rather
+# than mutable major-version tags -- a compromised/retagged action can't
+# silently change what runs here. Bumping a version means re-resolving and
+# updating both the SHA and the comment together.
 
 on:
   push:
@@ -28,8 +30,8 @@ jobs:
     name: Lint (server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "latest"
       - working-directory: server
@@ -42,8 +44,8 @@ jobs:
     name: Type check (server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "latest"
       - working-directory: server
@@ -55,8 +57,8 @@ jobs:
     name: Unit tests (server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "latest"
       - working-directory: server
@@ -68,8 +70,8 @@ jobs:
     name: Lint (ui)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -83,8 +85,8 @@ jobs:
     name: Type check (ui)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -98,8 +100,8 @@ jobs:
     name: Unit tests (ui)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -115,11 +117,11 @@ jobs:
     needs: [lint-server, typecheck-server, test-server, lint-ui, typecheck-ui, test-ui]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "latest"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -135,7 +137,7 @@ jobs:
           uv sync --group packaging
           uv run --group packaging pyinstaller ../packaging/linux.spec \
             --distpath ../dist --workpath ../build/pyinstaller --noconfirm
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rivulets-linux-amd64
           path: dist/rivulets-linux-amd64
@@ -146,8 +148,8 @@ jobs:
     needs: build-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rivulets-linux-amd64
           path: dist

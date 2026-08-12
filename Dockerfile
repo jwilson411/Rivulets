@@ -5,20 +5,26 @@
 # 3.12, Node 22) match .github/workflows/ci.yml so this builds against the
 # same toolchain CI already verifies against.
 #
+# Base images are pinned by digest, not just tag -- a tag is mutable (a
+# repush or upstream rebuild changes what gets built with no diff in this
+# repo); the digest is what actually gets built. Bumping a version means
+# updating both the tag (for readability) and the digest together --
+# `docker buildx imagetools inspect <image>:<tag>` prints the current one.
+#
 # The built UI lands at server/src/rivulets/static — the exact path
 # rivulets.app._static_dir() looks for when running unfrozen (see that
 # function's docstring). This is the same layout scripts/build-all.sh's
 # non-Docker PyInstaller path produces at build time, via a different
 # mechanism (packaging/_common.py's bundled `datas`).
 
-FROM node:22-slim AS ui-builder
+FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS ui-builder
 WORKDIR /src/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS server-builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS server-builder
 WORKDIR /app/server
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 # libp2p -> fastecdsa has no prebuilt wheel for every platform this builds
@@ -34,7 +40,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY server/ ./
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/jwilson411/Rivulets"
 LABEL org.opencontainers.image.description="Local-first, Slack-like workspace for humans and AI agent teams"
 LABEL org.opencontainers.image.licenses="BUSL-1.1"

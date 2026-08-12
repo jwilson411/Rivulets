@@ -39,7 +39,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from rivulets.api.deps import (
@@ -70,7 +70,11 @@ _DISCONNECT_POLL_SECONDS = 15
 
 
 class MessageCreate(BaseModel):
-    content: str
+    # Generous but bounded -- large enough for a pasted log/stack trace,
+    # small enough that one message can't blow up DB row size or an
+    # agent's context budget on its own (attachments are the intended path
+    # for genuinely large content, via `files` below).
+    content: str = Field(max_length=100_000)
     files: list[str] = []  # file_ids of already-uploaded files (POST /files/upload) to attach
 
 

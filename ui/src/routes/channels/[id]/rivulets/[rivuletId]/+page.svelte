@@ -145,15 +145,36 @@
 
 	$effect(() => {
 		const rivuletId = page.params.rivuletId!;
-		const token = auth.token;
-		if (!token) return;
+		if (!auth.token) return;
 
-		// EventSource can't set an Authorization header, so the token goes
-		// in the query string for this one endpoint only (api/deps.py's
+		let source: EventSource | null = null;
+		let cancelled = false;
+
+		// EventSource can't set an Authorization header, so *some* token has
+		// to go in the query string for this one endpoint (api/deps.py's
 		// get_current_workspace_id_for_stream) — everything else keeps
-		// header-only auth.
+		// header-only auth. mintStreamTicket() exchanges the real session
+		// token for a short-lived, single-purpose one first, so what
+		// actually ends up in this URL (and therefore in server logs/
+		// browser history) is far less valuable than the session token
+		// itself would be.
+		auth
+			.mintStreamTicket()
+			.then((ticket) => {
+				if (cancelled) return;
+				source = connectStream(rivuletId, ticket);
+			})
+			.catch(() => {}); // best-effort -- live streaming just won't start this time
+
+		return () => {
+			cancelled = true;
+			source?.close();
+		};
+	});
+
+	function connectStream(rivuletId: string, ticket: string): EventSource {
 		const source = new EventSource(
-			`/api/v1/rivulets/${rivuletId}/stream?token=${encodeURIComponent(token)}`
+			`/api/v1/rivulets/${rivuletId}/stream?token=${encodeURIComponent(ticket)}`
 		);
 
 		// Arrives before an agent's first token (invocation, tool calls,
@@ -221,8 +242,8 @@
 			liveMessage = null;
 		});
 
-		return () => source.close();
-	});
+		return source;
+	}
 
 	async function handleReply(event: SubmitEvent) {
 		event.preventDefault();

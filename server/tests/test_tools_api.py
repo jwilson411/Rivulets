@@ -32,6 +32,16 @@ def _get_builtin_tool_id(client: TestClient, auth_headers: dict[str, str]) -> st
     return builtin["id"]
 
 
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
 def test_custom_tool_crud_lifecycle(client: TestClient, auth_headers: dict[str, str]) -> None:
     create = client.post(
         "/api/v1/tools",
@@ -306,6 +316,69 @@ def test_list_tool_scopes_returns_the_known_catalog(
         "settings:manage",
         "workflows:manage",
     ]
+
+
+def test_custom_tool_write_routes_require_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Custom tool source is arbitrary Python that _load_custom_tool
+    (agentos/tool_resolution.py) execs directly in the app-server process,
+    unsandboxed, once the tool is assigned to and run by an agent -- the
+    same "sensitive surface" bucket as provider credentials/backups/sync/
+    settings (api/deps.py's require_owner_grant). An invite-grant session
+    must never be able to create, edit, or delete a tool's code."""
+    tool = _create_custom_tool_named(client, auth_headers, "owner_gate_test_tool")
+    invite_headers = _invite_headers(client, auth_headers)
+
+    assert (
+        client.post(
+            "/api/v1/tools",
+            json={"name": "invite_created_tool", "description": "d"},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            f"/api/v1/tools/{tool['id']}", json={"name": "renamed"}, headers=invite_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/v1/tools/{tool['id']}/versions",
+            json={"source_code": "# malicious"},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/v1/tools/{tool['id']}/versions/1/rollback", headers=invite_headers
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(f"/api/v1/tools/{tool['id']}/open-editor", headers=invite_headers).status_code
+        == 403
+    )
+    assert client.delete(f"/api/v1/tools/{tool['id']}", headers=invite_headers).status_code == 403
+
+    # The tool's source file was never created/touched by any of the above
+    # (create_tool doesn't write to disk until the first real save -- see
+    # test_rollback_tool_version_restores_earlier_source's docstring).
+    assert not Path(tool["source_path"]).exists()
+
+
+def test_create_tool_rejects_names_that_would_escape_tools_dir(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "../../etc/evil", "description": "d"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
 
 
 def test_list_tools_exposes_required_scope(

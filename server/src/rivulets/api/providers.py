@@ -6,6 +6,8 @@ OS keychain via security/credentials.py (or its encrypted-SQLite fallback,
 `provider_config.api_key_ref` reference is ever persisted or returned.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -37,8 +39,28 @@ async def get_credential_storage(_: CurrentWorkspaceId, _o: OwnerGrant) -> Crede
     return CredentialStorageOut(backend="keychain" if is_keyring_available() else "fallback")
 
 
+# Keep in sync with agentos/models.py's build_model — the actual source of
+# truth for which providers are wired up. Validating here just gives a
+# clean 422 on a typo/unsupported value at the API boundary instead of an
+# UnknownProviderError surfacing later, mid-dispatch, on an agent that
+# happens to use this provider.
+ProviderName = Literal[
+    "anthropic",
+    "openai",
+    "deepseek",
+    "google",
+    "mistral",
+    "groq",
+    "xai",
+    "qwen",
+    "cohere",
+    "ollama",
+    "openai_compatible",
+]
+
+
 class ProviderCreate(BaseModel):
-    provider: str  # 'openai' | 'anthropic' | 'deepseek' | 'openai_compatible'
+    provider: ProviderName
     label: str
     api_key: str
     base_url: str | None = None
