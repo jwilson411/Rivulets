@@ -351,9 +351,7 @@ async def set_mcp_server_env(
     the first place (module docstring)."""
     server = await _get_or_404(db, server_id)
     if server.transport != "stdio":
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "env vars only apply to stdio MCP servers"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "env vars only apply to stdio MCP servers")
     _set_env(server, body.env)
     await _connect_and_sync_tools(db, server)
     await db.commit()

@@ -1071,9 +1071,7 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
 
 		clickEdge('workflow-edge-c2');
-		await expect
-			.element(page.getByRole('combobox', { name: 'Condition' }))
-			.toBeInTheDocument();
+		await expect.element(page.getByRole('combobox', { name: 'Condition' })).toBeInTheDocument();
 
 		await page
 			.getByRole('combobox', { name: 'Condition' })

@@ -187,9 +187,7 @@ async def test_discover_tools_passes_command_and_env_to_mcp_tools(
 
     monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
 
-    result = await discover_tools(
-        command="npx", args=["-y", "@foo/bar"], env={"API_KEY": "secret"}
-    )
+    result = await discover_tools(command="npx", args=["-y", "@foo/bar"], env={"API_KEY": "secret"})
 
     assert captured["command"] == "npx -y @foo/bar"
     assert captured["env"] == {"API_KEY": "secret"}
@@ -197,7 +195,9 @@ async def test_discover_tools_passes_command_and_env_to_mcp_tools(
     assert result == [DiscoveredTool(name="run", description="Runs.")]
 
 
-async def test_discover_tools_shlex_quotes_args_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_discover_tools_shlex_quotes_args_with_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, Any] = {}
 
     def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
@@ -581,7 +581,7 @@ def test_register_stdio_mcp_server_success(
             "name": "Filesystem tools",
             "transport": "stdio",
             "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
             "env": {"API_KEY": "secret-value"},
         },
         headers=auth_headers,
@@ -591,13 +591,13 @@ def test_register_stdio_mcp_server_success(
     body = response.json()
     assert body["transport"] == "stdio"
     assert body["command"] == "npx"
-    assert body["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    assert body["args"] == ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
     assert body["url"] is None
     assert body["connected"] is True
     assert body["env_names"] == ["API_KEY"]
     assert "env" not in body
     assert "secret-value" not in response.text
-    assert captured_commands == ["npx ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']"]
+    assert captured_commands == ["npx ['-y', '@modelcontextprotocol/server-filesystem', '/data']"]
     assert captured_env == [{"API_KEY": "secret-value"}]
 
 
@@ -621,9 +621,7 @@ def test_register_stdio_mcp_server_requires_owner_grant(
 def test_register_mcp_server_rejects_mismatched_transport_fields(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    missing_url = client.post(
-        "/api/v1/mcp-servers", json={"name": "No url"}, headers=auth_headers
-    )
+    missing_url = client.post("/api/v1/mcp-servers", json={"name": "No url"}, headers=auth_headers)
     assert missing_url.status_code == 422
 
     missing_command = client.post(

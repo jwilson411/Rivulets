@@ -711,9 +711,7 @@ async def list_connections(
     return [WorkflowConnectionOut.from_row(row) for row in result.scalars().all()]
 
 
-@router.patch(
-    "/{workflow_id}/connections/{connection_id}", response_model=WorkflowConnectionOut
-)
+@router.patch("/{workflow_id}/connections/{connection_id}", response_model=WorkflowConnectionOut)
 async def update_connection(
     workflow_id: str,
     connection_id: str,

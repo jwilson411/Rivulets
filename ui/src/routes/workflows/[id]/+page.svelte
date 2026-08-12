@@ -66,9 +66,10 @@
 	// #198: seeded from the selected connection's condition_json in
 	// startEditEdge -- 'none' means "always follow", the same as a null
 	// condition_json (see _validate_condition, api/workflows.py).
-	let editingEdgeCondition = $state<{ operator: 'none' | 'contains' | 'not_contains'; value: string }>(
-		{ operator: 'none', value: '' }
-	);
+	let editingEdgeCondition = $state<{
+		operator: 'none' | 'contains' | 'not_contains';
+		value: string;
+	}>({ operator: 'none', value: '' });
 	let conditionBusy = $state(false);
 	let conditionError = $state<string | null>(null);
 
