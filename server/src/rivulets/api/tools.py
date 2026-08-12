@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.config import get_settings
 from rivulets.db.models import Tool, ToolVersion
@@ -82,6 +83,12 @@ class ToolOut(BaseModel):
     # SENSITIVE_BUILTIN_TOOL_NAMES), no UI to mark a custom/mcp tool
     # sensitive yet.
     sensitive: bool = False
+    # #188: the capability scope (if any) an agent must be granted before
+    # this tool actually resolves for it -- read-only here, set only by
+    # seed_builtin_tools via BUILTIN_TOOL_SCOPES (no custom/mcp tool
+    # declares one yet). None means no scope is required, same as every
+    # tool before #188.
+    required_scope: str | None = None
     available: bool = True
 
     model_config = {"from_attributes": True}
@@ -139,6 +146,15 @@ async def create_tool(body: ToolCreate, db: DbSession, _: CurrentWorkspaceId) ->
     await db.refresh(tool)
     await _publish_tool_change(db, tool)
     return tool
+
+
+@router.get("/scopes", response_model=list[str])
+async def list_tool_scopes(_: CurrentWorkspaceId) -> list[str]:
+    """The fixed catalog of capability scopes (#188, agentos/
+    tool_scopes.py's TOOL_SCOPES) a workspace owner can grant to an agent
+    via PUT /agents/{agent_id}/tool-scopes. Registered ahead of the
+    /{tool_id} route below so "scopes" isn't swallowed as a tool ID."""
+    return sorted(TOOL_SCOPES)
 
 
 @router.get("/{tool_id}", response_model=ToolOut)

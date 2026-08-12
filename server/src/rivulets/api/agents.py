@@ -26,13 +26,15 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 
 from rivulets.agentos import get_agentos, sync_agents
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
     AgentRoutingRule,
     AgentRun,
     AgentTool,
+    AgentToolScope,
     AgentVersion,
     TeamAgent,
 )
@@ -166,6 +168,14 @@ class PeerPreferenceOut(BaseModel):
 
 class PeerPreferenceIn(BaseModel):
     capability_tag: str | None = None
+
+
+class AgentToolScopesOut(BaseModel):
+    scopes: list[str]
+
+
+class AgentToolScopesIn(BaseModel):
+    scopes: list[str]
 
 
 class AgentVersionOut(BaseModel):
@@ -469,3 +479,44 @@ async def set_peer_preference(
     await db.commit()
     await publish_current_state(db, "agent_peer_preference", agent_id)
     return PeerPreferenceOut(capability_tag=pref.capability_tag)
+
+
+@router.get("/{agent_id}/tool-scopes", response_model=AgentToolScopesOut)
+async def get_agent_tool_scopes(
+    agent_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> AgentToolScopesOut:
+    """Capability scopes (#188) currently granted to this agent -- bounds
+    which of its assigned tools with a Tool.required_scope actually
+    resolve at run time. See tool_resolution.py's resolve_agent_tools."""
+    await _get_or_404(db, agent_id)
+    result = await db.execute(
+        select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id)
+    )
+    return AgentToolScopesOut(scopes=sorted(result.scalars().all()))
+
+
+@router.put("/{agent_id}/tool-scopes", response_model=AgentToolScopesOut)
+async def set_agent_tool_scopes(
+    agent_id: str, body: AgentToolScopesIn, db: DbSession, _: CurrentWorkspaceId, __: OwnerGrant
+) -> AgentToolScopesOut:
+    """Owner-only (#188's design decision): an agent shouldn't be able to
+    expand its own reach, and neither should an invited session, so this
+    is gated separately from the rest of this router. Replaces the full
+    granted-scope set, same delete+recreate shape as _set_tools/_set_teams
+    above. Unknown scope names are rejected rather than silently stored --
+    a typo'd scope would grant nothing (no tool's required_scope would
+    ever match it) while looking like it worked. Re-syncs AgentOS
+    afterward so the change actually takes effect -- tool resolution
+    happens at agent-build time (agentos/service.py's _build_agno_agent),
+    not per run."""
+    agent = await _get_or_404(db, agent_id)
+    unknown = sorted(set(body.scopes) - TOOL_SCOPES)
+    if unknown:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown scope(s): {', '.join(unknown)}")
+    await db.execute(delete(AgentToolScope).where(AgentToolScope.agent_id == agent_id))
+    granted = set(body.scopes)
+    for scope in granted:
+        db.add(AgentToolScope(agent_id=agent_id, scope=scope))
+    await db.commit()
+    await _register_with_agentos(db, agent)
+    return AgentToolScopesOut(scopes=sorted(granted))

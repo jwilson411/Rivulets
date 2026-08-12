@@ -432,3 +432,90 @@ def test_rollback_agent_version_not_found(client: TestClient, auth_headers: dict
 def test_rollback_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.post("/api/v1/agents/nonexistent/versions/1/rollback", headers=auth_headers)
     assert response.status_code == 404
+
+
+def test_get_agent_tool_scopes_empty_by_default(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    response = client.get(f"/api/v1/agents/{agent['id']}/tool-scopes", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"scopes": []}
+
+
+def test_get_agent_tool_scopes_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/agents/nonexistent/tool-scopes", headers=auth_headers)
+    assert response.status_code == 404
+
+
+def test_set_agent_tool_scopes_grants_and_replaces(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+
+    granted = client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["channels:manage", "workflows:manage"]},
+        headers=auth_headers,
+    )
+    assert granted.status_code == 200, granted.text
+    assert granted.json() == {"scopes": ["channels:manage", "workflows:manage"]}
+
+    fetched = client.get(f"/api/v1/agents/{agent['id']}/tool-scopes", headers=auth_headers)
+    assert fetched.json() == {"scopes": ["channels:manage", "workflows:manage"]}
+
+    # A second PUT fully replaces the set rather than merging into it.
+    replaced = client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["settings:manage"]},
+        headers=auth_headers,
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json() == {"scopes": ["settings:manage"]}
+
+
+def test_set_agent_tool_scopes_rejects_unknown_scope(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    response = client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["not_a_real_scope"]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert "not_a_real_scope" in response.text
+
+
+def test_set_agent_tool_scopes_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.put(
+        "/api/v1/agents/nonexistent/tool-scopes",
+        json={"scopes": []},
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+
+
+def test_set_agent_tool_scopes_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    invite_headers = {"Authorization": f"Bearer {accepted['token']}"}
+
+    response = client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # Reading isn't owner-gated, same as the rest of this router.
+    read = client.get(f"/api/v1/agents/{agent['id']}/tool-scopes", headers=invite_headers)
+    assert read.status_code == 200
