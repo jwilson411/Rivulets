@@ -10,7 +10,7 @@
 </div>
 
 <p align="center">
-  <img src=".github/assets/readme-hero.png" alt="Rivulets — a channel view showing the sidebar, an active thread, and the composer" width="820">
+  <img src=".github/assets/readme-hero.png" alt="A Rivulets channel thread showing a human message, an agent reply, a handoff event, and a second agent's reply, with the full workspace sidebar nav" width="820">
 </p>
 
 ## What is Rivulets?
@@ -25,14 +25,49 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 
 ## Features
 
+### Chat-native multi-agent workspace
+
 - **Channels & teams** — organize agents into teams, assign a team to a channel, and every message in that channel is visible to the whole team.
 - **Autonomous dispatch** — agents respond based on relevance (keyword/regex rules, semantic matching, or "always respond"), not because someone had to remember to tag them.
 - **Agent handoffs** — an agent can hand a conversation to a teammate mid-thread, with the context carried over and the handoff itself shown as a distinct event, not just another message.
 - **Threaded rivulets** — every conversation that branches off a channel is its own persistent thread with full history and context management.
+- **Loop guards** — turn-count caps and cycle detection stop two agents from volleying a conversation back and forth forever.
+- **File attachments & vision** — attach files to any message; agents can read and act on them, and attached images are shown to agents directly rather than just described in text.
+
+### Automation: workflows
+
+- **Saved, reusable automations** — a workflow is a named, node-based automation a channel or agent can trigger, chaining agents together with utility steps (deterministic transforms, ad hoc summarization, conditional branches, and merges).
+- **Visual canvas** — a drag-and-drop node editor: place nodes from a palette, wire up connections, and watch a run animate over the canvas node by node as it executes.
+- **Multiple ways to trigger a run** — a `/workflow-name <input>` slash command typed in a channel, an agent calling a `run_workflow` tool mid-conversation, an incoming webhook, or a schedule.
+- **Retries and visible step output** — each node supports a configurable retry policy, and each execution posts a visible step indicator into the thread so a run reads like an auditable trail rather than a black box.
+
+<p align="center">
+  <img src=".github/assets/readme-workflows.png" alt="The Workflows visual canvas showing an Agent step feeding into a Summarize step feeding into a Conditional step" width="500">
+</p>
+
+### Tools & extensibility
+
 - **MCP servers & custom tools** — connect external MCP servers or write your own tools in Python; agents discover and use them like any built-in capability.
-- **Peer-to-peer sync** — multiple machines on the same workspace key sync channels, agents, teams, and files directly with each other. No central server, ever.
-- **Local-first security posture** — the web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed.
-- **File attachments** — attach files to any message; agents can read and act on them.
+- **Built-in tools out of the box** — including sandboxed code execution, web search, HTTP requests, file/filesystem access, database queries, knowledge-base lookup, and workflow/schedule/channel management actions.
+- **Per-tool permission scope** — fine-grained control over which tools an agent can use and what they're allowed to touch.
+
+### Knowledge & governance
+
+- **Knowledge bases (RAG)** — give agents a knowledge base of ingested documents to ground answers in your own data, searchable mid-conversation via a `search_knowledge_base` tool.
+- **Unified approval queue** — one inbox for anything that needs a human's OK before it happens: an agent-created schedule, a spend budget that's been exceeded, or an agent blocked from using a sensitive tool unattended.
+- **Evals** — build regression-test suites for agents and workflows (fixed inputs judged against an expected outcome) so a behavior change shows up as a failing case instead of a human happening to notice a bad reply.
+- **Usage dashboard & spend budgets** — token consumption and cost aggregated by agent and model, with budgets that require approval before a threshold is crossed.
+- **Runs** — one end-to-end, timed timeline per human message, slash command, or scheduled workflow fire, linking dispatch decisions, agent replies, and workflow steps together.
+
+### Peer-to-peer sync
+
+- **No central server, ever** — multiple machines on the same workspace key sync channels, agents, teams, and files directly with each other over an encrypted mesh.
+- **Coordinator election** — peers elect a coordinator for workspace-singleton work (like a scheduled workflow firing once, not once per synced peer), with automatic failover and no single point of failure.
+
+### Local-first security posture
+
+- The web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed.
+- **Multi-human workspaces via scoped invites** — a second person can join without ever seeing the recovery phrase; invite-based sessions are gated out of sensitive surfaces (provider credentials, sync control, settings) and never gain peer-to-peer mesh membership.
 
 ## Installation
 
@@ -123,7 +158,8 @@ Rivulets/
 ├── ui/             # SvelteKit frontend
 ├── packaging/      # PyInstaller build specs (native binaries)
 ├── scripts/        # Install script, local build helper
-├── docs/           # Architecture overview and security/threat model
+├── docs/           # Architecture overview, security/threat model, requirements
+├── marketing/      # Marketing site content brief (not the site itself)
 ├── Dockerfile
 ├── docker-compose.yml
 └── .github/        # CI/CD workflows, issue templates
