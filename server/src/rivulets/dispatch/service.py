@@ -49,24 +49,35 @@ from typing import Any, cast
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from croniter import CroniterError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos import run_agent
+from rivulets.agentos import run_agent, sync_agents
 from rivulets.agentos.accounting import record_agent_run
+from rivulets.agentos.agent_lifecycle import (
+    generate_and_store_routing_rules,
+    publish_agent_change,
+    record_agent_version,
+    register_agent_with_agentos,
+    set_agent_teams,
+    set_agent_tools,
+)
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.config import get_settings
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
     AgentRoutingRule,
+    AgentVersion,
     Channel,
     DispatchDecision,
     File,
     Message,
     Rivulet,
     RivuletGuardState,
+    Team,
     TeamAgent,
+    Tool,
     Workflow,
     WorkflowSchedule,
 )
@@ -314,6 +325,241 @@ def _find_list_channels_call(run_output: RunOutput) -> bool:
     """Same shape as _find_list_schedules_call, for the argument-less
     list_channels tool (tools/builtin/channels.py, #189)."""
     return any(tool_call.tool_name == "list_channels" for tool_call in run_output.tools or [])
+
+
+def _str_list(args: dict[str, object], key: str) -> list[str] | None:
+    """Returns `args[key]` if it's a list of strings, else None -- used
+    (#190) wherever a tool call's optional list arg needs to preserve the
+    same "missing means don't touch, [] means clear" distinction
+    AgentUpdate/TeamUpdate make at the HTTP layer: args.get(key) already
+    returns None for a key the model didn't supply, and this only
+    overrides that to None too if the value is present but malformed
+    (not a list, or a list with a non-string item), never turning an
+    explicit [] into anything else."""
+    value = args.get(key)
+    if isinstance(value, list) and all(isinstance(item, str) for item in cast(list[Any], value)):
+        return cast(list[str], value)
+    return None
+
+
+class CreateAgentCall:
+    """Parsed args for a create_agent tool call (#190)."""
+
+    def __init__(self, name: str, args: dict[str, object]) -> None:
+        self.name = name
+        self.description = _str_or_none(args, "description") or ""
+        self.instructions = _str_or_none(args, "instructions") or ""
+        self.model = _str_or_none(args, "model") or ""
+        self.team_ids = _str_list(args, "team_ids") or []
+
+
+def _find_create_agent_call(run_output: RunOutput) -> CreateAgentCall | None:
+    """Same shape as _find_run_workflow_call, for the create_agent tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "create_agent":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        if isinstance(name, str):
+            return CreateAgentCall(name, args)
+    return None
+
+
+class UpdateAgentCall:
+    """Parsed args for an update_agent tool call (#190). Only `agent`
+    (the id-or-name reference) is required; every other field falls back
+    to None ("don't touch") when the model didn't supply it -- see
+    _str_list's docstring for why tool_ids/team_ids specifically preserve
+    the None-vs-[] distinction rather than defaulting to []."""
+
+    def __init__(self, agent_ref: str, args: dict[str, object]) -> None:
+        self.agent_ref = agent_ref
+        self.name = _str_or_none(args, "name")
+        self.description = _str_or_none(args, "description")
+        self.instructions = _str_or_none(args, "instructions")
+        self.model = _str_or_none(args, "model")
+        self.tool_ids = _str_list(args, "tool_ids")
+        self.team_ids = _str_list(args, "team_ids")
+
+
+def _find_update_agent_call(run_output: RunOutput) -> UpdateAgentCall | None:
+    """Same shape as _find_run_workflow_call, for the update_agent tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_agent":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        agent_ref = args.get("agent")
+        if isinstance(agent_ref, str):
+            return UpdateAgentCall(agent_ref, args)
+    return None
+
+
+def _find_delete_agent_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the delete_agent tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "delete_agent":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        agent_ref = args.get("agent")
+        if isinstance(agent_ref, str):
+            return agent_ref
+    return None
+
+
+class UpdateAgentRoutingRulesCall:
+    """Parsed args for an update_agent_routing_rules tool call (#190)."""
+
+    def __init__(self, agent_ref: str, rules: list[dict[str, object]]) -> None:
+        self.agent_ref = agent_ref
+        self.rules = rules
+
+
+def _find_update_agent_routing_rules_call(
+    run_output: RunOutput,
+) -> UpdateAgentRoutingRulesCall | None:
+    """Same shape as _find_run_workflow_call, for the
+    update_agent_routing_rules tool (tools/builtin/agents_teams.py,
+    #190). `rules` must be a list of dicts to even be considered a call
+    worth handling -- each dict's own fields (rule_type/pattern/priority)
+    are validated later, in _handle_update_agent_routing_rules_trigger,
+    the same "parse loosely here, validate meaningfully in the handler"
+    split every other parser in this module follows."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_agent_routing_rules":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        agent_ref = args.get("agent")
+        rules = args.get("rules")
+        if isinstance(agent_ref, str) and isinstance(rules, list):
+            items = cast(list[Any], rules)
+            if all(isinstance(item, dict) for item in items):
+                return UpdateAgentRoutingRulesCall(agent_ref, cast(list[dict[str, object]], rules))
+    return None
+
+
+class UpdateAgentPeerPreferenceCall:
+    """Parsed args for an update_agent_peer_preference tool call (#190).
+    `capability_tag` is None both when the model omitted it and when it
+    explicitly passed None -- either way means "clear", the same
+    contract PeerPreferenceIn's field default gives the HTTP endpoint."""
+
+    def __init__(self, agent_ref: str, capability_tag: str | None) -> None:
+        self.agent_ref = agent_ref
+        self.capability_tag = capability_tag
+
+
+def _find_update_agent_peer_preference_call(
+    run_output: RunOutput,
+) -> UpdateAgentPeerPreferenceCall | None:
+    """Same shape as _find_run_workflow_call, for the
+    update_agent_peer_preference tool (tools/builtin/agents_teams.py,
+    #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_agent_peer_preference":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        agent_ref = args.get("agent")
+        if isinstance(agent_ref, str):
+            return UpdateAgentPeerPreferenceCall(agent_ref, _str_or_none(args, "capability_tag"))
+    return None
+
+
+class RollbackAgentVersionCall:
+    """Parsed args for a rollback_agent_version tool call (#190)."""
+
+    def __init__(self, agent_ref: str, version: int) -> None:
+        self.agent_ref = agent_ref
+        self.version = version
+
+
+def _find_rollback_agent_version_call(run_output: RunOutput) -> RollbackAgentVersionCall | None:
+    """Same shape as _find_run_workflow_call, for the
+    rollback_agent_version tool (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "rollback_agent_version":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        agent_ref = args.get("agent")
+        version = args.get("version")
+        # bool is an int subclass -- excluded explicitly so a model
+        # accidentally passing a bare `true`/`false` doesn't get
+        # coerced into version 1/0.
+        version_ok = isinstance(version, int) and not isinstance(version, bool)
+        if isinstance(agent_ref, str) and version_ok:
+            return RollbackAgentVersionCall(agent_ref, cast(int, version))
+    return None
+
+
+def _find_list_agents_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_schedules_call, for the argument-less
+    list_agents tool (tools/builtin/agents_teams.py, #190)."""
+    return any(tool_call.tool_name == "list_agents" for tool_call in run_output.tools or [])
+
+
+class CreateTeamCall:
+    """Parsed args for a create_team tool call (#190)."""
+
+    def __init__(self, name: str, args: dict[str, object]) -> None:
+        self.name = name
+        self.description = _str_or_none(args, "description")
+
+
+def _find_create_team_call(run_output: RunOutput) -> CreateTeamCall | None:
+    """Same shape as _find_run_workflow_call, for the create_team tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "create_team":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        if isinstance(name, str):
+            return CreateTeamCall(name, args)
+    return None
+
+
+class UpdateTeamCall:
+    """Parsed args for an update_team tool call (#190)."""
+
+    def __init__(self, team_ref: str, args: dict[str, object]) -> None:
+        self.team_ref = team_ref
+        self.name = _str_or_none(args, "name")
+        self.description = _str_or_none(args, "description")
+        self.agent_ids = _str_list(args, "agent_ids")
+
+
+def _find_update_team_call(run_output: RunOutput) -> UpdateTeamCall | None:
+    """Same shape as _find_run_workflow_call, for the update_team tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_team":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        team_ref = args.get("team")
+        if isinstance(team_ref, str):
+            return UpdateTeamCall(team_ref, args)
+    return None
+
+
+def _find_delete_team_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the delete_team tool
+    (tools/builtin/agents_teams.py, #190)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "delete_team":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        team_ref = args.get("team")
+        if isinstance(team_ref, str):
+            return team_ref
+    return None
+
+
+def _find_list_teams_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_schedules_call, for the argument-less
+    list_teams tool (tools/builtin/agents_teams.py, #190)."""
+    return any(tool_call.tool_name == "list_teams" for tool_call in run_output.tools or [])
 
 
 async def dispatch_and_respond(
@@ -1089,6 +1335,66 @@ async def _invoke_agent(
     if _find_list_channels_call(run_output):
         new_messages.extend(await _handle_list_channels_trigger(db, rivulet, agent))
 
+    create_agent_call = _find_create_agent_call(run_output)
+    if create_agent_call is not None:
+        new_messages.extend(
+            await _handle_create_agent_trigger(db, rivulet, agent, create_agent_call)
+        )
+
+    update_agent_call = _find_update_agent_call(run_output)
+    if update_agent_call is not None:
+        new_messages.extend(
+            await _handle_update_agent_trigger(db, rivulet, agent, update_agent_call)
+        )
+
+    delete_agent_call = _find_delete_agent_call(run_output)
+    if delete_agent_call is not None:
+        new_messages.extend(
+            await _handle_delete_agent_trigger(db, rivulet, agent, delete_agent_call)
+        )
+
+    update_agent_routing_rules_call = _find_update_agent_routing_rules_call(run_output)
+    if update_agent_routing_rules_call is not None:
+        new_messages.extend(
+            await _handle_update_agent_routing_rules_trigger(
+                db, rivulet, agent, update_agent_routing_rules_call
+            )
+        )
+
+    update_agent_peer_preference_call = _find_update_agent_peer_preference_call(run_output)
+    if update_agent_peer_preference_call is not None:
+        new_messages.extend(
+            await _handle_update_agent_peer_preference_trigger(
+                db, rivulet, agent, update_agent_peer_preference_call
+            )
+        )
+
+    rollback_agent_version_call = _find_rollback_agent_version_call(run_output)
+    if rollback_agent_version_call is not None:
+        new_messages.extend(
+            await _handle_rollback_agent_version_trigger(
+                db, rivulet, agent, rollback_agent_version_call
+            )
+        )
+
+    if _find_list_agents_call(run_output):
+        new_messages.extend(await _handle_list_agents_trigger(db, rivulet, agent))
+
+    create_team_call = _find_create_team_call(run_output)
+    if create_team_call is not None:
+        new_messages.extend(await _handle_create_team_trigger(db, rivulet, agent, create_team_call))
+
+    update_team_call = _find_update_team_call(run_output)
+    if update_team_call is not None:
+        new_messages.extend(await _handle_update_team_trigger(db, rivulet, agent, update_team_call))
+
+    delete_team_call = _find_delete_team_call(run_output)
+    if delete_team_call is not None:
+        new_messages.extend(await _handle_delete_team_trigger(db, rivulet, agent, delete_team_call))
+
+    if _find_list_teams_call(run_output):
+        new_messages.extend(await _handle_list_teams_trigger(db, rivulet, agent))
+
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
     recursive_messages = await dispatch_and_respond(
@@ -1758,6 +2064,711 @@ async def _handle_list_channels_trigger(
         for c in channels:
             status = " (archived)" if c.archived else ""
             lines.append(f"- /{c.name}{status} (id: {c.id})")
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+_AGENT_NAME_MIN_LEN = 2
+_AGENT_NAME_MAX_LEN = 64
+_AGENT_DESCRIPTION_MIN_LEN = 10
+_AGENT_DESCRIPTION_MAX_LEN = 500
+
+_ROUTING_RULE_TYPES = {rt.value for rt in RuleType}
+_ARRAY_PATTERN_RULE_TYPES = {RuleType.KEYWORD.value, RuleType.SEMANTIC.value}
+
+
+async def _resolve_agent_ref(db: AsyncSession, agent_ref: str) -> Agent | None:
+    """Resolves an agent tool's `agent` arg, which may be the agent's id
+    or its name. An id match is checked first. Unlike
+    _resolve_channel_ref, a name match is never ambiguous -- Agent.name
+    is globally unique (db/models.py's idx_agent_name), not just unique
+    among some subset of rows -- so there's no list-of-matches case to
+    handle here."""
+    agent = await db.get(Agent, agent_ref)
+    if agent is not None:
+        return agent
+    return await db.scalar(select(Agent).where(Agent.name == agent_ref))
+
+
+async def _resolve_team_ref(db: AsyncSession, team_ref: str) -> Team | list[Team] | None:
+    """Resolves a team tool's `team` arg, which may be the team's id or
+    its name. An id match is checked first and is always unambiguous.
+    Unlike Agent.name, Team.name carries no uniqueness constraint at all
+    (db/models.py's Team), so a name match can genuinely hit more than
+    one team -- returned as a list so callers can report that ambiguity
+    the same way _resolve_channel_ref does, rather than silently acting
+    on whichever one sorts first."""
+    team = await db.get(Team, team_ref)
+    if team is not None:
+        return team
+    matches = list((await db.scalars(select(Team).where(Team.name == team_ref))).all())
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return matches
+    return None
+
+
+def _parse_routing_rule(item: dict[str, object]) -> tuple[str, str, int] | None:
+    """Validates and normalizes one rule dict from an
+    update_agent_routing_rules tool call into (rule_type, pattern,
+    priority), ready for an AgentRoutingRule row. `pattern` is
+    JSON-encoded for keyword/semantic rules (matching how _row_to_rule
+    expects to read it back out) since the tool itself accepts a real
+    list for those, not a pre-encoded JSON string -- more natural for a
+    model to produce than asking it to JSON-encode a string field the
+    way RoutingRuleIn's HTTP shape does. Returns None for anything
+    malformed; the caller decides how to report that."""
+    rule_type = item.get("rule_type")
+    if not isinstance(rule_type, str) or rule_type not in _ROUTING_RULE_TYPES:
+        return None
+    raw_priority = item.get("priority", 0)
+    priority_is_int = isinstance(raw_priority, int) and not isinstance(raw_priority, bool)
+    priority = cast(int, raw_priority) if priority_is_int else 0
+    raw_pattern = item.get("pattern")
+    if rule_type in _ARRAY_PATTERN_RULE_TYPES:
+        if isinstance(raw_pattern, list) and all(
+            isinstance(p, str) for p in cast(list[Any], raw_pattern)
+        ):
+            pattern = json.dumps(raw_pattern)
+        else:
+            return None
+    elif rule_type == RuleType.REGEX.value:
+        if not isinstance(raw_pattern, str):
+            return None
+        try:
+            re.compile(raw_pattern)
+        except re.error:
+            return None
+        pattern = raw_pattern
+    else:
+        pattern = ""
+    return rule_type, pattern, priority
+
+
+async def _handle_create_agent_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: CreateAgentCall
+) -> list[Message]:
+    """#190: an agent called the create_agent tool. Validation mirrors
+    api/agents.py's AgentCreate constraints (name/description length)
+    plus proactive name-uniqueness and team_ids-existence checks the HTTP
+    layer itself leaves to the DB's own constraints (idx_agent_name,
+    team.id's FK) -- a request that would 500 through the API is
+    rejected here as a visible message instead, the same defensive
+    posture _handle_create_channel_trigger already takes. On success,
+    gives the new agent the full "actually usable" treatment a human's
+    own API call gets: an initial #104 version snapshot, LLM-generated
+    routing rules (FR-3.3), and AgentOS registration (FR-3.2) -- skipping
+    any of these would leave a new agent that exists in the DB but can
+    never actually be dispatched to."""
+    if not (_AGENT_NAME_MIN_LEN <= len(call.name) <= _AGENT_NAME_MAX_LEN):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create agent {call.name!r}, but agent names must be "
+                f"{_AGENT_NAME_MIN_LEN}-{_AGENT_NAME_MAX_LEN} characters.",
+            )
+        ]
+    existing = await db.scalar(select(Agent).where(Agent.name == call.name))
+    if existing is not None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create agent {call.name!r}, but an agent with that "
+                "name already exists.",
+            )
+        ]
+    if not (_AGENT_DESCRIPTION_MIN_LEN <= len(call.description) <= _AGENT_DESCRIPTION_MAX_LEN):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create agent {call.name!r}, but its description must "
+                f"be {_AGENT_DESCRIPTION_MIN_LEN}-{_AGENT_DESCRIPTION_MAX_LEN} characters.",
+            )
+        ]
+    teams: list[Team] = []
+    for team_id in call.team_ids:
+        team = await db.get(Team, team_id)
+        if team is None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to create agent {call.name!r}, but team id "
+                    f"{team_id!r} doesn't exist.",
+                )
+            ]
+        teams.append(team)
+
+    new_agent = Agent(
+        name=call.name,
+        description=call.description,
+        instructions=call.instructions,
+        model=call.model,
+    )
+    db.add(new_agent)
+    await db.flush()  # populate new_agent.id before using it in join rows
+    await set_agent_teams(db, new_agent.id, [t.id for t in teams])
+    await record_agent_version(db, new_agent)
+    await db.commit()
+
+    await generate_and_store_routing_rules(db, new_agent)
+    await register_agent_with_agentos(db, new_agent)
+    await publish_agent_change(db, new_agent)
+
+    message = _system_message(
+        db, rivulet, f"@{agent.name} created agent @{new_agent.name} (id: {new_agent.id})."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_created", "agent_id": new_agent.id, "created_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_agent_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateAgentCall
+) -> list[Message]:
+    """#190: an agent called the update_agent tool. Mirrors api/agents.py's
+    update_agent handler (name/description validation, routing-rule
+    regen when description/instructions change, #104 version snapshot
+    when instructions/model change, AgentOS re-registration) plus
+    proactive tool_ids/team_ids-existence checks the HTTP layer itself
+    leaves to the DB's FK constraints."""
+    result = await _resolve_agent_ref(db, call.agent_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update agent {call.agent_ref!r}, but no agent with "
+                "that id or name was found.",
+            )
+        ]
+    target = result
+
+    if (
+        call.name is None
+        and call.description is None
+        and call.instructions is None
+        and call.model is None
+        and call.tool_ids is None
+        and call.team_ids is None
+    ):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update agent @{target.name}, but didn't specify any "
+                "changes.",
+            )
+        ]
+
+    if call.name is not None and call.name != target.name:
+        if not (_AGENT_NAME_MIN_LEN <= len(call.name) <= _AGENT_NAME_MAX_LEN):
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename agent @{target.name}, but agent names must "
+                    f"be {_AGENT_NAME_MIN_LEN}-{_AGENT_NAME_MAX_LEN} characters.",
+                )
+            ]
+        conflict = await db.scalar(select(Agent).where(Agent.name == call.name))
+        if conflict is not None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename agent @{target.name} to {call.name!r}, but "
+                    "an agent with that name already exists.",
+                )
+            ]
+
+    if call.description is not None and not (
+        _AGENT_DESCRIPTION_MIN_LEN <= len(call.description) <= _AGENT_DESCRIPTION_MAX_LEN
+    ):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update agent @{target.name}, but its description must "
+                f"be {_AGENT_DESCRIPTION_MIN_LEN}-{_AGENT_DESCRIPTION_MAX_LEN} characters.",
+            )
+        ]
+
+    if call.tool_ids is not None:
+        for tool_id in call.tool_ids:
+            if await db.get(Tool, tool_id) is None:
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to update agent @{target.name}, but tool id "
+                        f"{tool_id!r} doesn't exist.",
+                    )
+                ]
+
+    if call.team_ids is not None:
+        for team_id in call.team_ids:
+            if await db.get(Team, team_id) is None:
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to update agent @{target.name}, but team id "
+                        f"{team_id!r} doesn't exist.",
+                    )
+                ]
+
+    previous_name = target.name
+    rule_regen = call.description is not None or call.instructions is not None
+    old_instructions, old_model = target.instructions, target.model
+
+    if call.name is not None:
+        target.name = call.name
+    if call.description is not None:
+        target.description = call.description
+    if call.instructions is not None:
+        target.instructions = call.instructions
+    if call.model is not None:
+        target.model = call.model
+    if call.tool_ids is not None:
+        await set_agent_tools(db, target.id, call.tool_ids)
+    if call.team_ids is not None:
+        await set_agent_teams(db, target.id, call.team_ids)
+
+    if target.instructions != old_instructions or target.model != old_model:
+        await record_agent_version(db, target)
+
+    target.vector_clock += 1
+    await db.commit()
+
+    if rule_regen:
+        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
+        await generate_and_store_routing_rules(db, target)
+
+    await register_agent_with_agentos(db, target)
+    await publish_agent_change(db, target)
+
+    message = _system_message(db, rivulet, f"@{agent.name} updated agent @{previous_name}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_updated", "agent_id": target.id, "updated_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_delete_agent_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, agent_ref: str
+) -> list[Message]:
+    """#190: an agent called the delete_agent tool. Mirrors api/agents.py's
+    delete_agent handler (delete + re-sync AgentOS's registry), plus a
+    guard the HTTP layer doesn't need: this handler runs *during* the
+    calling agent's own turn, so letting it delete itself would pull the
+    row out from under the rest of this function's still-in-flight
+    _invoke_agent call (guard bookkeeping, the recursive re-dispatch
+    below, a possible handoff) -- refused up front instead of leaving
+    that an untested edge case."""
+    result = await _resolve_agent_ref(db, agent_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete agent {agent_ref!r}, but no agent with that id "
+                "or name was found.",
+            )
+        ]
+    target = result
+    if target.id == agent.id:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete itself -- an agent can't delete itself while "
+                "running.",
+            )
+        ]
+    target_name = target.name
+    await db.delete(target)
+    await db.commit()
+    await sync_agents(db)
+
+    message = _system_message(db, rivulet, f"@{agent.name} deleted agent @{target_name}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_deleted", "agent_name": target_name, "deleted_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_agent_routing_rules_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateAgentRoutingRulesCall
+) -> list[Message]:
+    """#190: an agent called the update_agent_routing_rules tool. Mirrors
+    api/agents.py's update_routing_rules handler (full replace, not a
+    merge) plus proactive per-rule validation the HTTP layer leaves to
+    Pydantic's RoutingRuleIn -- a rules list built by a model isn't
+    guaranteed well-typed the way a validated request body is."""
+    result = await _resolve_agent_ref(db, call.agent_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update routing rules for agent {call.agent_ref!r}, "
+                "but no agent with that id or name was found.",
+            )
+        ]
+    target = result
+
+    parsed: list[tuple[str, str, int]] = []
+    for item in call.rules:
+        rule = _parse_routing_rule(item)
+        if rule is None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to update routing rules for agent @{target.name}, "
+                    f"but {item!r} isn't a valid rule.",
+                )
+            ]
+        parsed.append(rule)
+
+    await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
+    for rule_type, pattern, priority in parsed:
+        db.add(
+            AgentRoutingRule(
+                agent_id=target.id, rule_type=rule_type, pattern=pattern, priority=priority
+            )
+        )
+    await db.flush()
+
+    message = _system_message(
+        db, rivulet, f"@{agent.name} set {len(parsed)} routing rule(s) for agent @{target.name}."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_routing_rules_updated", "agent_id": target.id, "updated_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_agent_peer_preference_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateAgentPeerPreferenceCall
+) -> list[Message]:
+    """#190: an agent called the update_agent_peer_preference tool.
+    Mirrors api/agents.py's set_peer_preference handler: capability_tag=
+    None clears the existing preference (local-only, not synced -- same
+    as that handler's own docstring note); setting a tag creates/updates
+    the row and publishes it (#10, sync/apply.py's
+    AGENT_PEER_PREFERENCE_SPEC)."""
+    result = await _resolve_agent_ref(db, call.agent_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to set peer preference for agent {call.agent_ref!r}, but "
+                "no agent with that id or name was found.",
+            )
+        ]
+    target = result
+    pref = await db.get(AgentPeerPreference, target.id)
+
+    if call.capability_tag is None:
+        if pref is not None:
+            await db.delete(pref)
+            await db.commit()
+        message = _system_message(
+            db, rivulet, f"@{agent.name} cleared peer preference for agent @{target.name}."
+        )
+        return [message]
+
+    if pref is None:
+        pref = AgentPeerPreference(agent_id=target.id, capability_tag=call.capability_tag)
+        db.add(pref)
+    else:
+        pref.capability_tag = call.capability_tag
+        pref.vector_clock += 1
+    await db.commit()
+    await publish_current_state(db, "agent_peer_preference", target.id)
+
+    message = _system_message(
+        db,
+        rivulet,
+        f"@{agent.name} set peer preference for agent @{target.name} to {call.capability_tag!r}.",
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_peer_preference_updated", "agent_id": target.id, "updated_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_rollback_agent_version_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: RollbackAgentVersionCall
+) -> list[Message]:
+    """#190: an agent called the rollback_agent_version tool. Mirrors
+    api/agents.py's rollback_agent_version handler (revert instructions/
+    model to a prior version, record the rollback itself as a new
+    version, regenerate routing rules when instructions changed)."""
+    result = await _resolve_agent_ref(db, call.agent_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to roll back agent {call.agent_ref!r}, but no agent with "
+                "that id or name was found.",
+            )
+        ]
+    target = result
+    version_row = await db.scalar(
+        select(AgentVersion).where(
+            AgentVersion.agent_id == target.id, AgentVersion.version == call.version
+        )
+    )
+    if version_row is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to roll back agent @{target.name} to version "
+                f"{call.version}, but that version doesn't exist.",
+            )
+        ]
+
+    instructions_changed = target.instructions != version_row.instructions
+    target.instructions = version_row.instructions
+    target.model = version_row.model
+    await record_agent_version(db, target)
+    target.vector_clock += 1
+    await db.commit()
+
+    if instructions_changed:
+        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
+        await generate_and_store_routing_rules(db, target)
+
+    await db.refresh(target)
+    await register_agent_with_agentos(db, target)
+    await publish_agent_change(db, target)
+
+    message = _system_message(
+        db, rivulet, f"@{agent.name} rolled back agent @{target.name} to version {call.version}."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "agent_rolled_back", "agent_id": target.id, "version": call.version},
+    )
+    return [message]
+
+
+async def _handle_list_agents_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#190: an agent called the (unscoped, read-only) list_agents
+    tool."""
+    agents = list((await db.scalars(select(Agent).order_by(Agent.name))).all())
+    if not agents:
+        content = f"@{agent.name} looked up the workspace's agents: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's agents:"]
+        for a in agents:
+            lines.append(f"- @{a.name} (id: {a.id}, model: {a.model})")
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+async def _handle_create_team_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: CreateTeamCall
+) -> list[Message]:
+    """#190: an agent called the create_team tool. Mirrors api/teams.py's
+    create_team handler -- Team.name carries no length or uniqueness
+    constraint at either layer, so there's nothing to proactively
+    validate beyond what TeamCreate itself would accept."""
+    team = Team(name=call.name, description=call.description)
+    db.add(team)
+    await db.flush()
+    await publish_current_state(db, "team", team.id)
+
+    message = _system_message(
+        db, rivulet, f"@{agent.name} created team {team.name!r} (id: {team.id})."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "team_created", "team_id": team.id, "created_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_team_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateTeamCall
+) -> list[Message]:
+    """#190: an agent called the update_team tool. Mirrors api/teams.py's
+    update_team handler (full membership replace, ordered by position)
+    -- except agent_ids entries are resolved by id-or-name
+    (_resolve_agent_ref) rather than raw id only, since a model is far
+    more likely to know a teammate's name than its uuid; api/teams.py's
+    own TeamUpdate.agent_ids only ever accepts ids because a human's UI
+    already resolved the name to an id before the request was built."""
+    result = await _resolve_team_ref(db, call.team_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update team {call.team_ref!r}, but no team with that "
+                "id or name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(t.id for t in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update team {call.team_ref!r}, but that name matches "
+                f"{len(result)} teams ({ids}) -- specify by id instead.",
+            )
+        ]
+    team = result
+
+    if call.name is None and call.description is None and call.agent_ids is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update team {team.name!r}, but didn't specify any "
+                "changes.",
+            )
+        ]
+
+    resolved_agents: list[Agent] = []
+    if call.agent_ids is not None:
+        for ref in call.agent_ids:
+            member = await _resolve_agent_ref(db, ref)
+            if member is None:
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to update team {team.name!r}, but {ref!r} "
+                        "doesn't match any agent.",
+                    )
+                ]
+            resolved_agents.append(member)
+
+    previous_name = team.name
+    if call.name is not None:
+        team.name = call.name
+    if call.description is not None:
+        team.description = call.description
+    if call.agent_ids is not None:
+        # De-duped by id, first-seen order preserved -- two different refs
+        # (e.g. an agent's name and its id) can resolve to the same Agent,
+        # and TeamAgent's primary key is the (team_id, agent_id) pair, so
+        # inserting the same agent twice would otherwise hit an
+        # IntegrityError on commit.
+        deduped = list({member.id: member for member in resolved_agents}.values())
+        await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team.id))
+        for position, member in enumerate(deduped):
+            db.add(TeamAgent(team_id=team.id, agent_id=member.id, position=position))
+
+    await db.commit()
+    await publish_current_state(db, "team", team.id)
+
+    message = _system_message(db, rivulet, f"@{agent.name} updated team {previous_name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "team_updated", "team_id": team.id, "updated_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_delete_team_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, team_ref: str
+) -> list[Message]:
+    """#190: an agent called the delete_team tool. Mirrors api/teams.py's
+    delete_team handler."""
+    result = await _resolve_team_ref(db, team_ref)
+    if result is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete team {team_ref!r}, but no team with that id or "
+                "name was found.",
+            )
+        ]
+    if isinstance(result, list):
+        ids = ", ".join(t.id for t in result)
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete team {team_ref!r}, but that name matches "
+                f"{len(result)} teams ({ids}) -- specify by id instead.",
+            )
+        ]
+    team = result
+    team_name = team.name
+    await db.delete(team)
+    await db.commit()
+
+    message = _system_message(db, rivulet, f"@{agent.name} deleted team {team_name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "team_deleted", "team_name": team_name, "deleted_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_teams_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#190: an agent called the (unscoped, read-only) list_teams
+    tool."""
+    teams = list((await db.scalars(select(Team).order_by(Team.name))).all())
+    if not teams:
+        content = f"@{agent.name} looked up the workspace's teams: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's teams:"]
+        for t in teams:
+            member_ids = list(
+                (
+                    await db.scalars(
+                        select(TeamAgent.agent_id)
+                        .where(TeamAgent.team_id == t.id)
+                        .order_by(TeamAgent.position)
+                    )
+                ).all()
+            )
+            names: list[str] = []
+            for member_id in member_ids:
+                member = await db.get(Agent, member_id)
+                if member is not None:
+                    names.append(f"@{member.name}")
+            members = ", ".join(names) if names else "no members"
+            lines.append(f"- {t.name!r} (id: {t.id}): {members}")
         content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)

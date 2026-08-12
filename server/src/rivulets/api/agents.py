@@ -14,7 +14,7 @@ peers. Publishing is best-effort — a peer being unreachable, or the sync
 engine not running at all, must never fail the request (FR-9.5).
 
 Every create/update/rollback that sets instructions/model also snapshots
-an AgentVersion row (#104) — see _record_agent_version and the
+an AgentVersion row (#104) — see record_agent_version and the
 /{agent_id}/versions endpoints below for the history/rollback surface.
 """
 
@@ -25,7 +25,15 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 
-from rivulets.agentos import get_agentos, sync_agents
+from rivulets.agentos import sync_agents
+from rivulets.agentos.agent_lifecycle import (
+    generate_and_store_routing_rules,
+    publish_agent_change,
+    record_agent_version,
+    register_agent_with_agentos,
+    set_agent_teams,
+    set_agent_tools,
+)
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.models import (
@@ -33,12 +41,9 @@ from rivulets.db.models import (
     AgentPeerPreference,
     AgentRoutingRule,
     AgentRun,
-    AgentTool,
     AgentToolScope,
     AgentVersion,
-    TeamAgent,
 )
-from rivulets.dispatch.rule_generation import generate_routing_rules
 from rivulets.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -194,69 +199,6 @@ async def _get_or_404(db: DbSession, agent_id: str) -> Agent:
     return agent
 
 
-async def _set_tools(db: DbSession, agent_id: str, tool_ids: list[str]) -> None:
-    await db.execute(delete(AgentTool).where(AgentTool.agent_id == agent_id))
-    for tool_id in tool_ids:
-        db.add(AgentTool(agent_id=agent_id, tool_id=tool_id))
-
-
-async def _set_teams(db: DbSession, agent_id: str, team_ids: list[str]) -> None:
-    await db.execute(delete(TeamAgent).where(TeamAgent.agent_id == agent_id))
-    for team_id in team_ids:
-        db.add(TeamAgent(team_id=team_id, agent_id=agent_id))
-
-
-async def _generate_and_store_routing_rules(db: DbSession, agent: Agent) -> None:
-    rules = await generate_routing_rules(db, agent.name, agent.description, agent.instructions)
-    if rules:
-        db.add_all(
-            AgentRoutingRule(
-                agent_id=agent.id, rule_type=rule_type, pattern=pattern, priority=priority
-            )
-            for rule_type, pattern, priority in rules
-        )
-        await db.commit()
-
-
-async def _publish_agent_change(db: DbSession, agent: Agent) -> None:
-    await publish_current_state(db, "agent", agent.id)
-
-
-async def _record_agent_version(db: DbSession, agent: Agent) -> None:
-    """Snapshots the agent's *current* instructions/model as the next
-    version (#104) -- same "record what's now current" shape as tools.py's
-    save_tool_version, just triggered from the CRUD flow itself rather
-    than a dedicated "save" endpoint, since agent edits don't have a
-    separate editor-handoff step the way custom tool source code does."""
-    latest_version = await db.scalar(
-        select(AgentVersion.version)
-        .where(AgentVersion.agent_id == agent.id)
-        .order_by(AgentVersion.version.desc())
-        .limit(1)
-    )
-    db.add(
-        AgentVersion(
-            agent_id=agent.id,
-            version=(latest_version or 0) + 1,
-            instructions=agent.instructions,
-            model=agent.model,
-        )
-    )
-
-
-async def _register_with_agentos(db: DbSession, agent: Agent) -> None:
-    """Rebuild AgentOS's agent registry and record whether `agent` made it
-    in. It won't have if its provider can't be resolved (NFR-2.4: that
-    only takes the one agent offline, not the whole sync) — agentos_agent_id
-    staying null is this scaffold's stand-in for an "unavailable" signal
-    until the UI grows a real status indicator."""
-    await sync_agents(db)
-    registered = any(a.id == agent.id for a in (get_agentos().agents or []))
-    agent.agentos_agent_id = agent.id if registered else None
-    await db.commit()
-    await db.refresh(agent)
-
-
 @router.get("", response_model=list[AgentOut])
 async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[Agent]:
     result = await db.execute(select(Agent))
@@ -276,14 +218,14 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
     db.add(agent)
     await db.flush()  # populate agent.id before using it in join rows
 
-    await _set_tools(db, agent.id, body.tool_ids)
-    await _set_teams(db, agent.id, body.team_ids)
-    await _record_agent_version(db, agent)
+    await set_agent_tools(db, agent.id, body.tool_ids)
+    await set_agent_teams(db, agent.id, body.team_ids)
+    await record_agent_version(db, agent)
     await db.commit()
 
-    await _generate_and_store_routing_rules(db, agent)
-    await _register_with_agentos(db, agent)
-    await _publish_agent_change(db, agent)
+    await generate_and_store_routing_rules(db, agent)
+    await register_agent_with_agentos(db, agent)
+    await publish_agent_change(db, agent)
     return agent
 
 
@@ -311,22 +253,22 @@ async def update_agent(
     if body.output_schema is not None:
         agent.output_schema = json.dumps(body.output_schema) if body.output_schema else None
     if body.tool_ids is not None:
-        await _set_tools(db, agent_id, body.tool_ids)
+        await set_agent_tools(db, agent_id, body.tool_ids)
     if body.team_ids is not None:
-        await _set_teams(db, agent_id, body.team_ids)
+        await set_agent_teams(db, agent_id, body.team_ids)
 
     if agent.instructions != old_instructions or agent.model != old_model:
-        await _record_agent_version(db, agent)
+        await record_agent_version(db, agent)
 
     agent.vector_clock += 1
     await db.commit()
 
     if needs_rule_regen:
         await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
-        await _generate_and_store_routing_rules(db, agent)
+        await generate_and_store_routing_rules(db, agent)
 
-    await _register_with_agentos(db, agent)
-    await _publish_agent_change(db, agent)
+    await register_agent_with_agentos(db, agent)
+    await publish_agent_change(db, agent)
     return agent
 
 
@@ -395,17 +337,17 @@ async def rollback_agent_version(
     instructions_changed = agent.instructions != target.instructions
     agent.instructions = target.instructions
     agent.model = target.model
-    await _record_agent_version(db, agent)
+    await record_agent_version(db, agent)
     agent.vector_clock += 1
     await db.commit()
 
     if instructions_changed:
         await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
-        await _generate_and_store_routing_rules(db, agent)
+        await generate_and_store_routing_rules(db, agent)
 
     await db.refresh(agent)
-    await _register_with_agentos(db, agent)
-    await _publish_agent_change(db, agent)
+    await register_agent_with_agentos(db, agent)
+    await publish_agent_change(db, agent)
     return agent
 
 
@@ -502,7 +444,7 @@ async def set_agent_tool_scopes(
     """Owner-only (#188's design decision): an agent shouldn't be able to
     expand its own reach, and neither should an invited session, so this
     is gated separately from the rest of this router. Replaces the full
-    granted-scope set, same delete+recreate shape as _set_tools/_set_teams
+    granted-scope set, same delete+recreate shape as set_agent_tools/set_agent_teams
     above. Unknown scope names are rejected rather than silently stored --
     a typo'd scope would grant nothing (no tool's required_scope would
     ever match it) while looking like it worked. Re-syncs AgentOS
@@ -518,5 +460,5 @@ async def set_agent_tool_scopes(
     for scope in granted:
         db.add(AgentToolScope(agent_id=agent_id, scope=scope))
     await db.commit()
-    await _register_with_agentos(db, agent)
+    await register_agent_with_agentos(db, agent)
     return AgentToolScopesOut(scopes=sorted(granted))

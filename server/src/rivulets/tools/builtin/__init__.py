@@ -5,6 +5,19 @@ callable; api/tools.py registers the ones a workspace enables against agents.
 agentos/service.py attaches it to every agent unconditionally (FR-6.1).
 """
 
+from rivulets.tools.builtin.agents_teams import (
+    create_agent,
+    create_team,
+    delete_agent,
+    delete_team,
+    list_agents,
+    list_teams,
+    rollback_agent_version,
+    update_agent,
+    update_agent_peer_preference,
+    update_agent_routing_rules,
+    update_team,
+)
 from rivulets.tools.builtin.channels import (
     archive_channel,
     create_channel,
@@ -27,22 +40,33 @@ from rivulets.tools.builtin.web_search import web_search
 __all__ = [
     "archive_channel",
     "cancel_schedule",
+    "create_agent",
     "create_channel",
+    "create_team",
+    "delete_agent",
+    "delete_team",
     "execute_python",
     "handoff",
     "http_request",
+    "list_agents",
     "list_channels",
     "list_files",
     "list_schedules",
+    "list_teams",
     "query_workspace_db",
     "read_attached_file",
     "read_file",
     "reorder_channels",
+    "rollback_agent_version",
     "run_workflow",
     "schedule_workflow",
     "search_knowledge_base",
     "unarchive_channel",
+    "update_agent",
+    "update_agent_peer_preference",
+    "update_agent_routing_rules",
     "update_channel",
+    "update_team",
     "web_search",
     "write_file",
 ]
