@@ -15,6 +15,7 @@ export interface BuildFlowGraphResult {
 	nodes: WorkflowFlowNode[];
 	edges: Edge[];
 	entryNodeId: string | null;
+	hasLoop: boolean;
 }
 
 // #198: a conditional edge's label -- what a viewer sees on the canvas
@@ -27,6 +28,70 @@ export function conditionEdgeLabel(condition: Record<string, unknown> | null): s
 	if (typeof condition.contains === 'string') return `contains "${condition.contains}"`;
 	if (typeof condition.not_contains === 'string') return `not contains "${condition.not_contains}"`;
 	return null;
+}
+
+// #199: mirrors engine.py's MAX_NODE_VISITS_PER_RUN / MAX_TOTAL_STEPS_PER_RUN
+// (server/src/rivulets/workflows/engine.py) -- neither value is exposed via
+// any API response, so the UI's "here's the safety net" copy just duplicates
+// the same two numbers. Keep these in sync if engine.py's constants change.
+export const LOOP_MAX_NODE_VISITS = 25;
+export const LOOP_MAX_TOTAL_STEPS = 200;
+
+// #199: an edge is a loop edge if its target can already reach its source
+// through the rest of the graph -- i.e. drawing this edge closes a cycle,
+// the same "revisits an already-visited node" shape engine.py's visit-count
+// guard exists for. Plain per-edge BFS rather than a full SCC pass: workflow
+// canvases are small and this only runs when the graph changes, not per
+// frame.
+export function isLoopEdge(
+	connections: WorkflowConnection[],
+	edge: { from_node_id: string | null; to_node_id: string }
+): boolean {
+	if (!edge.from_node_id) return false;
+	const fromNodeId = edge.from_node_id;
+	const adjacency = new Map<string, string[]>();
+	for (const c of connections) {
+		if (!c.from_node_id) continue;
+		const outbound = adjacency.get(c.from_node_id) ?? [];
+		outbound.push(c.to_node_id);
+		adjacency.set(c.from_node_id, outbound);
+	}
+	const visited = new Set<string>([edge.to_node_id]);
+	const queue = [edge.to_node_id];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		if (current === fromNodeId) return true;
+		for (const next of adjacency.get(current) ?? []) {
+			if (!visited.has(next)) {
+				visited.add(next);
+				queue.push(next);
+			}
+		}
+	}
+	return false;
+}
+
+// #199: an edge's label/style, given its condition (see conditionEdgeLabel)
+// and whether it's a loop edge (see isLoopEdge). A loop edge keeps whatever
+// color a plain/conditional edge would already have (unstyled default, or
+// magenta for a condition) and layers a tighter dotted dash + thicker stroke
+// on top of it, plus a "↻" marker in the label -- deliberately not a new
+// hue, since --color-agent-yellow is reserved for the third agent's print
+// ink only (see layout.css) and isn't available for canvas chrome.
+function edgeVisual(
+	conditionLabel: string | null,
+	loop: boolean
+): { label: string; labelStyle: string; style: string } | null {
+	if (!conditionLabel && !loop) return null;
+	const label = loop ? `↻ ${conditionLabel ?? 'loop back'}` : conditionLabel!;
+	const color = conditionLabel ? 'stroke: var(--color-agent-magenta); ' : '';
+	const style = loop
+		? `${color}stroke-dasharray: 2 3; stroke-width: 2.5px;`
+		: `${color}stroke-dasharray: 5 4;`;
+	const labelStyle = conditionLabel
+		? 'font-size: 11px; font-weight: 600; fill: var(--color-agent-magenta);'
+		: 'font-size: 11px; font-weight: 600;';
+	return { label, labelStyle, style };
 }
 
 // Pure WorkflowNode[]/WorkflowConnection[] -> Svelte Flow {nodes, edges}
@@ -66,6 +131,7 @@ export function buildFlowGraph(
 	// that's the exact bug class buildChain() had. A node with two outbound
 	// connections must produce two edges; two nodes sharing a target must
 	// produce two edges.
+	let hasLoop = false;
 	const flowEdges: Edge[] = connections
 		.filter(
 			(c): c is WorkflowConnection & { from_node_id: string } =>
@@ -73,6 +139,8 @@ export function buildFlowGraph(
 		)
 		.map((c) => {
 			const conditionLabel = conditionEdgeLabel(c.condition_json);
+			const loop = isLoopEdge(connections, c);
+			if (loop) hasLoop = true;
 			return {
 				id: c.id,
 				source: c.from_node_id,
@@ -82,20 +150,14 @@ export function buildFlowGraph(
 				// same way workflow-node-${id} does for nodes -- domAttributes is
 				// spread straight onto the rendered <g class="svelte-flow__edge">.
 				domAttributes: { 'data-testid': `workflow-edge-${c.id}` },
-				// A conditional edge gets a label plus a dashed stroke so
-				// branching is visible on the canvas itself, not just in the
-				// inspector -- an unconditional edge keeps the plain solid line
+				// A conditional and/or loop edge gets a label plus a distinct
+				// stroke so branching/looping is visible on the canvas itself,
+				// not just in the inspector -- a plain edge keeps the solid line
 				// it always had (no extra keys, so existing snapshots/tests for
 				// those are untouched).
-				...(conditionLabel
-					? {
-							label: conditionLabel,
-							labelStyle: 'font-size: 11px; font-weight: 600; fill: var(--color-agent-magenta);',
-							style: 'stroke-dasharray: 5 4; stroke: var(--color-agent-magenta);'
-						}
-					: {})
+				...(edgeVisual(conditionLabel, loop) ?? {})
 			};
 		});
 
-	return { nodes: flowNodes, edges: flowEdges, entryNodeId };
+	return { nodes: flowNodes, edges: flowEdges, entryNodeId, hasLoop };
 }

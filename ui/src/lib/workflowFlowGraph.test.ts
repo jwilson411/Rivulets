@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFlowGraph, conditionEdgeLabel } from './workflowFlowGraph';
+import { buildFlowGraph, conditionEdgeLabel, isLoopEdge } from './workflowFlowGraph';
 import type { WorkflowConnection, WorkflowNode } from './api/workflows';
 
 function node(overrides: Partial<WorkflowNode> & { id: string }): WorkflowNode {
@@ -157,6 +157,96 @@ describe('buildFlowGraph', () => {
 
 		expect(result.edges[0].label).toBe('contains "urgent"');
 		expect(result.edges[0].style).toContain('stroke-dasharray');
+	});
+
+	it('reports hasLoop false and leaves a forward-only edge unstyled', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const forward = connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' });
+
+		const result = buildFlowGraph([n1, n2], [forward], noSubtitle);
+
+		expect(result.hasLoop).toBe(false);
+		expect(result.edges[0].label).toBeUndefined();
+		expect(result.edges[0].style).toBeUndefined();
+	});
+
+	it('marks a back edge that closes a cycle as a loop, with a distinct label and style', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const forward = connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' });
+		const back = connection({ id: 'c2', from_node_id: 'n2', to_node_id: 'n1' });
+
+		const result = buildFlowGraph([n1, n2], [forward, back], noSubtitle);
+
+		expect(result.hasLoop).toBe(true);
+		const backEdge = result.edges.find((e) => e.id === 'c2');
+		expect(backEdge?.label).toBe('↻ loop back');
+		expect(backEdge?.style).toContain('stroke-dasharray');
+		// In a two-node cycle both edges close the loop symmetrically -- n2
+		// (c1's target) can reach n1 via c2, and n1 (c2's target) can reach n2
+		// via c1 -- so both are marked, not just whichever was drawn last.
+		const forwardEdge = result.edges.find((e) => e.id === 'c1');
+		expect(forwardEdge?.label).toBe('↻ loop back');
+	});
+
+	it('combines the loop marker with a condition label when a loop edge is also conditional', () => {
+		const n1 = node({ id: 'n1' });
+		const n2 = node({ id: 'n2' });
+		const forward = connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' });
+		const back = connection({
+			id: 'c2',
+			from_node_id: 'n2',
+			to_node_id: 'n1',
+			condition_json: { contains: 'retry' }
+		});
+
+		const result = buildFlowGraph([n1, n2], [forward, back], noSubtitle);
+
+		const backEdge = result.edges.find((e) => e.id === 'c2');
+		expect(backEdge?.label).toBe('↻ contains "retry"');
+		expect(backEdge?.style).toContain('var(--color-agent-magenta)');
+	});
+});
+
+describe('isLoopEdge', () => {
+	it('is false for an edge with no path back from its target', () => {
+		const connections = [
+			connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c2', from_node_id: 'n2', to_node_id: 'n3' })
+		];
+
+		expect(isLoopEdge(connections, connections[0])).toBe(false);
+		expect(isLoopEdge(connections, connections[1])).toBe(false);
+	});
+
+	it('is true for an edge that closes a two-node cycle', () => {
+		const connections = [
+			connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c2', from_node_id: 'n2', to_node_id: 'n1' })
+		];
+
+		expect(isLoopEdge(connections, connections[1])).toBe(true);
+	});
+
+	it('is true for a node looping back to itself', () => {
+		const connections = [connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n1' })];
+
+		expect(isLoopEdge(connections, connections[0])).toBe(true);
+	});
+
+	it('is true for an edge closing a longer cycle through several nodes', () => {
+		const connections = [
+			connection({ id: 'c1', from_node_id: 'n1', to_node_id: 'n2' }),
+			connection({ id: 'c2', from_node_id: 'n2', to_node_id: 'n3' }),
+			connection({ id: 'c3', from_node_id: 'n3', to_node_id: 'n1' })
+		];
+
+		expect(isLoopEdge(connections, connections[2])).toBe(true);
+		// Every edge in the cycle closes it back onto some earlier node in the
+		// walk, so all three are loop edges, not just the one that happens to
+		// point at the original entry.
+		expect(isLoopEdge(connections, connections[0])).toBe(true);
 	});
 });
 

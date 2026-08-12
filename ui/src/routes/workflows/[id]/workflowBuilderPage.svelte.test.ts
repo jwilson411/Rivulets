@@ -1130,6 +1130,80 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Cannot save condition')).toBeInTheDocument();
 	});
 
+	it('does not show the loop notice for a plain acyclic chain', async () => {
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c2')).toBeInTheDocument();
+
+		expect(page.getByTestId('workflow-loop-notice').elements()).toHaveLength(0);
+	});
+
+	it('#199 shows a loop notice near the canvas when an edge closes a cycle back to an earlier step', async () => {
+		mockLoad();
+		const loopBack: WorkflowConnection = {
+			id: 'c3',
+			workflow_id: 'wf-1',
+			from_node_id: 'n2',
+			to_node_id: 'n1',
+			condition_json: null
+		};
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			loopBack
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c3')).toBeInTheDocument();
+
+		await expect.element(page.getByTestId('workflow-loop-notice')).toBeInTheDocument();
+		const noticeText = page.getByTestId('workflow-loop-notice').element().textContent ?? '';
+		expect(noticeText).toContain('25');
+		expect(noticeText).toContain('200');
+	});
+
+	it('#199 shows the visit-cap explainer in the inspector only for an edge that is actually part of the cycle', async () => {
+		mockLoad();
+		// n1 -> n2 (c2, unchanged) feeds into a separate n2 <-> n3 cycle. c2
+		// itself never leads back to n1, so it must stay a plain edge even
+		// though its target (n2) sits on a cycle -- only c3/c4 close it.
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
+		const intoLoop: WorkflowConnection = {
+			id: 'c3',
+			workflow_id: 'wf-1',
+			from_node_id: 'n2',
+			to_node_id: 'n3',
+			condition_json: null
+		};
+		const loopBack: WorkflowConnection = {
+			id: 'c4',
+			workflow_id: 'wf-1',
+			from_node_id: 'n3',
+			to_node_id: 'n2',
+			condition_json: null
+		};
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			intoLoop,
+			loopBack
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c4')).toBeInTheDocument();
+
+		clickEdge('workflow-edge-c2');
+		await expect
+			.element(page.getByRole('button', { name: 'Delete connection' }))
+			.toBeInTheDocument();
+		expect(page.getByTestId('workflow-loop-edge-notice').elements()).toHaveLength(0);
+
+		await page.getByRole('button', { name: 'Cancel' }).click();
+		clickEdge('workflow-edge-c4');
+		await expect.element(page.getByTestId('workflow-loop-edge-notice')).toBeInTheDocument();
+	});
+
 	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {
 		mockLoad();
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);

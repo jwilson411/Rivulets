@@ -23,7 +23,12 @@
 		type WorkflowNodeFormValues
 	} from '$lib/components/WorkflowNodeForm.svelte';
 	import WorkflowFlowCanvas from '$lib/components/WorkflowFlowCanvas.svelte';
-	import { buildFlowGraph } from '$lib/workflowFlowGraph';
+	import {
+		buildFlowGraph,
+		isLoopEdge,
+		LOOP_MAX_NODE_VISITS,
+		LOOP_MAX_TOTAL_STEPS
+	} from '$lib/workflowFlowGraph';
 	import { NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
 	import { theme } from '$lib/theme.svelte';
 
@@ -96,6 +101,14 @@
 	}
 
 	const flowGraph = $derived(buildFlowGraph(nodeList, connectionList, subtitleFor));
+
+	// #199: whether the edge currently open in the inspector is a loop edge,
+	// so that panel can add the visit-cap explainer only when it's relevant
+	// rather than on every edge.
+	const editingEdgeIsLoop = $derived.by(() => {
+		const edge = connectionList.find((c) => c.id === editingEdgeId);
+		return edge ? isLoopEdge(connectionList, edge) : false;
+	});
 
 	async function load(workflowId: string) {
 		loadError = null;
@@ -1196,6 +1209,20 @@
 			</p>
 		{/if}
 
+		{#if flowGraph.hasLoop}
+			<p
+				class="flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
+				data-testid="workflow-loop-notice"
+			>
+				<Icon name="sync" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+				<span>
+					This workflow loops back to an earlier step (dotted "↻" edge). To guard against a runaway
+					loop, a run stops with an error after {LOOP_MAX_NODE_VISITS} visits to the same step or {LOOP_MAX_TOTAL_STEPS}
+					total steps, whichever comes first.
+				</span>
+			</p>
+		{/if}
+
 		{#if connectError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
 		{/if}
@@ -1205,6 +1232,19 @@
 				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 			>
 				<p class="text-sm text-ink dark:text-ink-dark">Connection selected.</p>
+				{#if editingEdgeIsLoop}
+					<p
+						class="mt-2 flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
+						data-testid="workflow-loop-edge-notice"
+					>
+						<Icon name="sync" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+						<span>
+							This edge loops back to an earlier step. The engine caps it at {LOOP_MAX_NODE_VISITS}
+							visits to that step or {LOOP_MAX_TOTAL_STEPS} total steps in the run, whichever comes first,
+							then stops the run with an error.
+						</span>
+					</p>
+				{/if}
 				<form
 					onsubmit={(event) => {
 						event.preventDefault();
