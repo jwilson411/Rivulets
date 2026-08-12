@@ -17,6 +17,7 @@ import {
 } from '$lib/api/workflows';
 import { agents } from '$lib/api/agents';
 import { channels } from '$lib/api/channels';
+import { providers, type Provider } from '$lib/api/providers';
 
 const gotoMock = vi.hoisted(() => vi.fn());
 
@@ -69,11 +70,15 @@ vi.mock('$lib/api/workflows', () => ({
 }));
 
 vi.mock('$lib/api/agents', () => ({
-	agents: { list: vi.fn() }
+	agents: { list: vi.fn(), create: vi.fn() }
 }));
 
 vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/providers', () => ({
+	providers: { list: vi.fn() }
 }));
 
 const reviewFlow: Workflow = {
@@ -164,6 +169,14 @@ const unnamedWebhook: WorkflowWebhook = {
 	updated_at: '2026-08-01T00:00:00Z'
 };
 
+const anthropicProvider: Provider = {
+	id: 'prov-1',
+	provider: 'anthropic',
+	label: 'My Anthropic key',
+	base_url: null,
+	is_default: true
+};
+
 const orphanNode: WorkflowNode = {
 	id: 'n3',
 	workflow_id: 'wf-1',
@@ -210,6 +223,7 @@ function mockLoad() {
 			agentos_agent_id: null
 		}
 	]);
+	vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
 }
 
 afterEach(() => {
@@ -1074,6 +1088,97 @@ describe('workflows/[id]/+page.svelte', () => {
 
 		expect(workflows.createNode).not.toHaveBeenCalled();
 		await expect.element(page.getByRole('button', { name: 'Add step' })).not.toBeInTheDocument();
+	});
+
+	// #203: "+ Create new agent…" in the agent picker opens AgentForm inline
+	// (as a sibling section, not nested inside WorkflowNodeForm's own <form>)
+	// without losing the node name already typed in, and auto-selects the
+	// created agent once agents.create resolves.
+	it('creates an agent inline from the add-node panel and selects it on the new node', async () => {
+		mockLoad();
+		const newAgent = {
+			id: 'agent-2',
+			name: 'Summarizer',
+			description: 'Summarizes things',
+			instructions: 'Be brief',
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: [],
+			approved_for_unattended_tools: false,
+			agentos_agent_id: null
+		};
+		vi.mocked(agents.create).mockResolvedValueOnce(newAgent);
+		vi.mocked(workflows.createNode).mockResolvedValueOnce({
+			...fetchNode,
+			id: 'n9',
+			name: 'Summary step',
+			agent_id: 'agent-2'
+		});
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('palette-node-agent').dropTo(page.getByTestId('workflow-canvas'));
+		await expect.element(page.getByRole('button', { name: 'Add step' })).toBeInTheDocument();
+		await page.getByPlaceholder('Step name').fill('Summary step');
+
+		await page.getByRole('combobox').nth(2).selectOptions('__create_new_agent__');
+		await expect.element(page.getByText('New agent', { exact: true })).toBeInTheDocument();
+
+		await page.getByPlaceholder('Name', { exact: true }).fill('Summarizer');
+		await page.getByPlaceholder('Description').fill('Summarizes things');
+		await page.getByPlaceholder('Instructions').fill('Be brief');
+		await page.getByRole('combobox').last().selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(agents.create).toHaveBeenCalledWith({
+			name: 'Summarizer',
+			description: 'Summarizes things',
+			instructions: 'Be brief',
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: [],
+			output_schema: null
+		});
+		await expect.element(page.getByText('New agent', { exact: true })).not.toBeInTheDocument();
+		// The name typed before creating the agent survived the round trip.
+		await expect.element(page.getByPlaceholder('Step name')).toHaveValue('Summary step');
+
+		await page.getByRole('button', { name: 'Add step' }).click();
+
+		expect(workflows.createNode).toHaveBeenCalledWith('wf-1', {
+			name: 'Summary step',
+			node_type: 'agent',
+			agent_id: 'agent-2',
+			child_workflow_id: undefined,
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5,
+			position_x: expect.any(Number),
+			position_y: expect.any(Number)
+		});
+	});
+
+	it('shows an error inline when creating an agent from the node panel fails', async () => {
+		mockLoad();
+		vi.mocked(agents.create).mockRejectedValueOnce(new Error('Name already taken'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await page.getByTestId('palette-node-agent').dropTo(page.getByTestId('workflow-canvas'));
+		await page.getByPlaceholder('Step name').fill('Summary step');
+		await page.getByRole('combobox').nth(2).selectOptions('__create_new_agent__');
+
+		await page.getByPlaceholder('Name', { exact: true }).fill('Summarizer');
+		await page.getByPlaceholder('Description').fill('Summarizes things');
+		await page.getByPlaceholder('Instructions').fill('Be brief');
+		await page.getByRole('combobox').last().selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		await expect.element(page.getByText('Name already taken')).toBeInTheDocument();
+		// The inline panel stays open and the node draft is untouched.
+		await expect.element(page.getByText('New agent', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Step name')).toHaveValue('Summary step');
+		expect(workflows.createNode).not.toHaveBeenCalled();
 	});
 
 	it('persists a new position when an existing node is dragged on the canvas', async () => {

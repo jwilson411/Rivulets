@@ -36,7 +36,8 @@
 		busy = false,
 		error = null,
 		onsubmit,
-		oncancel
+		oncancel,
+		oncreateagent
 	}: {
 		agentOptions: Agent[];
 		// Callers exclude the workflow currently being edited -- a workflow
@@ -52,6 +53,13 @@
 		error?: string | null;
 		onsubmit: (values: WorkflowNodeFormValues) => void;
 		oncancel?: () => void;
+		// #203: fired when the agent picker's "+ Create new agent…" option is
+		// chosen. The caller owns the actual creation flow (rendered as a
+		// sibling of this form, not nested inside it -- a <form> can't
+		// contain another <form>) and pushes the result back in via
+		// `setAgentId` below, rather than this component knowing about the
+		// agents API itself.
+		oncreateagent?: () => void;
 	} = $props();
 
 	// A snapshot, taken once -- callers remount this component (keyed block)
@@ -64,6 +72,24 @@
 	let contains = $state(untrack(() => (initial.config.contains as string | undefined) ?? ''));
 	let retryMaxAttempts = $state(untrack(() => initial.retry_max_attempts));
 	let retryBackoffSeconds = $state(untrack(() => initial.retry_backoff_seconds));
+
+	// #203: lets the parent select a just-created agent without remounting
+	// this form (which would wipe out the name/config the user already typed).
+	export function setAgentId(id: string) {
+		agentId = id;
+	}
+
+	const CREATE_NEW_AGENT_VALUE = '__create_new_agent__';
+
+	function handleAgentSelectChange(event: Event) {
+		const value = (event.target as HTMLSelectElement).value;
+		if (value === CREATE_NEW_AGENT_VALUE) {
+			(event.target as HTMLSelectElement).value = agentId;
+			oncreateagent?.();
+			return;
+		}
+		agentId = value;
+	}
 
 	function configFor(type: WorkflowNodeType): Record<string, unknown> {
 		if (type === 'transform') return template.trim() ? { template } : {};
@@ -116,13 +142,15 @@
 
 	{#if nodeType === 'agent'}
 		<select
-			bind:value={agentId}
+			value={agentId}
+			onchange={handleAgentSelectChange}
 			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 		>
 			<option value="" disabled>Select an agent…</option>
 			{#each agentOptions as agent (agent.id)}
 				<option value={agent.id}>{agent.name}</option>
 			{/each}
+			<option value={CREATE_NEW_AGENT_VALUE}>+ Create new agent…</option>
 		</select>
 	{:else if nodeType === 'transform'}
 		<textarea

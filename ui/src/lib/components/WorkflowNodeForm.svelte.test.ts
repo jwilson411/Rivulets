@@ -221,4 +221,48 @@ describe('WorkflowNodeForm.svelte', () => {
 		await expect.element(page.getByText('Could not save step')).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
 	});
+
+	// #203: "+ Create new agent…" hands off to the parent instead of being a
+	// real selectable agent -- see WorkflowNodeForm.svelte's handleAgentSelectChange.
+	it('calls oncreateagent and leaves no agent selected when "+ Create new agent…" is chosen', async () => {
+		const onsubmit = vi.fn();
+		const oncreateagent = vi.fn();
+		render(WorkflowNodeForm, {
+			agentOptions,
+			workflowOptions,
+			submitLabel: 'Add step',
+			busyLabel: 'Adding…',
+			onsubmit,
+			oncreateagent
+		});
+
+		await page.getByPlaceholder('Step name').fill('Research step');
+		await page.getByRole('combobox').nth(1).selectOptions('__create_new_agent__');
+
+		expect(oncreateagent).toHaveBeenCalledOnce();
+		await expect.element(page.getByRole('combobox').nth(1)).toHaveValue('');
+
+		await page.getByRole('button', { name: 'Add step' }).click();
+		expect(onsubmit).not.toHaveBeenCalled();
+	});
+
+	// #203: the parent selects the just-created agent via this imperative
+	// method (bind:this, exposed here as `component`) rather than a prop,
+	// since agentId is local state seeded only once from `initial`.
+	it('exposes setAgentId so the parent can select a newly-created agent', async () => {
+		const onsubmit = vi.fn();
+		const { component } = await render(WorkflowNodeForm, {
+			agentOptions,
+			workflowOptions,
+			submitLabel: 'Add step',
+			busyLabel: 'Adding…',
+			onsubmit
+		});
+
+		await page.getByPlaceholder('Step name').fill('Research step');
+		component.setAgentId('agent-1');
+		await page.getByRole('button', { name: 'Add step' }).click();
+
+		expect(onsubmit).toHaveBeenCalledWith(expect.objectContaining({ agent_id: 'agent-1' }));
+	});
 });
