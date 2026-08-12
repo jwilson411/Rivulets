@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import Icon from './Icon.svelte';
 	import { NODE_TYPE_ICONS, NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
 	import type { WorkflowFlowNode } from '$lib/workflowFlowGraph';
@@ -21,6 +23,16 @@
 					? 'border-agent-cyan-600 ring-2 ring-agent-cyan-600/40'
 					: 'border-ink/12 dark:border-white/10'
 	);
+
+	// #201: drilling into a nested workflow node navigates to its own
+	// canvas rather than opening this node's edit panel -- stopPropagation
+	// keeps the click from also reaching SvelteFlow's onnodeclick (wired to
+	// startEditNode in +page.svelte), which lives on an ancestor of this
+	// button.
+	function openNestedWorkflow(event: MouseEvent) {
+		event.stopPropagation();
+		if (data.childWorkflowId) goto(resolve('/workflows/[id]', { id: data.childWorkflowId }));
+	}
 </script>
 
 <div
@@ -69,6 +81,17 @@
 		<p class="mt-0.5 truncate text-xs text-neutral-500" title={data.subtitle}>
 			{data.subtitle}
 		</p>
+	{/if}
+	{#if data.childWorkflowId}
+		<button
+			type="button"
+			data-testid={`workflow-node-${id}-open-nested`}
+			class="nodrag nopan mt-1.5 flex items-center gap-1 text-xs font-medium text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+			onclick={openNestedWorkflow}
+		>
+			<Icon name="external-link" class="h-3 w-3" />
+			Open workflow
+		</button>
 	{/if}
 
 	<Handle

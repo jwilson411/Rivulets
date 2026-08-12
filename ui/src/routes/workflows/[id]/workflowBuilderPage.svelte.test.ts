@@ -18,8 +18,14 @@ import {
 import { agents } from '$lib/api/agents';
 import { channels } from '$lib/api/channels';
 
+const gotoMock = vi.hoisted(() => vi.fn());
+
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'wf-1' }, url: new URL('http://localhost/workflows/wf-1') }
+}));
+
+vi.mock('$app/navigation', () => ({
+	goto: gotoMock
 }));
 
 vi.mock('$app/paths', () => ({
@@ -1842,5 +1848,79 @@ describe('workflows/[id]/+page.svelte', () => {
 			retry_max_attempts: 0,
 			retry_backoff_seconds: 5
 		});
+	});
+
+	it('#201: drills into a nested workflow node without opening its edit panel', async () => {
+		mockLoad();
+		const otherFlow: Workflow = { ...reviewFlow, id: 'wf-2', name: 'other-flow' };
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow, otherFlow]);
+		const nestedNode: WorkflowNode = {
+			id: 'n3',
+			workflow_id: 'wf-1',
+			name: 'Nested',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-2',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5,
+			position_x: 480,
+			position_y: 0
+		};
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, nestedNode]);
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3', condition_json: null }
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n3-open-nested')).toBeInTheDocument();
+
+		// n3 sits under the minimap overlay at this viewport/position, which
+		// fails Playwright's "not obscured" actionability check for a real
+		// .click() -- dispatching directly is what the button's own onclick
+		// listener actually responds to (see clickEdge above for the same
+		// issue with edges).
+		page
+			.getByTestId('workflow-node-n3-open-nested')
+			.element()
+			.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+		expect(gotoMock).toHaveBeenCalledWith('/workflows/wf-2');
+		// The click shouldn't also open n3's edit panel via the ancestor
+		// node's onnodeclick -- if it had, the locked-type edit form's
+		// "Save changes" button would be in the document.
+		await expect
+			.element(page.getByRole('button', { name: 'Save changes' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('#201: hides the drill-in affordance when the nested workflow no longer exists', async () => {
+		mockLoad();
+		const nestedNode: WorkflowNode = {
+			id: 'n3',
+			workflow_id: 'wf-1',
+			name: 'Nested',
+			node_type: 'workflow',
+			agent_id: null,
+			child_workflow_id: 'wf-missing',
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5,
+			position_x: 480,
+			position_y: 0
+		};
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, nestedNode]);
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			{ id: 'c3', workflow_id: 'wf-1', from_node_id: 'n2', to_node_id: 'n3', condition_json: null }
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
+
+		await expect.element(page.getByTestId('workflow-node-n3-open-nested')).not.toBeInTheDocument();
 	});
 });
