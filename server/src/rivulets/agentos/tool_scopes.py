@@ -36,10 +36,30 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # share one "channels:manage" scope (see tools/builtin/channels.py);
 # list_channels is read-only and deliberately left out, the same way
 # read_file/list_files carry no required_scope either.
+#
+# #190 (tools/builtin/agents_teams.py) is the second: nine mutating
+# agent/team tools share one "agents_teams:manage" scope. This is the
+# highest-reach category so far -- update_agent's tool_ids lets an agent
+# reassign any agent's tool assignments, including its own -- but
+# assignment alone still isn't eligibility: a reassigned tool with its own
+# required_scope only actually resolves if the target agent separately
+# holds that scope via AgentToolScope, which stays an owner-only grant
+# (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) with no
+# built-in tool exposing it. list_agents/list_teams are read-only and
+# deliberately left out, same as list_channels.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
     "archive_channel": "channels:manage",
     "unarchive_channel": "channels:manage",
     "reorder_channels": "channels:manage",
+    "create_agent": "agents_teams:manage",
+    "update_agent": "agents_teams:manage",
+    "delete_agent": "agents_teams:manage",
+    "update_agent_routing_rules": "agents_teams:manage",
+    "update_agent_peer_preference": "agents_teams:manage",
+    "rollback_agent_version": "agents_teams:manage",
+    "create_team": "agents_teams:manage",
+    "update_team": "agents_teams:manage",
+    "delete_team": "agents_teams:manage",
 }

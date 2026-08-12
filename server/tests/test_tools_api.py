@@ -325,3 +325,16 @@ def test_list_tools_exposes_required_scope(
     assert tools["reorder_channels"] == "channels:manage"
     assert tools["list_channels"] is None
     assert tools["read_file"] is None
+    # #190: the nine mutating agent/team tools require "agents_teams:manage";
+    # list_agents/list_teams, like list_channels above, report None.
+    assert tools["create_agent"] == "agents_teams:manage"
+    assert tools["update_agent"] == "agents_teams:manage"
+    assert tools["delete_agent"] == "agents_teams:manage"
+    assert tools["update_agent_routing_rules"] == "agents_teams:manage"
+    assert tools["update_agent_peer_preference"] == "agents_teams:manage"
+    assert tools["rollback_agent_version"] == "agents_teams:manage"
+    assert tools["create_team"] == "agents_teams:manage"
+    assert tools["update_team"] == "agents_teams:manage"
+    assert tools["delete_team"] == "agents_teams:manage"
+    assert tools["list_agents"] is None
+    assert tools["list_teams"] is None

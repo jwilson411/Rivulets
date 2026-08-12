@@ -161,6 +161,54 @@ async def test_create_channel_tool_skipped_without_channels_manage_grant(
     assert [fn.name for fn in resolved] == ["create_channel"]
 
 
+async def test_seed_builtin_tools_sets_agents_teams_manage_scope(db_session: AsyncSession) -> None:
+    """#190: create_agent is the second real consumer of BUILTIN_TOOL_SCOPES
+    (after #189's channel tools) -- confirms seeding wires up
+    "agents_teams:manage" for the mutating agent/team tools while leaving
+    the read-only list_agents/list_teams unscoped, same shape as
+    test_seed_builtin_tools_sets_channels_manage_scope above."""
+    await seed_builtin_tools(db_session)
+
+    create_agent_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_agent"))
+    ).scalar_one()
+    assert create_agent_row.required_scope == "agents_teams:manage"
+
+    delete_team_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "delete_team"))
+    ).scalar_one()
+    assert delete_team_row.required_scope == "agents_teams:manage"
+
+    list_agents_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "list_agents"))
+    ).scalar_one()
+    assert list_agents_row.required_scope is None
+
+    list_teams_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "list_teams"))
+    ).scalar_one()
+    assert list_teams_row.required_scope is None
+
+
+async def test_update_agent_tool_skipped_without_agents_teams_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    update_agent_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "update_agent"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, update_agent_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="agents_teams:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["update_agent"]
+
+
 async def test_resolve_agent_tools_skips_unknown_builtin(db_session: AsyncSession) -> None:
     agent = await _make_agent(db_session)
     tool_row = Tool(name="not_a_real_builtin", description="stale", tool_type="builtin")
