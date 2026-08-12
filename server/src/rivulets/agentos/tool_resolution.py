@@ -198,6 +198,10 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                     )
                     continue
                 if server.transport == "stdio":
+                    # Enforced at create time (api/mcp_servers.py's
+                    # MCPServerCreate validator): command is required for
+                    # stdio transport.
+                    assert server.command is not None
                     args = json.loads(server.args_json) if server.args_json else None
                     resolved.append(
                         MCPTools(
@@ -208,6 +212,9 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                         )
                     )
                 else:
+                    # Enforced at create time: url is required for
+                    # streamable-http transport.
+                    assert server.url is not None
                     headers = get_server_headers(server)
                     resolved.append(
                         MCPTools(

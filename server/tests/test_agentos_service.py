@@ -265,9 +265,7 @@ async def test_run_agent_calls_schema_constrained_agent_non_streamed(
     registered_agent.arun = structured_arun  # pyright: ignore[reportAttributeAccessIssue]
     tokens: list[str] = []
 
-    result = await run_agent(
-        db_session, "agent-1", "hi", session_id="s-1", on_token=tokens.append
-    )
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1", on_token=tokens.append)
 
     assert result.status is RunStatus.completed
     assert result.content == {"answer": "42"}

@@ -464,9 +464,9 @@
 			>
 				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Guardrails</h2>
 				<p class="text-xs text-neutral-600 dark:text-neutral-400">
-					Loop-prevention thresholds (FR-7.4) — the same on every node. The defaults below work
-					well for most workspaces; only change these if agents are looping unexpectedly or you
-					want tighter or looser limits.
+					Loop-prevention thresholds (FR-7.4) — the same on every node. The defaults below work well
+					for most workspaces; only change these if agents are looping unexpectedly or you want
+					tighter or looser limits.
 				</p>
 
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
@@ -504,8 +504,8 @@
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
 					Cycle threshold
 					<span class="text-xs text-neutral-600 dark:text-neutral-400">
-						How many times the same two agents have to reply to each other within that window
-						before it's treated as a loop and paused for a human.
+						How many times the same two agents have to reply to each other within that window before
+						it's treated as a loop and paused for a human.
 					</span>
 					<input
 						type="number"
@@ -520,8 +520,8 @@
 				<label class="flex flex-col gap-1 text-sm text-ink dark:text-ink-dark">
 					Time-based pause
 					<span class="text-xs text-neutral-600 dark:text-neutral-400">
-						Pause an agent conversation automatically if it's been running this long without a
-						human weighing in, even if neither limit above has been hit.
+						Pause an agent conversation automatically if it's been running this long without a human
+						weighing in, even if neither limit above has been hit.
 					</span>
 					<input
 						type="number"

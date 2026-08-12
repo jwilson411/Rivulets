@@ -6,6 +6,8 @@ from pathlib import Path
 
 from agno.tools.function import Function
 from agno.tools.mcp import MCPTools
+from agno.tools.mcp.params import StreamableHTTPClientParams
+from mcp import StdioServerParameters
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -225,8 +227,9 @@ async def test_resolve_agent_tools_resolves_mcp_with_headers(db_session: AsyncSe
 
     assert len(resolved) == 1
     assert isinstance(resolved[0], MCPTools)
-    assert resolved[0].server_params is not None
-    assert resolved[0].server_params.headers == {"Authorization": "Bearer sk-real"}
+    server_params = resolved[0].server_params
+    assert isinstance(server_params, StreamableHTTPClientParams)
+    assert server_params.headers == {"Authorization": "Bearer sk-real"}
 
 
 async def test_resolve_agent_tools_resolves_stdio_mcp(db_session: AsyncSession) -> None:
@@ -239,7 +242,7 @@ async def test_resolve_agent_tools_resolves_stdio_mcp(db_session: AsyncSession) 
         name="local-server",
         transport="stdio",
         command="npx",
-        args_json=json.dumps(["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]),
+        args_json=json.dumps(["-y", "@modelcontextprotocol/server-filesystem", "/data"]),
     )
     db_session.add(server)
     await db_session.commit()
@@ -260,11 +263,13 @@ async def test_resolve_agent_tools_resolves_stdio_mcp(db_session: AsyncSession) 
 
     assert len(resolved) == 1
     assert isinstance(resolved[0], MCPTools)
-    assert resolved[0].server_params.command == "npx"
-    assert resolved[0].server_params.args == [
+    server_params = resolved[0].server_params
+    assert isinstance(server_params, StdioServerParameters)
+    assert server_params.command == "npx"
+    assert server_params.args == [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "/tmp",
+        "/data",
     ]
 
 
@@ -300,7 +305,10 @@ async def test_resolve_agent_tools_resolves_stdio_mcp_with_env(db_session: Async
 
     assert len(resolved) == 1
     assert isinstance(resolved[0], MCPTools)
-    assert resolved[0].server_params.env["API_KEY"] == "sk-real"
+    server_params = resolved[0].server_params
+    assert isinstance(server_params, StdioServerParameters)
+    assert server_params.env is not None
+    assert server_params.env["API_KEY"] == "sk-real"
 
 
 async def test_resolve_agent_tools_skips_stdio_mcp_with_disallowed_command(
@@ -310,9 +318,7 @@ async def test_resolve_agent_tools_skips_stdio_mcp_with_disallowed_command(
     (e.g. an executable outside its allowlist) must be skipped like any
     other broken tool assignment (NFR-2.4), not take the whole agent
     resolution down."""
-    server = MCPServer(
-        name="local-server", transport="stdio", command="not-a-real-executable-xyz"
-    )
+    server = MCPServer(name="local-server", transport="stdio", command="not-a-real-executable-xyz")
     db_session.add(server)
     await db_session.commit()
 

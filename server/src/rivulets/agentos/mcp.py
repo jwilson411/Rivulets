@@ -188,6 +188,9 @@ async def _run_handshake(
                 timeout_seconds=timeout_seconds,
             )
         else:
+            # Callers pass exactly one of url/command (see discover_tools'
+            # docstring); command is None here, so url must be set.
+            assert url is not None
             # Only build server_params when there are headers to carry --
             # passing StreamableHTTPClientParams unconditionally would
             # substitute its own 30s default `timeout` for the
