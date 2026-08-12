@@ -58,6 +58,16 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # HTTP route, not just a standing grant) -- see tools/builtin/
 # mcp_servers.py's module docstring for the full reasoning. list_mcp_servers
 # is read-only and deliberately left out, same as list_channels/list_agents.
+#
+# #192 (tools/builtin/workflows.py) is the fourth: create_workflow/
+# update_workflow/delete_workflow/publish_workflow/unpublish_workflow share
+# one "workflows:manage" scope. Deliberately narrower than api/workflows.py's
+# full HTTP surface -- only the workflow-level definition CRUD, not the
+# node/connection/schedule/webhook graph-editing sub-surface #192's issue
+# body calls out as large enough to warrant its own follow-up -- see
+# tools/builtin/workflows.py's module docstring. list_workflows is
+# read-only and deliberately left out, same as list_channels/list_agents/
+# list_mcp_servers.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -76,4 +86,9 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "register_mcp_server": "mcp_servers:manage",
     "reconnect_mcp_server": "mcp_servers:manage",
     "delete_mcp_server": "mcp_servers:manage",
+    "create_workflow": "workflows:manage",
+    "update_workflow": "workflows:manage",
+    "delete_workflow": "workflows:manage",
+    "publish_workflow": "workflows:manage",
+    "unpublish_workflow": "workflows:manage",
 }
