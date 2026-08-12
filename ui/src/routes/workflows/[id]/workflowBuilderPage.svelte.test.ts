@@ -1204,6 +1204,112 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByTestId('workflow-loop-edge-notice')).toBeInTheDocument();
 	});
 
+	it("#200 highlights a merge node's fan-out ancestor and explains where its branches diverged", async () => {
+		mockLoad();
+		// n1 (Fetch, the entry) -> n2 (Format) -> forks into n4 and directly
+		// into n3 (the merge), with n4 also feeding into n3 -- an
+		// unequal-length diamond, same shape the engine docstring calls out.
+		// n3's fan-out ancestor should resolve to n2, not the entry node n1.
+		const branchNode: WorkflowNode = {
+			id: 'n4',
+			workflow_id: 'wf-1',
+			name: 'Branch',
+			node_type: 'transform',
+			agent_id: null,
+			child_workflow_id: null,
+			config: {},
+			retry_max_attempts: 0,
+			retry_backoff_seconds: 5,
+			position_x: 360,
+			position_y: 140
+		};
+		const directIntoMerge: WorkflowConnection = {
+			id: 'c3',
+			workflow_id: 'wf-1',
+			from_node_id: 'n2',
+			to_node_id: 'n3',
+			condition_json: null
+		};
+		const intoBranch: WorkflowConnection = {
+			id: 'c4',
+			workflow_id: 'wf-1',
+			from_node_id: 'n2',
+			to_node_id: 'n4',
+			condition_json: null
+		};
+		const branchIntoMerge: WorkflowConnection = {
+			id: 'c5',
+			workflow_id: 'wf-1',
+			from_node_id: 'n4',
+			to_node_id: 'n3',
+			condition_json: null
+		};
+		vi.mocked(workflows.listNodes).mockResolvedValue([
+			fetchNode,
+			formatNode,
+			branchNode,
+			orphanNode
+		]);
+		vi.mocked(workflows.listConnections).mockResolvedValue([
+			entryConnection,
+			chainConnection,
+			directIntoMerge,
+			intoBranch,
+			branchIntoMerge
+		]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-edge-c5')).toBeInTheDocument();
+
+		expect(
+			page.getByTestId('workflow-node-n2').element().getAttribute('data-merge-highlight')
+		).toBeNull();
+
+		await page.getByTestId('workflow-node-n3').click();
+
+		await expect.element(page.getByTestId('workflow-merge-notice')).toBeInTheDocument();
+		const noticeText = page.getByTestId('workflow-merge-notice').element().textContent ?? '';
+		expect(noticeText).toContain('2 branches');
+		expect(noticeText).toContain('Format');
+
+		expect(
+			page.getByTestId('workflow-node-n2').element().getAttribute('data-merge-highlight')
+		).toBe('ancestor');
+		await expect.element(page.getByText('Splits here')).toBeInTheDocument();
+		// n1 (the entry) sits upstream of the fan-out point, not between it
+		// and the merge, so it stays untouched.
+		expect(
+			page.getByTestId('workflow-node-n1').element().getAttribute('data-merge-highlight')
+		).toBeNull();
+		expect(
+			page.getByTestId('workflow-edge-c3').element().getAttribute('data-merge-highlight')
+		).toBe('true');
+		expect(
+			page.getByTestId('workflow-edge-c4').element().getAttribute('data-merge-highlight')
+		).toBe('true');
+		expect(
+			page.getByTestId('workflow-edge-c5').element().getAttribute('data-merge-highlight')
+		).toBe('true');
+		expect(
+			page.getByTestId('workflow-edge-c2').element().getAttribute('data-merge-highlight')
+		).toBeNull();
+	});
+
+	it('#200 tells the user to add another connection when a merge node has fewer than two inputs', async () => {
+		mockLoad();
+		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n3')).toBeInTheDocument();
+
+		await page.getByTestId('workflow-node-n3').click();
+
+		await expect.element(page.getByTestId('workflow-merge-notice')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Connect at least two incoming steps', { exact: false }))
+			.toBeInTheDocument();
+	});
+
 	it('shows an orphan node on the canvas with no "Unconnected steps" section', async () => {
 		mockLoad();
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);

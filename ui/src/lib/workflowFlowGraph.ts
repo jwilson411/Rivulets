@@ -7,15 +7,31 @@ export interface WorkflowFlowNodeData {
 	nodeType: WorkflowNodeType;
 	subtitle: string | null;
 	isEntry: boolean;
+	// #200: set while this node is part of the currently-selected merge
+	// node's fan-out (see findMergeFanOut) -- 'ancestor' for the node the
+	// branches diverged at, 'branch' for every other node/the merge itself
+	// on a path between them, null otherwise.
+	mergeHighlight: 'ancestor' | 'branch' | null;
 }
 
 export type WorkflowFlowNode = Node<WorkflowFlowNodeData, 'workflowNode'>;
+
+// #200: the nearest ancestor upstream of a merge node from which 2+ of its
+// outbound paths reconverge at that merge, plus everything on the paths
+// between them. See findMergeFanOut.
+export interface MergeFanOut {
+	ancestorId: string;
+	branchCount: number;
+	nodeIds: Set<string>;
+	edgeIds: Set<string>;
+}
 
 export interface BuildFlowGraphResult {
 	nodes: WorkflowFlowNode[];
 	edges: Edge[];
 	entryNodeId: string | null;
 	hasLoop: boolean;
+	mergeFanOut: MergeFanOut | null;
 }
 
 // #198: a conditional edge's label -- what a viewer sees on the canvas
@@ -78,20 +94,124 @@ export function isLoopEdge(
 // on top of it, plus a "↻" marker in the label -- deliberately not a new
 // hue, since --color-agent-yellow is reserved for the third agent's print
 // ink only (see layout.css) and isn't available for canvas chrome.
+//
+// #200: `highlighted` layers on top of either of the above -- it's set for
+// every edge on the path between a merge node's fan-out ancestor and the
+// merge itself, while that merge node is selected (see findMergeFanOut).
+// Reuses --color-agent-cyan, the same hue the entry-node ring already uses
+// to mean "structurally significant, look here", overriding any condition
+// color since the highlight is a transient "look at this" state rather
+// than a permanent property of the edge.
 function edgeVisual(
 	conditionLabel: string | null,
-	loop: boolean
-): { label: string; labelStyle: string; style: string } | null {
-	if (!conditionLabel && !loop) return null;
-	const label = loop ? `↻ ${conditionLabel ?? 'loop back'}` : conditionLabel!;
+	loop: boolean,
+	highlighted: boolean
+): { label?: string; labelStyle?: string; style: string } | null {
+	if (!conditionLabel && !loop && !highlighted) return null;
+	const label = loop ? `↻ ${conditionLabel ?? 'loop back'}` : (conditionLabel ?? undefined);
 	const color = conditionLabel ? 'stroke: var(--color-agent-magenta); ' : '';
-	const style = loop
+	let style = loop
 		? `${color}stroke-dasharray: 2 3; stroke-width: 2.5px;`
-		: `${color}stroke-dasharray: 5 4;`;
+		: conditionLabel
+			? `${color}stroke-dasharray: 5 4;`
+			: '';
+	if (highlighted) {
+		style = `${style} stroke: var(--color-agent-cyan-600); stroke-width: 3px;`;
+	}
 	const labelStyle = conditionLabel
 		? 'font-size: 11px; font-weight: 600; fill: var(--color-agent-magenta);'
-		: 'font-size: 11px; font-weight: 600;';
-	return { label, labelStyle, style };
+		: label
+			? 'font-size: 11px; font-weight: 600;'
+			: undefined;
+	return { ...(label ? { label } : {}), ...(labelStyle ? { labelStyle } : {}), style };
+}
+
+// #200: the nearest ancestor of a merge node from which 2+ of its outbound
+// paths reconverge at that merge -- i.e. where the branches feeding this
+// merge actually diverged. Mirrors engine.py's _resolve_merge_arrivals in
+// spirit (the join fires at the nearest point of concurrency, however many
+// hops each sibling branch took to get there -- see the module docstring),
+// but computed statically from graph shape rather than a live run.
+//
+// A merge node needs 2+ direct incoming edges to have a fan-out worth
+// showing at all -- a single incoming edge isn't a join. From there: BFS
+// backward from the merge collects every ancestor with a forward path to
+// it, in increasing-distance order, so the first node encountered with 2+
+// outbound edges landing back in that set is the *nearest* fan-out point,
+// not just any fan-out point further upstream. Everything reachable
+// forward from that ancestor and backward-reachable from the merge is on
+// some path between them -- same BFS-over-adjacency style as isLoopEdge,
+// deliberately not a full graph-theory LCA pass (small canvases, recomputed
+// on selection change, not per frame).
+export function findMergeFanOut(
+	connections: WorkflowConnection[],
+	mergeNodeId: string
+): MergeFanOut | null {
+	const directPreds = connections.filter((c) => c.to_node_id === mergeNodeId && c.from_node_id);
+	if (directPreds.length < 2) return null;
+
+	const forward = new Map<string, string[]>();
+	const backward = new Map<string, string[]>();
+	for (const c of connections) {
+		if (!c.from_node_id) continue;
+		const outbound = forward.get(c.from_node_id) ?? [];
+		outbound.push(c.to_node_id);
+		forward.set(c.from_node_id, outbound);
+		const inbound = backward.get(c.to_node_id) ?? [];
+		inbound.push(c.from_node_id);
+		backward.set(c.to_node_id, inbound);
+	}
+
+	const seen = new Set([mergeNodeId]);
+	const bfsOrder: string[] = [];
+	const queue = [mergeNodeId];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		for (const from of backward.get(current) ?? []) {
+			if (!seen.has(from)) {
+				seen.add(from);
+				bfsOrder.push(from);
+				queue.push(from);
+			}
+		}
+	}
+	// Everything that can reach the merge node, plus the merge node itself.
+	const reachSet = seen;
+
+	let ancestorId: string | null = null;
+	let branchCount = 0;
+	for (const candidate of bfsOrder) {
+		const branchesTowardMerge = (forward.get(candidate) ?? []).filter((to) => reachSet.has(to));
+		if (branchesTowardMerge.length >= 2) {
+			ancestorId = candidate;
+			branchCount = branchesTowardMerge.length;
+			break;
+		}
+	}
+	if (!ancestorId) return null;
+
+	// Forward reachability from the ancestor, intersected with reachSet,
+	// is exactly the nodes on some path from the fan-out point to the
+	// merge -- regardless of how many hops each branch takes.
+	const nodeIds = new Set<string>([ancestorId]);
+	const fq = [ancestorId];
+	while (fq.length > 0) {
+		const current = fq.shift()!;
+		for (const to of forward.get(current) ?? []) {
+			if (reachSet.has(to) && !nodeIds.has(to)) {
+				nodeIds.add(to);
+				fq.push(to);
+			}
+		}
+	}
+
+	const edgeIds = new Set(
+		connections
+			.filter((c) => c.from_node_id && nodeIds.has(c.from_node_id) && nodeIds.has(c.to_node_id))
+			.map((c) => c.id)
+	);
+
+	return { ancestorId, branchCount, nodeIds, edgeIds };
 }
 
 // Pure WorkflowNode[]/WorkflowConnection[] -> Svelte Flow {nodes, edges}
@@ -102,10 +222,19 @@ function edgeVisual(
 export function buildFlowGraph(
 	nodes: WorkflowNode[],
 	connections: WorkflowConnection[],
-	subtitleFor: (node: WorkflowNode) => string | null
+	subtitleFor: (node: WorkflowNode) => string | null,
+	// #200: the currently-selected node id, if any -- only used to compute
+	// mergeFanOut/highlighting when it names an actual merge node. Passing
+	// a non-merge node id (or omitting it) leaves every node/edge exactly
+	// as buildFlowGraph produced them before #200.
+	selectedNodeId?: string | null
 ): BuildFlowGraphResult {
 	const nodeIds = new Set(nodes.map((n) => n.id));
 	const entryNodeId = connections.find((c) => c.from_node_id === null)?.to_node_id ?? null;
+
+	const selectedNode = selectedNodeId ? nodes.find((n) => n.id === selectedNodeId) : undefined;
+	const mergeFanOut =
+		selectedNode?.node_type === 'merge' ? findMergeFanOut(connections, selectedNode.id) : null;
 
 	const flowNodes: WorkflowFlowNode[] = nodes.map((node) => ({
 		id: node.id,
@@ -115,7 +244,14 @@ export function buildFlowGraph(
 			label: node.name,
 			nodeType: node.node_type,
 			subtitle: subtitleFor(node),
-			isEntry: node.id === entryNodeId
+			isEntry: node.id === entryNodeId,
+			mergeHighlight: !mergeFanOut
+				? null
+				: node.id === mergeFanOut.ancestorId
+					? 'ancestor'
+					: mergeFanOut.nodeIds.has(node.id)
+						? 'branch'
+						: null
 		}
 	}));
 
@@ -141,6 +277,7 @@ export function buildFlowGraph(
 			const conditionLabel = conditionEdgeLabel(c.condition_json);
 			const loop = isLoopEdge(connections, c);
 			if (loop) hasLoop = true;
+			const highlighted = mergeFanOut?.edgeIds.has(c.id) ?? false;
 			return {
 				id: c.id,
 				source: c.from_node_id,
@@ -149,15 +286,19 @@ export function buildFlowGraph(
 				// Lets tests target a specific edge (`page.getByTestId(...)`) the
 				// same way workflow-node-${id} does for nodes -- domAttributes is
 				// spread straight onto the rendered <g class="svelte-flow__edge">.
-				domAttributes: { 'data-testid': `workflow-edge-${c.id}` },
+				domAttributes: {
+					'data-testid': `workflow-edge-${c.id}`,
+					'data-merge-highlight': highlighted ? 'true' : undefined
+				},
 				// A conditional and/or loop edge gets a label plus a distinct
 				// stroke so branching/looping is visible on the canvas itself,
 				// not just in the inspector -- a plain edge keeps the solid line
 				// it always had (no extra keys, so existing snapshots/tests for
-				// those are untouched).
-				...(edgeVisual(conditionLabel, loop) ?? {})
+				// those are untouched). #200 layers a highlight on top when this
+				// edge is on the selected merge node's fan-out path.
+				...(edgeVisual(conditionLabel, loop, highlighted) ?? {})
 			};
 		});
 
-	return { nodes: flowNodes, edges: flowEdges, entryNodeId, hasLoop };
+	return { nodes: flowNodes, edges: flowEdges, entryNodeId, hasLoop, mergeFanOut };
 }
