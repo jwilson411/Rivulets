@@ -257,6 +257,87 @@ async def test_register_mcp_server_tool_skipped_without_mcp_servers_manage_grant
     assert [fn.name for fn in resolved] == ["register_mcp_server"]
 
 
+async def test_seed_builtin_tools_sets_settings_manage_scope(db_session: AsyncSession) -> None:
+    """#193: get_workspace_settings/update_workspace_settings are the
+    fifth real consumer of BUILTIN_TOOL_SCOPES -- confirms seeding wires
+    up "settings:manage" for both. Unlike every prior category's list
+    tool, get_workspace_settings is scoped too (api/settings.py's GET
+    route is OwnerGrant-gated same as its PATCH) -- see tool_scopes.py's
+    BUILTIN_TOOL_SCOPES comment for why."""
+    await seed_builtin_tools(db_session)
+
+    get_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "get_workspace_settings"))
+    ).scalar_one()
+    assert get_row.required_scope == "settings:manage"
+
+    update_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "update_workspace_settings"))
+    ).scalar_one()
+    assert update_row.required_scope == "settings:manage"
+
+
+async def test_update_workspace_settings_tool_skipped_without_settings_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    update_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "update_workspace_settings"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, update_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="settings:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["update_workspace_settings"]
+
+
+async def test_seed_builtin_tools_sets_invites_manage_scope(db_session: AsyncSession) -> None:
+    """#193: create_invite/list_invites/revoke_invite share one
+    "invites:manage" scope, separate from "settings:manage" -- an invite
+    is a more security-sensitive resource than a settings key/value pair
+    (tool_scopes.py's BUILTIN_TOOL_SCOPES comment)."""
+    await seed_builtin_tools(db_session)
+
+    create_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_invite"))
+    ).scalar_one()
+    assert create_row.required_scope == "invites:manage"
+
+    list_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "list_invites"))
+    ).scalar_one()
+    assert list_row.required_scope == "invites:manage"
+
+    revoke_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "revoke_invite"))
+    ).scalar_one()
+    assert revoke_row.required_scope == "invites:manage"
+
+
+async def test_create_invite_tool_skipped_without_invites_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    create_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_invite"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, create_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="invites:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["create_invite"]
+
+
 async def test_resolve_agent_tools_skips_unknown_builtin(db_session: AsyncSession) -> None:
     agent = await _make_agent(db_session)
     tool_row = Tool(name="not_a_real_builtin", description="stale", tool_type="builtin")

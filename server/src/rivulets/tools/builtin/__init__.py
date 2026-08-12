@@ -32,6 +32,7 @@ from rivulets.tools.builtin.files import read_attached_file
 from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
+from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
 from rivulets.tools.builtin.knowledge_base import search_knowledge_base
 from rivulets.tools.builtin.mcp_servers import (
     delete_mcp_server,
@@ -41,6 +42,7 @@ from rivulets.tools.builtin.mcp_servers import (
 )
 from rivulets.tools.builtin.run_workflow import run_workflow
 from rivulets.tools.builtin.schedules import cancel_schedule, list_schedules, schedule_workflow
+from rivulets.tools.builtin.settings import get_workspace_settings, update_workspace_settings
 from rivulets.tools.builtin.web_search import web_search
 from rivulets.tools.builtin.workflows import (
     create_workflow,
@@ -56,6 +58,7 @@ __all__ = [
     "cancel_schedule",
     "create_agent",
     "create_channel",
+    "create_invite",
     "create_team",
     "create_workflow",
     "delete_agent",
@@ -63,11 +66,13 @@ __all__ = [
     "delete_team",
     "delete_workflow",
     "execute_python",
+    "get_workspace_settings",
     "handoff",
     "http_request",
     "list_agents",
     "list_channels",
     "list_files",
+    "list_invites",
     "list_mcp_servers",
     "list_schedules",
     "list_teams",
@@ -79,6 +84,7 @@ __all__ = [
     "reconnect_mcp_server",
     "register_mcp_server",
     "reorder_channels",
+    "revoke_invite",
     "rollback_agent_version",
     "run_workflow",
     "schedule_workflow",
@@ -91,6 +97,7 @@ __all__ = [
     "update_channel",
     "update_team",
     "update_workflow",
+    "update_workspace_settings",
     "web_search",
     "write_file",
 ]
