@@ -89,6 +89,7 @@ from rivulets.db.models import (
     TeamAgent,
     Tool,
     Workflow,
+    WorkflowConnection,
     WorkflowSchedule,
 )
 from rivulets.db.session import session_scope
@@ -625,6 +626,97 @@ def _find_list_mcp_servers_call(run_output: RunOutput) -> bool:
     """Same shape as _find_list_schedules_call, for the argument-less
     list_mcp_servers tool (tools/builtin/mcp_servers.py, #191)."""
     return any(tool_call.tool_name == "list_mcp_servers" for tool_call in run_output.tools or [])
+
+
+class CreateWorkflowCall:
+    """Parsed args for a create_workflow tool call (#192)."""
+
+    def __init__(self, name: str, args: dict[str, object]) -> None:
+        self.name = name
+        self.description = _str_or_none(args, "description")
+
+
+def _find_create_workflow_call(run_output: RunOutput) -> CreateWorkflowCall | None:
+    """Same shape as _find_run_workflow_call, for the create_workflow tool
+    (tools/builtin/workflows.py, #192)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "create_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        if isinstance(name, str):
+            return CreateWorkflowCall(name, args)
+    return None
+
+
+class UpdateWorkflowCall:
+    """Parsed args for an update_workflow tool call (#192). Only
+    `workflow_ref` (the id-or-name reference) is required;
+    `name`/`description` fall back to None when the model didn't supply
+    them, same as UpdateChannelCall above."""
+
+    def __init__(self, workflow_ref: str, args: dict[str, object]) -> None:
+        self.workflow_ref = workflow_ref
+        self.name = _str_or_none(args, "name")
+        self.description = _str_or_none(args, "description")
+
+
+def _find_update_workflow_call(run_output: RunOutput) -> UpdateWorkflowCall | None:
+    """Same shape as _find_run_workflow_call, for the update_workflow tool
+    (tools/builtin/workflows.py, #192)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "update_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        workflow_ref = args.get("workflow")
+        if isinstance(workflow_ref, str):
+            return UpdateWorkflowCall(workflow_ref, args)
+    return None
+
+
+def _find_delete_workflow_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the delete_workflow
+    tool (tools/builtin/workflows.py, #192)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "delete_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        workflow_ref = args.get("workflow")
+        if isinstance(workflow_ref, str):
+            return workflow_ref
+    return None
+
+
+def _find_publish_workflow_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the publish_workflow
+    tool (tools/builtin/workflows.py, #192)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "publish_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        workflow_ref = args.get("workflow")
+        if isinstance(workflow_ref, str):
+            return workflow_ref
+    return None
+
+
+def _find_unpublish_workflow_call(run_output: RunOutput) -> str | None:
+    """Same shape as _find_cancel_schedule_call, for the
+    unpublish_workflow tool (tools/builtin/workflows.py, #192)."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "unpublish_workflow":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        workflow_ref = args.get("workflow")
+        if isinstance(workflow_ref, str):
+            return workflow_ref
+    return None
+
+
+def _find_list_workflows_call(run_output: RunOutput) -> bool:
+    """Same shape as _find_list_schedules_call, for the argument-less
+    list_workflows tool (tools/builtin/workflows.py, #192)."""
+    return any(tool_call.tool_name == "list_workflows" for tool_call in run_output.tools or [])
 
 
 async def dispatch_and_respond(
@@ -1482,6 +1574,39 @@ async def _invoke_agent(
 
     if _find_list_mcp_servers_call(run_output):
         new_messages.extend(await _handle_list_mcp_servers_trigger(db, rivulet, agent))
+
+    create_workflow_call = _find_create_workflow_call(run_output)
+    if create_workflow_call is not None:
+        new_messages.extend(
+            await _handle_create_workflow_trigger(db, rivulet, agent, create_workflow_call)
+        )
+
+    update_workflow_call = _find_update_workflow_call(run_output)
+    if update_workflow_call is not None:
+        new_messages.extend(
+            await _handle_update_workflow_trigger(db, rivulet, agent, update_workflow_call)
+        )
+
+    delete_workflow_call = _find_delete_workflow_call(run_output)
+    if delete_workflow_call is not None:
+        new_messages.extend(
+            await _handle_delete_workflow_trigger(db, rivulet, agent, delete_workflow_call)
+        )
+
+    publish_workflow_call = _find_publish_workflow_call(run_output)
+    if publish_workflow_call is not None:
+        new_messages.extend(
+            await _handle_publish_workflow_trigger(db, rivulet, agent, publish_workflow_call)
+        )
+
+    unpublish_workflow_call = _find_unpublish_workflow_call(run_output)
+    if unpublish_workflow_call is not None:
+        new_messages.extend(
+            await _handle_unpublish_workflow_trigger(db, rivulet, agent, unpublish_workflow_call)
+        )
+
+    if _find_list_workflows_call(run_output):
+        new_messages.extend(await _handle_list_workflows_trigger(db, rivulet, agent))
 
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
@@ -3090,6 +3215,289 @@ async def _handle_list_mcp_servers_trigger(
             status = "connected" if s.connected else "not connected"
             target = s.url if s.transport == "streamable-http" else s.command
             lines.append(f"- {s.name!r} (id: {s.id}, {s.transport}, {status}): {target}")
+        content = "\n".join(lines)
+
+    message = _system_message(db, rivulet, content)
+    return [message]
+
+
+# #192: workflow-level definition CRUD. Same source of truth as
+# api/workflows.py's WorkflowCreate/WorkflowUpdate: the name pattern is
+# copied here (rather than imported) to avoid api/workflows.py importing
+# back into dispatch/service.py -- api -> dispatch is the existing
+# dependency direction everywhere else in this file (e.g. _CHANNEL_NAME_MIN_LEN/
+# _AGENT_NAME_MIN_LEN above are likewise each their own copy of the
+# corresponding api/*.py constraint, not an import of it).
+_WORKFLOW_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+
+
+async def _resolve_workflow_ref(db: AsyncSession, workflow_ref: str) -> Workflow | None:
+    """Resolves a workflow tool's `workflow` arg, which may be the
+    workflow's id or its name. An id match is checked first. Like
+    Agent.name, Workflow.name is globally unique (db/models.py's
+    idx_workflow_name), so there's no list-of-matches case to handle here,
+    unlike _resolve_channel_ref/_resolve_team_ref."""
+    workflow = await db.get(Workflow, workflow_ref)
+    if workflow is not None:
+        return workflow
+    return await db.scalar(select(Workflow).where(Workflow.name == workflow_ref))
+
+
+async def _handle_create_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: CreateWorkflowCall
+) -> list[Message]:
+    """#192: an agent called the create_workflow tool. Validation mirrors
+    api/workflows.py's create_workflow handler (name pattern via
+    _WORKFLOW_NAME_PATTERN, name uniqueness via idx_workflow_name) so a
+    request that would 422/409 through the API is rejected here as a
+    visible message instead, the same defensive posture
+    _handle_create_channel_trigger already takes. The new workflow starts
+    unpublished with no nodes/connections -- node/connection authoring
+    isn't part of this tool set (tools/builtin/workflows.py's module
+    docstring)."""
+    if not _WORKFLOW_NAME_PATTERN.match(call.name):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create workflow {call.name!r}, but workflow names must "
+                "be 2-64 characters, lowercase letters/digits/hyphens only, starting with a "
+                "letter.",
+            )
+        ]
+    existing = await db.scalar(select(Workflow).where(Workflow.name == call.name))
+    if existing is not None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to create workflow {call.name!r}, but a workflow with that "
+                "name already exists.",
+            )
+        ]
+
+    workflow = Workflow(name=call.name, description=call.description)
+    db.add(workflow)
+    await db.flush()  # populates workflow.id (uuid7 default), needed below
+    await publish_current_state(db, "workflow", workflow.id)
+    await db.commit()
+
+    message = _system_message(
+        db, rivulet, f"@{agent.name} created workflow {workflow.name!r} (id: {workflow.id})."
+    )
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workflow_created", "workflow_id": workflow.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_update_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, call: UpdateWorkflowCall
+) -> list[Message]:
+    """#192: an agent called the update_workflow tool. Mirrors api/
+    workflows.py's update_workflow handler for the name/description
+    fields only -- on_failure_workflow_id/on_call_agent_id aren't
+    settable through this tool (tools/builtin/workflows.py's module
+    docstring)."""
+    workflow = await _resolve_workflow_ref(db, call.workflow_ref)
+    if workflow is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update workflow {call.workflow_ref!r}, but no workflow "
+                "with that id or name was found.",
+            )
+        ]
+
+    if call.name is None and call.description is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update workflow {workflow.name!r}, but didn't specify "
+                "any changes.",
+            )
+        ]
+
+    previous_name = workflow.name
+    if call.name is not None and call.name != workflow.name:
+        if not _WORKFLOW_NAME_PATTERN.match(call.name):
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename workflow {workflow.name!r}, but workflow "
+                    "names must be 2-64 characters, lowercase letters/digits/hyphens only, "
+                    "starting with a letter.",
+                )
+            ]
+        conflict = await db.scalar(select(Workflow).where(Workflow.name == call.name))
+        if conflict is not None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename workflow {workflow.name!r} to {call.name!r}, "
+                    "but a workflow with that name already exists.",
+                )
+            ]
+        workflow.name = call.name
+
+    if call.description is not None:
+        workflow.description = call.description
+
+    await db.commit()
+    await publish_current_state(db, "workflow", workflow.id)
+
+    message = _system_message(db, rivulet, f"@{agent.name} updated workflow {previous_name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workflow_updated", "workflow_id": workflow.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_delete_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, workflow_ref: str
+) -> list[Message]:
+    """#192: an agent called the delete_workflow tool. Mirrors api/
+    workflows.py's delete_workflow handler (cascade delete of the
+    workflow's own nodes/connections, Workflow.nodes/connections'
+    cascade="all, delete-orphan")."""
+    workflow = await _resolve_workflow_ref(db, workflow_ref)
+    if workflow is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete workflow {workflow_ref!r}, but no workflow with "
+                "that id or name was found.",
+            )
+        ]
+    workflow_name = workflow.name
+    await db.delete(workflow)
+    await db.commit()
+
+    message = _system_message(db, rivulet, f"@{agent.name} deleted workflow {workflow_name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workflow_deleted", "workflow_name": workflow_name, "deleted_by": agent.id},
+    )
+    return [message]
+
+
+async def _handle_publish_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, workflow_ref: str
+) -> list[Message]:
+    """#192: an agent called the publish_workflow tool. Mirrors api/
+    workflows.py's publish_workflow handler (refuses without an entry
+    connection, the same "can this even run" check the engine itself
+    makes at trigger time)."""
+    workflow = await _resolve_workflow_ref(db, workflow_ref)
+    if workflow is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to publish workflow {workflow_ref!r}, but no workflow with "
+                "that id or name was found.",
+            )
+        ]
+    if workflow.published:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to publish workflow {workflow.name!r}, but it's already "
+                "published.",
+            )
+        ]
+    entry = await db.scalar(
+        select(WorkflowConnection).where(
+            WorkflowConnection.workflow_id == workflow.id,
+            WorkflowConnection.from_node_id.is_(None),
+        )
+    )
+    if entry is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to publish workflow {workflow.name!r}, but it has no entry "
+                "point yet -- connect a first step before publishing.",
+            )
+        ]
+
+    workflow.published = True
+    await db.commit()
+    await publish_current_state(db, "workflow", workflow.id)
+
+    message = _system_message(db, rivulet, f"@{agent.name} published workflow {workflow.name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workflow_published", "workflow_id": workflow.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_unpublish_workflow_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, workflow_ref: str
+) -> list[Message]:
+    """#192: an agent called the unpublish_workflow tool. Mirrors api/
+    workflows.py's unpublish_workflow handler (reverts to draft; has no
+    effect on a run already in flight)."""
+    workflow = await _resolve_workflow_ref(db, workflow_ref)
+    if workflow is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to unpublish workflow {workflow_ref!r}, but no workflow "
+                "with that id or name was found.",
+            )
+        ]
+    if not workflow.published:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to unpublish workflow {workflow.name!r}, but it isn't "
+                "published.",
+            )
+        ]
+
+    workflow.published = False
+    await db.commit()
+    await publish_current_state(db, "workflow", workflow.id)
+
+    message = _system_message(db, rivulet, f"@{agent.name} unpublished workflow {workflow.name!r}.")
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "workflow_unpublished", "workflow_id": workflow.id, "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_list_workflows_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent
+) -> list[Message]:
+    """#192: an agent called the (unscoped, read-only) list_workflows
+    tool."""
+    workflows = list((await db.scalars(select(Workflow).order_by(Workflow.name))).all())
+    if not workflows:
+        content = f"@{agent.name} looked up the workspace's workflows: there are none yet."
+    else:
+        lines = [f"@{agent.name} looked up the workspace's workflows:"]
+        for w in workflows:
+            status = "published" if w.published else "draft"
+            lines.append(f"- {w.name!r} (id: {w.id}, {status})")
         content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)
