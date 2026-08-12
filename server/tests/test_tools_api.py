@@ -288,3 +288,30 @@ def test_open_tool_editor_rejects_a_tool_with_no_source_file(
     response = client.post(f"/api/v1/tools/{builtin_id}/open-editor", headers=auth_headers)
 
     assert response.status_code == 400
+
+
+def test_list_tool_scopes_returns_the_known_catalog(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#188: the fixed scope catalog an owner can grant to an agent via
+    PUT /agents/{agent_id}/tool-scopes."""
+    response = client.get("/api/v1/tools/scopes", headers=auth_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == [
+        "agents_teams:manage",
+        "channels:manage",
+        "mcp_servers:manage",
+        "settings:manage",
+        "workflows:manage",
+    ]
+
+
+def test_list_tools_exposes_required_scope(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    # No builtin tool declares a required_scope yet (#188 is the
+    # mechanism, not the first scoped tool) -- every tool reports None.
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    assert tools
+    assert all(tool["required_scope"] is None for tool in tools)

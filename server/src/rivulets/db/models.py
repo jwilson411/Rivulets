@@ -361,6 +361,32 @@ class AgentTool(Base):
     )
 
 
+class AgentToolScope(Base):
+    """Per-agent grant of a capability scope (#188) -- independent of
+    which tools are assigned via AgentTool above. A tool whose
+    Tool.required_scope is set only resolves for an agent that holds a
+    matching row here; see tool_resolution.py's resolve_agent_tools.
+
+    Granted by a workspace owner only (api/agents.py's
+    set_agent_tool_scopes, gated by OwnerGrant) -- an agent shouldn't be
+    able to expand its own reach, and neither should an invited session,
+    so this is a separate owner-only surface rather than folded into
+    agent_tool's existing update path (open to any valid session, same as
+    the rest of api/agents.py).
+
+    Not P2P-synced, same as AgentTool itself (sync/apply.py's AGENT_SPEC
+    doesn't cover either join table) -- local-node authorization state,
+    not shared workspace content."""
+
+    __tablename__ = "agent_tool_scope"
+
+    agent_id: Mapped[str] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True
+    )
+    scope: Mapped[str] = mapped_column(primary_key=True)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class Tool(Base):
     __tablename__ = "tool"
 
@@ -377,6 +403,15 @@ class Tool(Base):
     # tool -- v1 scope is the fixed builtin set called out in #100, not a
     # UI for marking an arbitrary custom/mcp tool sensitive yet.
     sensitive: Mapped[bool] = mapped_column(default=False)
+    # #188: capability scope (agentos/tool_scopes.py's TOOL_SCOPES) an
+    # agent must be granted, via AgentToolScope below, before this tool
+    # resolves for it -- see tool_resolution.py's resolve_agent_tools.
+    # None (every tool today) means no scope is required, the same
+    # unconditional "assigned -> usable" behavior that existed before
+    # #188. Independent of `sensitive` above: that axis gates unattended
+    # use of an already-invocable tool; this one gates invocability at
+    # all, attended or not.
+    required_scope: Mapped[str | None] = mapped_column(default=None)
     source_path: Mapped[str | None] = mapped_column(default=None)
     mcp_server_id: Mapped[str | None] = mapped_column(ForeignKey("mcp_server.id"), default=None)
     mcp_tool_name: Mapped[str | None] = mapped_column(default=None)

@@ -49,7 +49,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.mcp import build_stdio_command, get_server_env, get_server_headers
-from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
+from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
+from rivulets.db.models import Agent, AgentTool, AgentToolScope, MCPServer, Tool
 from rivulets.tools.builtin import (
     cancel_schedule,
     execute_python,
@@ -106,15 +107,17 @@ async def seed_builtin_tools(db: AsyncSession) -> None:
     name — call on every app startup (mirrors sync_agents()'s own
     call-every-startup pattern), not just the first.
 
-    Also patches `sensitive` on every existing builtin row to match
-    SENSITIVE_BUILTIN_TOOL_NAMES (#100) — not just set at insert time —
-    since an install that seeded these rows before #100 existed would
-    otherwise carry `sensitive=False` forever with no other code path
-    that ever revisits it."""
+    Also patches `sensitive` and `required_scope` on every existing
+    builtin row to match SENSITIVE_BUILTIN_TOOL_NAMES (#100) and
+    BUILTIN_TOOL_SCOPES (#188) — not just set at insert time — since an
+    install that seeded these rows before either existed would otherwise
+    carry the old value forever with no other code path that ever
+    revisits it."""
     result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
     existing = {row.name: row for row in result.scalars().all()}
     for fn in _BUILTIN_FUNCTIONS:
         sensitive = fn.name in SENSITIVE_BUILTIN_TOOL_NAMES
+        required_scope = BUILTIN_TOOL_SCOPES.get(fn.name)
         if fn.name not in existing:
             db.add(
                 Tool(
@@ -122,10 +125,14 @@ async def seed_builtin_tools(db: AsyncSession) -> None:
                     description=fn.description or "",
                     tool_type="builtin",
                     sensitive=sensitive,
+                    required_scope=required_scope,
                 )
             )
-        elif existing[fn.name].sensitive != sensitive:
-            existing[fn.name].sensitive = sensitive
+        else:
+            if existing[fn.name].sensitive != sensitive:
+                existing[fn.name].sensitive = sensitive
+            if existing[fn.name].required_scope != required_scope:
+                existing[fn.name].required_scope = required_scope
     await db.commit()
 
 
@@ -152,7 +159,17 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
     """Returns the agno tool objects for everything assigned to
     `agent_row` via the agent_tool join table — the caller (agentos/
     service.py's _build_agno_agent) adds `handoff` on top unconditionally
-    (FR-6.1), so this only returns the opt-in tools."""
+    (FR-6.1), so this only returns the opt-in tools.
+
+    #188: a tool_row whose `required_scope` is set only resolves if
+    `agent_row` also holds a matching AgentToolScope grant — assignment
+    (agent_tool) and eligibility (agent_tool_scope) are two separate
+    gates, so a workspace owner can bound which of an agent's assigned
+    tools actually work without having to un-assign them. A tool that
+    fails this check is skipped with a warning, the same NFR-2.4 "one
+    unavailable tool doesn't take the whole agent offline" treatment
+    already given to a missing custom-tool file or a deleted MCP server
+    below."""
     result = await db.execute(
         select(Tool)
         .join(AgentTool, AgentTool.tool_id == Tool.id)
@@ -160,8 +177,21 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
     )
     tool_rows = list(result.scalars().all())
 
+    scope_result = await db.execute(
+        select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_row.id)
+    )
+    granted_scopes = set(scope_result.scalars().all())
+
     resolved: list[Any] = []
     for tool_row in tool_rows:
+        if tool_row.required_scope is not None and tool_row.required_scope not in granted_scopes:
+            logger.warning(
+                "Tool %r requires scope %r, not granted to agent %r — skipping",
+                tool_row.name,
+                tool_row.required_scope,
+                agent_row.name,
+            )
+            continue
         try:
             if tool_row.tool_type == "builtin":
                 fn = _BUILTIN_REGISTRY.get(tool_row.name)

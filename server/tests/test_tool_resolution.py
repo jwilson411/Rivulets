@@ -12,7 +12,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
-from rivulets.db.models import Agent, AgentTool, MCPServer, Tool
+from rivulets.db.models import Agent, AgentTool, AgentToolScope, MCPServer, Tool
 
 _AGENT_FIELDS = {
     "description": "A test agent for tool resolution tests.",
@@ -73,6 +73,49 @@ async def test_resolve_agent_tools_resolves_builtin(db_session: AsyncSession) ->
     agent = await _make_agent(db_session)
     tool_row = (await db_session.execute(select(Tool).where(Tool.name == "read_file"))).scalar_one()
     await _assign(db_session, agent.id, tool_row.id)
+
+    resolved = await resolve_agent_tools(db_session, agent)
+
+    assert len(resolved) == 1
+    assert isinstance(resolved[0], Function)
+    assert resolved[0].name == "read_file"
+
+
+async def test_resolve_agent_tools_skips_tool_with_ungranted_scope(
+    db_session: AsyncSession,
+) -> None:
+    """#188: a tool with a required_scope set doesn't resolve for an agent
+    that hasn't been granted that scope via AgentToolScope, even though
+    it's assigned via agent_tool."""
+    agent = await _make_agent(db_session)
+    tool_row = Tool(
+        name="scoped_tool",
+        description="A tool with real reach.",
+        tool_type="builtin",
+        required_scope="channels:manage",
+    )
+    db_session.add(tool_row)
+    await db_session.commit()
+    await _assign(db_session, agent.id, tool_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+
+async def test_resolve_agent_tools_resolves_tool_with_granted_scope(
+    db_session: AsyncSession,
+) -> None:
+    """The counterpart to the skip test above: granting the required scope
+    via AgentToolScope makes the assigned tool resolve normally."""
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    read_file_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "read_file"))
+    ).scalar_one()
+    read_file_row.required_scope = "channels:manage"
+    await db_session.commit()
+    await _assign(db_session, agent.id, read_file_row.id)
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="channels:manage"))
+    await db_session.commit()
 
     resolved = await resolve_agent_tools(db_session, agent)
 
