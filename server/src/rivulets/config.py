@@ -18,6 +18,17 @@ class Settings(BaseSettings):
     app_server_host: str = "127.0.0.1"
     app_server_port: int = 8484
 
+    # #247: with app_server_host=0.0.0.0 (the Docker default), the app is
+    # reachable before the owner's first login -- without this, whoever
+    # sends the first valid-looking POST /auth/login claims the single
+    # workspace row, permanently locking out the real mnemonic. Only
+    # gates *creating* that row (api/auth.py); every login afterward is
+    # unaffected, and a loopback-only bind never needed this to begin
+    # with. Left unset, first login over 0.0.0.0 refuses to bootstrap at
+    # all -- fails closed rather than defaulting to the old unauthenticated
+    # race.
+    bootstrap_token: str | None = None
+
     # NFR-3.5 / ADR-008: the Code Execution tool denies outbound network
     # access from sandboxed code by default. No per-workspace UI toggle
     # exists yet (see tools/builtin/code_exec.py) — this is the only knob.

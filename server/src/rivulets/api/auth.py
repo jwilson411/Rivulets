@@ -8,6 +8,16 @@ That same first-login moment also seeds the starter agent/team library
 (#16, agentos/starter_content.py) — there's exactly one workspace per
 install, so "first workspace creation" only ever happens once.
 
+#247: that first-login-wins scheme is fine on the default loopback-only
+bind (only the machine's own user can reach it), but app_server_host can
+be 0.0.0.0 (the Docker image's default, main.py) — there, the app is
+reachable before the owner ever logs in, and the first valid-looking
+POST here permanently claims the workspace out from under them. Gated
+below with RIVULETS_BOOTSTRAP_TOKEN (config.py): creating the workspace
+row while bound to 0.0.0.0 requires the request to carry a matching
+token, operator-set out of band (env var), so a network race can't win
+what it never received.
+
 Login also starts the P2P sync engine (FR-9): the workspace PSK it needs
 (FR-9.4) only exists once the workspace key has been derived here, so it
 can't start any earlier (e.g. at app startup, like AgentOS does). If the
@@ -26,6 +36,7 @@ happens, so a flood of mnemonic guesses is capped regardless of whether
 any of them happen to be right.
 """
 
+import hmac
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -44,6 +55,7 @@ from rivulets.api.deps import (
     SessionClaims,
     get_session_claims,
 )
+from rivulets.config import get_settings
 from rivulets.db.models import Human, Workspace
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
@@ -61,6 +73,10 @@ _JWT_TTL = timedelta(hours=24)
 class LoginRequest(BaseModel):
     key: str  # 12-word BIP-39 mnemonic
     passphrase: str | None = None
+    # #247: only consulted when this login is about to create the
+    # workspace row *and* app_server_host is 0.0.0.0 — see login()'s
+    # bootstrap-token check.
+    bootstrap_token: str | None = None
 
 
 class LoginResponse(BaseModel):
@@ -87,6 +103,24 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     workspace = result.scalar_one_or_none()
 
     if workspace is None:
+        settings = get_settings()
+        if settings.app_server_host == "0.0.0.0":  # noqa: S104
+            # #247: this request is about to claim the single workspace row
+            # over a network-reachable bind. `settings.bootstrap_token` being
+            # unset fails closed rather than being treated as "no token
+            # required" -- checked before compare_digest so an unconfigured
+            # node can never be claimed just by posting an empty token to
+            # match an empty default.
+            configured_token = settings.bootstrap_token
+            supplied_token = body.bootstrap_token or ""
+            if not configured_token or not hmac.compare_digest(
+                supplied_token.encode(), configured_token.encode()
+            ):
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "This node requires RIVULETS_BOOTSTRAP_TOKEN to initialize a workspace "
+                    "while bound to 0.0.0.0",
+                )
         workspace = Workspace(key_hash=keys.hash_workspace_key(workspace_key))
         db.add(workspace)
         await db.commit()

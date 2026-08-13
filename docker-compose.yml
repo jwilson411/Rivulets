@@ -6,13 +6,19 @@
 # install's NFR-3.4 posture: reachable from this machine only. To expose it
 # to your LAN instead, change the port mapping below to "8484:8484" — do
 # that deliberately, not by accident, since Rivulets has no built-in network
-# auth beyond the workspace key.
+# auth beyond the workspace key. If you do, also set RIVULETS_BOOTSTRAP_TOKEN
+# (#247, README.md's Docker section) before the first login: the container
+# binds 0.0.0.0 internally regardless of this port mapping, so anyone who
+# reaches it before you've logged in once could otherwise claim the
+# workspace with their own recovery phrase.
 services:
   rivulets:
     build: .
     image: rivulets:local
     ports:
       - "127.0.0.1:8484:8484"
+    # environment:
+    #   RIVULETS_BOOTSTRAP_TOKEN: ${RIVULETS_BOOTSTRAP_TOKEN:?set this before exposing beyond loopback}
     volumes:
       - rivulets-data:/data
     restart: unless-stopped

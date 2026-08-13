@@ -4,9 +4,25 @@ import jwt as pyjwt
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.config import Settings, get_settings
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
 from rivulets.security.session import get_session_key_store
+
+_ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- exercising #247's gate, never actually bound
+_TEST_BOOTSTRAP_TOKEN = "correct-token"  # noqa: S105 -- test fixture value, not a real secret
+
+
+def _settings_bound_to(host: str, *, bootstrap_token: str | None = None) -> Settings:
+    # Same fields as get_settings() would produce, just with app_server_host
+    # (and optionally bootstrap_token) overridden -- workspace_dir/db paths
+    # are irrelevant to login() and never touched by these tests.
+    base = get_settings()
+    return Settings(
+        app_server_host=host,
+        workspace_dir=base.workspace_dir,
+        bootstrap_token=bootstrap_token,
+    )
 
 
 def test_login_bootstraps_workspace_on_first_use(client: TestClient) -> None:
@@ -29,6 +45,85 @@ def test_second_login_requires_same_mnemonic(client: TestClient) -> None:
     other = keys.generate_mnemonic()
     rejected = client.post("/api/v1/auth/login", json={"key": other})
     assert rejected.status_code == 401
+
+
+def test_bootstrap_over_0_0_0_0_refuses_without_a_bootstrap_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#247: with no workspace yet and the app reachable from the network
+    (app_server_host=0.0.0.0), the first login must not be able to claim
+    the workspace unless RIVULETS_BOOTSTRAP_TOKEN is configured."""
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings", lambda: _settings_bound_to(_ALL_INTERFACES)
+    )
+
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+
+    assert response.status_code == 401
+    assert "bootstrap" in response.json()["detail"].lower()
+
+
+def test_bootstrap_over_0_0_0_0_refuses_a_wrong_bootstrap_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings",
+        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"key": keys.generate_mnemonic(), "bootstrap_token": "wrong-token"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_bootstrap_over_0_0_0_0_succeeds_with_the_correct_bootstrap_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings",
+        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"key": keys.generate_mnemonic(), "bootstrap_token": _TEST_BOOTSTRAP_TOKEN},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["token"]
+
+
+def test_second_login_over_0_0_0_0_does_not_require_a_bootstrap_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the workspace already exists, the bootstrap-token gate no
+    longer applies -- it only guards the moment the workspace row is
+    created, not every subsequent login."""
+    mnemonic = keys.generate_mnemonic()
+    first = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    assert first.status_code == 200
+
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings", lambda: _settings_bound_to(_ALL_INTERFACES)
+    )
+    second = client.post("/api/v1/auth/login", json={"key": mnemonic})
+
+    assert second.status_code == 200, second.text
+
+
+def test_bootstrap_over_loopback_does_not_require_a_bootstrap_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default bind (127.0.0.1) is only reachable from this machine
+    already -- the token gate is scoped to the network-reachable bind."""
+    monkeypatch.setattr("rivulets.api.auth.get_settings", lambda: _settings_bound_to("127.0.0.1"))
+
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+
+    assert response.status_code == 200, response.text
 
 
 def test_protected_endpoint_requires_token(client: TestClient) -> None:
