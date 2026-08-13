@@ -16,6 +16,11 @@ from rivulets.update import RESTART_ENV_VAR, cleanup_stale_backup, wait_for_port
 
 
 def main() -> None:
+    # docs/security.md's "File permissions" claim (#244): restrict the mode
+    # of every file/dir this process creates from here on -- the workspace
+    # dir, the databases, backups, synced file blobs, custom tool sources --
+    # to owner-only, before any of that gets created below.
+    os.umask(0o077)
     settings = get_settings()
     cleanup_stale_backup()
     if os.environ.pop(RESTART_ENV_VAR, None):

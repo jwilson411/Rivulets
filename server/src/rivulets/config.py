@@ -68,6 +68,14 @@ class Settings(BaseSettings):
             self.sync_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
+            # main.py's process-wide umask only governs *new* files/dirs --
+            # this also tightens dirs left over from before #244, on every
+            # startup, so an upgrade fixes an existing install in place
+            # rather than just new ones.
+            d.chmod(0o700)
+        for f in (self.db_path, self.credential_fallback_db_path):
+            if f.exists():
+                f.chmod(0o600)
 
 
 @lru_cache
