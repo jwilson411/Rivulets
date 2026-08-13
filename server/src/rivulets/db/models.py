@@ -505,11 +505,18 @@ class Workflow(Base):
     time (workflows/engine.py's "Workflow has no entry point" failure) --
     published is meant to mean "ready", not just "flagged".
 
-    Not required for a node_type='workflow' step (#85) to reference this
-    workflow as a nested child -- that's a structural reference chosen by
-    whoever built the parent, not an external trigger a stray message
-    could hit by accident, so the same "shouldn't be triggerable before
-    it's ready" concern `published` addresses doesn't apply the same way.
+    Not required for a node_type='workflow' step (#85) to *reference* this
+    workflow as a nested child at save time -- that's a structural choice
+    made by whoever built the parent, not an external trigger a stray
+    message could hit by accident. Actually *running* that nested step
+    does require it, though (#249): `workflows/engine.py`'s
+    `_execute_workflow_node` re-checks `published` immediately before
+    invoking the child, the same gate `find_workflow_by_name` applies to
+    every other trigger path. A synced peer that's only received this
+    workflow's nodes/connections (not yet this flag -- see sync/apply.py's
+    `WORKFLOW_SPEC`, which now syncs `published` for exactly this reason)
+    therefore can't nest-run a graph its own copy still considers a draft,
+    even though the node/connection rows are already fully present.
 
     `on_failure_workflow_id` (#94 layer 2): an optional remediation
     workflow, invoked automatically (workflows/engine.py's
@@ -743,7 +750,22 @@ class WorkflowRun(Base):
     it after a pause/resume boundary, which starts a fresh `_RunContext`.
     Read by `workflows/nodes.py`'s `execute_agent_node` to gate an 'agent'
     node whose assigned agent has an unapproved sensitive tool -- see
-    `Agent.approved_for_unattended_tools`."""
+    `Agent.approved_for_unattended_tools`.
+
+    `visit_counts_json`/`total_steps` (#249): the same "persisted so a
+    pause/resume boundary doesn't lose it" treatment `unattended` already
+    gets, for workflows/engine.py's loop guard (`MAX_NODE_VISITS_PER_RUN`/
+    `MAX_TOTAL_STEPS_PER_RUN`). Before this, `resume_workflow` rebuilt a
+    fresh `_RunContext` on every resume, so a looping graph that paused
+    once per iteration (a 'human_input' node inside the loop) reset its
+    guard counters at every pause and could run past either cap without
+    ever tripping it. `_pause_for_human_input` writes the in-flight
+    `_RunContext`'s counters here (alongside `current_node_id`/`status`)
+    every time a run pauses, and `resume_workflow` seeds its new
+    `_RunContext` from these columns instead of starting at zero. A run
+    that never pauses never touches these -- the loop guard's usual
+    in-memory-only path (module docstring's "Loops" section) is unchanged
+    for the common case."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -764,6 +786,10 @@ class WorkflowRun(Base):
     error_message: Mapped[str | None] = mapped_column(default=None)
     final_output: Mapped[str | None] = mapped_column(default=None)
     graph_snapshot_json: Mapped[str] = mapped_column(default="{}")
+    # #249: loop-guard state, persisted across a pause/resume boundary --
+    # see this class's own docstring.
+    visit_counts_json: Mapped[str] = mapped_column(default="{}")
+    total_steps: Mapped[int] = mapped_column(default=0)
     started_at: Mapped[str] = mapped_column(default=utcnow_iso)
     completed_at: Mapped[str | None] = mapped_column(default=None)
 

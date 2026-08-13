@@ -226,7 +226,20 @@ AGENT_PEER_PREFERENCE_SPEC = EntitySpec(
     "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_field="agent_id"
 )
 HUMAN_SPEC = EntitySpec("human", Human, ("display_name",))
-WORKFLOW_SPEC = EntitySpec("workflow", Workflow, ("name", "description"))
+WORKFLOW_SPEC = EntitySpec(
+    "workflow",
+    Workflow,
+    # #249: `published` is synced too now, not just definitional fields --
+    # workflows/engine.py's `_execute_workflow_node` gates a nested run on
+    # it, so a peer that's only received a workflow's nodes/connections
+    # (WORKFLOW_NODE_SPEC/WORKFLOW_CONNECTION_SPEC below) but not yet this
+    # flag would otherwise still see it as an unpublished draft and
+    # correctly refuse to nest-run it -- syncing the flag is what lets a
+    # workflow published on one peer actually become nest-runnable on
+    # another, the same way it's already runnable there via the ordinary
+    # slash-command/schedule/webhook trigger paths.
+    ("name", "description", "published"),
+)
 # workflow_id has the same FK-ordering hazard as Rivulet.channel_id/
 # Message.rivulet_id (module docstring): included anyway because a node/
 # connection is meaningless without its parent workflow, and the

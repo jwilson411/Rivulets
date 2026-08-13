@@ -151,6 +151,20 @@ is also why `_BranchOutcome` now carries an `output` field threaded
 through every clean-success return, not just failure/pause: nothing else
 needed a queryable "this run's result" before nesting required one.
 
+Two more guards on top of the cycle check (#249): `MAX_WORKFLOW_NESTING_
+DEPTH` caps how deep an *acyclic* chain of distinct nested workflows can
+go (the ancestry set's cycle guard alone doesn't bound that), and
+`_execute_workflow_node` re-checks `child_workflow.published` immediately
+before invoking it -- the same gate every other trigger path
+(workflows/trigger.py's `find_workflow_by_name`, api/webhooks.py,
+workflows/scheduler.py) already applies. Before #249, neither existed: a
+'workflow' node could nest-run an unpublished child (locally, or --
+because `WORKFLOW_NODE_SPEC`/`WORKFLOW_CONNECTION_SPEC` sync a workflow's
+graph independently of its `published` flag -- a child synced from a peer
+that had fully built but not yet published it), and a long non-cyclic
+nesting chain had no depth limit at all, only the loop guard's total-step
+budget to eventually exhaust.
+
 Deliberately out of scope: a nested child pausing on its own 'human_input'
 node. `_execute_workflow_node` treats that outcome as a failure of the
 parent's 'workflow' node rather than propagating the pause up through
@@ -221,6 +235,15 @@ logger = logging.getLogger(__name__)
 # one running away.
 MAX_NODE_VISITS_PER_RUN = 25
 MAX_TOTAL_STEPS_PER_RUN = 200
+
+# #249: a structural cap on how many workflows can be nested inside each
+# other (len(ctx.ancestry) once a level is entered), independent of the
+# ancestry set's own A-embeds-B-embeds-A cycle guard (_execute_workflow_node
+# below) -- a long *acyclic* chain of distinct workflows nesting into each
+# other is still unbounded without this, and each level multiplies the
+# loop guard's own already-generous budget (MAX_TOTAL_STEPS_PER_RUN) by
+# however deep the chain goes.
+MAX_WORKFLOW_NESTING_DEPTH = 10
 
 
 @dataclass
@@ -551,6 +574,22 @@ async def _execute_workflow_node(
     "Nested workflows" section for the ancestry-based cycle guard and why
     a nested pause becomes a failure here rather than propagating.
 
+    #249: two guards added after the ancestry cycle check, in this order --
+    a structural nesting-depth cap (`MAX_WORKFLOW_NESTING_DEPTH`, checked
+    first since it needs no extra lookup and existing cycle-guard tests
+    rely on the cycle error winning over a would-also-be-unpublished
+    child), then a `published` re-check on `child_workflow` -- the same
+    gate `workflows/trigger.py`'s `find_workflow_by_name` applies to the
+    slash-command/agent-tool trigger paths, and `api/webhooks.py`/
+    `workflows/scheduler.py` apply to theirs. Before this, a 'workflow'
+    node could nest-run a child regardless of its publish state, which is
+    exactly the kind of "still being built in the canvas" workflow
+    `published` exists to keep un-triggerable -- and, since
+    `WORKFLOW_NODE_SPEC`/`WORKFLOW_CONNECTION_SPEC` sync a workflow's
+    graph independently of `WORKFLOW_SPEC.published` (now synced too, for
+    this reason), a peer could otherwise have received a full, runnable
+    graph for a workflow its own copy still correctly considers a draft.
+
     #96: `node_trace_ctx` (this node's own workflow_node_run span, from
     _run_node_with_retries) becomes the child run's *parent* span, not
     `ctx.trace_ctx` (this run's own root span) -- so a nested run's spans
@@ -563,9 +602,18 @@ async def _execute_workflow_node(
             f"Node {node.name!r} would create a cycle — that workflow is already running "
             "further up this chain"
         )
+    if len(ctx.ancestry) >= MAX_WORKFLOW_NESTING_DEPTH:
+        raise ValueError(
+            f"Node {node.name!r} would nest workflows more than "
+            f"{MAX_WORKFLOW_NESTING_DEPTH} levels deep"
+        )
     child_workflow = await db.get(Workflow, node.child_workflow_id)
     if child_workflow is None:
         raise ValueError(f"Node {node.name!r} references a deleted workflow")
+    if not child_workflow.published:
+        raise ValueError(
+            f"Node {node.name!r} references workflow /{child_workflow.name}, which isn't published"
+        )
     rivulet = await db.get(Rivulet, rivulet_id)
     assert rivulet is not None
 
@@ -944,12 +992,17 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     paused node's output — the same "a node's output becomes the next
     node's input" contract every other node type honors (issue #24) — and
     the walk continues from there via _follow_edges. The loop guard
-    starts fresh: visit_counts/total_steps were local to the original
-    run_workflow call and aren't persisted across a pause, so a run that
-    paused near its budget gets a clean one again on resume rather than
-    inheriting an exhausted one. Ancestry resets to just this workflow's
-    own id -- a resumed run is always a top-level one (#85's module
-    docstring section on why a nested run can never be the one paused).
+    resumes where it left off (#249): `_pause_for_human_input` persists
+    the original `_RunContext`'s `visit_counts`/`total_steps` onto
+    `run.visit_counts_json`/`run.total_steps` right before pausing, and
+    this function seeds its new `_RunContext` from those columns instead
+    of starting both at zero -- without that, a looping graph that pauses
+    once per iteration (a 'human_input' node inside the loop) could reset
+    its own guard on every pause and run past MAX_NODE_VISITS_PER_RUN /
+    MAX_TOTAL_STEPS_PER_RUN without ever tripping it. Ancestry resets to
+    just this workflow's own id -- a resumed run is always a top-level one
+    (#85's module docstring section on why a nested run can never be the
+    one paused).
 
     #84: hydrates the graph from `run.graph_snapshot_json` rather than
     re-querying the live WorkflowNode/WorkflowConnection rows -- a
@@ -1017,8 +1070,11 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     await db.commit()
 
     ctx = _RunContext(
-        visit_counts={},
-        total_steps=[0],
+        # #249: restores the loop guard's counters as of the pause that
+        # led here (this function's own docstring), instead of starting a
+        # fresh budget every resume.
+        visit_counts=json.loads(run.visit_counts_json),
+        total_steps=[run.total_steps],
         ancestry=frozenset({workflow.id}),
         # #100: restores what run_workflow derived/inherited at this run's
         # original start -- a fresh _RunContext here has no other way to
@@ -1224,7 +1280,15 @@ async def _pause_for_human_input(
     await db.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id == run_id)
-        .values(current_node_id=node.id, status="awaiting_human")
+        .values(
+            current_node_id=node.id,
+            status="awaiting_human",
+            # #249: snapshot the loop guard's in-flight counters so a
+            # resume doesn't restart them at zero -- see WorkflowRun's own
+            # docstring.
+            visit_counts_json=json.dumps(ctx.visit_counts),
+            total_steps=ctx.total_steps[0],
+        )
     )
     rivulet.status = "paused"
     await db.commit()
