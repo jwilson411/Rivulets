@@ -154,7 +154,18 @@ async def _add_security_headers(
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Rivulets", version=APP_VERSION, lifespan=lifespan)
+    # docs_url/redoc_url/openapi_url off: this API has no external
+    # consumers to document for, and leaving Swagger/ReDoc/the schema
+    # reachable is unauthenticated surface for no product benefit — every
+    # other route here sits behind the workspace JWT (see docs/security.md).
+    app = FastAPI(
+        title="Rivulets",
+        version=APP_VERSION,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     # Registered before the static/SPA-fallback route below so its 404s stay
     # 404s (see _spa_fallback's own "api/" guard for the other half of that).
     app.include_router(api_router)

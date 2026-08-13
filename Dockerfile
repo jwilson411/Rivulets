@@ -45,6 +45,21 @@ LABEL org.opencontainers.image.source="https://github.com/jwilson411/Rivulets"
 LABEL org.opencontainers.image.description="Local-first, Slack-like workspace for humans and AI agent teams"
 LABEL org.opencontainers.image.licenses="BUSL-1.1"
 
+# firejail is deliberately NOT installed here. It needs to create its own
+# mount/user namespaces, which needs CAP_SYS_ADMIN — a capability outside
+# Docker's default bounding set. Installing the binary without also
+# granting that capability (and relaxing the container's seccomp/AppArmor
+# profile to allow the syscalls it uses) would just leave firejail present
+# but non-functional, and code_exec.is_available() would report the tool
+# available while every real invocation failed. Granting SYS_ADMIN to every
+# container by default to support this one opt-in tool would weaken the
+# baseline hardening this image otherwise ships with for everyone, for a
+# feature most Docker installs won't use. Instead, the Code Execution
+# built-in tool reports itself unavailable under a stock `docker compose
+# up` (see tools/builtin/code_exec.py's is_available()) and fails closed
+# rather than running unsandboxed. See docs/security.md for the opt-in
+# --cap-add/--security-opt profile for installs that want it anyway.
+
 RUN useradd --create-home --home-dir /home/rivulets --shell /usr/sbin/nologin rivulets
 
 WORKDIR /app/server
