@@ -1053,9 +1053,11 @@ class BudgetCap(Base):
     Synced like Team/Agent/WorkspaceSetting -- the *definition* is agreed
     workspace policy, visible to every peer. *Enforcement* against it is
     local-only per peer (dispatch/budgets.py), computed from that peer's
-    own AgentRun spend -- no cross-peer aggregation (that needs #101's
-    not-yet-built coordinator election). Same explicit v1 limitation
-    WorkflowSchedule (#92) documents for its own local-only firing.
+    own AgentRun spend -- no cross-peer aggregation (that needs a
+    singleton consumer of #101's coordinator election, which is not
+    wired yet -- the election primitive itself shipped). Same explicit
+    v1 limitation WorkflowSchedule (#92) documents for its own
+    local-only firing.
 
     `ck_budget_cap_scope` mirrors EvalSuite's ck_eval_suite_single_subject:
     exactly one of agent_id/team_id is set for their respective scope_type,

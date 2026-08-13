@@ -62,7 +62,7 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 ### Peer-to-peer sync
 
 - **No central server, ever** — multiple machines on the same workspace key sync channels, agents, teams, and files directly with each other over an encrypted mesh.
-- **Coordinator election** — peers elect a coordinator for workspace-singleton work (like a scheduled workflow firing once, not once per synced peer), with automatic failover and no single point of failure.
+- **Coordinator election** — election primitive shipped (capability scoring, bully-style claim, automatic failover). Singleton consumers (a scheduled workflow firing once, budget aggregation, trace retention) are **not wired yet**; duplicate scheduled fires across peers are avoided today by keeping schedules local/unsynced, not by election.
 
 ### Local-first security posture
 
@@ -158,8 +158,7 @@ Rivulets/
 ├── ui/             # SvelteKit frontend
 ├── packaging/      # PyInstaller build specs (native binaries)
 ├── scripts/        # Install script, local build helper
-├── docs/           # Architecture overview, security/threat model, requirements
-├── marketing/      # Marketing site content brief (not the site itself)
+├── docs/           # Architecture overview, security/threat model, DR, requirements
 ├── Dockerfile
 ├── docker-compose.yml
 └── .github/        # CI/CD workflows, issue templates
@@ -196,10 +195,12 @@ CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs all of the ab
 
 - [`docs/architecture.md`](./docs/architecture.md) — how the pieces fit together and the technology stack
 - [`docs/security.md`](./docs/security.md) — the security model and threat model
+- [`docs/infrastructure/security-and-dr.md`](./docs/infrastructure/security-and-dr.md) — backups, restore, and login rate limits
+- [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability
 
 ## Security
 
-Rivulets runs entirely on your own machine with no cloud component, but the web UI is still a network service — see [`docs/security.md`](./docs/security.md) for the full threat model. If you find a vulnerability, please report it through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue.
+Rivulets runs entirely on your own machine with no cloud component, but the web UI is still a network service — see [`docs/security.md`](./docs/security.md) for the full threat model and [`docs/infrastructure/security-and-dr.md`](./docs/infrastructure/security-and-dr.md) for backups and rate limits. If you find a vulnerability, please report it through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue. See [`SECURITY.md`](./SECURITY.md).
 
 ## Contributing
 

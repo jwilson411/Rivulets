@@ -98,6 +98,8 @@ All derived keys are computed at login time and held in memory only — they're 
 | An invited human's device is later compromised | Invite-grant sessions are owner-gated out of provider credentials, backups, sync control, and further invites; they never gain P2P mesh membership, so there's nothing to exfiltrate beyond that session's own JWT | An attacker with that JWT can act as that human within the un-gated surface (channels, messages, agents) until the token expires; the owner can't remotely invalidate a single already-issued session token before then. |
 | A peer falsely self-reports a high capability score to win coordinator election (#101) | None beyond the existing peer trust boundary — every peer in a workspace already shares the same trust level (Layer 3's PSK gates *mesh membership*, not per-peer trust within the mesh), and the coordinator role only owns specific workspace-singleton actions, never a broader privilege over other peers' data or requests | A peer that's already inside the mesh could always publish false `node_capabilities`/other synced state; a false coordinator claim is the same category of self-reported, unverified broadcast, not a new capability an attacker gains. `POST /sync/coordinator/reclaim` (the human override) is owner-gated, same as `/sync/connect`/`/sync/disconnect`. |
 
+Operational backups, restore, and login rate limits are documented in [`infrastructure/security-and-dr.md`](infrastructure/security-and-dr.md).
+
 ## Reporting a vulnerability
 
-Please report security issues through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue.
+Please report security issues through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue. The repo-root [`SECURITY.md`](../SECURITY.md) is the GitHub-conventional pointer to that form.
