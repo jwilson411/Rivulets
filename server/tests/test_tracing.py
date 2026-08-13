@@ -9,8 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import RunSpan, RunTrace
+from rivulets.db.session import session_scope
 from rivulets.tracing import (
     TraceContext,
+    _retention_tick,  # pyright: ignore[reportPrivateUsage]
     finish_span,
     finish_trace,
     prune_old_traces,
@@ -164,3 +166,25 @@ async def test_prune_old_traces_deletes_only_stale_ones(db_session: AsyncSession
     assert remaining_ids == {fresh_trace.id}
     # Cascade: the old trace's span goes with it.
     assert (await db_session.scalars(select(RunSpan))).first() is None
+
+
+async def test_retention_tick_commits_deletion(db_session: AsyncSession) -> None:
+    """Regression test for #233: `_retention_tick` opens and commits its own
+    session, rather than just deleting within an in-memory transaction that
+    a caller's `session_scope()` context manager rolls back on exit. Seeds
+    the stale trace via `db_session` and commits it, then reads back
+    through a brand-new `session_scope()` (not `db_session`) after the
+    tick, so a silently-uncommitted delete would still show the row here."""
+    old_trace = RunTrace(
+        trigger_type="message",
+        label="old",
+        started_at=(datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    db_session.add(old_trace)
+    await db_session.commit()
+
+    await _retention_tick()
+
+    async with session_scope() as fresh_db:
+        remaining_ids = {t.id for t in (await fresh_db.scalars(select(RunTrace))).all()}
+    assert old_trace.id not in remaining_ids
