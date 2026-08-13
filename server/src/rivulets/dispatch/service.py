@@ -3724,10 +3724,21 @@ async def _handle_create_invite_trigger(
     the same fallback api/invites.py's lan_url logic reaches for, just
     without a request to compare against first.
 
-    The raw secret is embedded in the chat message returned here and
-    nowhere else -- never in the tool's own return value (read by the
-    calling model) and never in the websocket payload below -- see
-    tools/builtin/invites.py's module docstring for why."""
+    #241: the raw secret must never land in the returned Message -- a
+    Message is a persisted, gossipsub-synced entity (sync/engine.py's
+    FR-9.6), unlike the Invite row itself (db/models.py's Invite
+    docstring: deliberately excluded from sync). Putting the secret in
+    chat content would replicate it to every peer and every future
+    context window that reads this rivulet's history, defeating the
+    "shown once" property invites are built around (api/invites.py's
+    module docstring) -- exactly what api/invites.py's own create_invite
+    response avoids by returning the secret directly to the caller and
+    never persisting it. The chat message here confirms only the invite
+    id/display hint/expiry; the one-shot url rides the in-process SSE
+    `system_alert` payload instead (streaming.py's publish() -- in-memory,
+    per-process, never persisted or gossiped, the same "nowhere but this
+    one delivery" shape the tool's own return value already has, see
+    tools/builtin/invites.py's module docstring)."""
     secret = keys.generate_invite_secret()
     expires_at = datetime.now(UTC) + timedelta(hours=call.expires_in_hours)
     invite = Invite(
@@ -3744,20 +3755,33 @@ async def _handle_create_invite_trigger(
     port = get_settings().app_server_port
     url = f"http://{lan_ip or '127.0.0.1'}:{port}/invite/{invite.id}.{secret}"
 
-    lines = [f"@{agent.name} created a workspace invite (id: {invite.id}): {url}"]
+    hint = f" for {call.display_name_hint!r}" if call.display_name_hint else ""
+    lines = [
+        f"@{agent.name} created a workspace invite (id: {invite.id}){hint}, "
+        f"expires {invite.expires_at}."
+    ]
     if lan_ip is None:
         lines.append(
             "Couldn't detect a LAN address, so this link only works from this machine -- "
             "share the workspace's real network address manually if the invitee is remote."
         )
-    lines.append("This link is shown only once here -- make sure it reaches whoever needs it.")
+    lines.append(
+        "The link itself was pushed live to this rivulet just now, shown only that once -- "
+        "if it was missed, revoke this invite and create a new one."
+    )
     content = "\n".join(lines)
 
     message = _system_message(db, rivulet, content)
     publish(
         rivulet.id,
         "system_alert",
-        {"type": "invite_created", "invite_id": invite.id, "agent_id": agent.id},
+        {
+            "type": "invite_created",
+            "invite_id": invite.id,
+            "agent_id": agent.id,
+            "url": url,
+            "loopback_only": lan_ip is None,
+        },
     )
     return [message]
 
