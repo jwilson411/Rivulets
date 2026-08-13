@@ -172,10 +172,42 @@ def test_create_invite_creates_invite_and_posts_link(
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     content = messages[2]["content"]
     assert "created a workspace invite" in content
-    assert "/invite/" in content
+    assert "Alex" in content
 
     listed = client.get("/api/v1/invites", headers=auth_headers).json()
     assert any(inv["display_name_hint"] == "Alex" for inv in listed)
+
+
+def test_create_invite_confirmation_message_never_contains_the_secret(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#241: the raw secret must never be persisted into a synced Message
+    -- it's a one-shot value, only ever delivered via the non-synced SSE
+    `system_alert` payload (dispatch/service.py's publish() call inside
+    _handle_create_invite_trigger)."""
+    agent_id = _create_agent(client, auth_headers, "SecretlessInviter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("create_invite", {"display_name_hint": "Alex"})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go invite someone"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    content = messages[2]["content"]
+    # No URL, no path, no bearer token -- just id/hint/expiry.
+    assert "http://" not in content
+    assert "/invite/" not in content
+
+    listed = client.get("/api/v1/invites", headers=auth_headers).json()
+    invite_id = next(inv["id"] for inv in listed if inv["display_name_hint"] == "Alex")
+    assert invite_id in content
 
 
 def test_create_invite_does_not_publish_to_sync(

@@ -33,10 +33,21 @@ member can see. Handing the secret to the model would mean it travels
 through the model provider's own logging/inference pipeline and lands in
 plain sight in the rivulet, defeating the "shown once, to the owner"
 property invites are built around (api/invites.py's module docstring).
-The invite link is posted directly into the rivulet as a system message
-instead (dispatch/service.py's _handle_create_invite_trigger), the same
-"real work bypasses the model" split every other mutating built-in tool
-in this library already follows.
+
+The confirmation posted into the rivulet (dispatch/service.py's
+_handle_create_invite_trigger) is real work that bypasses the model, the
+same split every other mutating built-in tool in this library already
+follows -- but #241 found that message carrying the raw secret too: a
+persisted Message is a synced entity (sync/engine.py's FR-9.6 gossipsub
+sync covers messages same as agents/channels/teams), so embedding the
+secret there replicated it to every peer and left it sitting in this
+rivulet's history for a model to read back on a future turn, undoing the
+whole point of keeping it out of the tool result. The confirmation
+message now carries only the invite id/display hint/expiry; the one-shot
+url instead rides the in-process SSE `system_alert` payload
+(streaming.py's publish() -- in-memory, per-process, never persisted or
+gossiped), the one channel with the same "nowhere but this one delivery"
+shape the tool result already had.
 """
 
 from agno.tools import tool
@@ -52,8 +63,9 @@ def create_invite(
     human (they can pick their own instead). `max_uses` caps how many
     times the link can be redeemed (default 1, one person). `expires_in_hours`
     caps how long the link stays valid (default 168, one week). The link
-    itself is posted as a follow-up message once created -- it's shown
-    only that once, so make sure whoever needs it sees this reply."""
+    itself is never shown here or in chat -- it's pushed once, live, to
+    whoever has this rivulet open at the moment it's created, so let the
+    human know to watch for it right now."""
     return "Requested creation of a workspace invite."
 
 
