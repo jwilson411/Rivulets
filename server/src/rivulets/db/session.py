@@ -89,8 +89,9 @@ def override_engine(engine: AsyncEngine | None) -> None:
 
 
 async def init_db(engine: AsyncEngine | None = None) -> None:
-    """Create tables if they don't exist. Real deployments use Alembic migrations;
-    this is the fast path for fresh installs and tests."""
+    """Create tables if they don't exist. Real app startup uses
+    db/migrate.py's run_migrations() instead (#229) -- this stays as the
+    fast, no-Alembic-machinery path for the test suite's in-memory DB."""
     engine = engine or get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

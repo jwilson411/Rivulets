@@ -26,6 +26,10 @@ node_modules/
 # Rivulets runtime data (never commit user workspace data)
 .rivulets/
 
+# Scratch DB alembic.ini's dev-only sqlalchemy.url points at when running
+# `alembic revision --autogenerate` without an explicit -x db= override
+/server/dev.db
+
 # Packaging output
 packaging/dist/
 *.spec.bak

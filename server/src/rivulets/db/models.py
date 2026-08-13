@@ -146,9 +146,9 @@ class Agent(Base):
     # order if `model`'s call fails with a retryable-looking error (rate
     # limit, 5xx, timeout). None/empty means no fallback configured, the
     # original single-model behavior. JSON-in-TEXT, same convention as
-    # AgentRoutingRule.pattern below -- no live migration tooling in this
-    # project, so a new typed column would be just as much schema churn
-    # for no benefit over reusing that pattern.
+    # AgentRoutingRule.pattern below -- a normalized child table would be
+    # schema churn for no benefit over reusing that pattern for a small
+    # ordered list nothing ever queries by element.
     fallback_models: Mapped[str | None] = mapped_column(default=None)
     # #100: one-time human approval that this agent may use its assigned
     # sensitive tools (execute_python/http_request/write_file/

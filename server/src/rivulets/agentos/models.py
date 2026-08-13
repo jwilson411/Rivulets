@@ -38,9 +38,8 @@ _QWEN_DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 # The `agent.model` sentinel for "Auto" mode (#23): the model is resolved
 # fresh per-message (dispatch/service.py) instead of once at agent build
 # time. Stored directly in the existing unconstrained `model` column
-# rather than a new one — there's no live migration tooling in this
-# project (init_db() only does create_all), so it round-trips through the
-# generic peer-sync layer (sync/apply.py) with zero special-casing.
+# rather than a new one, so it round-trips through the generic peer-sync
+# layer (sync/apply.py) with zero special-casing.
 AUTO_MODEL = "auto"
 
 ModelTier = Literal["cheap", "capable"]

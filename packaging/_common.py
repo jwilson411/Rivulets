@@ -29,9 +29,17 @@ def server_src(specpath: str) -> str:
 def common_datas(specpath: str) -> list[tuple[str, str]]:
     root = repo_root(specpath)
     tools_dir = root / "server" / "src" / "rivulets" / "tools" / "builtin"
+    # rivulets.db.migrate reads these off disk by path at runtime (Alembic
+    # loads each versions/*.py itself, not via a Python import our own
+    # static analysis would catch) -- same blind spot as tools_dir above,
+    # same fix.
+    migrations_dir = root / "server" / "src" / "rivulets" / "db" / "migrations"
     ui_build = root / "ui" / "build"
 
-    datas = [(str(tools_dir), "rivulets/tools/builtin")]
+    datas = [
+        (str(tools_dir), "rivulets/tools/builtin"),
+        (str(migrations_dir), "rivulets/db/migrations"),
+    ]
     if ui_build.exists():
         datas.append((str(ui_build), "rivulets/static"))
     # else: `npm run build` in ui/ hasn't been run yet — the binary would
