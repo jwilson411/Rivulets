@@ -8,10 +8,10 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "agno>=2.8,<3.0",
+    "agno>=2.8.7,<3.0",
     "aiosqlite>=0.22.1",
-    "alembic>=1.13",
-    "anthropic>=0.120.2",
+    "alembic>=1.19.1",
+    "anthropic>=0.121.0",
     "bcrypt>=5.0.0",
     "cohere>=7.0.8",
     "croniter>=2.0.5",
@@ -22,12 +22,12 @@ dependencies = [
     "httpx>=0.28.1",
     "keyring>=25.7.0",
     "libp2p>=0.7.0",
-    "mcp>=1.9.2,<2",
+    "mcp>=2.0.0,<3",
     "mistralai>=2.9.1",
     "mnemonic>=0.21",
     "ollama>=0.6.2",
     "openai>=2.53.0",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.15.0",
     "pyjwt>=2.9",
     "python-multipart>=0.0.32",
     "pyyaml>=6.0.3",
@@ -39,7 +39,7 @@ dependencies = [
 rivulets = "rivulets:main"
 
 [build-system]
-requires = ["uv_build>=0.12.1,<0.13.0"]
+requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -49,10 +49,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5",
     "pytest-xdist>=3",
-    "ruff>=0.7",
+    "ruff>=0.16.2",
 ]
 packaging = [
-    "pyinstaller>=6.21.0",
+    "pyinstaller>=6.22.0",
 ]
 
 [tool.ruff]
