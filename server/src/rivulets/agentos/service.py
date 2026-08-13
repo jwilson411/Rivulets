@@ -79,7 +79,7 @@ def _agentos_db() -> SqliteDb:
     if _agentos_db_instance is None:
         settings = get_settings()
         settings.ensure_workspace_dirs()
-        _agentos_db_instance = SqliteDb(db_file=str(settings.workspace_dir / "agentos.db"))
+        _agentos_db_instance = SqliteDb(db_file=str(settings.agentos_db_path))
     return _agentos_db_instance
 
 
@@ -99,13 +99,27 @@ def get_agentos() -> AgentOS:
     return _agent_os
 
 
-def reset_agentos_for_testing() -> None:
-    """Test-only hook, mirroring db.session.override_engine — lets each
-    test start from a clean AgentOS singleton instead of leaking agents
-    registered by a previous test."""
+def reset_agentos() -> None:
+    """Drop the process-wide AgentOS singleton and its SqliteDb handle so
+    the next init_agentos()/get_agentos() call builds fresh ones against
+    whatever's on disk at settings.agentos_db_path.
+
+    Two callers: the test suite (via reset_agentos_for_testing() below),
+    and rivulets.api.backups' restore handler after backup.restore_from_backup
+    wipes agentos.db (#243) — AgentOS.agents is an in-process registry
+    keyed off `rivulets.db`'s Agent rows, so re-initializing here and
+    calling sync_agents() rebuilds it from the just-restored database
+    rather than leaving stale session state that disagrees with it."""
     global _agent_os, _agentos_db_instance
     _agent_os = None
     _agentos_db_instance = None
+
+
+def reset_agentos_for_testing() -> None:
+    """Test-only alias, mirroring db.session.override_engine — lets each
+    test start from a clean AgentOS singleton instead of leaking agents
+    registered by a previous test."""
+    reset_agentos()
 
 
 async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:

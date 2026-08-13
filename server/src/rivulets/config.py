@@ -36,6 +36,13 @@ class Settings(BaseSettings):
         return self.workspace_dir / "credentials.db"
 
     @property
+    def agentos_db_path(self) -> Path:
+        """AgentOS's own SQLite file (agentos/service.py's module docstring)
+        — session/run history, kept separate from `db_path` since AgentOS
+        owns its own schema and migrations internally."""
+        return self.workspace_dir / "agentos.db"
+
+    @property
     def files_dir(self) -> Path:
         return self.workspace_dir / "files"
 
