@@ -16,8 +16,9 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, JSONResponse, Response
+from sqlalchemy.exc import IntegrityError, OperationalError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from rivulets.agentos import init_agentos, sync_agents
@@ -153,6 +154,36 @@ async def _add_security_headers(
     return response
 
 
+async def _integrity_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    # #250 safety net: a route-level pre-check (api/agents.py's
+    # _check_name_available, api/workflows.py's inline equivalent) closes
+    # the common case for the handful of routes that have one, but any
+    # other UniqueConstraint/ForeignKey violation would otherwise surface
+    # here as an unhandled 500 carrying the raw SQLAlchemy/SQLite
+    # statement (params included) in the body. A stable `error` shape
+    # keeps that text out of the response for every route, not just the
+    # ones that got a dedicated fix.
+    return JSONResponse(
+        {"error": {"code": "conflict", "message": "That change conflicts with existing data."}},
+        status_code=status.HTTP_409_CONFLICT,
+    )
+
+
+async def _operational_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    # Same reasoning as _integrity_error_handler, for SQLite's "database is
+    # locked" (a concurrent writer holding the file lock) -- retryable, so
+    # 503 rather than 409's "this won't succeed as-is".
+    return JSONResponse(
+        {
+            "error": {
+                "code": "database_unavailable",
+                "message": "The database is temporarily busy, try again.",
+            }
+        },
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 def create_app() -> FastAPI:
     # docs_url/redoc_url/openapi_url off: this API has no external
     # consumers to document for, and leaving Swagger/ReDoc/the schema
@@ -169,6 +200,8 @@ def create_app() -> FastAPI:
     # Registered before the static/SPA-fallback route below so its 404s stay
     # 404s (see _spa_fallback's own "api/" guard for the other half of that).
     app.include_router(api_router)
+    app.add_exception_handler(IntegrityError, _integrity_error_handler)
+    app.add_exception_handler(OperationalError, _operational_error_handler)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_add_security_headers)
     # AgentOS is a Python-level agent registry here, not an HTTP mount —
     # see agentos/service.py's module docstring for why.

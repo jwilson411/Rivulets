@@ -76,6 +76,29 @@ def test_delete_team_removes_it(client: TestClient, auth_headers: dict[str, str]
     assert client.get(f"/api/v1/teams/{team_id}", headers=auth_headers).status_code == 404
 
 
+def test_delete_team_unassigns_its_channels(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Doomed With Channel"}, headers=auth_headers
+    ).json()["id"]
+    channel_id = client.post(
+        "/api/v1/channels", json={"name": "doomed-channel"}, headers=auth_headers
+    ).json()["id"]
+    assigned = client.patch(
+        f"/api/v1/channels/{channel_id}", json={"team_id": team_id}, headers=auth_headers
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["team_id"] == team_id
+
+    deleted = client.delete(f"/api/v1/teams/{team_id}", headers=auth_headers)
+    assert deleted.status_code == 204, deleted.text
+
+    fetched = client.get(f"/api/v1/channels/{channel_id}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["team_id"] is None
+
+
 def test_delete_team_returns_404_for_unknown_team(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

@@ -24,6 +24,7 @@ from typing import cast
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from rivulets.agentos import sync_agents
 from rivulets.agentos.agent_lifecycle import (
@@ -205,8 +206,19 @@ async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[Agent]:
     return list(result.scalars().all())
 
 
+async def _check_name_available(db: DbSession, name: str) -> None:
+    """Mirrors api/workflows.py's create/update pre-check -- a lookup
+    first so the common case (no collision) fails fast with a real 409
+    instead of the raw IntegrityError Agent.name's UniqueConstraint would
+    otherwise raise past the flush() below (#250)."""
+    existing = await db.scalar(select(Agent).where(Agent.name == name))
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"An agent named {name!r} already exists")
+
+
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
 async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) -> Agent:
+    await _check_name_available(db, body.name)
     agent = Agent(
         name=body.name,
         description=body.description,
@@ -216,7 +228,17 @@ async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) 
         output_schema=json.dumps(body.output_schema) if body.output_schema else None,
     )
     db.add(agent)
-    await db.flush()  # populate agent.id before using it in join rows
+    try:
+        await db.flush()  # populate agent.id before using it in join rows
+    except IntegrityError as exc:
+        # The pre-check above closes the common case; this closes the race
+        # window between it and the flush (two concurrent creates with the
+        # same name) -- same treatment sync/apply.py gives a losing
+        # IntegrityError on commit.
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"An agent named {body.name!r} already exists"
+        ) from exc
 
     await set_agent_tools(db, agent.id, body.tool_ids)
     await set_agent_teams(db, agent.id, body.team_ids)
@@ -239,6 +261,8 @@ async def update_agent(
     agent_id: str, body: AgentUpdate, db: DbSession, _: CurrentWorkspaceId
 ) -> Agent:
     agent = await _get_or_404(db, agent_id)
+    if body.name is not None and body.name != agent.name:
+        await _check_name_available(db, body.name)
     rule_regen_fields = {"description", "instructions"}
     updates = body.model_dump(
         exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models", "output_schema"}
@@ -261,7 +285,15 @@ async def update_agent(
         await record_agent_version(db, agent)
 
     agent.vector_clock += 1
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Same race-window close as create_agent's flush() above -- two
+        # concurrent renames to the same name both pass the pre-check.
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"An agent named {body.name!r} already exists"
+        ) from exc
 
     if needs_rule_regen:
         await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
