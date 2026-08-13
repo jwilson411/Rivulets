@@ -19,9 +19,9 @@ an AgentVersion row (#104) — see record_agent_version and the
 """
 
 import json
-from typing import cast
+from typing import Annotated, cast
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -35,8 +35,15 @@ from rivulets.agentos.agent_lifecycle import (
     set_agent_teams,
     set_agent_tools,
 )
+from rivulets.agentos.tool_resolution import SENSITIVE_BUILTIN_TOOL_NAMES
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
-from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
+from rivulets.api.deps import (
+    CurrentWorkspaceId,
+    DbSession,
+    OwnerGrant,
+    SessionClaims,
+    get_session_claims,
+)
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
@@ -44,6 +51,7 @@ from rivulets.db.models import (
     AgentRun,
     AgentToolScope,
     AgentVersion,
+    Tool,
 )
 from rivulets.sync.publish import publish_current_state, publish_tombstone
 
@@ -200,6 +208,42 @@ async def _get_or_404(db: DbSession, agent_id: str) -> Agent:
     return agent
 
 
+async def _check_tool_assignment_authorized(
+    db: DbSession, tool_ids: list[str], claims: SessionClaims
+) -> None:
+    """#231: assigning a tool with real blast radius -- one of the four
+    SENSITIVE_BUILTIN_TOOL_NAMES, or any tool whose required_scope is set
+    -- is owner-only. Assignment alone doesn't make a tool usable
+    (resolve_agent_tools still requires a separate AgentToolScope grant,
+    itself owner-only via set_agent_tool_scopes below), but an invite-grant
+    session shouldn't be able to stage one of these on an agent that
+    already holds, or might later be granted, the matching scope."""
+    if claims.grant == "owner" or not tool_ids:
+        return
+    result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
+    for tool in result.scalars().all():
+        if tool.required_scope is not None or (
+            tool.tool_type == "builtin" and tool.name in SENSITIVE_BUILTIN_TOOL_NAMES
+        ):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Owner access required to assign tool {tool.name!r}",
+            )
+
+
+async def _agent_holds_owner_scope(db: DbSession, agent_id: str) -> bool:
+    """True if `agent_id` currently holds any owner-granted capability
+    scope (set_agent_tool_scopes below). Such an agent can reach owner-only
+    HTTP routes via its already-assigned tools, so a non-owner session
+    rewriting its instructions/tools/routing would be a confused-deputy
+    escalation (#231) -- dispatch honors the standing scope regardless of
+    who last edited the agent."""
+    scope = await db.scalar(
+        select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id).limit(1)
+    )
+    return scope is not None
+
+
 @router.get("", response_model=list[AgentOut])
 async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[Agent]:
     result = await db.execute(select(Agent))
@@ -217,8 +261,14 @@ async def _check_name_available(db: DbSession, name: str) -> None:
 
 
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
-async def create_agent(body: AgentCreate, db: DbSession, _: CurrentWorkspaceId) -> Agent:
+async def create_agent(
+    body: AgentCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> Agent:
     await _check_name_available(db, body.name)
+    await _check_tool_assignment_authorized(db, body.tool_ids, claims)
     agent = Agent(
         name=body.name,
         description=body.description,
@@ -258,9 +308,30 @@ async def get_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> Agen
 
 @router.patch("/{agent_id}", response_model=AgentOut)
 async def update_agent(
-    agent_id: str, body: AgentUpdate, db: DbSession, _: CurrentWorkspaceId
+    agent_id: str,
+    body: AgentUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> Agent:
     agent = await _get_or_404(db, agent_id)
+    if claims.grant != "owner":
+        # #231: an agent already holding an owner-granted capability scope
+        # is a confused-deputy risk for *any* edit (instructions, model,
+        # tool_ids), not just tool reassignment -- block the whole PATCH
+        # rather than trying to enumerate every field that could steer it.
+        if await _agent_holds_owner_scope(db, agent_id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Owner access required to modify an agent that holds a capability scope",
+            )
+        if body.approved_for_unattended_tools is not None:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Owner access required to approve unattended tool use",
+            )
+    if body.tool_ids is not None:
+        await _check_tool_assignment_authorized(db, body.tool_ids, claims)
     if body.name is not None and body.name != agent.name:
         await _check_name_available(db, body.name)
     rule_regen_fields = {"description", "instructions"}
@@ -351,7 +422,11 @@ async def list_agent_versions(
 
 @router.post("/{agent_id}/versions/{version}/rollback", response_model=AgentOut)
 async def rollback_agent_version(
-    agent_id: str, version: int, db: DbSession, _: CurrentWorkspaceId
+    agent_id: str,
+    version: int,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> Agent:
     """Reverts instructions/model to a prior version (#104) and records the
     rollback itself as a new version -- same "what's now current becomes
@@ -362,6 +437,11 @@ async def rollback_agent_version(
     otherwise a reverted agent could keep routing rules generated for
     instructions it no longer has."""
     agent = await _get_or_404(db, agent_id)
+    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to roll back an agent that holds a capability scope",
+        )
     target = await db.scalar(
         select(AgentVersion).where(
             AgentVersion.agent_id == agent_id, AgentVersion.version == version
@@ -402,9 +482,18 @@ async def get_routing_rules(
 
 @router.patch("/{agent_id}/routing-rules", response_model=list[RoutingRuleOut])
 async def update_routing_rules(
-    agent_id: str, body: RoutingRulesUpdate, db: DbSession, _: CurrentWorkspaceId
+    agent_id: str,
+    body: RoutingRulesUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> list[AgentRoutingRule]:
     await _get_or_404(db, agent_id)
+    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to modify routing rules for an agent holding a capability scope",
+        )
     await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
     rows = [
         AgentRoutingRule(
