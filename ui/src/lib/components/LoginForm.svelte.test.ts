@@ -61,8 +61,35 @@ describe('LoginForm.svelte', () => {
 		await input.fill('  apple banana cherry  ');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry');
+		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined);
 		await expect.element(input).toHaveValue('');
+	});
+
+	it('calls auth.login with the passphrase when one is entered, and clears it on success', async () => {
+		vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+		render(LoginForm);
+		const passphraseInput = page.getByLabelText('Passphrase (optional)');
+
+		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
+		await passphraseInput.fill('extra word');
+		await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', 'extra word');
+		await expect.element(passphraseInput).toHaveValue('');
+	});
+
+	it('renders the passphrase field as a password input that is not persisted across a failed login', async () => {
+		vi.mocked(auth.login).mockRejectedValueOnce(new Error('Incorrect recovery phrase'));
+		render(LoginForm);
+		const passphraseInput = page.getByLabelText('Passphrase (optional)');
+		await expect.element(passphraseInput).toHaveAttribute('type', 'password');
+
+		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('wrong words here');
+		await passphraseInput.fill('extra word');
+		await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+		await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
+		await expect.element(passphraseInput).toHaveValue('extra word');
 	});
 
 	it('shows the error message and keeps the input when login fails', async () => {
@@ -117,7 +144,19 @@ describe('LoginForm.svelte', () => {
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE);
+			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined);
+		});
+
+		it('logs in with the entered passphrase alongside the generated phrase', async () => {
+			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByLabelText('Passphrase (optional)').fill('extra word');
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, 'extra word');
 		});
 
 		it('copies the generated phrase to the clipboard', async () => {

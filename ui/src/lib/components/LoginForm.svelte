@@ -9,18 +9,20 @@
 	import { auth } from '$lib/api/auth.svelte';
 
 	let mnemonic = $state('');
+	let passphrase = $state('');
 	let loginError = $state<string | null>(null);
 	let loggingIn = $state(false);
 
 	let generatedWords = $state<string[] | null>(null);
+	let generatedPassphrase = $state('');
 	let acknowledged = $state(false);
 	let copied = $state(false);
 
-	async function performLogin(phrase: string): Promise<boolean> {
+	async function performLogin(phrase: string, phrasePassphrase: string): Promise<boolean> {
 		loginError = null;
 		loggingIn = true;
 		try {
-			await auth.login(phrase.trim());
+			await auth.login(phrase.trim(), phrasePassphrase || undefined);
 			return true;
 		} catch (err) {
 			loginError = err instanceof Error ? err.message : 'Login failed';
@@ -32,13 +34,17 @@
 
 	async function handleLogin(event: SubmitEvent) {
 		event.preventDefault();
-		if (await performLogin(mnemonic)) mnemonic = '';
+		if (await performLogin(mnemonic, passphrase)) {
+			mnemonic = '';
+			passphrase = '';
+		}
 	}
 
 	function generatePhrase() {
 		// 128 bits of entropy -> 12 words, matching the server's
 		// _MNEMONIC_STRENGTH_BITS (security/keys.py).
 		generatedWords = generateMnemonic(128).split(' ');
+		generatedPassphrase = '';
 		acknowledged = false;
 		copied = false;
 		loginError = null;
@@ -46,6 +52,7 @@
 
 	function useExistingPhraseInstead() {
 		generatedWords = null;
+		generatedPassphrase = '';
 		acknowledged = false;
 		copied = false;
 		loginError = null;
@@ -59,8 +66,9 @@
 
 	async function confirmGeneratedPhrase() {
 		if (!generatedWords || !acknowledged) return;
-		if (await performLogin(generatedWords.join(' '))) {
+		if (await performLogin(generatedWords.join(' '), generatedPassphrase)) {
 			generatedWords = null;
+			generatedPassphrase = '';
 			acknowledged = false;
 		}
 	}
@@ -112,6 +120,24 @@
 				{copied ? 'Copied' : 'Copy phrase'}
 			</button>
 
+			<div class="flex flex-col gap-1.5">
+				<label class="text-sm font-medium text-ink dark:text-ink-dark" for="generated-passphrase">
+					Passphrase (optional)
+				</label>
+				<input
+					id="generated-passphrase"
+					type="password"
+					autocomplete="off"
+					bind:value={generatedPassphrase}
+					placeholder="Leave blank for none"
+					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				/>
+				<p class="text-xs text-neutral-500">
+					An extra word or phrase on top of the recovery phrase above. There's no reset for this
+					either — if you set one, you'll need it every time, along with the phrase.
+				</p>
+			</div>
+
 			<label class="flex items-start gap-2 text-sm text-ink dark:text-ink-dark">
 				<input type="checkbox" bind:checked={acknowledged} class="mt-0.5" />
 				I've saved this phrase somewhere safe
@@ -149,6 +175,17 @@
 				type="text"
 				bind:value={mnemonic}
 				placeholder="apple banana cherry ..."
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			<label class="text-sm font-medium text-ink dark:text-ink-dark" for="passphrase">
+				Passphrase (optional)
+			</label>
+			<input
+				id="passphrase"
+				type="password"
+				autocomplete="off"
+				bind:value={passphrase}
+				placeholder="Leave blank if this workspace doesn't use one"
 				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 			/>
 			<button
