@@ -5,19 +5,31 @@ detect "the binary running now differs from the one that last started
 here." Reads installed package metadata rather than hardcoding a string
 that would need to stay in sync with pyproject.toml by hand.
 
-Falls back to a literal if metadata isn't available — PyInstaller's onefile
-build doesn't bundle dist-info by default, so a frozen binary would
-otherwise raise PackageNotFoundError on every startup.
+packaging/_common.py's copy_metadata("rivulets") call bundles the
+dist-info this needs into every frozen binary (#230) -- PyInstaller
+doesn't include a package's own dist-info by default, so without that,
+version("rivulets") would raise PackageNotFoundError on every startup of
+a released binary.
+
+The fallback below is only a safety net for that packaging step
+regressing (or a from-source dev checkout with a stale/missing
+dist-info), not the expected path. It deliberately isn't a
+real-looking version: "unknown" fails _parse_version()'s dotted-integer
+parse in update.py, so it can't compare as "older than every release"
+and silently disable pre-upgrade backups or loop update.check_for_update
+into re-downloading the same release forever.
 """
 
 from importlib.metadata import PackageNotFoundError, version
+
+_UNKNOWN_VERSION = "unknown"
 
 
 def _resolve_version() -> str:
     try:
         return version("rivulets")
     except PackageNotFoundError:
-        return "0.1.0"
+        return _UNKNOWN_VERSION
 
 
 APP_VERSION = _resolve_version()
