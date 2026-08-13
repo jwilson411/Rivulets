@@ -194,6 +194,7 @@ async def test_nested_workflow_node_span_nests_under_its_own_node(db_session: As
     rivulet = await _make_rivulet(db_session)
 
     child = await _make_workflow(db_session, name="child-traced")
+    child.published = True
     child_step = _transform_node(child.id, "child-step", "child saw: {input}")
     db_session.add(child_step)
     await db_session.flush()

@@ -27,7 +27,12 @@ from rivulets.db.models import (
     WorkflowNodeRun,
     WorkflowRun,
 )
-from rivulets.workflows.engine import MAX_NODE_VISITS_PER_RUN, resume_workflow, run_workflow
+from rivulets.workflows.engine import (
+    MAX_NODE_VISITS_PER_RUN,
+    MAX_WORKFLOW_NESTING_DEPTH,
+    resume_workflow,
+    run_workflow,
+)
 
 
 async def _make_rivulet(db: AsyncSession) -> Rivulet:
@@ -990,6 +995,42 @@ async def test_resume_workflow_can_pause_again_at_a_second_human_input_node(
     assert rivulet.status == "active"
 
 
+async def test_loop_guard_survives_repeated_pause_resume_cycles(
+    db_session: AsyncSession,
+) -> None:
+    """#249: a graph that loops back onto its own 'human_input' node pauses
+    once per iteration -- before the loop guard's counters were persisted
+    onto WorkflowRun, each resume_workflow call rebuilt a fresh
+    `_RunContext` and this could pause/resume past MAX_NODE_VISITS_PER_RUN
+    forever without ever tripping. Resuming enough times to cross that cap
+    must now fail the run instead."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="ask-forever")
+    ask = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
+    db_session.add(ask)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=ask.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask.id, to_node_id=ask.id),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "start", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "awaiting_human"  # visit 1
+
+    # Visits 2 through MAX_NODE_VISITS_PER_RUN + 1 -- the last of these
+    # crosses the cap and fails the run instead of pausing again.
+    for _ in range(MAX_NODE_VISITS_PER_RUN):
+        run = await resume_workflow(db_session, run, "again")
+
+    assert run.status == "failed"
+    assert "loop guard" in (run.error_message or "")
+
+
 async def test_run_final_output_reflects_the_terminal_nodes_output(
     db_session: AsyncSession,
 ) -> None:
@@ -1022,6 +1063,7 @@ async def test_workflow_node_invokes_a_nested_workflow_and_chains_its_output(
     rivulet = await _make_rivulet(db_session)
 
     child = await _make_workflow(db_session, name="child-flow")
+    child.published = True
     child_step = _transform_node(child.id, "child-step", "child saw: {input}")
     db_session.add(child_step)
     await db_session.flush()
@@ -1094,6 +1136,7 @@ async def test_workflow_node_rejects_an_indirect_cycle(db_session: AsyncSession)
     rivulet = await _make_rivulet(db_session)
     workflow_a = await _make_workflow(db_session, name="workflow-a")
     workflow_b = await _make_workflow(db_session, name="workflow-b")
+    workflow_b.published = True
 
     invoke_b = _workflow_node(workflow_a.id, "invoke-b", workflow_b.id)
     db_session.add(invoke_b)
@@ -1124,6 +1167,7 @@ async def test_nested_workflow_pausing_fails_the_parent_and_the_child(
     rivulet = await _make_rivulet(db_session)
 
     child = await _make_workflow(db_session, name="asks-a-question")
+    child.published = True
     ask = WorkflowNode(workflow_id=child.id, name="ask", node_type="human_input")
     db_session.add(ask)
     await db_session.flush()
@@ -1149,3 +1193,63 @@ async def test_nested_workflow_pausing_fails_the_parent_and_the_child(
     )
     child_run = result.scalars().one()
     assert child_run.status == "failed"
+
+
+async def test_workflow_node_rejects_an_unpublished_child_workflow(
+    db_session: AsyncSession,
+) -> None:
+    """#249: nested runs must require `published`, the same gate every
+    other trigger path (slash-command, schedule, webhook) already
+    enforces -- a child workflow still being built in the canvas (default
+    `published=False`, see `_make_workflow`) can't be nest-run just
+    because a 'workflow' node references it."""
+    rivulet = await _make_rivulet(db_session)
+
+    child = await _make_workflow(db_session, name="unpublished-child")
+    child_step = _transform_node(child.id, "child-step", "child saw: {input}")
+    db_session.add(child_step)
+    await db_session.flush()
+    await _entry_connect(db_session, child.id, child_step.id)
+
+    parent = await _make_workflow(db_session, name="calls-unpublished-child")
+    invoke = _workflow_node(parent.id, "invoke-child", child.id)
+    db_session.add(invoke)
+    await db_session.flush()
+    await _entry_connect(db_session, parent.id, invoke.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "isn't published" in (run.error_message or "")
+
+
+async def test_workflow_node_rejects_nesting_deeper_than_the_cap(
+    db_session: AsyncSession,
+) -> None:
+    """#249: MAX_WORKFLOW_NESTING_DEPTH bounds a long *acyclic* chain of
+    distinct nested workflows -- unlike the ancestry-based cycle guard
+    (which only catches a workflow embedding itself, directly or
+    indirectly), nothing else stops one workflow embedding the next
+    embedding the next indefinitely."""
+    rivulet = await _make_rivulet(db_session)
+
+    depth = MAX_WORKFLOW_NESTING_DEPTH + 1
+    chain = [await _make_workflow(db_session, name=f"chain-{i}") for i in range(depth)]
+    for workflow in chain:
+        workflow.published = True
+    for i in range(depth - 1):
+        invoke = _workflow_node(chain[i].id, f"invoke-{i + 1}", chain[i + 1].id)
+        db_session.add(invoke)
+        await db_session.flush()
+        await _entry_connect(db_session, chain[i].id, invoke.id)
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, chain[0], rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "nest workflows" in (run.error_message or "")

@@ -52,6 +52,7 @@ from rivulets.db.models import (
     Team,
     Tool,
     ToolVersion,
+    Workflow,
     WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
@@ -65,6 +66,7 @@ from rivulets.sync.apply import (
     RIVULET_SPEC,
     TEAM_SPEC,
     TOMBSTONE_FIELD,
+    WORKFLOW_SPEC,
     WORKSPACE_SETTING_SPEC,
     ClockComparison,
     apply_remote_change,
@@ -218,6 +220,30 @@ async def test_apply_remote_team_change_creates_team(db_session: AsyncSession) -
     team = await db_session.get(Team, "team-1")
     assert team is not None
     assert team.name == "Eng"
+
+
+async def test_apply_remote_workflow_change_syncs_published(db_session: AsyncSession) -> None:
+    """#249: `published` is a synced field on WORKFLOW_SPEC now, not just
+    `name`/`description` -- a peer that's already received a workflow's
+    nodes/connections (WORKFLOW_NODE_SPEC/WORKFLOW_CONNECTION_SPEC) also
+    needs the flag itself, or workflows/engine.py's nested-run published
+    gate would keep treating an already-published workflow as a draft."""
+    db_session.add(Workflow(id="wf-1", name="synced-flow", description=None, published=False))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        WORKFLOW_SPEC,
+        "wf-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "synced-flow", "description": None, "published": True},
+    )
+    assert result.applied is True
+
+    workflow = await db_session.get(Workflow, "wf-1")
+    assert workflow is not None
+    assert workflow.published is True
 
 
 async def test_apply_remote_delete_removes_local_entity(db_session: AsyncSession) -> None:
