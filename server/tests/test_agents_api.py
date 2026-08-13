@@ -10,6 +10,9 @@ docstring), so agent creation here never makes a real LLM call.
 
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
+
 
 def _create_agent(
     client: TestClient,
@@ -323,6 +326,27 @@ def test_delete_agent_removes_it(client: TestClient, auth_headers: dict[str, str
     # The four starter agents (#16) are untouched -- only the one created above is gone.
     remaining = {a["name"] for a in client.get("/api/v1/agents", headers=auth_headers).json()}
     assert remaining == {"Assistant", "Coder", "Researcher", "Writer"}
+
+
+async def test_delete_agent_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#238: without publish_tombstone, a peer that still has this agent's
+    row would keep it forever, and its next edit would recreate it here.
+    The `client` fixture never actually starts the sync engine (see
+    conftest.py), so a successful publish attempt queues a tombstone
+    (SyncPendingOutbound.deleted=True) instead of dropping the delete on
+    the floor -- the same FR-9.5 offline-outbox behavior every other
+    publish call site already gets."""
+    agent = _create_agent(client, auth_headers)
+
+    deleted = client.delete(f"/api/v1/agents/{agent['id']}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("agent", agent["id"]))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_get_agent_runs_empty(client: TestClient, auth_headers: dict[str, str]) -> None:

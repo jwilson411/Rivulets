@@ -27,6 +27,7 @@ from rivulets.db.models import Agent, Channel, Rivulet, SyncPendingInbound, Sync
 from rivulets.sync.apply import (
     CHANNEL_SPEC,
     RIVULET_SPEC,
+    TOMBSTONE_FIELD,
     apply_remote_change,
     record_local_change,
     retry_pending_inbound,
@@ -37,6 +38,7 @@ from rivulets.sync.publish import (
     drain_pending_outbound,
     publish_current_state,
     publish_entity_change,
+    publish_tombstone,
 )
 
 _AGENT_FIELDS = {
@@ -138,6 +140,63 @@ async def test_publish_current_state_is_noop_for_deleted_entity(
     assert fake.published == []
 
 
+async def test_publish_tombstone_queues_when_engine_not_running(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    await publish_tombstone(db_session, "agent", "agent-1")
+
+    pending = await db_session.get(SyncPendingOutbound, ("agent", "agent-1"))
+    assert pending is not None
+    assert pending.deleted is True
+
+
+async def test_publish_tombstone_queues_when_publish_fails(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEngine(running=True, fail=True)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
+
+    await publish_tombstone(db_session, "agent", "agent-1")
+
+    pending = await db_session.get(SyncPendingOutbound, ("agent", "agent-1"))
+    assert pending is not None
+    assert pending.deleted is True
+
+
+async def test_publish_tombstone_sends_deleted_marker_on_success(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
+
+    await publish_tombstone(db_session, "agent", "agent-1")
+
+    assert await db_session.get(SyncPendingOutbound, ("agent", "agent-1")) is None
+    assert fake.published == [("agent", "agent-1", {TOMBSTONE_FIELD: True}, {"node-a": 1})]
+
+
+async def test_record_pending_outbound_promotes_queued_edit_to_deleted(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    """The entity was updated (queued a live-state retry), then deleted
+    before that retry ever ran (#238) -- the existing row must be promoted
+    to deleted=True in place, not left as a live-state retry that would
+    silently no-op (publish_current_state finds nothing to rebuild) and
+    never tell any peer about the delete at all."""
+    await publish_entity_change(db_session, "agent", "agent-1", {"name": "x"})
+    pending = await db_session.get(SyncPendingOutbound, ("agent", "agent-1"))
+    assert pending is not None
+    assert pending.deleted is False
+
+    await publish_tombstone(db_session, "agent", "agent-1")
+
+    await db_session.refresh(pending)
+    assert pending.deleted is True
+    # Still exactly one row for this entity, not a second queued alongside it.
+    all_pending = list((await db_session.execute(select(SyncPendingOutbound))).scalars().all())
+    assert len(all_pending) == 1
+
+
 async def test_drain_pending_outbound_republishes_and_clears_queue(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +232,26 @@ async def test_drain_pending_outbound_drops_queue_entry_for_deleted_entity(
 
     assert fake.published == []
     assert await db_session.get(SyncPendingOutbound, ("channel", "never-existed")) is None
+
+
+async def test_drain_pending_outbound_republishes_tombstone_for_deleted_entity(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#238: a queued tombstone (deleted=True, from a delete that happened
+    while the engine was down or a publish failed) must retry via
+    publish_tombstone, not publish_current_state -- the entity is already
+    gone locally, so publish_current_state would just find nothing to
+    rebuild and silently drop the delete instead of ever telling a peer."""
+    db_session.add(SyncPendingOutbound(entity_type="agent", entity_id="agent-1", deleted=True))
+    await db_session.commit()
+
+    fake = _FakeEngine(running=True)
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: fake)
+
+    await drain_pending_outbound(db_session)
+
+    assert fake.published == [("agent", "agent-1", {TOMBSTONE_FIELD: True}, {"node-a": 1})]
+    assert await db_session.get(SyncPendingOutbound, ("agent", "agent-1")) is None
 
 
 async def test_drain_pending_outbound_requeues_on_repeated_failure(

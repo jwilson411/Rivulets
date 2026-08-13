@@ -67,7 +67,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,6 +103,13 @@ from rivulets.sync.engine import get_sync_engine
 from rivulets.validation import TOOL_NAME_RE, local_path_for_content_hash
 
 logger = logging.getLogger(__name__)
+
+# #238: marks a gossipsub envelope's payload as a tombstone rather than a
+# field-copying create/update -- checked by handle_incoming_state_change
+# before any entity_type-specific dispatch, and set by sync/publish.py's
+# publish_tombstone. Not a real synced field on any EntitySpec, so it can
+# never collide with one.
+TOMBSTONE_FIELD = "__deleted__"
 
 
 class ClockComparison(Enum):
@@ -363,6 +370,87 @@ async def apply_remote_change(
             entity_id,
         )
         return ApplyResult(applied=False, conflict=False)
+    return ApplyResult(applied=True, conflict=False)
+
+
+async def clear_delete_blockers(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+    """Pre-delete cleanup for the one synced entity whose dependents don't
+    already clean up via a real ondelete=CASCADE/SET NULL FK (db/models.py):
+    Channel.team_id has no ondelete at all, which is exactly what #250
+    fixed for the *local* delete_team route (api/teams.py unassigns
+    matching channels before deleting the team) -- a remotely-applied team
+    delete (apply_remote_delete, below) or a conflict resolved "keep
+    remote" toward a delete (api/sync.py's resolve_conflict) needs the
+    identical pre-step or it hits the same IntegrityError whenever this
+    node still has a channel pointing at the team being deleted. Every
+    other synced entity type's dependents (AgentVersion, TeamAgent,
+    BudgetCap, EvalSuite, KnowledgeBase, ...) use a real FK action SQLite
+    enforces on its own, so this only needs a case for the one
+    exception. Public (not module-private) since both call sites live
+    outside this module."""
+    if entity_type == "team":
+        await db.execute(update(Channel).where(Channel.team_id == entity_id).values(team_id=None))
+
+
+async def apply_remote_delete(
+    db: AsyncSession,
+    entity_type: str,
+    entity_id: str,
+    remote_vector_clock: dict[str, int],
+    remote_node_id: str,
+) -> ApplyResult:
+    """The delete counterpart to apply_remote_change (#238). `entity_type`
+    is whatever a live create/update message for this entity already uses
+    -- there's no separate EntitySpec for tombstones, since a delete
+    doesn't carry field values to copy, just an entity to remove.
+
+    Vector-clock comparison is identical to apply_remote_change's: a
+    delete bumps the deleting node's own clock component exactly the way
+    an edit does (sync/publish.py's publish_tombstone calls the same
+    record_local_change), so a peer that edited this entity without yet
+    having seen this delete lands as CONCURRENT -- a SyncConflict is
+    recorded and nothing is deleted *or* resurrected on either side --
+    rather than one side silently winning. Only REMOTE_NEWER actually
+    removes the local row. The vector clock itself is never removed here,
+    on either branch: VectorClockTracker has no FK to the entity it
+    describes, so it keeps recording this entity's history after the row
+    is gone -- exactly what lets a *later* stale message (e.g. a
+    long-offline peer's own pre-delete edit, replayed once it reconnects)
+    still be correctly judged LOCAL_NEWER/ignored instead of resurrecting
+    the entity, satisfying #238's "keep tombstones as long as offline
+    peers can remain disconnected" ask without a separate expiring table."""
+    local_vc = await _load_vector_clock(db, entity_type, entity_id)
+    comparison = compare_vector_clocks(local_vc, remote_vector_clock)
+
+    if comparison in (ClockComparison.EQUAL, ClockComparison.LOCAL_NEWER):
+        return ApplyResult(applied=False, conflict=False)
+
+    merged = merge_vector_clocks(local_vc, remote_vector_clock)
+    spec = get_entity_spec(entity_type)
+    instance = await db.get(spec.model, entity_id) if spec is not None else None
+
+    if comparison is ClockComparison.CONCURRENT:
+        db.add(
+            SyncConflict(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                local_snapshot=json.dumps(
+                    _snapshot(instance, spec.synced_fields) if instance is not None and spec else {}
+                ),
+                remote_snapshot=json.dumps({"deleted": True}),
+                remote_node_id=remote_node_id,
+            )
+        )
+        await _store_vector_clock(db, entity_type, entity_id, merged)
+        await db.commit()
+        return ApplyResult(applied=False, conflict=True)
+
+    # REMOTE_NEWER: a clean, non-conflicting delete -- apply it.
+    if instance is not None:
+        await clear_delete_blockers(db, entity_type, entity_id)
+        await db.delete(instance)
+    await _store_vector_clock(db, entity_type, entity_id, merged)
+    await db.commit()
     return ApplyResult(applied=True, conflict=False)
 
 
@@ -725,7 +813,20 @@ async def handle_incoming_state_change(
     workflow_connection/eval_suite/eval_case. Anything else is logged and
     dropped, matching this module's generalization path."""
     async with session_scope() as db:
-        if entity_type == "tool":
+        if payload.get(TOMBSTONE_FIELD):
+            # #238: a tombstone carries no fields to copy, so it's routed
+            # here before any of the entity_type-specific create/update
+            # paths below rather than through them -- checked against
+            # _ALL_SPECS (not just _DISPATCH) since tool/file are valid
+            # tombstone targets too even though their live-change path is
+            # bespoke (apply_remote_tool_change/apply_remote_file_change).
+            if entity_type not in _ALL_SPECS:
+                logger.info("Dropping tombstone for unsupported entity_type=%r", entity_type)
+                return
+            result = await apply_remote_delete(
+                db, entity_type, entity_id, vector_clock, origin_node_id
+            )
+        elif entity_type == "tool":
             result = await apply_remote_tool_change(
                 db, entity_id, vector_clock, origin_node_id, payload
             )

@@ -5,6 +5,9 @@ dedicated, direct test of their own."""
 
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
+
 
 def test_list_teams_returns_created_teams(client: TestClient, auth_headers: dict[str, str]) -> None:
     # #16 seeds a "Starter Team" on first login -- "empty" here means no
@@ -97,6 +100,26 @@ def test_delete_team_unassigns_its_channels(
     fetched = client.get(f"/api/v1/channels/{channel_id}", headers=auth_headers)
     assert fetched.status_code == 200
     assert fetched.json()["team_id"] is None
+
+
+async def test_delete_team_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#238: mirrors test_agents_api.py's equivalent -- the `client`
+    fixture never actually starts the sync engine, so a successful delete
+    queues a tombstone retry (SyncPendingOutbound.deleted=True) instead of
+    the delete never reaching any peer at all."""
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Doomed Sync"}, headers=auth_headers
+    ).json()["id"]
+
+    deleted = client.delete(f"/api/v1/teams/{team_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("team", team_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_delete_team_returns_404_for_unknown_team(

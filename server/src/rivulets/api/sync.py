@@ -23,7 +23,7 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import SyncConflict
 from rivulets.sync import get_sync_engine
-from rivulets.sync.apply import get_entity_spec
+from rivulets.sync.apply import clear_delete_blockers, get_entity_spec
 from rivulets.sync.capabilities import load_capabilities, save_capabilities
 from rivulets.sync.engine import PeerInfo as EnginePeerInfo
 
@@ -246,9 +246,19 @@ async def resolve_conflict(
             instance = await db.get(spec.model, conflict.entity_id)
             if instance is not None:
                 remote = json.loads(conflict.remote_snapshot)
-                for field in spec.synced_fields:
-                    if field in remote:
-                        setattr(instance, field, remote[field])
+                if remote.get("deleted"):
+                    # #238: a modify/delete conflict's remote_snapshot is
+                    # {"deleted": True}, not a set of spec.synced_fields --
+                    # without this branch the loop below would find none of
+                    # its fields in `remote` and silently do nothing,
+                    # making "keep remote" on a delete-conflict a no-op
+                    # that looks like it worked.
+                    await clear_delete_blockers(db, conflict.entity_type, conflict.entity_id)
+                    await db.delete(instance)
+                else:
+                    for field in spec.synced_fields:
+                        if field in remote:
+                            setattr(instance, field, remote[field])
 
     conflict.resolved = True
     await db.commit()
