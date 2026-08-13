@@ -10,9 +10,11 @@ POST /webhooks/{webhook_id} is deliberately not CurrentWorkspaceId-gated
 signature (security/webhook_signing.py) *is* the credential being
 presented here, not a bearer token the caller doesn't have. CRUD for
 WorkflowWebhook itself (create/list/update/delete/rotate-secret) lives in
-api/workflows.py alongside the schedule CRUD it mirrors, gated normally
-by CurrentWorkspaceId -- only this one trigger route needs to be reachable
-without a session.
+api/workflows.py alongside the schedule CRUD it mirrors -- create/rotate/
+delete are additionally owner-gated there (#242: they mint or destroy the
+HMAC secret that *is* the credential this route accepts, same bucket as
+invite management) -- only this one trigger route needs to be reachable
+without a session at all.
 
 Reachability is the caller's own responsibility, same limitation #121
 already documents for invite links: this node's HTTP port is loopback-only
@@ -21,19 +23,31 @@ if the human has deliberately exposed the app beyond loopback (Docker
 `-p` to a real interface, a reverse proxy, Tailscale, ...). There's no
 port-forwarding/tunneling mechanism in this codebase to solve that, so it
 isn't attempted here either.
+
+The signature/timestamp headers verify() checks aren't enough to stop a
+replay on their own -- a validly-signed request stays replayable for the
+whole `max_age_seconds` window otherwise -- so a verified request is also
+checked against `security/webhook_signing.py`'s ReplayGuard before it's
+allowed to fire (#242). And the actual firing (`fire_webhook` ->
+`run_workflow`, potentially slow) runs as a BackgroundTask rather than
+being awaited inline, so this route's advertised 202 Accepted is no
+longer a lie: the response is sent as soon as the request is validated,
+not after the workflow finishes.
 """
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.api.deps import DbSession
+from rivulets.db.base import uuid7
 from rivulets.db.models import Workflow, WorkflowWebhook
 from rivulets.security.rate_limit import get_webhook_trigger_rate_limiter
 from rivulets.security.session import get_session_key_store
 from rivulets.security.webhook_secret_store import decrypt_webhook_secret
-from rivulets.security.webhook_signing import verify
+from rivulets.security.webhook_signing import get_webhook_replay_guard, verify
 from rivulets.workflows.webhook import fire_webhook
 
 logger = logging.getLogger(__name__)
@@ -57,13 +71,30 @@ class WebhookTriggerResponse(BaseModel):
     status: str
 
 
+async def _fire_webhook_in_background(
+    db: AsyncSession, webhook: WorkflowWebhook, workflow: Workflow, raw_body: bytes, run_id: str
+) -> None:
+    """Runs as a BackgroundTask -- Starlette only starts this after the
+    202 response above has already been sent, the same pattern
+    api/update.py's _exit_after_response uses. This is what actually
+    keeps a slow workflow off the request task: the sender gets its
+    Accepted response as soon as the signature/replay checks pass, not
+    after the workflow finishes running. Any failure here can only be
+    logged, not turned into an HTTP error -- the sender's response is
+    long gone by the time this runs."""
+    try:
+        await fire_webhook(db, webhook, workflow, raw_body, run_id=run_id)
+    except RuntimeError as exc:
+        logger.warning("Webhook %s failed to fire: %s", webhook.id, exc)
+
+
 @router.post(
     "/{webhook_id}",
     response_model=WebhookTriggerResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def trigger_webhook(
-    webhook_id: str, request: Request, db: DbSession
+    webhook_id: str, request: Request, db: DbSession, background_tasks: BackgroundTasks
 ) -> WebhookTriggerResponse:
     """Deliberately not CurrentWorkspaceId-gated -- see module docstring."""
     client_ip = request.client.host if request.client else "unknown"
@@ -109,6 +140,14 @@ async def trigger_webhook(
     if not verify(secret, timestamp, raw_body, signature):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
 
+    # #242: only reached once the signature's already verified, so an
+    # unauthenticated caller can't fill this store with garbage triples --
+    # a resend of the exact same signed delivery within the window (a
+    # sender's at-least-once retry, or a captured-and-replayed request)
+    # is rejected here rather than re-firing the workflow a second time.
+    if not get_webhook_replay_guard().check_and_record(webhook_id, timestamp, signature):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This delivery has already been processed")
+
     workflow = await db.get(Workflow, webhook.workflow_id)
     if workflow is None or not workflow.published:
         # Same gate every trigger path shares (workflows/trigger.py) --
@@ -116,10 +155,9 @@ async def trigger_webhook(
         # authenticated, it's just not ready to fire yet.
         raise HTTPException(status.HTTP_409_CONFLICT, "This workflow isn't published")
 
-    try:
-        run = await fire_webhook(db, webhook, workflow, raw_body)
-    except RuntimeError as exc:
-        logger.warning("Webhook %s failed to fire: %s", webhook.id, exc)
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-
-    return WebhookTriggerResponse(run_id=run.id, status=run.status)
+    # #242: the id is chosen here, before the run exists, so it can go in
+    # the response below -- the run itself is created and executed by a
+    # BackgroundTask (_fire_webhook_in_background), not on this request.
+    run_id = uuid7()
+    background_tasks.add_task(_fire_webhook_in_background, db, webhook, workflow, raw_body, run_id)
+    return WebhookTriggerResponse(run_id=run_id, status="running")

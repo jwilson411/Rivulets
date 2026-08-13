@@ -65,7 +65,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.models import (
     Agent,
     Channel,
@@ -864,13 +864,23 @@ async def preview_schedule(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_webhook(
-    workflow_id: str, body: WorkflowWebhookCreate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    body: WorkflowWebhookCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    _o: OwnerGrant,
 ) -> WorkflowWebhookCreated:
     """#99: publish-state is deliberately NOT checked here, same as
     create_schedule above -- a webhook can be configured against a
     still-draft workflow; only api/webhooks.py's trigger endpoint
     re-checks Workflow.published at invocation time, the single gate
-    every trigger path shares (workflows/trigger.py)."""
+    every trigger path shares (workflows/trigger.py).
+
+    #242: owner-gated, same bucket as invite management -- create/rotate
+    mint the HMAC secret that *is* the trigger credential (api/webhooks.py
+    is deliberately unauthenticated beyond that HMAC), so an invite-grant
+    session minting one for itself would hand it a durable, unattended
+    external trigger into the workspace that outlives the session."""
     await _get_workflow_or_404(db, workflow_id)
     if await db.get(Channel, body.channel_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
@@ -937,8 +947,9 @@ async def update_webhook(
 
 @router.delete("/{workflow_id}/webhooks/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_webhook(
-    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> None:
+    """#242: owner-gated -- see create_webhook's docstring."""
     webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
     await db.delete(webhook)
     await db.commit()
@@ -948,11 +959,13 @@ async def delete_webhook(
     "/{workflow_id}/webhooks/{webhook_id}/rotate-secret", response_model=WorkflowWebhookCreated
 )
 async def rotate_webhook_secret(
-    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str, webhook_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> WorkflowWebhookCreated:
     """Mints a fresh secret for an existing webhook (its id/URL stays the
     same) -- the recovery path if a secret leaks, without having to
-    reconfigure the sender's URL. Same shown-once treatment as create."""
+    reconfigure the sender's URL. Same shown-once treatment as create.
+
+    #242: owner-gated -- see create_webhook's docstring."""
     webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
     secret = keys.generate_webhook_secret()
     encryption_key = get_session_key_store().get_webhook_secret_key()
