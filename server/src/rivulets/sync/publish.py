@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import File, SyncPendingOutbound, Tool
 from rivulets.sync import get_sync_engine
-from rivulets.sync.apply import get_entity_spec, record_local_change
+from rivulets.sync.apply import TOMBSTONE_FIELD, get_entity_spec, record_local_change
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,35 @@ async def publish_entity_change(
             "Failed to publish sync change for %s/%s", entity_type, entity_id, exc_info=True
         )
         await _record_pending_outbound(db, entity_type, entity_id)
+
+
+async def publish_tombstone(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+    """The delete counterpart to publish_current_state (#238): called after
+    a local hard-delete has already been committed, so unlike
+    publish_current_state there's no live row left to rebuild a payload
+    from. Bumps the vector clock the same way any edit does -- via the
+    same record_local_change an edit uses -- so a peer's concurrent,
+    not-yet-seen edit of the same entity is judged CONCURRENT rather than
+    silently overwritten either way (see apply.py's apply_remote_delete for
+    the receiving side and why that's what makes "peer edits resurrect
+    deleted entities" no longer happen). Best-effort like
+    publish_entity_change: engine down or a publish failure queues a
+    tombstone retry (SyncPendingOutbound.deleted) instead of dropping the
+    delete forever."""
+    engine = get_sync_engine()
+    if not engine.running:
+        await _record_pending_outbound(db, entity_type, entity_id, deleted=True)
+        return
+    try:
+        vector_clock = await record_local_change(db, entity_type, entity_id, engine.node_id)
+        await engine.publish_state_change(
+            entity_type, entity_id, {TOMBSTONE_FIELD: True}, vector_clock
+        )
+    except Exception:
+        logger.warning(
+            "Failed to publish sync tombstone for %s/%s", entity_type, entity_id, exc_info=True
+        )
+        await _record_pending_outbound(db, entity_type, entity_id, deleted=True)
 
 
 async def publish_current_state(db: AsyncSession, entity_type: str, entity_id: str) -> None:
@@ -107,10 +136,22 @@ async def _build_file_payload(db: AsyncSession, entity_id: str) -> dict[str, Any
     }
 
 
-async def _record_pending_outbound(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+async def _record_pending_outbound(
+    db: AsyncSession, entity_type: str, entity_id: str, *, deleted: bool = False
+) -> None:
     existing = await db.get(SyncPendingOutbound, (entity_type, entity_id))
     if existing is None:
-        db.add(SyncPendingOutbound(entity_type=entity_type, entity_id=entity_id))
+        db.add(SyncPendingOutbound(entity_type=entity_type, entity_id=entity_id, deleted=deleted))
+        await db.commit()
+    elif deleted and not existing.deleted:
+        # A live-state publish was already queued for this entity when it
+        # got deleted before that retry ever ran (#238) -- the queued
+        # retry would otherwise call publish_current_state, which is a
+        # silent no-op for a deleted entity (build_entity_payload returns
+        # None), losing the delete rather than ever telling peers about
+        # it. One row per entity either way; promote it in place instead
+        # of adding a second.
+        existing.deleted = True
         await db.commit()
 
 
@@ -118,18 +159,22 @@ async def drain_pending_outbound(db: AsyncSession) -> None:
     """Called once the sync engine starts (api/auth.py's login). Retries
     every entity queued by a previous failed/impossible publish attempt.
     Each row is deleted before its retry is attempted, not after: if the
-    retry fails again, publish_entity_change's own failure path re-queues
-    it, so there's no window where a row is silently dropped because this
-    function's own bookkeeping (rather than the publish itself) failed."""
+    retry fails again, publish_entity_change's/publish_tombstone's own
+    failure path re-queues it, so there's no window where a row is
+    silently dropped because this function's own bookkeeping (rather than
+    the publish itself) failed."""
     engine = get_sync_engine()
     if not engine.running:
         return
     result = await db.execute(select(SyncPendingOutbound))
     pending = list(result.scalars().all())
     for row in pending:
-        entity_type, entity_id = row.entity_type, row.entity_id
+        entity_type, entity_id, deleted = row.entity_type, row.entity_id, row.deleted
         await db.delete(row)
         await db.commit()
-        await publish_current_state(db, entity_type, entity_id)
+        if deleted:
+            await publish_tombstone(db, entity_type, entity_id)
+        else:
+            await publish_current_state(db, entity_type, entity_id)
     if pending:
         logger.info("Retried %d pending outbound sync change(s)", len(pending))

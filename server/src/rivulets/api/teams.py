@@ -10,7 +10,7 @@ from sqlalchemy import delete, select, update
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.db.models import Channel, Team, TeamAgent
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
@@ -119,3 +119,7 @@ async def delete_team(team_id: str, db: DbSession, _: CurrentWorkspaceId) -> Non
     await db.execute(update(Channel).where(Channel.team_id == team_id).values(team_id=None))
     await db.delete(team)
     await db.commit()
+    # #238: without this, a peer that still has the row would keep it, and
+    # its own next edit would arrive here as a plain REMOTE_NEWER update
+    # and recreate the team we just deleted.
+    await publish_tombstone(db, "team", team_id)

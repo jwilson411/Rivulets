@@ -64,9 +64,11 @@ from rivulets.sync.apply import (
     MESSAGE_SPEC,
     RIVULET_SPEC,
     TEAM_SPEC,
+    TOMBSTONE_FIELD,
     WORKSPACE_SETTING_SPEC,
     ClockComparison,
     apply_remote_change,
+    apply_remote_delete,
     apply_remote_file_change,
     apply_remote_tool_change,
     compare_vector_clocks,
@@ -216,6 +218,122 @@ async def test_apply_remote_team_change_creates_team(db_session: AsyncSession) -
     team = await db_session.get(Team, "team-1")
     assert team is not None
     assert team.name == "Eng"
+
+
+async def test_apply_remote_delete_removes_local_entity(db_session: AsyncSession) -> None:
+    """#238's baseline case: a clean, non-conflicting tombstone actually
+    deletes the local row and records the merged clock, matching
+    apply_remote_change's own REMOTE_NEWER branch."""
+    db_session.add(Agent(id="agent-1", name="Local", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    result = await apply_remote_delete(db_session, "agent", "agent-1", {"node-b": 1}, "node-b")
+
+    assert result.applied is True
+    assert result.conflict is False
+    assert await db_session.get(Agent, "agent-1") is None
+
+
+async def test_apply_remote_delete_ignores_stale(db_session: AsyncSession) -> None:
+    db_session.add(Agent(id="agent-1", name="Local", **_AGENT_FIELDS))
+    await db_session.commit()
+    await record_local_change(db_session, "agent", "agent-1", "node-a")  # local at {node-a: 1}
+
+    result = await apply_remote_delete(db_session, "agent", "agent-1", {"node-a": 0}, "node-b")
+
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(Agent, "agent-1") is not None  # untouched
+
+
+async def test_apply_remote_delete_of_unknown_entity_is_a_noop(db_session: AsyncSession) -> None:
+    """A tombstone for an entity this node never had (already deleted
+    everywhere, or simply never synced here) has no row to remove but must
+    still record the vector clock -- otherwise a later stale create for
+    the same entity_id would be judged REMOTE_NEWER and resurrect it."""
+    result = await apply_remote_delete(
+        db_session, "agent", "never-existed", {"node-b": 1}, "node-b"
+    )
+    assert result.applied is True
+    assert await db_session.get(Agent, "never-existed") is None
+
+
+async def test_apply_remote_delete_vs_concurrent_edit_does_not_resurrect(
+    db_session: AsyncSession,
+) -> None:
+    """The exact scenario #238 asks for a test of: delete on node A, edit
+    on node B, neither having seen the other's change yet. From A's point
+    of view (this test), B's edit must not resurrect the agent A already
+    deleted -- it's recorded as a conflict instead, leaving A's deleted
+    state alone."""
+    db_session.add(Agent(id="agent-1", name="Local", **_AGENT_FIELDS))
+    await db_session.commit()
+    await record_local_change(db_session, "agent", "agent-1", "node-a")  # created at {node-a: 1}
+
+    # A deletes -- bumps its own clock component to {node-a: 2} and removes
+    # the row, exactly like publish_tombstone's real call to
+    # record_local_change followed by apply_remote_delete's own commit
+    # would on the *other* side of a real publish.
+    delete_result = await apply_remote_delete(
+        db_session, "agent", "agent-1", {"node-a": 2}, "node-a"
+    )
+    assert delete_result.applied is True
+    assert await db_session.get(Agent, "agent-1") is None
+
+    # B's edit arrives: B built it from the pre-delete state ({node-a: 1}),
+    # bumped its own component -- {node-a: 1, node-b: 1}. Neither vector
+    # dominates the other (A is ahead on its own component, B is ahead on
+    # its own) -- a genuine concurrent modify/delete.
+    edit_result = await apply_remote_change(
+        db_session,
+        AGENT_SPEC,
+        "agent-1",
+        {"node-a": 1, "node-b": 1},
+        "node-b",
+        {"name": "Edited on B", **_AGENT_FIELDS},
+    )
+
+    assert edit_result.applied is False
+    assert edit_result.conflict is True
+    assert await db_session.get(Agent, "agent-1") is None  # still deleted, not resurrected
+
+    conflicts = list((await db_session.execute(select(SyncConflict))).scalars().all())
+    assert len(conflicts) == 1
+    assert conflicts[0].entity_id == "agent-1"
+    assert conflicts[0].remote_node_id == "node-b"
+    assert json.loads(conflicts[0].remote_snapshot)["name"] == "Edited on B"
+
+
+async def test_apply_remote_delete_of_team_unassigns_its_channels(
+    db_session: AsyncSession,
+) -> None:
+    """#250 fixed this exact IntegrityError for the local delete_team route
+    (Channel.team_id has no ondelete, unlike every other synced FK) -- a
+    remotely-applied team delete needs the same pre-cleanup or this would
+    raise instead of deleting."""
+    db_session.add(Team(id="team-1", name="Eng"))
+    await db_session.commit()
+    db_session.add(Channel(id="chan-1", name="eng-chan", team_id="team-1"))
+    await db_session.commit()
+
+    result = await apply_remote_delete(db_session, "team", "team-1", {"node-b": 1}, "node-b")
+
+    assert result.applied is True
+    assert await db_session.get(Team, "team-1") is None
+    channel = await db_session.get(Channel, "chan-1")
+    assert channel is not None
+    assert channel.team_id is None
+
+
+async def test_handle_incoming_state_change_applies_a_tombstone(db_session: AsyncSession) -> None:
+    db_session.add(Agent(id="agent-1", name="Local", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    await handle_incoming_state_change(
+        "agent", "agent-1", {"node-b": 1}, "node-b", {TOMBSTONE_FIELD: True}
+    )
+
+    assert await db_session.get(Agent, "agent-1") is None
 
 
 async def test_apply_remote_mcp_server_change_does_not_sync_connection_status(
@@ -1335,6 +1453,47 @@ async def test_resolve_conflict_applies_remote_for_non_agent_entity(
     updated = client.get(f"/api/v1/channels/{channel_id}", headers=auth_headers).json()
     assert updated["name"] == "remote-name-chan"
     assert updated["description"] == "from remote"
+
+
+async def test_resolve_conflict_keep_remote_deletes_for_a_delete_conflict(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#238: a modify/delete conflict's remote_snapshot is {"deleted":
+    True}, not a set of spec.synced_fields -- before this, "keep remote"
+    on one of these silently did nothing (none of spec.synced_fields is
+    ever present in {"deleted": True}), which looked like it worked but
+    left the entity right where it was."""
+    create = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Conflict Delete Target",
+            "description": "Exists only to be deleted concurrently.",
+            "instructions": "N/A",
+            "model": "openai:gpt-4",
+        },
+        headers=auth_headers,
+    )
+    agent_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "agent", agent_id, "node-a")
+        result = await apply_remote_delete(db, "agent", agent_id, {"node-b": 1}, "node-b")
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    matching = [c for c in conflicts if c["entity_id"] == agent_id]
+    assert len(matching) == 1
+    assert matching[0]["remote_snapshot"] == {"deleted": True}
+    conflict_id = matching[0]["id"]
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    assert client.get(f"/api/v1/agents/{agent_id}", headers=auth_headers).status_code == 404
 
 
 def test_agent_create_does_not_fail_when_sync_engine_not_running(

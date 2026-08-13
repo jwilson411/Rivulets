@@ -1482,12 +1482,22 @@ class SyncPendingOutbound(Base):
     not the payload itself: by the time a retry runs, the entity may have
     changed again, so the retry always re-reads current state from its own
     table rather than replaying a payload that could be stale. Not synced
-    itself — purely local bookkeeping."""
+    itself — purely local bookkeeping.
+
+    `deleted` (#238) distinguishes a queued live-state publish (re-read the
+    entity and publish its current fields — publish_current_state) from a
+    queued tombstone (the entity is already gone locally, so there's
+    nothing to re-read — publish_tombstone). A row that started as a
+    live-state publish gets promoted to `deleted=True` in place if the
+    entity is deleted before the original publish ever succeeds, rather
+    than the delete adding a second row for the same (entity_type,
+    entity_id) — see sync/publish.py's `_record_pending_outbound`."""
 
     __tablename__ = "sync_pending_outbound"
 
     entity_type: Mapped[str] = mapped_column(primary_key=True)
     entity_id: Mapped[str] = mapped_column(primary_key=True)
+    deleted: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
 

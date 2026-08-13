@@ -45,7 +45,7 @@ from rivulets.db.models import (
     AgentToolScope,
     AgentVersion,
 )
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -312,6 +312,10 @@ async def delete_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> N
     # Rebuilds AgentOS's registry from the remaining rows — the deleted
     # agent simply won't be in it anymore (FR-3.2's "unregister").
     await sync_agents(db)
+    # #238: without this, a peer that still has the row would keep it, and
+    # its own next edit would arrive here as a plain REMOTE_NEWER update
+    # and recreate the agent we just deleted.
+    await publish_tombstone(db, "agent", agent_id)
 
 
 @router.get("/{agent_id}/runs", response_model=list[AgentRunOut])
