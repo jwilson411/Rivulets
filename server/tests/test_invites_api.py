@@ -1,6 +1,10 @@
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.api.invites import _reserve_redemption_slot  # pyright: ignore[reportPrivateUsage]
+from rivulets.db.session import session_scope
 from rivulets.security.rate_limit import get_invite_accept_rate_limiter
 from rivulets.security.session import get_session_key_store
 
@@ -121,6 +125,35 @@ def test_second_accept_of_a_single_use_invite_fails(
 
     second = client.post("/api/v1/invites/accept", json={"invite_token": token})
     assert second.status_code == 403
+
+
+async def test_concurrent_redemption_claims_only_grant_one_slot(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#236: accept_invite used to check use_count < max_uses and increment
+    it in separate steps, so two overlapping accepts could both pass the
+    check before either committed. _reserve_redemption_slot's
+    `UPDATE ... WHERE use_count < max_uses` folds the check and the write
+    into one atomic statement instead, so only one of several truly
+    concurrent claims against a max_uses=1 invite can ever win -- exercised
+    here with real overlapping calls (via asyncio.gather, each on its own
+    DB session), not just the sequential two-calls-in-a-row shape the
+    existing tests already cover."""
+    created = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_id = created["invite_id"]
+
+    async def _attempt() -> bool:
+        async with session_scope() as session:
+            claimed = await _reserve_redemption_slot(session, invite_id)
+            await session.commit()
+            return claimed
+
+    results = await asyncio.gather(*[_attempt() for _ in range(8)])
+    assert results.count(True) == 1, results
+    assert results.count(False) == 7, results
+
+    invites = client.get("/api/v1/invites", headers=auth_headers).json()
+    assert invites[0]["use_count"] == 1
 
 
 def test_accept_invite_with_max_uses_two_allows_exactly_two_redemptions(
