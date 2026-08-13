@@ -200,6 +200,51 @@ async def seed_builtin_tools(db: AsyncSession) -> None:
     await db.commit()
 
 
+async def is_builtin_tool_authorized(db: AsyncSession, agent_row: Agent, tool_name: str) -> bool:
+    """Re-checks a builtin tool call at *invocation* time (#240), not just
+    at agent-build time. resolve_agent_tools above gates what agno's own
+    Agent.arun() is handed to call in the first place, but dispatch/
+    service.py's trigger handlers (_handle_create_invite_trigger and
+    friends) don't go through agno's dispatch at all -- they inspect a
+    *completed* run's tool calls and pattern-match on `tool_call.tool_name`,
+    a plain string, to decide which mutation to actually perform. A custom
+    or MCP tool assigned to the same agent under a colliding name (e.g. a
+    custom tool literally named "create_invite") would make that handler
+    fire the real mutator with no scope check at all -- resolve_agent_tools's
+    gate only ever applied to the real builtin Tool row, which in that
+    scenario was never assigned to (or resolved for) this agent to begin
+    with.
+
+    Returns True only if `agent_row` currently has a `tool_type='builtin'`
+    row named exactly `tool_name` assigned via agent_tool (ruling out the
+    name-collision case above) and, if that row's `required_scope` is set,
+    a matching AgentToolScope grant (ruling out a stale/never-granted
+    scope). Both queried fresh here rather than trusting the in-memory
+    AgentOS-built agent, which in the collision case is simply irrelevant
+    -- the tool that actually ran was never the builtin at all."""
+    result = await db.execute(
+        select(Tool)
+        .join(AgentTool, AgentTool.tool_id == Tool.id)
+        .where(
+            AgentTool.agent_id == agent_row.id,
+            Tool.name == tool_name,
+            Tool.tool_type == "builtin",
+        )
+    )
+    tool_row = result.scalars().first()
+    if tool_row is None:
+        return False
+    if tool_row.required_scope is None:
+        return True
+    scope_result = await db.execute(
+        select(AgentToolScope.scope).where(
+            AgentToolScope.agent_id == agent_row.id,
+            AgentToolScope.scope == tool_row.required_scope,
+        )
+    )
+    return scope_result.scalar() is not None
+
+
 def _load_custom_tool(tool_row: Tool) -> Function | None:
     if not tool_row.source_path:
         return None

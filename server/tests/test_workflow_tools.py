@@ -32,6 +32,7 @@ from rivulets.tools.builtin.workflows import (
     unpublish_workflow,
     update_workflow,
 )
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -232,6 +233,7 @@ def test_create_workflow_creates_workflow(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Creator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_workflow")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -261,6 +263,7 @@ def test_create_workflow_rejects_invalid_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "PickyCreator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_workflow")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -281,6 +284,7 @@ def test_create_workflow_rejects_duplicate_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "DupeCreator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_workflow")
     existing_name = f"dupe-workflow-{agent_id}"
     _create_workflow_via_api(client, auth_headers, existing_name)
 
@@ -303,6 +307,7 @@ def test_update_workflow_renames_by_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Renamer")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workflow")
     old_name = f"rename-target-{agent_id}"
     workflow_id = _create_workflow_via_api(client, auth_headers, old_name)
 
@@ -330,6 +335,7 @@ def test_update_workflow_no_changes_specified_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Indecisive")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workflow")
     name = f"indecisive-workflow-{agent_id}"
     _create_workflow_via_api(client, auth_headers, name)
 
@@ -352,6 +358,7 @@ def test_update_workflow_unknown_reference_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workflow")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -376,6 +383,7 @@ def test_delete_workflow_removes_workflow(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Deleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_workflow")
     name = f"delete-target-{agent_id}"
     workflow_id = _create_workflow_via_api(client, auth_headers, name)
 
@@ -402,6 +410,7 @@ def test_delete_workflow_unknown_reference_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedDeleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_workflow")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -422,6 +431,7 @@ def test_publish_workflow_with_entry_point_succeeds(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Publisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "publish_workflow")
     name = f"publish-target-{agent_id}"
     workflow_id = _create_workflow_via_api(client, auth_headers, name)
     _give_entry_point(client, auth_headers, workflow_id)
@@ -448,6 +458,7 @@ def test_publish_workflow_without_entry_point_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ImpatientPublisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "publish_workflow")
     name = f"no-entry-{agent_id}"
     _create_workflow_via_api(client, auth_headers, name)
 
@@ -470,6 +481,7 @@ def test_publish_workflow_already_published_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "DoublePublisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "publish_workflow")
     name = f"already-published-{agent_id}"
     workflow_id = _create_workflow_via_api(client, auth_headers, name)
     _give_entry_point(client, auth_headers, workflow_id)
@@ -495,6 +507,7 @@ def test_unpublish_workflow_reverts_to_draft(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Unpublisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "unpublish_workflow")
     name = f"unpublish-target-{agent_id}"
     workflow_id = _create_workflow_via_api(client, auth_headers, name)
     _give_entry_point(client, auth_headers, workflow_id)
@@ -523,6 +536,7 @@ def test_unpublish_workflow_not_published_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ImpatientUnpublisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "unpublish_workflow")
     name = f"still-draft-{agent_id}"
     _create_workflow_via_api(client, auth_headers, name)
 

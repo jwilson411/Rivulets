@@ -71,6 +71,7 @@ from rivulets.agentos.mcp import (
     mcp_header_ref,
 )
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
+from rivulets.agentos.tool_resolution import is_builtin_tool_authorized
 from rivulets.config import get_settings
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
@@ -119,6 +120,30 @@ from rivulets.tracing import TraceContext, finish_span, start_span
 logger = logging.getLogger(__name__)
 
 _ARRAY_PATTERN_TYPES = {RuleType.KEYWORD, RuleType.SEMANTIC}
+
+
+async def _authorize_builtin_call(db: AsyncSession, agent: Agent, tool_name: str) -> bool:
+    """#240: gates every scoped builtin trigger handler below on
+    is_builtin_tool_authorized, re-checked fresh against this run's
+    `agent` right before acting on it -- the `_find_*_call` helpers above
+    only look at `tool_call.tool_name`, a plain string on the completed
+    run, which says nothing about whether the thing that actually ran was
+    the real scoped builtin (as opposed to a same-named custom/MCP tool
+    that needed no scope at all) or whether the scope grant behind it is
+    still current. A denial here is treated the same as "this run made no
+    such tool call" -- logged and silently skipped, not surfaced to the
+    rivulet -- since the legitimate trigger for it (a real, authorized
+    call) never happened."""
+    if await is_builtin_tool_authorized(db, agent, tool_name):
+        return True
+    logger.warning(
+        "Agent %r's run included a %r tool call that isn't backed by an authorized "
+        "builtin (missing/revoked scope grant, or a same-named custom/MCP tool) — "
+        "refusing to act on it",
+        agent.name,
+        tool_name,
+    )
+    return False
 
 
 def _row_to_rule(row: AgentRoutingRule) -> Rule:
@@ -1535,31 +1560,41 @@ async def _invoke_agent(
         )
 
     create_channel_call = _find_create_channel_call(run_output)
-    if create_channel_call is not None:
+    if create_channel_call is not None and await _authorize_builtin_call(
+        db, agent, "create_channel"
+    ):
         new_messages.extend(
             await _handle_create_channel_trigger(db, rivulet, agent, create_channel_call)
         )
 
     update_channel_call = _find_update_channel_call(run_output)
-    if update_channel_call is not None:
+    if update_channel_call is not None and await _authorize_builtin_call(
+        db, agent, "update_channel"
+    ):
         new_messages.extend(
             await _handle_update_channel_trigger(db, rivulet, agent, update_channel_call)
         )
 
     archive_channel_call = _find_archive_channel_call(run_output)
-    if archive_channel_call is not None:
+    if archive_channel_call is not None and await _authorize_builtin_call(
+        db, agent, "archive_channel"
+    ):
         new_messages.extend(
             await _handle_archive_channel_trigger(db, rivulet, agent, archive_channel_call)
         )
 
     unarchive_channel_call = _find_unarchive_channel_call(run_output)
-    if unarchive_channel_call is not None:
+    if unarchive_channel_call is not None and await _authorize_builtin_call(
+        db, agent, "unarchive_channel"
+    ):
         new_messages.extend(
             await _handle_unarchive_channel_trigger(db, rivulet, agent, unarchive_channel_call)
         )
 
     reorder_channels_call = _find_reorder_channels_call(run_output)
-    if reorder_channels_call is not None:
+    if reorder_channels_call is not None and await _authorize_builtin_call(
+        db, agent, "reorder_channels"
+    ):
         new_messages.extend(
             await _handle_reorder_channels_trigger(db, rivulet, agent, reorder_channels_call)
         )
@@ -1568,25 +1603,33 @@ async def _invoke_agent(
         new_messages.extend(await _handle_list_channels_trigger(db, rivulet, agent))
 
     create_agent_call = _find_create_agent_call(run_output)
-    if create_agent_call is not None:
+    if create_agent_call is not None and await _authorize_builtin_call(
+        db, agent, "create_agent"
+    ):
         new_messages.extend(
             await _handle_create_agent_trigger(db, rivulet, agent, create_agent_call)
         )
 
     update_agent_call = _find_update_agent_call(run_output)
-    if update_agent_call is not None:
+    if update_agent_call is not None and await _authorize_builtin_call(
+        db, agent, "update_agent"
+    ):
         new_messages.extend(
             await _handle_update_agent_trigger(db, rivulet, agent, update_agent_call)
         )
 
     delete_agent_call = _find_delete_agent_call(run_output)
-    if delete_agent_call is not None:
+    if delete_agent_call is not None and await _authorize_builtin_call(
+        db, agent, "delete_agent"
+    ):
         new_messages.extend(
             await _handle_delete_agent_trigger(db, rivulet, agent, delete_agent_call)
         )
 
     update_agent_routing_rules_call = _find_update_agent_routing_rules_call(run_output)
-    if update_agent_routing_rules_call is not None:
+    if update_agent_routing_rules_call is not None and await _authorize_builtin_call(
+        db, agent, "update_agent_routing_rules"
+    ):
         new_messages.extend(
             await _handle_update_agent_routing_rules_trigger(
                 db, rivulet, agent, update_agent_routing_rules_call
@@ -1594,7 +1637,9 @@ async def _invoke_agent(
         )
 
     update_agent_peer_preference_call = _find_update_agent_peer_preference_call(run_output)
-    if update_agent_peer_preference_call is not None:
+    if update_agent_peer_preference_call is not None and await _authorize_builtin_call(
+        db, agent, "update_agent_peer_preference"
+    ):
         new_messages.extend(
             await _handle_update_agent_peer_preference_trigger(
                 db, rivulet, agent, update_agent_peer_preference_call
@@ -1602,7 +1647,9 @@ async def _invoke_agent(
         )
 
     rollback_agent_version_call = _find_rollback_agent_version_call(run_output)
-    if rollback_agent_version_call is not None:
+    if rollback_agent_version_call is not None and await _authorize_builtin_call(
+        db, agent, "rollback_agent_version"
+    ):
         new_messages.extend(
             await _handle_rollback_agent_version_trigger(
                 db, rivulet, agent, rollback_agent_version_call
@@ -1613,28 +1660,32 @@ async def _invoke_agent(
         new_messages.extend(await _handle_list_agents_trigger(db, rivulet, agent))
 
     create_team_call = _find_create_team_call(run_output)
-    if create_team_call is not None:
+    if create_team_call is not None and await _authorize_builtin_call(db, agent, "create_team"):
         new_messages.extend(await _handle_create_team_trigger(db, rivulet, agent, create_team_call))
 
     update_team_call = _find_update_team_call(run_output)
-    if update_team_call is not None:
+    if update_team_call is not None and await _authorize_builtin_call(db, agent, "update_team"):
         new_messages.extend(await _handle_update_team_trigger(db, rivulet, agent, update_team_call))
 
     delete_team_call = _find_delete_team_call(run_output)
-    if delete_team_call is not None:
+    if delete_team_call is not None and await _authorize_builtin_call(db, agent, "delete_team"):
         new_messages.extend(await _handle_delete_team_trigger(db, rivulet, agent, delete_team_call))
 
     if _find_list_teams_call(run_output):
         new_messages.extend(await _handle_list_teams_trigger(db, rivulet, agent))
 
     register_mcp_server_call = _find_register_mcp_server_call(run_output)
-    if register_mcp_server_call is not None:
+    if register_mcp_server_call is not None and await _authorize_builtin_call(
+        db, agent, "register_mcp_server"
+    ):
         new_messages.extend(
             await _handle_register_mcp_server_trigger(db, rivulet, agent, register_mcp_server_call)
         )
 
     reconnect_mcp_server_call = _find_reconnect_mcp_server_call(run_output)
-    if reconnect_mcp_server_call is not None:
+    if reconnect_mcp_server_call is not None and await _authorize_builtin_call(
+        db, agent, "reconnect_mcp_server"
+    ):
         new_messages.extend(
             await _handle_reconnect_mcp_server_trigger(
                 db, rivulet, agent, reconnect_mcp_server_call
@@ -1642,7 +1693,9 @@ async def _invoke_agent(
         )
 
     delete_mcp_server_call = _find_delete_mcp_server_call(run_output)
-    if delete_mcp_server_call is not None:
+    if delete_mcp_server_call is not None and await _authorize_builtin_call(
+        db, agent, "delete_mcp_server"
+    ):
         new_messages.extend(
             await _handle_delete_mcp_server_trigger(db, rivulet, agent, delete_mcp_server_call)
         )
@@ -1651,31 +1704,41 @@ async def _invoke_agent(
         new_messages.extend(await _handle_list_mcp_servers_trigger(db, rivulet, agent))
 
     create_workflow_call = _find_create_workflow_call(run_output)
-    if create_workflow_call is not None:
+    if create_workflow_call is not None and await _authorize_builtin_call(
+        db, agent, "create_workflow"
+    ):
         new_messages.extend(
             await _handle_create_workflow_trigger(db, rivulet, agent, create_workflow_call)
         )
 
     update_workflow_call = _find_update_workflow_call(run_output)
-    if update_workflow_call is not None:
+    if update_workflow_call is not None and await _authorize_builtin_call(
+        db, agent, "update_workflow"
+    ):
         new_messages.extend(
             await _handle_update_workflow_trigger(db, rivulet, agent, update_workflow_call)
         )
 
     delete_workflow_call = _find_delete_workflow_call(run_output)
-    if delete_workflow_call is not None:
+    if delete_workflow_call is not None and await _authorize_builtin_call(
+        db, agent, "delete_workflow"
+    ):
         new_messages.extend(
             await _handle_delete_workflow_trigger(db, rivulet, agent, delete_workflow_call)
         )
 
     publish_workflow_call = _find_publish_workflow_call(run_output)
-    if publish_workflow_call is not None:
+    if publish_workflow_call is not None and await _authorize_builtin_call(
+        db, agent, "publish_workflow"
+    ):
         new_messages.extend(
             await _handle_publish_workflow_trigger(db, rivulet, agent, publish_workflow_call)
         )
 
     unpublish_workflow_call = _find_unpublish_workflow_call(run_output)
-    if unpublish_workflow_call is not None:
+    if unpublish_workflow_call is not None and await _authorize_builtin_call(
+        db, agent, "unpublish_workflow"
+    ):
         new_messages.extend(
             await _handle_unpublish_workflow_trigger(db, rivulet, agent, unpublish_workflow_call)
         )
@@ -1683,11 +1746,15 @@ async def _invoke_agent(
     if _find_list_workflows_call(run_output):
         new_messages.extend(await _handle_list_workflows_trigger(db, rivulet, agent))
 
-    if _find_get_workspace_settings_call(run_output):
+    if _find_get_workspace_settings_call(run_output) and await _authorize_builtin_call(
+        db, agent, "get_workspace_settings"
+    ):
         new_messages.extend(await _handle_get_workspace_settings_trigger(db, rivulet, agent))
 
     update_workspace_settings_call = _find_update_workspace_settings_call(run_output)
-    if update_workspace_settings_call is not None:
+    if update_workspace_settings_call is not None and await _authorize_builtin_call(
+        db, agent, "update_workspace_settings"
+    ):
         new_messages.extend(
             await _handle_update_workspace_settings_trigger(
                 db, rivulet, agent, update_workspace_settings_call
@@ -1695,16 +1762,22 @@ async def _invoke_agent(
         )
 
     create_invite_call = _find_create_invite_call(run_output)
-    if create_invite_call is not None:
+    if create_invite_call is not None and await _authorize_builtin_call(
+        db, agent, "create_invite"
+    ):
         new_messages.extend(
             await _handle_create_invite_trigger(db, rivulet, agent, create_invite_call)
         )
 
-    if _find_list_invites_call(run_output):
+    if _find_list_invites_call(run_output) and await _authorize_builtin_call(
+        db, agent, "list_invites"
+    ):
         new_messages.extend(await _handle_list_invites_trigger(db, rivulet, agent))
 
     revoke_invite_call = _find_revoke_invite_call(run_output)
-    if revoke_invite_call is not None:
+    if revoke_invite_call is not None and await _authorize_builtin_call(
+        db, agent, "revoke_invite"
+    ):
         new_messages.extend(
             await _handle_revoke_invite_trigger(db, rivulet, agent, revoke_invite_call)
         )

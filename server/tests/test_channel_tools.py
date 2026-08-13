@@ -31,6 +31,7 @@ from rivulets.tools.builtin.channels import (
     unarchive_channel,
     update_channel,
 )
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -204,6 +205,7 @@ def test_create_channel_creates_channel(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Creator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_channel")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -231,6 +233,7 @@ def test_create_channel_rejects_short_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "PickyCreator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_channel")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -251,6 +254,7 @@ def test_create_channel_rejects_duplicate_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "DupeCreator")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_channel")
     existing_name = f"channel-tool-test-{agent_id}"
 
     monkeypatch.setattr(
@@ -272,6 +276,7 @@ def test_update_channel_renames_by_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Renamer")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_channel")
     old_name = f"channel-tool-test-{agent_id}"
 
     monkeypatch.setattr(
@@ -298,6 +303,7 @@ def test_update_channel_no_changes_specified_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Indecisive")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_channel")
     name = f"channel-tool-test-{agent_id}"
 
     monkeypatch.setattr(
@@ -319,6 +325,7 @@ def test_update_channel_unknown_reference_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Confused")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_channel")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -341,6 +348,9 @@ def test_archive_then_unarchive_channel_by_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Archiver")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, agent_id, "archive_channel", "unarchive_channel"
+    )
     name = f"channel-tool-test-{agent_id}"
 
     monkeypatch.setattr(
@@ -384,6 +394,7 @@ def test_archive_already_archived_channel_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "DoubleArchiver")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "archive_channel")
     client.delete(f"/api/v1/channels/{channel_id}", headers=auth_headers)
 
     monkeypatch.setattr(
@@ -405,6 +416,7 @@ def test_reorder_channels_sets_position(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Reorderer")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reorder_channels")
 
     other = client.post(
         "/api/v1/channels", json={"name": f"other-{agent_id}"}, headers=auth_headers
@@ -434,6 +446,7 @@ def test_reorder_channels_unknown_ref_leaves_positions_unchanged(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "BadReorderer")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reorder_channels")
     before = client.get("/api/v1/channels", headers=auth_headers).json()
 
     monkeypatch.setattr(
@@ -474,3 +487,33 @@ def test_list_channels_reports_existing_channels(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert name in messages[2]["content"]
+
+
+def test_create_channel_call_ignored_without_channels_manage_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#240: a completed run's `create_channel` tool call must not create a
+    real channel unless the agent that made it actually holds the
+    "channels:manage" scope, re-checked fresh at invocation time. See
+    test_invite_tools.py's equivalent test for the full rationale."""
+    agent_id = _create_agent(client, auth_headers, "UnauthorizedCreator")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(
+            _tool_execution("create_channel", {"name": "sneaky-channel", "description": "nope"})
+        ),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go create a channel"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    listed = client.get("/api/v1/channels", headers=auth_headers).json()
+    assert not any(c["name"] == "sneaky-channel" for c in listed)
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert all("created channel" not in m["content"] for m in messages)

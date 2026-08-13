@@ -313,6 +313,7 @@ def test_list_tool_scopes_returns_the_known_catalog(
         "channels:manage",
         "invites:manage",
         "mcp_servers:manage",
+        "sensitive_tools:manage",
         "settings:manage",
         "workflows:manage",
     ]

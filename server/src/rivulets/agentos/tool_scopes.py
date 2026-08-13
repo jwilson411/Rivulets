@@ -29,6 +29,7 @@ TOOL_SCOPES: frozenset[str] = frozenset(
         "workflows:manage",
         "settings:manage",
         "invites:manage",
+        "sensitive_tools:manage",
     }
 )
 
@@ -69,6 +70,25 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # tools/builtin/workflows.py's module docstring. list_workflows is
 # read-only and deliberately left out, same as list_channels/list_agents/
 # list_mcp_servers.
+#
+# #240: SENSITIVE_BUILTIN_TOOL_NAMES (agentos/tool_resolution.py --
+# execute_python, http_request, write_file, query_workspace_db) previously
+# carried no required_scope at all, which oversold "agents_teams:manage":
+# update_agent's tool_ids lets an agent reassign *any* tool to *any*
+# agent, and with no scope of their own, these four resolved and ran the
+# instant they were assigned -- no separate owner-only step the way every
+# category above requires. "sensitive_tools:manage" closes that: assigning
+# one of these four via tool_ids is still possible (agents_teams:manage
+# alone permits it), but it stays inert for the target agent until an
+# owner separately grants sensitive_tools:manage to it, the same
+# assignment-isn't-eligibility split every other scope already enforces.
+# A single shared scope, not one each -- these four aren't independently
+# grantable resources like channels/agents/invites, they're one severity
+# tier ("arbitrary code exec, arbitrary outbound HTTP, local filesystem
+# writes, DB access" -- tool_resolution.py's own description) that either
+# is or isn't the right amount of trust to place in a given agent. Folded
+# into BUILTIN_TOOL_SCOPES below (not a separate dict) since that's the
+# only mapping seed_builtin_tools and resolve_agent_tools actually read.
 #
 # #193 (tools/builtin/settings.py, tools/builtin/invites.py) is the fifth
 # and last of #125's originally-scoped sub-issues, and the first to cover
@@ -115,4 +135,8 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_invite": "invites:manage",
     "list_invites": "invites:manage",
     "revoke_invite": "invites:manage",
+    "execute_python": "sensitive_tools:manage",
+    "http_request": "sensitive_tools:manage",
+    "write_file": "sensitive_tools:manage",
+    "query_workspace_db": "sensitive_tools:manage",
 }

@@ -43,6 +43,7 @@ from rivulets.tools.builtin.agents_teams import (
     update_agent_routing_rules,
     update_team,
 )
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -348,6 +349,7 @@ def test_create_agent_creates_agent(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Creator")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "create_agent")
 
     messages = _trigger(
         client,
@@ -376,6 +378,7 @@ def test_create_agent_rejects_short_name(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "PickyCreator")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "create_agent")
 
     messages = _trigger(
         client,
@@ -400,6 +403,7 @@ def test_create_agent_rejects_duplicate_name(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "DupeCreator")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "create_agent")
 
     messages = _trigger(
         client,
@@ -424,6 +428,7 @@ def test_create_agent_rejects_short_description(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "DescPicky")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "create_agent")
 
     messages = _trigger(
         client,
@@ -448,6 +453,7 @@ def test_update_agent_renames_by_name(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Renamer")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
     target_name = f"Target-{controller_id}"
     target = client.post(
         "/api/v1/agents",
@@ -482,6 +488,7 @@ def test_update_agent_dedupes_repeated_team_id(
     IntegrityError on commit."""
     controller_id = _create_controller_agent(client, auth_headers, "DupeTeamAssigner")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
     target_name = f"DupeTeamTarget-{controller_id}"
     target = client.post(
         "/api/v1/agents",
@@ -517,6 +524,7 @@ def test_update_agent_no_changes_specified_is_rejected(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Indecisive")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
 
     messages = _trigger(
         client,
@@ -533,6 +541,7 @@ def test_update_agent_unknown_reference_is_rejected(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Confused")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
 
     messages = _trigger(
         client,
@@ -549,6 +558,7 @@ def test_delete_agent_removes_it(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Deleter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_agent")
     target_name = f"Doomed-{controller_id}"
     target = client.post(
         "/api/v1/agents",
@@ -578,6 +588,7 @@ def test_delete_agent_refuses_self_delete(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "SelfDeleter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_agent")
 
     messages = _trigger(
         client,
@@ -595,6 +606,9 @@ def test_update_agent_routing_rules_replaces_rules(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "RuleSetter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_routing_rules"
+    )
     target_name = f"RuleTarget-{controller_id}"
     target = client.post(
         "/api/v1/agents",
@@ -633,6 +647,9 @@ def test_update_agent_routing_rules_rejects_invalid_rule(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "BadRuleSetter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_routing_rules"
+    )
 
     messages = _trigger(
         client,
@@ -652,6 +669,9 @@ def test_update_agent_peer_preference_sets_and_clears(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "PeerSetter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_peer_preference"
+    )
 
     messages = _trigger(
         client,
@@ -687,6 +707,7 @@ def test_rollback_agent_version_reverts_instructions(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "Rollbacker")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "rollback_agent_version")
     target_name = f"VersionedTarget-{controller_id}"
     target = client.post(
         "/api/v1/agents",
@@ -722,6 +743,7 @@ def test_rollback_agent_version_unknown_version_rejected(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "BadRollbacker")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "rollback_agent_version")
 
     messages = _trigger(
         client,
@@ -750,6 +772,7 @@ def test_create_team_creates_team(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "TeamCreator")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "create_team")
 
     messages = _trigger(
         client,
@@ -771,6 +794,7 @@ def test_update_team_renames_and_sets_members(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "TeamUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
     member_name = f"Member-{controller_id}"
     member = client.post(
         "/api/v1/agents",
@@ -816,6 +840,7 @@ def test_update_team_dedupes_agent_ids_naming_same_agent_twice(
     would otherwise hit an IntegrityError on commit."""
     controller_id = _create_controller_agent(client, auth_headers, "DupeTeamUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
     member_name = f"DupeMember-{controller_id}"
     member = client.post(
         "/api/v1/agents",
@@ -851,6 +876,7 @@ def test_update_team_ambiguous_name_rejected(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "AmbiguousUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
     dup_name = f"Dup-{controller_id}"
     client.post("/api/v1/teams", json={"name": dup_name}, headers=auth_headers)
     client.post("/api/v1/teams", json={"name": dup_name}, headers=auth_headers)
@@ -870,6 +896,7 @@ def test_delete_team_removes_it(
 ) -> None:
     controller_id = _create_controller_agent(client, auth_headers, "TeamDeleter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_team")
     team = client.post(
         "/api/v1/teams", json={"name": f"Doomed-Team-{controller_id}"}, headers=auth_headers
     ).json()
@@ -896,3 +923,37 @@ def test_list_teams_reports_members(
     )
     assert "Agent Tool Test Team" in messages[2]["content"]
     assert "TeamLister" in messages[2]["content"]
+
+
+def test_delete_agent_call_ignored_without_agents_teams_manage_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#240: a completed run's `delete_agent` tool call must not delete a
+    real agent unless the calling agent actually holds the
+    "agents_teams:manage" scope, re-checked fresh at invocation time. See
+    test_invite_tools.py's equivalent test for the full rationale --
+    delete_agent is this category's highest-consequence tool, so it's the
+    one worth a dedicated deny-path regression here."""
+    controller_id = _create_controller_agent(client, auth_headers, "UnauthorizedDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    target_name = f"ShouldSurvive-{controller_id}"
+    target = client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent that must survive the unauthorized attempt.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    ).json()
+
+    _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("delete_agent", {"agent": target_name}),
+    )
+
+    assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).status_code == 200
