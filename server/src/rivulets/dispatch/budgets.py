@@ -6,7 +6,8 @@ that scope until the window resets or a human overrides it).
 Cap *definitions* (db/models.py's BudgetCap) are synced workspace config,
 same as WorkspaceSetting. Enforcement here is local-only per peer, computed
 from this node's own AgentRun history — no cross-peer spend aggregation
-(that needs #101's not-yet-built coordinator election). See BudgetCap's
+(that needs a singleton consumer of #101's coordinator election, which
+is not wired yet — the election primitive itself shipped). See BudgetCap's
 docstring for the full reasoning; this is the same local-only precedent
 WorkflowSchedule (#92) already set for itself.
 
