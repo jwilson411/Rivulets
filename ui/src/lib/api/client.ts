@@ -59,12 +59,31 @@ function extractErrorMessage(body: string): string {
 	return body;
 }
 
+type UnauthorizedHandler = () => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+// auth.svelte.ts registers itself here rather than this module importing
+// auth.svelte.ts directly -- auth.svelte.ts already imports `api` from
+// here, so a direct import back would be circular. This is the one place
+// that sees every response's status, so it's also the one place that
+// notices a bearer token has gone stale, instead of every call site
+// checking `err.status === 401` itself.
+export function onUnauthorized(handler: UnauthorizedHandler): void {
+	unauthorizedHandler = handler;
+}
+
 async function request<T>(path: string, init: RequestInit, token?: string): Promise<T> {
 	const headers = new Headers(init.headers);
 	headers.set('Content-Type', 'application/json');
 	if (token) headers.set('Authorization', `Bearer ${token}`);
 
 	const response = await fetch(`/api/v1${path}`, { ...init, headers });
+	// Only a 401 on a request that *carried* a bearer token means that
+	// token is stale -- a 401 from an unauthenticated call (e.g. a bad
+	// mnemonic on /auth/login) is a credentials problem, not a session
+	// problem, and must not tear down an unrelated already-logged-in session.
+	if (token && response.status === 401) unauthorizedHandler?.();
 	if (!response.ok) {
 		const body = await response.text();
 		throw new ApiError(response.status, extractErrorMessage(body) || response.statusText);

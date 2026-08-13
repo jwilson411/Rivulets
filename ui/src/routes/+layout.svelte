@@ -17,7 +17,7 @@
 {#if isInviteRoute}
 	{@render children()}
 {:else if !auth.isAuthenticated}
-	<LoginForm />
+	<LoginForm sessionExpired={auth.sessionExpired} />
 {:else if !auth.humanId}
 	<IdentityPicker />
 {:else}

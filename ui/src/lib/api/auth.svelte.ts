@@ -6,7 +6,7 @@
 // refresh path is a deliberate product decision, not scaffolding — left as
 // a TODO here rather than silently choosing a weaker storage mode.
 
-import { api } from './client';
+import { api, onUnauthorized } from './client';
 
 interface LoginResponse {
 	token: string;
@@ -35,6 +35,52 @@ let token = $state<string | null>(null);
 let humanId = $state<string | null>(null);
 let displayName = $state<string | null>(null);
 let grant = $state<string | null>(null);
+let expiresAt = $state<string | null>(null);
+// True only when a previously-valid session was torn down out from under
+// the user (a 401 mid-session, or the JWT's own expiry) -- distinct from
+// simply being logged out, so LoginForm can say *why* it's showing again
+// instead of looking like a silent bounce back to the login screen.
+let sessionExpired = $state(false);
+
+let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearExpiryTimer(): void {
+	if (expiryTimer !== null) {
+		clearTimeout(expiryTimer);
+		expiryTimer = null;
+	}
+}
+
+// Proactively drops the session a moment before the server would start
+// rejecting it anyway, so a user mid-session sees "sign in again" instead
+// of the next click failing with a generic error. `expires_at` isn't
+// always a well-formed/parseable date (tests stub it with placeholders),
+// so a NaN or past delay is just skipped rather than firing immediately.
+function scheduleExpiry(iso: string): void {
+	clearExpiryTimer();
+	const delay = Date.parse(iso) - Date.now();
+	if (!Number.isFinite(delay) || delay <= 0) return;
+	expiryTimer = setTimeout(() => clearSession(true), delay);
+}
+
+function clearSession(expired: boolean): void {
+	clearExpiryTimer();
+	token = null;
+	humanId = null;
+	displayName = null;
+	grant = null;
+	expiresAt = null;
+	sessionExpired = expired;
+}
+
+// client.ts calls this on every 401 response. Only treat it as a session
+// tear-down if we actually thought we were logged in -- a 401 from a bad
+// login attempt itself (wrong phrase) shouldn't clear anything or flip on
+// the "session expired" banner, and login() never sets `token` until it
+// already has a successful response.
+onUnauthorized(() => {
+	if (token) clearSession(true);
+});
 
 export const auth = {
 	get token() {
@@ -52,6 +98,12 @@ export const auth = {
 	get grant() {
 		return grant;
 	},
+	get expiresAt() {
+		return expiresAt;
+	},
+	get sessionExpired() {
+		return sessionExpired;
+	},
 	async login(mnemonic: string, passphrase?: string): Promise<void> {
 		const response = await api.post<LoginResponse>('/auth/login', {
 			key: mnemonic,
@@ -59,6 +111,9 @@ export const auth = {
 		});
 		token = response.token;
 		grant = response.grant;
+		expiresAt = response.expires_at;
+		sessionExpired = false;
+		scheduleExpiry(response.expires_at);
 	},
 	// Sets the full claimed-identity session state at once (#14's
 	// IdentityPicker, #15's invite-accept flow) -- both hand back a token
@@ -68,6 +123,9 @@ export const auth = {
 		humanId = info.human_id;
 		displayName = info.display_name;
 		grant = info.grant;
+		expiresAt = info.expires_at;
+		sessionExpired = false;
+		scheduleExpiry(info.expires_at);
 	},
 	// Claims a Human identity for the current workspace session (#14's
 	// IdentityPicker) -- pass an existing human_id to "continue as" them,
@@ -103,10 +161,7 @@ export const auth = {
 	},
 	async logout(): Promise<void> {
 		const activeToken = token;
-		token = null;
-		humanId = null;
-		displayName = null;
-		grant = null;
+		clearSession(false);
 		if (activeToken) await api.post('/auth/logout', {}, activeToken);
 	}
 };
