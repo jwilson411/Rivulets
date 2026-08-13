@@ -26,7 +26,9 @@
 	let reply = $state('');
 	let loadError = $state<string | null>(null);
 	let sending = $state(false);
+	let sendError = $state<string | null>(null);
 	let resuming = $state(false);
+	let resumeError = $state<string | null>(null);
 	let pendingFiles = $state<globalThis.File[]>([]);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let downloadError = $state<string | null>(null);
@@ -250,6 +252,7 @@
 		const rivuletId = page.params.rivuletId!;
 		if (!reply.trim() && pendingFiles.length === 0) return;
 		sending = true;
+		sendError = null;
 		try {
 			// Uploads happen first, as their own step — a file has to exist on
 			// the server (POST /files/upload) before it can be referenced by
@@ -268,7 +271,7 @@
 			pendingFiles = [];
 			messages = await rivulets.listMessages(rivuletId);
 		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to send message';
+			sendError = err instanceof Error ? err.message : 'Failed to send message';
 		} finally {
 			sending = false;
 		}
@@ -277,9 +280,12 @@
 	async function handleResume() {
 		const rivuletId = page.params.rivuletId!;
 		resuming = true;
+		resumeError = null;
 		try {
 			rivulet = await rivulets.resume(rivuletId);
 			messages = await rivulets.listMessages(rivuletId);
+		} catch (err) {
+			resumeError = err instanceof Error ? err.message : 'Failed to resume rivulet';
 		} finally {
 			resuming = false;
 		}
@@ -328,16 +334,21 @@
 
 	{#if rivulet?.status === 'paused'}
 		<div
-			class="flex items-center justify-between gap-3 border-b border-agent-magenta-200 bg-agent-magenta-100/60 px-9 py-2 text-sm text-agent-magenta-800 dark:border-agent-magenta-900 dark:bg-agent-magenta-900/20 dark:text-agent-magenta-300"
+			class="flex flex-col gap-1 border-b border-agent-magenta-200 bg-agent-magenta-100/60 px-9 py-2 text-sm text-agent-magenta-800 dark:border-agent-magenta-900 dark:bg-agent-magenta-900/20 dark:text-agent-magenta-300"
 		>
-			<span>{pauseNotice ?? 'This rivulet is paused — agent replies are suppressed.'}</span>
-			<button
-				onclick={handleResume}
-				disabled={resuming}
-				class="shrink-0 rounded-md border border-agent-magenta-400 px-3 py-1 text-xs font-medium hover:bg-agent-magenta-100 disabled:opacity-50 dark:border-agent-magenta-700 dark:hover:bg-agent-magenta-900/30"
-			>
-				{resuming ? 'Resuming…' : 'Resume'}
-			</button>
+			<div class="flex items-center justify-between gap-3">
+				<span>{pauseNotice ?? 'This rivulet is paused — agent replies are suppressed.'}</span>
+				<button
+					onclick={handleResume}
+					disabled={resuming}
+					class="shrink-0 rounded-md border border-agent-magenta-400 px-3 py-1 text-xs font-medium hover:bg-agent-magenta-100 disabled:opacity-50 dark:border-agent-magenta-700 dark:hover:bg-agent-magenta-900/30"
+				>
+					{resuming ? 'Resuming…' : 'Resume'}
+				</button>
+			</div>
+			{#if resumeError}
+				<p class="text-xs">{resumeError}</p>
+			{/if}
 		</div>
 	{/if}
 
@@ -517,6 +528,9 @@
 			<p class="mb-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
 				{downloadError}
 			</p>
+		{/if}
+		{#if sendError}
+			<p class="mb-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{sendError}</p>
 		{/if}
 		{#if pendingFiles.length > 0}
 			<div class="mb-2 flex flex-wrap gap-2">
