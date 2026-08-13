@@ -26,6 +26,12 @@ on:
   push:
     tags: ["v*"]
 
+# Workflow-level default; both jobs below already set their own narrower
+# permissions (read+id-token for build, write for publish) -- this only
+# matters as a fail-safe for any job added later that forgets to.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build (${{ matrix.name }})
@@ -58,7 +64,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: "latest"
+          version: "0.12.3"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -77,6 +83,9 @@ jobs:
           uv sync --group packaging
           uv run --group packaging pyinstaller ../${{ matrix.spec }} --distpath ../dist --workpath ../build/pyinstaller --noconfirm
 
+      # Health-only used to be the whole release smoke test -- none of the
+      # P0 launch blockers below (wrong frozen version, no migrations
+      # exercised, restore broken) would have failed this job (#254).
       - name: Smoke test (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
@@ -90,6 +99,51 @@ jobs:
             sleep 1
           done
           curl -sf http://127.0.0.1:8484/api/v1/health | grep '"status":"ok"'
+
+          # UI is actually bundled into this binary, not just an API-only
+          # server.
+          curl -sf http://127.0.0.1:8484/ | grep -q '<title>Rivulets</title>'
+
+          # Frozen binary reports the tag it was actually built from, not
+          # a stale fallback literal (#230).
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          curl -sf http://127.0.0.1:8484/api/v1/info | grep -q "\"version\":\"${TAG_VERSION}\""
+
+          TOKEN=$(curl -sf -X POST http://127.0.0.1:8484/api/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"key":"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"}' \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+          curl -sf -X POST http://127.0.0.1:8484/api/v1/agents \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d '{"name":"smoke-test","description":"Smoke test agent for release","instructions":"You are a test agent. Respond with OK.","model":"test:mock"}' \
+            | grep -q '"name":"smoke-test"'
+
+          # Backup/restore round trip (#243/#254): snapshot now, add a
+          # second agent only after the snapshot, restore, then confirm
+          # the pre-snapshot agent survived and the post-snapshot one
+          # didn't -- proving restore actually swaps state back on this
+          # platform's filesystem rather than being a no-op.
+          BACKUP_FILE=$(curl -sf -X POST http://127.0.0.1:8484/api/v1/backups \
+            -H "Authorization: Bearer $TOKEN" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['filename'])")
+
+          curl -sf -X POST http://127.0.0.1:8484/api/v1/agents \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d '{"name":"post-backup-agent","description":"should not survive restore","instructions":"noop","model":"test:mock"}' \
+            | grep -q '"name":"post-backup-agent"'
+
+          curl -sf -X POST "http://127.0.0.1:8484/api/v1/backups/${BACKUP_FILE}/restore" \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d "{\"confirm_filename\":\"${BACKUP_FILE}\"}"
+
+          RESTORED_AGENTS=$(curl -sf http://127.0.0.1:8484/api/v1/agents -H "Authorization: Bearer $TOKEN")
+          echo "$RESTORED_AGENTS" | grep -q 'smoke-test'
+          if echo "$RESTORED_AGENTS" | grep -q 'post-backup-agent'; then
+            echo "restore did not revert the post-snapshot agent" >&2
+            exit 1
+          fi
+
           kill $PID
 
       - name: Smoke test (Windows)
@@ -106,8 +160,58 @@ jobs:
             } catch {}
             Start-Sleep -Seconds 1
           }
-          Stop-Process -Id $proc.Id
-          if (-not $ok) { exit 1 }
+          if (-not $ok) {
+            Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
+            Write-Error "Binary never reported healthy"
+            exit 1
+          }
+
+          try {
+            # UI is actually bundled into this binary, not just an
+            # API-only server.
+            $html = Invoke-RestMethod -Uri "http://127.0.0.1:8484/"
+            if ($html -notmatch '<title>Rivulets</title>') {
+              throw "UI index.html was not served at /"
+            }
+
+            # Frozen binary reports the tag it was actually built from,
+            # not a stale fallback literal (#230).
+            $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+            $info = Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/info"
+            if ($info.version -ne $tagVersion) {
+              throw "Expected /info version $tagVersion, got $($info.version)"
+            }
+
+            $loginBody = @{ key = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" } | ConvertTo-Json
+            $login = Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/auth/login" -Method Post -ContentType "application/json" -Body $loginBody
+            $headers = @{ Authorization = "Bearer $($login.token)" }
+
+            $agentBody = @{ name = "smoke-test"; description = "Smoke test agent for release"; instructions = "You are a test agent. Respond with OK."; model = "test:mock" } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/agents" -Method Post -Headers $headers -ContentType "application/json" -Body $agentBody | Out-Null
+
+            # Backup/restore round trip (#243/#254), same rationale as the
+            # Linux/macOS leg -- this is the platform most likely to hit a
+            # file-locking issue while swapping the SQLite file back in.
+            $backup = Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/backups" -Method Post -Headers $headers
+            $backupFile = $backup.filename
+
+            $postBody = @{ name = "post-backup-agent"; description = "should not survive restore"; instructions = "noop"; model = "test:mock" } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/agents" -Method Post -Headers $headers -ContentType "application/json" -Body $postBody | Out-Null
+
+            $restoreBody = @{ confirm_filename = $backupFile } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/backups/$backupFile/restore" -Method Post -Headers $headers -ContentType "application/json" -Body $restoreBody | Out-Null
+
+            $agents = Invoke-RestMethod -Uri "http://127.0.0.1:8484/api/v1/agents" -Headers $headers
+            $names = @($agents | ForEach-Object { $_.name })
+            if ($names -notcontains "smoke-test") {
+              throw "smoke-test agent missing after restore"
+            }
+            if ($names -contains "post-backup-agent") {
+              throw "restore did not revert the post-snapshot agent"
+            }
+          } finally {
+            Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          }
 
       - name: Checksum
         shell: bash
