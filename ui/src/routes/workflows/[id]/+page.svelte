@@ -169,6 +169,11 @@
 	async function load(workflowId: string) {
 		loadError = null;
 		try {
+			// providersApi.list() is OwnerGrant-only (server-side); the
+			// workflows API has no such gate. An invite grant would otherwise
+			// get a 403 here that fails this entire Promise.all and leaves the
+			// canvas dead-on-arrival. Treat a failed provider fetch as "no
+			// provider catalog" instead.
 			const [
 				loadedWorkflow,
 				loadedNodes,
@@ -188,7 +193,7 @@
 				channelsApi.list(),
 				workflows.listSchedules(workflowId),
 				workflows.listWebhooks(workflowId),
-				providersApi.list()
+				providersApi.list().catch(() => [])
 			]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;

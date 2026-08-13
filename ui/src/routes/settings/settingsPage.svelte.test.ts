@@ -15,6 +15,19 @@ import { budgets as budgetsApi, type BudgetStatus } from '$lib/api/budgets';
 import { agents as agentsApi, type Agent } from '$lib/api/agents';
 import { teams as teamsApi, type Team } from '$lib/api/teams';
 
+// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
+// follows -- defaults to 'owner' so the existing (pre-#232) tests below
+// don't have to know about grants at all.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
 vi.mock('$lib/api/settings', () => ({
 	settings: { get: vi.fn(), update: vi.fn() }
 }));
@@ -173,6 +186,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('settings/+page.svelte', () => {
@@ -821,5 +835,56 @@ describe('settings/+page.svelte', () => {
 		await section.getByRole('button', { name: 'Add cap' }).click();
 
 		await expect.element(section.getByText('Failed to create budget cap')).toBeInTheDocument();
+	});
+
+	// #232: budgets.list (unlike create/delete/override) isn't OwnerGrant-only
+	// server-side, so an invite-grant session can still see the cap list --
+	// but the mutating controls that would 403 must not be offered.
+	describe('invite-grant (non-owner) session', () => {
+		beforeEach(() => {
+			authState.grant = 'invite';
+		});
+
+		it('hides the Add cap form for a non-owner session', async () => {
+			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
+			vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap]);
+
+			render(SettingsPage);
+
+			const section = await budgetsSection();
+			await expect
+				.element(section.getByText('Whole workspace', { exact: true }))
+				.toBeInTheDocument();
+			await expect
+				.element(section.getByRole('button', { name: 'Add cap' }))
+				.not.toBeInTheDocument();
+		});
+
+		it('hides the Override and Delete buttons for a non-owner session', async () => {
+			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
+			vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap, blockedAgentCap]);
+			vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
+
+			render(SettingsPage);
+
+			const section = await budgetsSection();
+			await expect.element(section.getByText('Support Bot')).toBeInTheDocument();
+			await expect
+				.element(section.getByRole('button', { name: 'Override' }))
+				.not.toBeInTheDocument();
+			await expect.element(section.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+		});
+
+		it('hides the Back up now button for a non-owner session', async () => {
+			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
+			vi.mocked(backupsApi.list).mockRejectedValue(new Error('Owner access required'));
+
+			render(SettingsPage);
+
+			const section = await backupsSection();
+			await expect
+				.element(section.getByRole('button', { name: 'Back up now' }))
+				.not.toBeInTheDocument();
+		});
 	});
 });

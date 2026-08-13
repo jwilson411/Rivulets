@@ -71,9 +71,13 @@
 	async function refresh() {
 		loadError = null;
 		try {
+			// providersApi.list() is OwnerGrant-only (server-side) -- an invite
+			// grant gets a 403 here even though agent CRUD itself isn't
+			// owner-gated. Treat that as "no provider catalog" rather than
+			// letting it fail the whole Promise.all and blank the agent list.
 			const [loadedAgents, loadedProviders, teamSummaries] = await Promise.all([
 				agents.list(),
-				providersApi.list(),
+				providersApi.list().catch(() => []),
 				teamsApi.list()
 			]);
 			agentList = loadedAgents;
