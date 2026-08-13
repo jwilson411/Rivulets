@@ -39,6 +39,24 @@ def test_channel_name_length_validation(client: TestClient, auth_headers: dict[s
     assert response.status_code == 400
 
 
+def test_duplicate_active_channel_name_returns_409_via_global_handler(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """create_channel has no pre-check of its own (unlike agents/workflows)
+    -- this exercises app.py's #250 IntegrityError safety net against
+    Channel's real partial unique index (idx_channel_name, archived = 0)
+    instead of a contrived exception."""
+    first = client.post("/api/v1/channels", json={"name": "duplicate-name"}, headers=auth_headers)
+    assert first.status_code == 201, first.text
+
+    second = client.post("/api/v1/channels", json={"name": "duplicate-name"}, headers=auth_headers)
+    assert second.status_code == 409, second.text
+    body = second.json()
+    assert body["error"]["code"] == "conflict"
+    assert "sqlite" not in second.text.lower()
+    assert "INSERT INTO" not in second.text
+
+
 def test_reorder_channels(client: TestClient, auth_headers: dict[str, str]) -> None:
     ids = []
     for name in ("alpha-chan", "beta-chan", "gamma-chan"):

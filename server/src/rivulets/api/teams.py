@@ -6,10 +6,10 @@ Channel.team_id isn't (see sync/apply.py's module docstring)."""
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
-from rivulets.db.models import Team, TeamAgent
+from rivulets.db.models import Channel, Team, TeamAgent
 from rivulets.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/teams", tags=["teams"])
@@ -109,5 +109,13 @@ async def update_team(
 @router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_team(team_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
     team = await _get_or_404(db, team_id)
+    # Channel.team_id has no ondelete (SQLite defaults an unset FK to
+    # RESTRICT), so a channel still pointing at this team would otherwise
+    # turn the delete below into an unhandled IntegrityError (#250). Mirror
+    # the "clear children first" pattern api/mcp_servers.py's delete_server
+    # uses for its Tool rows: unassign rather than block, since a deleted
+    # team is a smaller surprise to a channel than a delete that silently
+    # fails.
+    await db.execute(update(Channel).where(Channel.team_id == team_id).values(team_id=None))
     await db.delete(team)
     await db.commit()

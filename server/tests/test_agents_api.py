@@ -60,6 +60,24 @@ def test_get_agent_success(client: TestClient, auth_headers: dict[str, str]) -> 
     assert response.json()["name"] == "DBA"
 
 
+def test_create_agent_duplicate_name_returns_409(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    _create_agent(client, auth_headers, name="DBA")
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "DBA",
+            "description": "A second agent claiming the same name.",
+            "instructions": "You are also a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 409, response.text
+
+
 def test_create_agent_with_tools_and_teams(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
@@ -175,6 +193,34 @@ def test_update_agent_not_found(client: TestClient, auth_headers: dict[str, str]
         "/api/v1/agents/nonexistent", json={"name": "New name"}, headers=auth_headers
     )
     assert response.status_code == 404
+
+
+def test_update_agent_duplicate_name_returns_409(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    _create_agent(client, auth_headers, name="DBA")
+    other = _create_agent(client, auth_headers, name="Other")
+
+    response = client.patch(
+        f"/api/v1/agents/{other['id']}", json={"name": "DBA"}, headers=auth_headers
+    )
+    assert response.status_code == 409, response.text
+    assert client.get(f"/api/v1/agents/{other['id']}", headers=auth_headers).json()["name"] == (
+        "Other"
+    )
+
+
+def test_update_agent_name_unchanged_does_not_409(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers, name="DBA")
+
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"name": "DBA", "description": "Updated description text here."},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
 
 
 def test_update_agent_name_only_does_not_regenerate_rules(
