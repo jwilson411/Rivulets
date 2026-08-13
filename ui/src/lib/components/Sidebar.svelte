@@ -55,43 +55,54 @@
 			const [
 				agentList,
 				teamList,
-				providerList,
 				mcpServerList,
 				toolList,
 				knowledgeBaseList,
 				workflowList,
 				evalSuiteList,
-				syncStatus,
-				updateStatus,
 				approvalList
 			] = await Promise.all([
 				agents.list(),
 				teams.list(),
-				providers.list(),
 				mcpServers.list(),
 				tools.list(),
 				knowledgeBases.list(),
 				workflows.list(),
 				evals.listSuites(),
-				sync.status(),
-				update.status(),
 				approvals.list()
 			]);
 			agentCount = agentList.length;
 			teamCount = teamList.length;
-			providerCount = providerList.length;
 			mcpServerCount = mcpServerList.length;
 			toolCount = toolList.length;
 			knowledgeBaseCount = knowledgeBaseList.length;
 			workflowCount = workflowList.length;
 			evalSuiteCount = evalSuiteList.length;
-			syncRunning = syncStatus.running;
-			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
-			updateAvailable = updateStatus.update_available;
 			pendingApprovalCount = approvalList.filter((a) => a.status === 'pending').length;
 		} catch {
 			// Sidebar counts are a convenience, not load-bearing — leave them
 			// blank rather than surfacing a second error UI alongside `loadError`.
+		}
+
+		// providers.list, sync.status, and update.status are all OwnerGrant-only
+		// server-side (api/deps.py). Bundling them into the Promise.all above
+		// used to mean one 403 from an invite-grant session blanked every
+		// badge, including the any-grant ones. Skip them outright for a
+		// non-owner session rather than firing requests that can only 403.
+		if (auth.grant !== 'owner') return;
+
+		try {
+			const [providerList, syncStatus, updateStatus] = await Promise.all([
+				providers.list(),
+				sync.status(),
+				update.status()
+			]);
+			providerCount = providerList.length;
+			syncRunning = syncStatus.running;
+			syncPeerCount = syncStatus.peers.filter((p) => p.connected).length;
+			updateAvailable = updateStatus.update_available;
+		} catch {
+			// Same convenience-only reasoning as above.
 		}
 	}
 
@@ -251,21 +262,23 @@
 							>{teamCount}</span
 						>{/if}
 				</a>
-				<a
-					href={resolve('/providers')}
-					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
-						isActive('/providers')
-					)}"
-				>
-					<Icon
-						name="plug"
-						class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
-					/>
-					Providers
-					{#if providerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
-							>{providerCount}</span
-						>{/if}
-				</a>
+				{#if auth.grant === 'owner'}
+					<a
+						href={resolve('/providers')}
+						class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
+							isActive('/providers')
+						)}"
+					>
+						<Icon
+							name="plug"
+							class="h-[17px] w-[17px] flex-none text-neutral-600 dark:text-neutral-400"
+						/>
+						Providers
+						{#if providerCount !== null}<span class="ml-auto text-[11.5px] text-neutral-500"
+								>{providerCount}</span
+							>{/if}
+					</a>
+				{/if}
 				<a
 					href={resolve('/mcp-servers')}
 					class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13.5px] {navClass(
@@ -464,33 +477,37 @@
 		{/if}
 	</form>
 
-	<a
-		href={resolve('/sync')}
-		class="flex items-center gap-2 border-t border-ink/10 px-4 pt-3 text-[12px] {isActive('/sync')
-			? 'text-agent-cyan-700 dark:text-agent-cyan-400'
-			: 'text-neutral-600 hover:text-ink dark:text-neutral-400 dark:hover:text-ink-dark'}"
-	>
-		<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-			<circle
-				cx="7"
-				cy="7"
-				r="5.5"
-				fill="none"
-				stroke={syncPeerCount ? 'var(--color-agent-cyan)' : 'currentColor'}
-				stroke-width="1.2"
-			/>
-			<path
-				d="M7 0 V4 M7 10 V14 M0 7 H4 M10 7 H14"
-				stroke={syncPeerCount ? 'var(--color-agent-cyan)' : 'currentColor'}
-				stroke-width="1.2"
-			/>
-		</svg>
-		{#if syncPeerCount === null}
-			checking sync…
-		{:else}
-			{syncPeerCount} peer{syncPeerCount === 1 ? '' : 's'} · {syncRunning ? 'in register' : 'idle'}
-		{/if}
-	</a>
+	{#if auth.grant === 'owner'}
+		<a
+			href={resolve('/sync')}
+			class="flex items-center gap-2 border-t border-ink/10 px-4 pt-3 text-[12px] {isActive('/sync')
+				? 'text-agent-cyan-700 dark:text-agent-cyan-400'
+				: 'text-neutral-600 hover:text-ink dark:text-neutral-400 dark:hover:text-ink-dark'}"
+		>
+			<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+				<circle
+					cx="7"
+					cy="7"
+					r="5.5"
+					fill="none"
+					stroke={syncPeerCount ? 'var(--color-agent-cyan)' : 'currentColor'}
+					stroke-width="1.2"
+				/>
+				<path
+					d="M7 0 V4 M7 10 V14 M0 7 H4 M10 7 H14"
+					stroke={syncPeerCount ? 'var(--color-agent-cyan)' : 'currentColor'}
+					stroke-width="1.2"
+				/>
+			</svg>
+			{#if syncPeerCount === null}
+				checking sync…
+			{:else}
+				{syncPeerCount} peer{syncPeerCount === 1 ? '' : 's'} · {syncRunning
+					? 'in register'
+					: 'idle'}
+			{/if}
+		</a>
+	{/if}
 
 	<div class="px-4 pt-2">
 		<div

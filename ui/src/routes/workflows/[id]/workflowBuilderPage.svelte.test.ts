@@ -248,6 +248,21 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Format')).toBeInTheDocument();
 	});
 
+	// #232: providers.list() is OwnerGrant-only server-side; the workflows
+	// API has no such gate. An invite-grant session used to get a 403 there
+	// that failed this whole Promise.all and left the canvas
+	// dead-on-arrival even though it should have been reachable.
+	it('still renders the canvas when providers.list() 403s for an invite-grant session', async () => {
+		mockLoad();
+		vi.mocked(providers.list).mockRejectedValueOnce(new Error('Owner access required'));
+
+		render(WorkflowBuilderPage);
+
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+		await expect.element(page.getByText('Failed to load workflow')).not.toBeInTheDocument();
+	});
+
 	it('renames the workflow', async () => {
 		mockLoad();
 		vi.mocked(workflows.update).mockResolvedValueOnce({ ...reviewFlow, name: 'review-pr-v2' });

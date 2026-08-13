@@ -343,6 +343,70 @@ describe('Sidebar.svelte', () => {
 			.not.toBeInTheDocument();
 	});
 
+	it('shows the Providers link and the ambient sync footer for an owner session', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(providers.list).mockResolvedValue([]);
+		vi.mocked(sync.status).mockResolvedValue({
+			running: false,
+			node_id: null,
+			peers: [],
+			pending_changes: 0,
+			own_addresses: []
+		});
+		vi.mocked(update.status).mockResolvedValue({
+			current_version: '0.1.0',
+			latest_version: null,
+			update_available: false,
+			applicable: true
+		});
+
+		render(Sidebar);
+
+		await expect.element(browserPage.getByRole('link', { name: /Providers/ })).toBeInTheDocument();
+		await expect
+			.element(browserPage.getByRole('link', { name: /0 peers · idle/ }))
+			.toBeInTheDocument();
+	});
+
+	// #232: providers.list, sync.status, and update.status are OwnerGrant-only
+	// server-side -- bundled into refreshCounts()'s single Promise.all, one
+	// 403 from an invite-grant session used to blank every badge, including
+	// the any-grant ones (agent/team/tool counts, etc).
+	it('hides the Providers link and ambient sync footer, and still shows any-grant counts, for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		vi.mocked(channels.list).mockResolvedValue([]);
+		mockWorkspaceCounts();
+		vi.mocked(agents.list).mockResolvedValue([
+			{
+				id: 'a1',
+				name: 'Researcher',
+				description: '',
+				instructions: '',
+				model: 'm',
+				fallback_models: [],
+				approved_for_unattended_tools: false,
+				agentos_agent_id: null
+			}
+		]);
+
+		render(Sidebar);
+
+		await expect
+			.element(browserPage.getByRole('link', { name: /Providers/ }))
+			.not.toBeInTheDocument();
+		await expect
+			.element(browserPage.getByRole('link', { name: /checking sync…/ }))
+			.not.toBeInTheDocument();
+		// The any-grant agent count still renders -- this used to be blanked
+		// alongside providerCount/syncPeerCount by the one shared Promise.all.
+		const agentsLink = browserPage.getByRole('link', { name: /Agents/ });
+		await expect.element(agentsLink).toBeInTheDocument();
+		await expect.element(agentsLink.getByText('1')).toBeInTheDocument();
+		expect(providers.list).not.toHaveBeenCalled();
+		expect(sync.status).not.toHaveBeenCalled();
+		expect(update.status).not.toHaveBeenCalled();
+	});
+
 	it('shows the claimed identity and clears it via the switch control for an owner session', async () => {
 		vi.mocked(channels.list).mockResolvedValue([]);
 

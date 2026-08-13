@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { auth } from '$lib/api/auth.svelte';
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
 	import { update, type UpdateStatus } from '$lib/api/update';
@@ -386,22 +387,26 @@
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{backupsError}</p>
 		{/if}
 
-		<button
-			type="button"
-			onclick={handleCreateBackup}
-			disabled={creatingBackup}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creatingBackup ? 'Backing up…' : 'Back up now'}
-		</button>
-		{#if createBackupError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createBackupError}</p>
-		{/if}
+		{#if auth.grant === 'owner'}
+			<button
+				type="button"
+				onclick={handleCreateBackup}
+				disabled={creatingBackup}
+				class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			>
+				{creatingBackup ? 'Backing up…' : 'Back up now'}
+			</button>
+			{#if createBackupError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
+					{createBackupError}
+				</p>
+			{/if}
 
-		{#if restoreSuccess}
-			<p class="text-sm text-agent-cyan-700 dark:text-agent-cyan-400">
-				Restored. Reload the page to see the restored workspace.
-			</p>
+			{#if restoreSuccess}
+				<p class="text-sm text-agent-cyan-700 dark:text-agent-cyan-400">
+					Restored. Reload the page to see the restored workspace.
+				</p>
+			{/if}
 		{/if}
 
 		{#if backupsList.length > 0}
@@ -514,23 +519,25 @@
 								{/if}
 							</span>
 							<span class="flex items-center gap-2">
-								{#if cap.blocked}
+								{#if auth.grant === 'owner'}
+									{#if cap.blocked}
+										<button
+											type="button"
+											onclick={() => handleOverrideBudgetCap(cap.id)}
+											disabled={overridingCapId === cap.id}
+											class="text-agent-cyan-700 hover:underline disabled:opacity-50 dark:text-agent-cyan-400"
+										>
+											{overridingCapId === cap.id ? 'Overriding…' : 'Override'}
+										</button>
+									{/if}
 									<button
 										type="button"
-										onclick={() => handleOverrideBudgetCap(cap.id)}
-										disabled={overridingCapId === cap.id}
-										class="text-agent-cyan-700 hover:underline disabled:opacity-50 dark:text-agent-cyan-400"
+										onclick={() => handleDeleteBudgetCap(cap.id)}
+										class="text-agent-magenta-700 hover:underline dark:text-agent-magenta-400"
 									>
-										{overridingCapId === cap.id ? 'Overriding…' : 'Override'}
+										Delete
 									</button>
 								{/if}
-								<button
-									type="button"
-									onclick={() => handleDeleteBudgetCap(cap.id)}
-									class="text-agent-magenta-700 hover:underline dark:text-agent-magenta-400"
-								>
-									Delete
-								</button>
 							</span>
 						</div>
 					</li>
@@ -540,96 +547,98 @@
 			<p class="text-xs text-neutral-500 italic">No budget caps configured yet.</p>
 		{/if}
 
-		<form
-			onsubmit={handleCreateBudgetCap}
-			class="mt-2 flex flex-wrap items-end gap-3 border-t border-ink/10 pt-3 dark:border-white/10"
-		>
-			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-				Scope
-				<select
-					bind:value={newCapScope}
-					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-				>
-					<option value="workspace">Whole workspace</option>
-					<option value="team">Team</option>
-					<option value="agent">Agent</option>
-				</select>
-			</label>
-
-			{#if newCapScope === 'agent'}
-				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-					Agent
-					<select
-						bind:value={newCapAgentId}
-						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-					>
-						<option value="" disabled>Select an agent</option>
-						{#each budgetAgents as agent (agent.id)}
-							<option value={agent.id}>{agent.name}</option>
-						{/each}
-					</select>
-				</label>
-			{:else if newCapScope === 'team'}
-				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-					Team
-					<select
-						bind:value={newCapTeamId}
-						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-					>
-						<option value="" disabled>Select a team</option>
-						{#each budgetTeams as team (team.id)}
-							<option value={team.id}>{team.name}</option>
-						{/each}
-					</select>
-				</label>
-			{/if}
-
-			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-				Period
-				<select
-					bind:value={newCapPeriod}
-					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-				>
-					<option value="day">Day</option>
-					<option value="week">Week</option>
-					<option value="month">Month</option>
-				</select>
-			</label>
-
-			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-				Limit (USD)
-				<input
-					type="number"
-					min="0.01"
-					step="0.01"
-					bind:value={newCapLimit}
-					class="w-28 rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-				/>
-			</label>
-
-			<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
-				On breach
-				<select
-					bind:value={newCapAction}
-					class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
-				>
-					<option value="alert">Alert only</option>
-					<option value="hard_stop">Hard stop</option>
-				</select>
-			</label>
-
-			<button
-				type="submit"
-				disabled={creatingCap ||
-					(newCapScope === 'agent' && !newCapAgentId) ||
-					(newCapScope === 'team' && !newCapTeamId)}
-				class="rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+		{#if auth.grant === 'owner'}
+			<form
+				onsubmit={handleCreateBudgetCap}
+				class="mt-2 flex flex-wrap items-end gap-3 border-t border-ink/10 pt-3 dark:border-white/10"
 			>
-				{creatingCap ? 'Adding…' : 'Add cap'}
-			</button>
-		</form>
-		{#if createCapError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createCapError}</p>
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					Scope
+					<select
+						bind:value={newCapScope}
+						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					>
+						<option value="workspace">Whole workspace</option>
+						<option value="team">Team</option>
+						<option value="agent">Agent</option>
+					</select>
+				</label>
+
+				{#if newCapScope === 'agent'}
+					<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+						Agent
+						<select
+							bind:value={newCapAgentId}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+						>
+							<option value="" disabled>Select an agent</option>
+							{#each budgetAgents as agent (agent.id)}
+								<option value={agent.id}>{agent.name}</option>
+							{/each}
+						</select>
+					</label>
+				{:else if newCapScope === 'team'}
+					<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+						Team
+						<select
+							bind:value={newCapTeamId}
+							class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+						>
+							<option value="" disabled>Select a team</option>
+							{#each budgetTeams as team (team.id)}
+								<option value={team.id}>{team.name}</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
+
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					Period
+					<select
+						bind:value={newCapPeriod}
+						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					>
+						<option value="day">Day</option>
+						<option value="week">Week</option>
+						<option value="month">Month</option>
+					</select>
+				</label>
+
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					Limit (USD)
+					<input
+						type="number"
+						min="0.01"
+						step="0.01"
+						bind:value={newCapLimit}
+						class="w-28 rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					/>
+				</label>
+
+				<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+					On breach
+					<select
+						bind:value={newCapAction}
+						class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 text-sm dark:border-white/15"
+					>
+						<option value="alert">Alert only</option>
+						<option value="hard_stop">Hard stop</option>
+					</select>
+				</label>
+
+				<button
+					type="submit"
+					disabled={creatingCap ||
+						(newCapScope === 'agent' && !newCapAgentId) ||
+						(newCapScope === 'team' && !newCapTeamId)}
+					class="rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+				>
+					{creatingCap ? 'Adding…' : 'Add cap'}
+				</button>
+			</form>
+			{#if createCapError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createCapError}</p>
+			{/if}
 		{/if}
 	</section>
 

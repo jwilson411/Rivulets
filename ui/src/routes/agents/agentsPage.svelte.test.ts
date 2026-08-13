@@ -160,6 +160,20 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('Failed to load agents')).toBeInTheDocument();
 	});
 
+	// #232: providers.list() is OwnerGrant-only server-side (agent CRUD is
+	// not), so an invite-grant session gets a 403 there while agents.list()
+	// still succeeds. That must not blank the agent list.
+	it('still loads the agent list when providers.list() 403s for an invite-grant session', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockRejectedValueOnce(new Error('Owner access required'));
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+
+		render(AgentsPage);
+
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+		await expect.element(page.getByText('Failed to load agents')).not.toBeInTheDocument();
+	});
+
 	it('creates a new agent via the New agent form and refreshes the list', async () => {
 		vi.mocked(agents.list).mockResolvedValueOnce([]).mockResolvedValueOnce([researcher]);
 		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
