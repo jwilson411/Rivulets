@@ -10,6 +10,7 @@ of `sys.modules` (guaranteed present once `rivulets.main` has been
 imported once, below) sidesteps that.
 """
 
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -21,6 +22,18 @@ from rivulets.config import Settings
 from rivulets.main import main as run_main
 
 main_module: ModuleType = sys.modules["rivulets.main"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_umask() -> Any:
+    """#244: main() now calls os.umask(0o077), which is process-wide, not
+    per-call state monkeypatch can undo -- without this, the first test
+    below would permanently tighten every other test's file-creation mode
+    for the rest of the suite."""
+    original = os.umask(0o022)
+    os.umask(original)
+    yield
+    os.umask(original)
 
 
 def _settings(host: str, workspace_dir: Path) -> Settings:
@@ -67,3 +80,23 @@ def test_main_allows_0_0_0_0_for_docker(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(main_module.uvicorn, "run", _noop_uvicorn_run)
 
     run_main()  # must not raise
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX umask bits aren't meaningful on Windows"
+)
+def test_main_sets_a_restrictive_process_umask(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """docs/security.md's claim (#244) that everything under ~/.rivulets/
+    is created with a restrictive umask -- verified here at the process
+    level, since that's what actually governs any file/dir main() or code
+    it calls creates without an explicit chmod."""
+    settings = _settings("127.0.0.1", tmp_path)
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module.uvicorn, "run", _noop_uvicorn_run)
+
+    run_main()
+
+    current_umask = os.umask(0o022)
+    assert current_umask == 0o077

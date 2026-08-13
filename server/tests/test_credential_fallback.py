@@ -5,6 +5,8 @@ fallback); this file covers the fallback's own encrypt/store/decrypt
 round trip and its file isolation from the synced app database.
 """
 
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,18 @@ def test_wrong_key_fails_to_decrypt(tmp_path: Path) -> None:
     credential_fallback.store(db_path, "provider-key:1", "sk-secret", _KEY_A)
     with pytest.raises(InvalidTag):
         credential_fallback.get(db_path, "provider-key:1", _KEY_B)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file-mode bits aren't meaningful on Windows"
+)
+def test_store_creates_the_db_file_owner_only(tmp_path: Path) -> None:
+    """#244: this file holds AES-GCM ciphertext of provider API keys, so a
+    freshly created credentials.db must not be group/world-readable
+    regardless of the caller's process umask."""
+    db_path = tmp_path / "credentials.db"
+    credential_fallback.store(db_path, "provider-key:1", "sk-secret", _KEY_A)
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
 
 
 def test_the_stored_file_is_not_the_app_database(tmp_path: Path) -> None:

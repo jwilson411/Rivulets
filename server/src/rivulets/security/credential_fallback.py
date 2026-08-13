@@ -35,11 +35,18 @@ _NONCE_LENGTH = 12  # 96 bits, AES-GCM's recommended nonce size
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    is_new_file = not db_path.exists()
     conn = sqlite3.connect(db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS provider_keys ("
         "ref TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL)"
     )
+    if is_new_file:
+        # Encrypted or not, this file holds provider-key ciphertext -- match
+        # sync/identity.py's node_key handling rather than relying solely on
+        # main.py's process umask, since callers (tests, scripts) can reach
+        # this module directly without going through that entry point.
+        db_path.chmod(0o600)
     return conn
 
 
