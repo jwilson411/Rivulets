@@ -29,6 +29,7 @@ from rivulets.tools.builtin.mcp_servers import (
     reconnect_mcp_server,
     register_mcp_server,
 )
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -194,6 +195,7 @@ def test_register_mcp_server_creates_server(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Registrar")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "register_mcp_server")
 
     _patch_dispatch_discover_tools(
         monkeypatch, [DiscoveredTool(name="add", description="Adds numbers.")]
@@ -229,6 +231,7 @@ def test_register_mcp_server_degrades_gracefully_on_connection_failure(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "FlakyRegistrar")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "register_mcp_server")
 
     _patch_dispatch_discover_tools(monkeypatch, MCPConnectionError("could not connect"))
     monkeypatch.setattr(
@@ -257,6 +260,7 @@ def test_register_mcp_server_missing_url_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Blank")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "register_mcp_server")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -294,6 +298,7 @@ def test_reconnect_mcp_server_by_name(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Reconnector")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reconnect_mcp_server")
     server_name = f"reconnect-target-{agent_id}"
     _register_server_via_api(client, auth_headers, monkeypatch, server_name)
 
@@ -319,6 +324,7 @@ def test_reconnect_mcp_server_unknown_reference_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedReconnector")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reconnect_mcp_server")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -339,6 +345,7 @@ def test_delete_mcp_server_removes_server_and_tools(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Deleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_mcp_server")
     server_name = f"delete-target-{agent_id}"
     server_id = _register_server_via_api(client, auth_headers, monkeypatch, server_name)
 
@@ -365,6 +372,7 @@ def test_delete_mcp_server_unknown_reference_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedDeleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_mcp_server")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",

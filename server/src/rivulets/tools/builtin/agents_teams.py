@@ -26,8 +26,12 @@ the matching AgentToolScope grant, which stays an owner-only surface
 (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) with no
 built-in tool anywhere in this library that can set it. So the worst an
 agent can do with update_agent's tool_ids is assign a sensitive tool to
-an agent that still can't use it. list_agents/list_teams are read-only
-and deliberately left unscoped, mirroring list_channels.
+an agent that still can't use it -- true since #240 gave
+execute_python/http_request/write_file/query_workspace_db their own
+"sensitive_tools:manage" required_scope (agentos/tool_scopes.py); before
+that, those four had no required_scope at all, so this claim was false
+for exactly the tools where it mattered most. list_agents/list_teams are
+read-only and deliberately left unscoped, mirroring list_channels.
 """
 
 from agno.tools import tool

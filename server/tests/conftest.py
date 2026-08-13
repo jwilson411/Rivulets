@@ -212,3 +212,46 @@ def auth_headers(client: TestClient) -> dict[str, str]:
     assert identity_response.status_code == 200, identity_response.text
     token = identity_response.json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def authorize_agent_for_builtin_tool(
+    client: TestClient, headers: dict[str, str], agent_id: str, *tool_names: str
+) -> None:
+    """#240: assigns the real seeded `tool_type='builtin'` row(s) named
+    `tool_names` to `agent_id` via agent_tool, and grants every required_
+    scope they carry (agentos/tool_scopes.py's BUILTIN_TOOL_SCOPES) via
+    AgentToolScope -- the two-gate setup dispatch/service.py's trigger
+    handlers now re-check at invocation time (is_builtin_tool_authorized),
+    not just at agent-build time. `auth_headers`'s fresh mnemonic always
+    claims the workspace-bootstrapping owner grant, so it can always reach
+    the owner-gated tool-scopes route below.
+
+    Takes every tool name a single call needs at once (variadic, not one
+    call per tool) because PATCH .../agents/{id}'s tool_ids *replaces* the
+    agent's full assigned-tool set rather than adding to it -- calling
+    this helper twice in a row would silently un-assign whatever the
+    first call assigned.
+
+    Every end-to-end test exercising a scoped builtin trigger (create_
+    channel, update_agent, create_invite, etc.) needs this after creating
+    its agent -- before #240, dispatch/service.py fired the real mutator
+    off the completed run's `tool_call.tool_name` string alone, with no
+    regard for whether the agent was ever actually granted the tool at
+    all, so these tests previously passed without it."""
+    tools = client.get("/api/v1/tools", headers=headers).json()
+    by_name = {t["name"]: t for t in tools if t["tool_type"] == "builtin"}
+    matched = [by_name[name] for name in tool_names]
+    patched = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"tool_ids": [t["id"] for t in matched]},
+        headers=headers,
+    )
+    assert patched.status_code == 200, patched.text
+    required_scopes = sorted({t["required_scope"] for t in matched if t["required_scope"]})
+    if required_scopes:
+        scoped = client.put(
+            f"/api/v1/agents/{agent_id}/tool-scopes",
+            json={"scopes": required_scopes},
+            headers=headers,
+        )
+        assert scoped.status_code == 200, scoped.text

@@ -20,6 +20,7 @@ from rivulets.dispatch.service import (
     _find_revoke_invite_call,  # pyright: ignore[reportPrivateUsage]
 )
 from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -156,6 +157,7 @@ def test_create_invite_creates_invite_and_posts_link(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "Inviter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_invite")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -186,6 +188,7 @@ def test_create_invite_does_not_publish_to_sync(
     treatment api/invites.py's create_invite handler already gives it."""
     agent_id = _create_agent(client, auth_headers, "QuietInviter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_invite")
 
     published: list[tuple[str, str]] = []
 
@@ -213,6 +216,7 @@ def test_list_invites_reports_existing_invites(
     agent_id = _create_agent(client, auth_headers, "Lister")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     invite_id = _create_invite_via_api(client, auth_headers)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "list_invites")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -234,6 +238,7 @@ def test_list_invites_reports_no_invites(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "EmptyLister")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "list_invites")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -255,6 +260,7 @@ def test_revoke_invite_revokes_invite(
     agent_id = _create_agent(client, auth_headers, "Revoker")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     invite_id = _create_invite_via_api(client, auth_headers)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "revoke_invite")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -279,6 +285,7 @@ def test_revoke_invite_unknown_id_is_rejected(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedRevoker")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "revoke_invite")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -292,3 +299,36 @@ def test_revoke_invite_unknown_id_is_rejected(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "no invite with that id" in messages[2]["content"]
+
+
+def test_create_invite_call_ignored_without_invites_manage_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#240: a completed run's `create_invite` tool call must not create a
+    real invite unless the agent that made it actually holds the
+    "invites:manage" scope, re-checked fresh at invocation time -- not
+    just because the run_output happens to contain a tool call with that
+    name. Deliberately does *not* assign create_invite to the agent at
+    all (mirroring the name-collision scenario the issue describes: the
+    agent could just as easily have a same-named custom/MCP tool), so no
+    system message about the (refused) attempt is expected either -- the
+    run completes normally with only its own reply persisted."""
+    agent_id = _create_agent(client, auth_headers, "UnauthorizedInviter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("create_invite", {"display_name_hint": "Eve"})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go invite someone"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    listed = client.get("/api/v1/invites", headers=auth_headers).json()
+    assert not any(inv["display_name_hint"] == "Eve" for inv in listed)
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert all("created a workspace invite" not in m["content"] for m in messages)

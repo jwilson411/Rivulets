@@ -11,7 +11,11 @@ from mcp import StdioServerParameters
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
+from rivulets.agentos.tool_resolution import (
+    is_builtin_tool_authorized,
+    resolve_agent_tools,
+    seed_builtin_tools,
+)
 from rivulets.db.models import Agent, AgentTool, AgentToolScope, MCPServer, Tool
 
 _AGENT_FIELDS = {
@@ -336,6 +340,118 @@ async def test_create_invite_tool_skipped_without_invites_manage_grant(
 
     resolved = await resolve_agent_tools(db_session, agent)
     assert [fn.name for fn in resolved] == ["create_invite"]
+
+
+async def test_seed_builtin_tools_sets_sensitive_tools_manage_scope(
+    db_session: AsyncSession,
+) -> None:
+    """#240: execute_python/http_request/write_file/query_workspace_db
+    (SENSITIVE_BUILTIN_TOOL_NAMES) previously carried no required_scope at
+    all, so update_agent's tool_ids (gated only by "agents_teams:manage")
+    could assign them to any agent and they'd resolve immediately -- no
+    separate owner-only grant the way every other category requires. They
+    now share one "sensitive_tools:manage" scope, same shape as
+    test_seed_builtin_tools_sets_channels_manage_scope above."""
+    await seed_builtin_tools(db_session)
+
+    for name in ("execute_python", "http_request", "write_file", "query_workspace_db"):
+        row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        assert row.required_scope == "sensitive_tools:manage"
+
+
+async def test_execute_python_tool_skipped_without_sensitive_tools_manage_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    execute_python_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "execute_python"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, execute_python_row.id)
+
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="sensitive_tools:manage"))
+    await db_session.commit()
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert [fn.name for fn in resolved] == ["execute_python"]
+
+
+async def test_is_builtin_tool_authorized_true_for_unscoped_assigned_builtin(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    read_file_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "read_file"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, read_file_row.id)
+
+    assert await is_builtin_tool_authorized(db_session, agent, "read_file") is True
+
+
+async def test_is_builtin_tool_authorized_false_when_not_assigned(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+
+    assert await is_builtin_tool_authorized(db_session, agent, "create_invite") is False
+
+
+async def test_is_builtin_tool_authorized_false_for_scoped_tool_without_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    create_invite_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_invite"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, create_invite_row.id)
+
+    assert await is_builtin_tool_authorized(db_session, agent, "create_invite") is False
+
+
+async def test_is_builtin_tool_authorized_true_for_scoped_tool_with_grant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    create_invite_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "create_invite"))
+    ).scalar_one()
+    await _assign(db_session, agent.id, create_invite_row.id)
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="invites:manage"))
+    await db_session.commit()
+
+    assert await is_builtin_tool_authorized(db_session, agent, "create_invite") is True
+
+
+async def test_is_builtin_tool_authorized_false_for_name_colliding_custom_tool(
+    db_session: AsyncSession,
+) -> None:
+    """#240's core scenario: an agent has a *custom* tool literally named
+    "create_invite" assigned (no scope needed -- custom tools carry no
+    required_scope), and never has the real builtin "create_invite" (nor
+    "invites:manage") at all. dispatch/service.py's trigger handlers used
+    to fire the real mutator off `tool_call.tool_name == "create_invite"`
+    alone, with nothing distinguishing this from a legitimate call --
+    is_builtin_tool_authorized must refuse it because the assigned row
+    backing that name isn't tool_type='builtin'."""
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    fake_create_invite = Tool(
+        name="create_invite",
+        description="A custom tool that happens to share a sensitive builtin's name.",
+        tool_type="custom",
+        source_path="/does/not/matter.py",
+    )
+    db_session.add(fake_create_invite)
+    await db_session.commit()
+    await _assign(db_session, agent.id, fake_create_invite.id)
+
+    assert await is_builtin_tool_authorized(db_session, agent, "create_invite") is False
 
 
 async def test_resolve_agent_tools_skips_unknown_builtin(db_session: AsyncSession) -> None:

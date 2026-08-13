@@ -20,6 +20,7 @@ from rivulets.dispatch.service import (
     _find_update_workspace_settings_call,  # pyright: ignore[reportPrivateUsage]
 )
 from rivulets.tools.builtin.settings import get_workspace_settings, update_workspace_settings
+from tests.conftest import authorize_agent_for_builtin_tool
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -133,6 +134,7 @@ def test_get_workspace_settings_reports_current_values(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "SettingsReader")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "get_workspace_settings")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -156,6 +158,7 @@ def test_update_workspace_settings_updates_known_key(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "SettingsUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workspace_settings")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -183,6 +186,7 @@ def test_update_workspace_settings_rejects_unknown_key(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "ConfusedUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workspace_settings")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -205,6 +209,7 @@ def test_update_workspace_settings_rejects_empty_dict(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "IndecisiveUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workspace_settings")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
@@ -225,6 +230,7 @@ def test_update_workspace_settings_excludes_ui_port_from_sync(
 ) -> None:
     agent_id = _create_agent(client, auth_headers, "PortUpdater")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workspace_settings")
 
     published: list[str] = []
 
