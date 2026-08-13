@@ -19,4 +19,4 @@ def test_resolve_version_falls_back_when_package_metadata_is_missing(
         raise PackageNotFoundError(name)
 
     monkeypatch.setattr(version, "version", fake_version)
-    assert version._resolve_version() == "0.1.0"  # pyright: ignore[reportPrivateUsage]
+    assert version._resolve_version() == "unknown"  # pyright: ignore[reportPrivateUsage]

@@ -9,7 +9,7 @@ and windows.spec don't drift from each other.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 
 def repo_root(specpath: str) -> Path:
@@ -39,6 +39,13 @@ def common_datas(specpath: str) -> list[tuple[str, str]]:
     datas = [
         (str(tools_dir), "rivulets/tools/builtin"),
         (str(migrations_dir), "rivulets/db/migrations"),
+        # PyInstaller's static analysis doesn't bundle a package's own
+        # *.dist-info -- only what it imports. rivulets/version.py reads
+        # its version via importlib.metadata.version("rivulets"), which
+        # needs that dist-info on disk, so without this the frozen binary
+        # always hit PackageNotFoundError and fell back to a hardcoded
+        # literal (#230).
+        *copy_metadata("rivulets"),
     ]
     if ui_build.exists():
         datas.append((str(ui_build), "rivulets/static"))
