@@ -2,6 +2,8 @@
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
 	import { update, type UpdateStatus } from '$lib/api/update';
+	import { backups as backupsApi, type Backup, type BackupKind } from '$lib/api/backups';
+	import { formatBytes, timeAgo } from '$lib/format';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import {
 		budgets as budgetsApi,
@@ -39,6 +41,16 @@
 	let applying = $state(false);
 	let applyError = $state<string | null>(null);
 	let restarting = $state(false);
+
+	let backupsList = $state<Backup[]>([]);
+	let backupsError = $state<string | null>(null);
+	let creatingBackup = $state(false);
+	let createBackupError = $state<string | null>(null);
+	let restoringFilename = $state<string | null>(null);
+	let restoreConfirmText = $state('');
+	let restoring = $state(false);
+	let restoreError = $state<string | null>(null);
+	let restoreSuccess = $state(false);
 
 	let budgetCaps = $state<BudgetStatus[]>([]);
 	let budgetsError = $state<string | null>(null);
@@ -107,6 +119,71 @@
 			applyError = err instanceof Error ? err.message : 'Failed to apply update';
 		} finally {
 			applying = false;
+		}
+	}
+
+	async function refreshBackups() {
+		backupsError = null;
+		try {
+			backupsList = await backupsApi.list();
+		} catch (err) {
+			backupsError = err instanceof Error ? err.message : 'Failed to load backups';
+		}
+	}
+
+	async function handleCreateBackup() {
+		createBackupError = null;
+		creatingBackup = true;
+		try {
+			await backupsApi.create();
+			await refreshBackups();
+		} catch (err) {
+			createBackupError = err instanceof Error ? err.message : 'Failed to create backup';
+		} finally {
+			creatingBackup = false;
+		}
+	}
+
+	function startRestore(filename: string) {
+		restoringFilename = filename;
+		restoreConfirmText = '';
+		restoreError = null;
+		restoreSuccess = false;
+	}
+
+	function cancelRestore() {
+		restoringFilename = null;
+		restoreConfirmText = '';
+		restoreError = null;
+	}
+
+	async function confirmRestore() {
+		if (!restoringFilename) return;
+		restoreError = null;
+		restoring = true;
+		try {
+			await backupsApi.restore(restoringFilename);
+			restoringFilename = null;
+			restoreConfirmText = '';
+			restoreSuccess = true;
+			await refreshBackups();
+		} catch (err) {
+			restoreError = err instanceof Error ? err.message : 'Failed to restore backup';
+		} finally {
+			restoring = false;
+		}
+	}
+
+	function backupKindLabel(kind: BackupKind): string {
+		switch (kind) {
+			case 'manual':
+				return 'Manual';
+			case 'daily':
+				return 'Daily';
+			case 'pre-upgrade':
+				return 'Pre-upgrade';
+			case 'pre-restore':
+				return 'Pre-restore';
 		}
 	}
 
@@ -183,6 +260,7 @@
 	refreshProviders();
 	refreshHitRate();
 	refreshUpdateStatus();
+	refreshBackups();
 	refreshBudgets();
 	refreshBudgetPickerOptions();
 
@@ -289,6 +367,108 @@
 					Check for updates
 				</button>
 			{/if}
+		{/if}
+	</section>
+
+	<section
+		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+	>
+		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Backups</h2>
+		<p class="text-xs text-neutral-600 dark:text-neutral-400">
+			Node-local snapshots (#243) of the app database, the provider-key fallback store, and this
+			node's sync identity. One is taken automatically once a day, and another right before any
+			restore below, so a restore is itself always undoable. File attachments in <code
+				class="font-mono">files/</code
+			> aren't included — cover those with your own filesystem backups.
+		</p>
+
+		{#if backupsError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{backupsError}</p>
+		{/if}
+
+		<button
+			type="button"
+			onclick={handleCreateBackup}
+			disabled={creatingBackup}
+			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+		>
+			{creatingBackup ? 'Backing up…' : 'Back up now'}
+		</button>
+		{#if createBackupError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createBackupError}</p>
+		{/if}
+
+		{#if restoreSuccess}
+			<p class="text-sm text-agent-cyan-700 dark:text-agent-cyan-400">
+				Restored. Reload the page to see the restored workspace.
+			</p>
+		{/if}
+
+		{#if backupsList.length > 0}
+			<ul class="flex flex-col gap-2">
+				{#each backupsList as b (b.filename)}
+					<li class="rounded-md border border-ink/10 p-3 text-sm dark:border-white/10">
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							<span class="font-mono text-xs text-ink dark:text-ink-dark">{b.filename}</span>
+							<span class="text-xs text-neutral-500">
+								{backupKindLabel(b.kind)} · {formatBytes(b.size_bytes)} · {timeAgo(b.created_at)}
+							</span>
+						</div>
+
+						{#if restoringFilename === b.filename}
+							<div
+								class="mt-2 flex flex-col gap-2 border-t border-ink/10 pt-2 dark:border-white/10"
+							>
+								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+									This replaces the live workspace with this snapshot — anything created since it
+									was taken will be gone. Type the filename to confirm.
+								</p>
+								<label class="flex flex-col gap-1 text-xs text-ink dark:text-ink-dark">
+									Filename
+									<input
+										type="text"
+										bind:value={restoreConfirmText}
+										placeholder={b.filename}
+										class="rounded-md border border-ink/15 bg-transparent px-2 py-1.5 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+									/>
+								</label>
+								<div class="flex items-center gap-3">
+									<button
+										type="button"
+										onclick={confirmRestore}
+										disabled={restoring || restoreConfirmText !== b.filename}
+										class="rounded-md bg-agent-magenta-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-magenta-700 disabled:opacity-50"
+									>
+										{restoring ? 'Restoring…' : 'Confirm restore'}
+									</button>
+									<button
+										type="button"
+										onclick={cancelRestore}
+										class="text-xs text-neutral-600 hover:underline dark:text-neutral-400"
+									>
+										Cancel
+									</button>
+								</div>
+								{#if restoreError}
+									<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
+										{restoreError}
+									</p>
+								{/if}
+							</div>
+						{:else}
+							<button
+								type="button"
+								onclick={() => startRestore(b.filename)}
+								class="mt-1 text-xs text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+							>
+								Restore
+							</button>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{:else if !backupsError}
+			<p class="text-xs text-neutral-500 italic">No backups yet.</p>
 		{/if}
 	</section>
 

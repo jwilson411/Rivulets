@@ -9,6 +9,7 @@ import SettingsPage from './+page.svelte';
 import { settings, type WorkspaceSettings } from '$lib/api/settings';
 import { dispatch, type HitRate } from '$lib/api/dispatch';
 import { update, type UpdateStatus } from '$lib/api/update';
+import { backups as backupsApi, type Backup } from '$lib/api/backups';
 import { providers as providersApi, type Provider } from '$lib/api/providers';
 import { budgets as budgetsApi, type BudgetStatus } from '$lib/api/budgets';
 import { agents as agentsApi, type Agent } from '$lib/api/agents';
@@ -35,6 +36,16 @@ async function dispatcherSection() {
 vi.mock('$lib/api/update', () => ({
 	update: { status: vi.fn(), apply: vi.fn() }
 }));
+
+vi.mock('$lib/api/backups', () => ({
+	backups: { list: vi.fn(), create: vi.fn(), restore: vi.fn() }
+}));
+
+async function backupsSection() {
+	const heading = page.getByRole('heading', { name: 'Backups' });
+	await expect.element(heading).toBeInTheDocument();
+	return page.elementLocator(heading.element().closest('section')!);
+}
 
 vi.mock('$lib/api/providers', () => ({
 	providers: { list: vi.fn() }
@@ -153,6 +164,7 @@ beforeEach(() => {
 	// per-test.
 	vi.mocked(dispatch.hitRate).mockResolvedValue(emptyHitRate);
 	vi.mocked(update.status).mockResolvedValue(upToDateStatus);
+	vi.mocked(backupsApi.list).mockResolvedValue([]);
 	vi.mocked(providersApi.list).mockResolvedValue([]);
 	vi.mocked(budgetsApi.list).mockResolvedValue([]);
 	vi.mocked(agentsApi.list).mockResolvedValue([]);
@@ -458,6 +470,150 @@ describe('settings/+page.svelte', () => {
 		render(SettingsPage);
 
 		await expect.element(page.getByText('Failed to check for updates')).toBeInTheDocument();
+	});
+
+	it('shows the empty state when no backups exist', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await expect.element(section.getByText('No backups yet.')).toBeInTheDocument();
+	});
+
+	it('lists backups with kind, size, and age', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		const oneBackup: Backup = {
+			filename: 'manual-2026-01-01T000000Z.tar',
+			kind: 'manual',
+			size_bytes: 2048,
+			created_at: new Date().toISOString()
+		};
+		vi.mocked(backupsApi.list).mockResolvedValue([oneBackup]);
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await expect.element(section.getByText('manual-2026-01-01T000000Z.tar')).toBeInTheDocument();
+		await expect
+			.element(section.getByText('Manual · 2.0 KB', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it('shows an error when loading backups fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(backupsApi.list).mockRejectedValueOnce(new Error('Failed to load backups'));
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await expect.element(section.getByText('Failed to load backups')).toBeInTheDocument();
+	});
+
+	it('creates a manual backup and refreshes the list', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		const created: Backup = {
+			filename: 'manual-2026-01-01T000000Z.tar',
+			kind: 'manual',
+			size_bytes: 1024,
+			created_at: new Date().toISOString()
+		};
+		vi.mocked(backupsApi.create).mockResolvedValueOnce(created);
+		vi.mocked(backupsApi.list).mockResolvedValueOnce([]).mockResolvedValueOnce([created]);
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await section.getByRole('button', { name: 'Back up now' }).click();
+
+		expect(backupsApi.create).toHaveBeenCalled();
+		await expect.element(section.getByText('manual-2026-01-01T000000Z.tar')).toBeInTheDocument();
+	});
+
+	it('shows an error when creating a backup fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		vi.mocked(backupsApi.create).mockRejectedValueOnce(new Error('Failed to create backup'));
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await section.getByRole('button', { name: 'Back up now' }).click();
+
+		await expect.element(section.getByText('Failed to create backup')).toBeInTheDocument();
+	});
+
+	it('requires the exact filename to be typed before confirming a restore', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		const oneBackup: Backup = {
+			filename: 'manual-2026-01-01T000000Z.tar',
+			kind: 'manual',
+			size_bytes: 1024,
+			created_at: new Date().toISOString()
+		};
+		vi.mocked(backupsApi.list).mockResolvedValue([oneBackup]);
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await section.getByRole('button', { name: 'Restore' }).click();
+
+		const confirmButton = section.getByRole('button', { name: 'Confirm restore' });
+		await expect.element(confirmButton).toBeDisabled();
+
+		const input = section.getByLabelText('Filename');
+		await input.fill('not-the-right-filename.tar');
+		await expect.element(confirmButton).toBeDisabled();
+
+		await input.fill(oneBackup.filename);
+		await expect.element(confirmButton).not.toBeDisabled();
+
+		await confirmButton.click();
+		expect(backupsApi.restore).toHaveBeenCalledWith(oneBackup.filename);
+		await expect
+			.element(section.getByText('Restored. Reload the page', { exact: false }))
+			.toBeInTheDocument();
+	});
+
+	it('cancels a restore without calling the API', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		const oneBackup: Backup = {
+			filename: 'manual-2026-01-01T000000Z.tar',
+			kind: 'manual',
+			size_bytes: 1024,
+			created_at: new Date().toISOString()
+		};
+		vi.mocked(backupsApi.list).mockResolvedValue([oneBackup]);
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await section.getByRole('button', { name: 'Restore' }).click();
+		await section.getByRole('button', { name: 'Cancel' }).click();
+
+		await expect.element(section.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+		expect(backupsApi.restore).not.toHaveBeenCalled();
+	});
+
+	it('shows an error when restoring fails', async () => {
+		vi.mocked(settings.get).mockResolvedValue(loadedSettings);
+		const oneBackup: Backup = {
+			filename: 'manual-2026-01-01T000000Z.tar',
+			kind: 'manual',
+			size_bytes: 1024,
+			created_at: new Date().toISOString()
+		};
+		vi.mocked(backupsApi.list).mockResolvedValue([oneBackup]);
+		vi.mocked(backupsApi.restore).mockRejectedValueOnce(new Error('Failed to restore backup'));
+
+		render(SettingsPage);
+
+		const section = await backupsSection();
+		await section.getByRole('button', { name: 'Restore' }).click();
+		const input = section.getByLabelText('Filename');
+		await input.fill(oneBackup.filename);
+		await section.getByRole('button', { name: 'Confirm restore' }).click();
+
+		await expect.element(section.getByText('Failed to restore backup')).toBeInTheDocument();
 	});
 
 	it('shows the empty state when no budget caps are configured', async () => {
