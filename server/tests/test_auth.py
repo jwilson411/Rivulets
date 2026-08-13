@@ -128,6 +128,27 @@ def test_logout_clears_the_session_and_stops_the_sync_engine(
     assert client.get("/api/v1/channels", headers=auth_headers).status_code == 401
 
 
+def test_unauthenticated_logout_does_not_clear_a_logged_in_workspaces_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#228: an unauthenticated POST /auth/logout used to be able to wipe
+    the process-wide SessionKeyStore (JWT signing key, P2P PSK,
+    credential-store key, webhook-secret key) and stop sync for every
+    session on the node -- from a plain cross-site form POST, no bearer
+    token required. It must now be a no-op unless the caller presents the
+    workspace's own valid session token."""
+    no_token = client.post("/api/v1/auth/logout")
+    assert no_token.status_code == 204
+
+    bad_token = client.post(
+        "/api/v1/auth/logout", headers={"Authorization": "Bearer not-a-real-token"}
+    )
+    assert bad_token.status_code == 204
+
+    # The already-logged-in workspace's session must still be intact.
+    assert client.get("/api/v1/channels", headers=auth_headers).status_code == 200
+
+
 def test_login_derives_a_credential_store_key(client: TestClient) -> None:
     """#118: login always derives the encrypted-SQLite fallback's
     encryption key alongside the JWT signing key and P2P PSK, even though
