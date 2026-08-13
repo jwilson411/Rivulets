@@ -34,7 +34,8 @@ from datetime import UTC, datetime, timedelta
 import jwt
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
@@ -93,6 +94,34 @@ class InviteAcceptResponse(BaseModel):
     human_id: str
     display_name: str
     grant: str
+
+
+async def _reserve_redemption_slot(db: AsyncSession, invite_id: str) -> bool:
+    """Atomically claims one use of `invite_id`, returning whether the
+    claim succeeded. accept_invite's own use_count >= max_uses check is
+    best-effort -- a nice error message for the common sequential case --
+    this compare-and-swap UPDATE is what actually keeps two concurrent
+    accepts of a max_uses=1 invite from both succeeding: only one
+    request's UPDATE can match a still-eligible row, so only one gets
+    rowcount == 1."""
+    now_iso = datetime.now(UTC).isoformat()
+    result = await db.execute(
+        update(Invite)
+        .where(
+            Invite.id == invite_id,
+            Invite.revoked == False,  # noqa: E712
+            Invite.use_count < Invite.max_uses,
+            Invite.expires_at > now_iso,
+        )
+        .values(use_count=Invite.use_count + 1)
+    )
+    # Unlike tracing.py's prune_old_traces, an atomic rowcount really is
+    # needed for correctness here (a select-then-delete/update shape would
+    # reopen the exact TOCTOU race this function exists to close).
+    return (  # pyright: ignore[reportUnknownVariableType]
+        result.rowcount  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        == 1
+    )
 
 
 @router.post("", response_model=InviteCreated, status_code=status.HTTP_201_CREATED)
@@ -192,9 +221,11 @@ async def accept_invite(
             "Rivulets here first",
         ) from exc
 
+    if not await _reserve_redemption_slot(db, invite.id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This invite has already been used")
+
     human = Human(display_name=body.display_name or invite.display_name_hint or "Guest")
     db.add(human)
-    invite.use_count += 1
     await db.commit()
     await db.refresh(human)
     await publish_current_state(db, "human", human.id)
