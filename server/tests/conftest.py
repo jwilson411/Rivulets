@@ -98,6 +98,14 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # each one — real behavior worth its own tests (test_backup.py), but
     # pure overhead here against an ephemeral in-memory DB nobody restores.
     monkeypatch.setattr("rivulets.app.run_startup_backup_checks", _noop_async)
+    # lifespan() runs real Alembic migrations against the workspace DB
+    # (#229) — swapped for the plain create_all fast path here since the
+    # in-memory DB this fixture builds is always empty and ephemeral, and
+    # running the full migration chain on every single test in the suite
+    # would be needless overhead. Real migration behavior (including
+    # against a non-empty, legacy-shaped DB) is covered by
+    # tests/test_migrations.py against run_migrations() directly.
+    monkeypatch.setattr("rivulets.app.run_migrations", init_db)
     # #92's scheduler_task is started as a bare asyncio.create_task at
     # lifespan startup, with no ordering guarantee against the test's own
     # first request. Since the in-memory test DB uses StaticPool (all

@@ -26,7 +26,8 @@ from rivulets.agentos.tool_resolution import seed_builtin_tools
 from rivulets.api import api_router
 from rivulets.backup import run_startup_backup_checks
 from rivulets.config import get_settings
-from rivulets.db.session import get_engine, init_db, session_scope
+from rivulets.db.migrate import run_migrations
+from rivulets.db.session import get_engine, session_scope
 from rivulets.dispatch import invoke_agent_remotely
 from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
@@ -109,12 +110,15 @@ def _static_dir() -> Path | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    await init_db()
+    # Backup runs *before* migrations, not after: it's the rollback point
+    # if a migration goes wrong, so it needs to snapshot the pre-migration
+    # file. (Doesn't need tables to exist -- see backup.py's VACUUM INTO.)
     # security-and-dr.md's two startup-time triggers: a pre-upgrade
     # snapshot (only if the binary version changed since last start) and
     # the daily automatic backup. Both are internally idempotent/failure-
     # tolerant (see backup.py), so this never blocks the rest of startup.
     await run_startup_backup_checks(get_settings(), get_engine())
+    await run_migrations()
     async with session_scope() as db:
         # Builtin tool rows (FR-8.2) must exist before sync_agents() builds
         # any agent that might reference one via the agent_tool join table.

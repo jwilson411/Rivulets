@@ -134,7 +134,10 @@ def list_backups(settings: Settings) -> list[BackupInfo]:
 
 
 async def run_startup_backup_checks(settings: Settings, engine: AsyncEngine) -> None:
-    """Called once from app.py's lifespan, after tables exist. Covers both
+    """Called once from app.py's lifespan, *before* migrations run (#229) so
+    the pre-upgrade snapshot below captures the true pre-migration file —
+    VACUUM INTO works on a table-less or even not-yet-created DB file just
+    fine, so there's no ordering requirement the other way. Covers both
     documented startup-time triggers: the pre-upgrade snapshot (version
     marker changed since the last start) and the daily snapshot (idempotent
     — see create_backup's same-day overwrite).
