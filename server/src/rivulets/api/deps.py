@@ -64,6 +64,23 @@ async def get_session_claims(
     return _decode_token(credentials.credentials)
 
 
+async def get_optional_session_claims(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> SessionClaims | None:
+    """Like get_session_claims, but returns None instead of 401ing on a
+    missing or invalid token -- for the handful of routes (POST
+    /auth/logout) where an unauthenticated caller should get a silent
+    no-op instead of an error, so a client that's already logged out (or
+    never was) can still call it, but nothing about the session actually
+    changes unless the token is genuine."""
+    if credentials is None:
+        return None
+    try:
+        return _decode_token(credentials.credentials)
+    except HTTPException:
+        return None
+
+
 async def get_current_workspace_id(
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> str:
@@ -135,17 +152,20 @@ CurrentWorkspaceId = Annotated[str, Depends(get_current_workspace_id)]
 CurrentWorkspaceIdForStream = Annotated[str, Depends(get_current_workspace_id_for_stream)]
 CurrentHumanId = Annotated[str, Depends(get_current_human_id)]
 OwnerGrant = Annotated[None, Depends(require_owner_grant)]
+OptionalSessionClaims = Annotated[SessionClaims | None, Depends(get_optional_session_claims)]
 
 __all__ = [
     "CurrentHumanId",
     "CurrentWorkspaceId",
     "CurrentWorkspaceIdForStream",
     "DbSession",
+    "OptionalSessionClaims",
     "OwnerGrant",
     "SessionClaims",
     "get_current_human_id",
     "get_current_workspace_id",
     "get_current_workspace_id_for_stream",
+    "get_optional_session_claims",
     "get_session_claims",
     "require_owner_grant",
 ]

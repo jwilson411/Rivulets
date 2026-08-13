@@ -37,7 +37,13 @@ from sqlalchemy import select
 
 from rivulets.agentos import sync_agents
 from rivulets.agentos.starter_content import seed_starter_agents, seed_starter_teams
-from rivulets.api.deps import DbSession, OwnerGrant, SessionClaims, get_session_claims
+from rivulets.api.deps import (
+    DbSession,
+    OptionalSessionClaims,
+    OwnerGrant,
+    SessionClaims,
+    get_session_claims,
+)
 from rivulets.db.models import Human, Workspace
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
@@ -127,7 +133,16 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout() -> None:
+async def logout(claims: OptionalSessionClaims) -> None:
+    """Requires a genuine session token before touching process-wide state
+    (#228) -- an unauthenticated POST here used to be able to wipe the
+    JWT signing key, P2P PSK, credential-store key, and webhook-secret
+    key, and stop sync, for every session on the node, from a plain
+    cross-site form POST. A missing or invalid token is a silent 204
+    no-op instead of a 401 so a client that's already logged out (or
+    never was) can still "sign out" locally without an error."""
+    if claims is None:
+        return
     get_session_key_store().clear()
     await get_sync_engine().stop()
 
