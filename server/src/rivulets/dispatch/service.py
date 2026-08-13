@@ -95,7 +95,7 @@ from rivulets.db.models import (
     WorkflowSchedule,
     WorkspaceSetting,
 )
-from rivulets.db.session import session_scope
+from rivulets.db.session import begin_immediate, session_scope
 from rivulets.dispatch.approvals import create_or_get_pending_approval
 from rivulets.dispatch.budgets import BudgetAlert, budget_alert_text, check_budget_caps
 from rivulets.dispatch.complexity_classifier import classify_tier
@@ -833,9 +833,14 @@ async def dispatch_and_respond(
 ) -> list[Message]:
     """Run the dispatcher against `channel`'s team and invoke every matched
     agent, appending its reply to `rivulet` as a Message row. Returns the
-    new Message rows (already added to `db`, not yet committed — callers
-    own the commit so this composes with whatever else they're persisting
-    in the same request).
+    new Message rows -- already committed individually as they're produced
+    (#237: each agent's reply, and the guard/budget bookkeeping around it,
+    is its own short transaction so no write lock spans an LLM call), not
+    left for the caller to batch into one big commit at the end. Callers
+    still commit after this returns, both as a final catch-all for
+    whatever's pending (e.g. a trailing span close) and because SQLAlchemy
+    objects like `rivulet` may have been mutated (e.g. a guard pause) since
+    the caller's own last commit.
 
     `from_agent_id`/`from_agent_name` are set only on recursive calls
     triggered by another agent's own message — omit them for the normal,
@@ -926,6 +931,11 @@ async def _dispatch_and_respond(
     agent_by_id = {agent.id: agent for agent, _ in team_agents}
     dispatch_infos = [info for _, info in team_agents]
 
+    # #237: engine.dispatch can itself invoke an LLM (its own hybrid-
+    # routing fallback) -- commit whatever's pending (e.g. a freshly
+    # created RivuletGuardState row) first so that call never runs with an
+    # open write transaction behind it.
+    await db.commit()
     engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
     result = await engine.dispatch(message_content, dispatch_infos)
     # R-4 dispatcher hit-rate tracking (#31): one row per routing decision,
@@ -956,6 +966,13 @@ async def _dispatch_and_respond(
     # appended, computed once since it's identical for every matched agent
     # this round.
     agent_content = message_content + _attachment_note(attached_files)
+
+    # #237: the DispatchDecision/span/agentos_session_id writes above are
+    # still only flushed, not committed -- close that out before the loop
+    # below, whose first iteration might go straight to
+    # _dispatch_to_remote_peer's RPC (_invoke_agent commits before its own
+    # LLM call, but a remote-routed agent never reaches _invoke_agent).
+    await db.commit()
 
     new_messages: list[Message] = []
     for agent_id in result.agent_ids:
@@ -1004,6 +1021,14 @@ async def _dispatch_and_respond(
         )
 
     await finish_span(db, dispatch_span_id, status="completed")
+    # #237: this closes out a recursive call's own dispatch_decision span
+    # promptly rather than leaving it dangling for whatever the caller
+    # does next -- a caller further up the recursive chain (e.g. an
+    # _invoke_agent about to run a workflow trigger, itself LLM-bound) may
+    # not otherwise commit before its own next network-bound call. A
+    # top-level call's own caller already commits again right after this
+    # returns, so this is a no-op there.
+    await db.commit()
     return new_messages
 
 
@@ -1276,6 +1301,34 @@ def _post_budget_alert(
     return message
 
 
+_GuardSnapshot = tuple[int, str | None, str | None, bool, str | None, str | None]
+
+
+def _snapshot_guard_state(state: RivuletGuardState) -> _GuardSnapshot:
+    """#237: captures the fields record_agent_message mutates, so a
+    speculative pre-LLM-call reservation (see _invoke_agent) can be undone
+    if the call turns out to have failed."""
+    return (
+        state.agent_exchange_count,
+        state.recent_interactions,
+        state.agent_active_since,
+        state.paused,
+        state.paused_at,
+        state.pause_reason,
+    )
+
+
+def _restore_guard_state(state: RivuletGuardState, snapshot: _GuardSnapshot) -> None:
+    (
+        state.agent_exchange_count,
+        state.recent_interactions,
+        state.agent_active_since,
+        state.paused,
+        state.paused_at,
+        state.pause_reason,
+    ) = snapshot
+
+
 async def _invoke_agent(
     db: AsyncSession,
     rivulet: Rivulet,
@@ -1296,6 +1349,14 @@ async def _invoke_agent(
     since both need the identical run/error/persist/guard/recurse pipeline.
     """
     new_messages: list[Message] = []
+
+    # #237: BEGIN IMMEDIATE takes SQLite's write lock for this section up
+    # front (see db/session.py's begin_immediate) so a concurrent
+    # invocation of the same rivulet can't pass its own budget/guard check
+    # against pre-increment state while this one's LLM call (below) is
+    # still in flight -- the commit a few lines down drops the lock before
+    # that call runs.
+    await begin_immediate(db)
     budget_alerts, budget_blocking = await check_budget_caps(db, agent, channel.team_id)
     for budget_alert in budget_alerts:
         new_messages.append(_post_budget_alert(db, rivulet.id, budget_alert, blocked=False))
@@ -1318,8 +1379,28 @@ async def _invoke_agent(
             title=f"Budget cap exceeded for {budget_blocking.cap.scope_type}",
             detail=budget_alert_text(budget_blocking, blocked=True),
         )
-        await db.flush()
+        await db.commit()
         return new_messages
+
+    # #237: reserve this turn's guard-state slot now, before the LLM call,
+    # not after it returns -- otherwise a concurrent invocation of the same
+    # rivulet can read this same (not-yet-incremented) state and also pass
+    # its own check while this call is in flight. `pause_message` isn't
+    # applied (rivulet.status, db.add) until the run actually succeeds
+    # below, matching the original ordering; `guard_snapshot` lets a failed
+    # run undo the reservation, since a provider error shouldn't count
+    # toward FR-7's limits (it never really happened as far as the
+    # conversation goes).
+    guard_snapshot = _snapshot_guard_state(guard_state)
+    pause_message = await record_agent_message(
+        db,
+        rivulet.id,
+        guard_state,
+        from_agent_id=from_agent_id,
+        from_agent_name=from_agent_name or "",
+        to_agent_id=agent.id,
+        to_agent_name=agent.name,
+    )
 
     # #96: opened before the run so its duration covers the actual LLM
     # call, not just the accounting that happens after it returns --
@@ -1331,6 +1412,9 @@ async def _invoke_agent(
     child_trace_ctx = (
         TraceContext(trace_ctx.trace_id, agent_span_id) if trace_ctx is not None else None
     )
+    # #237: drop the write lock -- everything below through the LLM call
+    # runs without an open transaction.
+    await db.commit()
     seq = 0
 
     def on_token(delta: str, agent_id: str = agent.id, agent_name: str = agent.name) -> None:
@@ -1395,7 +1479,9 @@ async def _invoke_agent(
             "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=exc
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
+        _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
         await finish_span(db, agent_span_id, status="error")
+        await db.commit()
         return new_messages
 
     if run_output.status is RunStatus.error:
@@ -1409,6 +1495,7 @@ async def _invoke_agent(
             "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
+        _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
         error_run = await record_agent_run(
             db,
             agent,
@@ -1436,6 +1523,7 @@ async def _invoke_agent(
         )
         db.add(message)
         new_messages.append(message)
+        await db.commit()
         return new_messages  # provider errors don't count toward guard limits or recurse
 
     # get_content_as_string()'s **kwargs is Unknown in agno's own stubs.
@@ -1482,7 +1570,12 @@ async def _invoke_agent(
         cost_usd=completed_run.cost_usd,
         total_tokens=completed_run.total_tokens,
     )
-    await db.flush()  # populate message.id for the agent_message event below
+    # #237: commit the reply now rather than holding it open through the
+    # handoff/tool-trigger/recursion cascade below (which can itself
+    # invoke further LLM calls, e.g. a run_workflow trigger). Also
+    # populates message.id for the agent_message event below (commit
+    # implies a flush; expire_on_commit=False keeps it readable after).
+    await db.commit()
     new_messages.append(message)
     publish(
         rivulet.id,
@@ -1496,15 +1589,6 @@ async def _invoke_agent(
         },
     )
 
-    pause_message = await record_agent_message(
-        db,
-        rivulet.id,
-        guard_state,
-        from_agent_id=from_agent_id,
-        from_agent_name=from_agent_name or "",
-        to_agent_id=agent.id,
-        to_agent_name=agent.name,
-    )
     if pause_message is not None:
         rivulet.status = "paused"
         db.add(pause_message)
@@ -1518,6 +1602,7 @@ async def _invoke_agent(
                 "message": pause_message.content,
             },
         )
+        await db.commit()
         return new_messages
 
     handoff_call = _find_handoff_call(run_output)

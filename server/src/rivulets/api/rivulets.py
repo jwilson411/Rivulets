@@ -294,6 +294,18 @@ async def create_rivulet(
         await db.refresh(rivulet)
         return rivulet
 
+    # #237: commit the human message (and its attachments) before dispatch
+    # runs -- dispatch_and_respond's own agent invocations hold a SQLite
+    # write lock only around short, LLM-call-free critical sections, but
+    # that only helps if it isn't handed an already-open transaction to
+    # extend. Matches the triggered-workflow branch above.
+    await db.commit()
+    await db.refresh(rivulet)
+    await _publish_rivulet_change(db, rivulet)
+    await _publish_message_change(db, human_message)
+    for file_row in attached_files:
+        await publish_file_change(db, file_row)
+
     trace_ctx = await start_trace(
         db, trigger_type="message", label=body.content, rivulet_id=rivulet.id, channel_id=channel.id
     )
@@ -309,12 +321,9 @@ async def create_rivulet(
     await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
     await db.refresh(rivulet)
-    await _publish_rivulet_change(db, rivulet)
-    await _publish_message_change(db, human_message)
+    await _publish_rivulet_change(db, rivulet)  # dispatch can pause the rivulet as a side effect
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
-    for file_row in attached_files:
-        await publish_file_change(db, file_row)
     return rivulet
 
 
@@ -400,6 +409,16 @@ async def post_message(
         await db.commit()
         return _to_message_out(message, attached_files)
 
+    # #237: commit the human message (and its attachments) before dispatch
+    # runs, matching the two triggered-workflow branches above -- otherwise
+    # this open transaction is the one dispatch_and_respond's own agent
+    # invocations would extend across their LLM calls.
+    await db.commit()
+    await db.refresh(message)
+    await _publish_message_change(db, message)
+    for file_row in attached_files:
+        await publish_file_change(db, file_row)
+
     # dispatch_and_respond resets RivuletGuardState on every human-triggered
     # call (FR-7.5) before dispatching.
     trace_ctx = await start_trace(
@@ -416,16 +435,13 @@ async def post_message(
     )
     await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
-    await db.refresh(message)
     # dispatch can pause the rivulet (a loop guard tripping) as a side
     # effect, so its state needs republishing here too, not just from the
     # explicit resume/close endpoints below.
+    await db.refresh(rivulet)
     await _publish_rivulet_change(db, rivulet)
-    await _publish_message_change(db, message)
     for agent_message in agent_messages:
         await _publish_message_change(db, agent_message)
-    for file_row in attached_files:
-        await publish_file_change(db, file_row)
     return _to_message_out(message, attached_files)
 
 

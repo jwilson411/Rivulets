@@ -108,3 +108,25 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
     """FastAPI dependency."""
     async with session_scope() as session:
         yield session
+
+
+async def begin_immediate(session: AsyncSession) -> None:
+    """Commits whatever this session has pending, then opens a fresh
+    transaction with SQLite's BEGIN IMMEDIATE instead of the default
+    deferred BEGIN (#237) -- takes the write lock right away rather than
+    lazily on first write, so a concurrent session doing the same thing
+    blocks up front (subject to busy_timeout above) instead of both
+    acquiring read locks and racing to upgrade, which SQLite resolves
+    with an immediate SQLITE_BUSY instead of a wait.
+
+    The commit-first step means this is safe to call as the first thing
+    in a critical section regardless of what the session did earlier in
+    the request -- it always starts that section from a clean, committed
+    state. It only fails if a write already happened *after* the last
+    commit on this same session (aiosqlite's driver only opens a real
+    transaction on first write, not on read, so reads beforehand are
+    fine) -- callers own not doing that.
+    """
+    await session.commit()
+    conn = await session.connection()
+    await conn.exec_driver_sql("BEGIN IMMEDIATE")
