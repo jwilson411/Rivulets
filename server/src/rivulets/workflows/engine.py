@@ -622,6 +622,7 @@ async def run_workflow(
     ancestry: frozenset[str] = frozenset(),
     trace_ctx: TraceContext | None = None,
     unattended: bool | None = None,
+    run_id: str | None = None,
 ) -> WorkflowRun:
     """Run `workflow` against `rivulet`, starting with `input_content` as
     the entry node's input. `triggered_by`/`triggered_by_id` record who
@@ -650,6 +651,14 @@ async def run_workflow(
     `triggered_by` (_UNATTENDED_TRIGGERS) -- only `_execute_workflow_node`
     passes it explicitly, inheriting the parent run's value rather than
     letting a nested run's literal 'workflow' trigger derive to False.
+
+    `run_id` (#242): every call site leaves this at its default of None,
+    letting WorkflowRun.id fall back to its normal uuid7 default. The one
+    exception is api/webhooks.py, which needs this run's id *before*
+    execution starts -- it hands the run off to a BackgroundTask rather
+    than awaiting it inline, so the id it commits to in its 202 response
+    has to be chosen up front rather than read back off the row this
+    function would otherwise generate.
     """
     if unattended is None:
         unattended = triggered_by in _UNATTENDED_TRIGGERS
@@ -667,6 +676,8 @@ async def run_workflow(
         # (possibly since-edited) WorkflowNode/WorkflowConnection rows.
         graph_snapshot_json=_serialize_graph(nodes, connections),
     )
+    if run_id is not None:
+        run.id = run_id
     db.add(run)
     await db.flush()
     run_span_id = await start_span(

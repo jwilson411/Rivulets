@@ -38,10 +38,20 @@ def build_input_content(webhook: WorkflowWebhook, raw_body: bytes) -> str:
 
 
 async def fire_webhook(
-    db: AsyncSession, webhook: WorkflowWebhook, workflow: Workflow, raw_body: bytes
+    db: AsyncSession,
+    webhook: WorkflowWebhook,
+    workflow: Workflow,
+    raw_body: bytes,
+    *,
+    run_id: str | None = None,
 ) -> WorkflowRun:
     """Caller has already verified the HMAC signature and that
-    `workflow.published` -- this only does the firing."""
+    `workflow.published` -- this only does the firing.
+
+    `run_id` (#242): passed through to run_workflow so api/webhooks.py can
+    hand this call off to a BackgroundTask while still committing to a
+    run id in its already-sent 202 response -- see run_workflow's own
+    docstring."""
     channel = await db.get(Channel, webhook.channel_id)
     if channel is None:
         raise RuntimeError(f"Webhook {webhook.id}'s target channel no longer exists")
@@ -80,6 +90,7 @@ async def fire_webhook(
         triggered_by="webhook",
         triggered_by_id=webhook.id,
         trace_ctx=trace_ctx,
+        run_id=run_id,
     )
     await finish_trace(db, trace_ctx.trace_id)
     return run

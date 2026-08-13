@@ -141,6 +141,30 @@ def test_create_webhook_rejects_unknown_channel(
     assert resp.status_code == 404
 
 
+def test_create_webhook_is_forbidden_for_an_invite_grant_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#242: create/rotate/delete mint or destroy the HMAC secret that is
+    the trigger endpoint's whole credential, so an invited session
+    shouldn't be able to mint one for itself any more than it can create
+    an invite of its own (test_invites_api.py's own version of this)."""
+    workflow_id = _create_workflow(client, auth_headers, "owner-gated")
+    channel_id = _create_channel(client, auth_headers, "owner-gated-channel")
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": created_invite["url"].rsplit("/", 1)[-1], "display_name": "Guest"},
+    ).json()
+    invite_headers = {"Authorization": f"Bearer {accepted['token']}"}
+
+    response = client.post(
+        f"/api/v1/workflows/{workflow_id}/webhooks",
+        json={"channel_id": channel_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
 def test_update_and_delete_webhook(client: TestClient, auth_headers: dict[str, str]) -> None:
     workflow_id = _create_workflow(client, auth_headers, "updatable")
     channel_id = _create_channel(client, auth_headers, "updatable-channel")
@@ -202,9 +226,13 @@ def test_trigger_with_valid_signature_fires_published_workflow(
     )
     assert resp.status_code == 202, resp.text
     payload = resp.json()
-    assert payload["status"] == "completed"
+    # The run is handed off to a BackgroundTask (#242) rather than
+    # awaited inline -- this response is built, and its status committed
+    # to, before that task has run at all.
+    assert payload["status"] == "running"
 
     run = _get_run(client, auth_headers, webhook["workflow_id"], payload["run_id"])
+    assert run["status"] == "completed"
     assert run["triggered_by"] == "webhook"
     assert run["triggered_by_id"] == webhook["id"]
 
@@ -234,6 +262,46 @@ def test_trigger_applies_input_template_substitution(
 
     run = _get_run(client, auth_headers, webhook["workflow_id"], run_id)
     assert run["final_output"] == 'got: webhook says: {"count": 3}'
+
+
+def test_trigger_rejects_replayed_delivery(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#242: the same (webhook_id, timestamp, signature) triple firing
+    twice -- a sender's at-least-once retry, or a captured-and-replayed
+    request -- must not fire the workflow a second time. The first
+    delivery still succeeds; only the exact resend is rejected."""
+    webhook = _make_published_workflow_with_webhook(client, auth_headers, "replay")
+    body = b'{"event": "push"}'
+    headers = _signed_headers(webhook["secret"], body)
+
+    first = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+    assert first.status_code == 202, first.text
+
+    second = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+    assert second.status_code == 409
+
+
+def test_trigger_rejects_malformed_signature_without_500(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#242: a signature that isn't a 64-char hex digest -- wrong length
+    here, see test_webhook_signing.py's test_malformed_signature_fails_
+    without_raising for the non-ASCII case hmac.compare_digest itself
+    can't handle without HTTP header encoding rejecting the request
+    first -- must still be a uniform 401, not a 500, on this
+    otherwise-unauthenticated route."""
+    webhook = _make_published_workflow_with_webhook(client, auth_headers, "malformed-sig")
+    body = b"payload"
+    resp = client.post(
+        f"/api/v1/webhooks/{webhook['id']}",
+        content=body,
+        headers={
+            _TIMESTAMP_HEADER: str(int(time.time())),
+            _SIGNATURE_HEADER: "too-short",
+        },
+    )
+    assert resp.status_code == 401
 
 
 def test_trigger_rejects_invalid_signature(
