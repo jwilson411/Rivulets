@@ -14,6 +14,7 @@ reportPrivateUsage override below.
 
 # pyright: reportPrivateUsage=false
 
+import importlib
 import socket
 import sys
 import threading
@@ -42,6 +43,33 @@ def _release_json_handler(tag_name: str, asset_name: str) -> Any:
         return httpx.Response(200, json={"tag_name": tag_name, "assets": [{"name": asset_name}]})
 
     return handler
+
+
+class TestRepoOverride:
+    """REPO is resolved once at import time (see update.py's module-level
+    block), so exercising the override logic means reloading the module
+    under a controlled environment and restoring the real module state
+    afterward -- every other test in this file relies on `update.REPO`
+    matching the checked-in default.
+    """
+
+    def test_override_ignored_without_allowlist_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RIVULETS_REPO", "attacker/evil-fork")
+        monkeypatch.delenv("RIVULETS_ALLOW_REPO_OVERRIDE", raising=False)
+        try:
+            reloaded = importlib.reload(update)
+            assert reloaded.REPO == "jwilson411/Rivulets"
+        finally:
+            importlib.reload(update)
+
+    def test_override_honored_with_allowlist_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RIVULETS_REPO", "someone/fork")
+        monkeypatch.setenv("RIVULETS_ALLOW_REPO_OVERRIDE", "1")
+        try:
+            reloaded = importlib.reload(update)
+            assert reloaded.REPO == "someone/fork"
+        finally:
+            importlib.reload(update)
 
 
 class TestPlatformAssetName:
@@ -218,6 +246,104 @@ class TestDownloadAndVerify:
                 )
 
         assert not dest.exists()
+
+
+class TestCosignAvailable:
+    def test_true_when_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(update.shutil, "which", lambda name="": "/usr/bin/cosign")
+        assert update._cosign_available() is True  # noqa: SLF001
+
+    def test_false_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(update.shutil, "which", lambda name="": None)
+        assert update._cosign_available() is False  # noqa: SLF001
+
+
+class TestVerifyCosignSignature:
+    async def test_raises_when_cosign_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(update.shutil, "which", lambda name="": None)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("should not fetch .sig/.pem when cosign is missing")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(update.UpdateVerificationError, match="cosign"):
+                await update._verify_cosign_signature(  # noqa: SLF001
+                    client,
+                    "https://example.com/rivulets-linux-amd64",
+                    tmp_path / "bin",
+                    tmp_path / "bin.sig",
+                    tmp_path / "bin.pem",
+                )
+
+    async def test_raises_when_verify_blob_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(update.shutil, "which", lambda name="": "/usr/bin/cosign")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"stub")
+
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            class _Result:
+                returncode = 1
+                stdout = ""
+                stderr = "certificate identity did not match"
+
+            return _Result()
+
+        monkeypatch.setattr(update.subprocess, "run", fake_run)
+
+        binary_path = tmp_path / "bin"
+        binary_path.write_bytes(b"binary contents")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(update.UpdateVerificationError, match="verification failed"):
+                await update._verify_cosign_signature(  # noqa: SLF001
+                    client,
+                    "https://example.com/rivulets-linux-amd64",
+                    binary_path,
+                    tmp_path / "bin.sig",
+                    tmp_path / "bin.pem",
+                )
+
+    async def test_succeeds_and_writes_sig_and_cert(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(update.shutil, "which", lambda name="": "/usr/bin/cosign")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith(".sig"):
+                return httpx.Response(200, content=b"sig-bytes")
+            return httpx.Response(200, content=b"pem-bytes")
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+            captured.append(cmd)
+
+            class _Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(update.subprocess, "run", fake_run)
+
+        binary_path = tmp_path / "bin"
+        binary_path.write_bytes(b"binary contents")
+        sig_path = tmp_path / "bin.sig"
+        cert_path = tmp_path / "bin.pem"
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await update._verify_cosign_signature(  # noqa: SLF001
+                client, "https://example.com/rivulets-linux-amd64", binary_path, sig_path, cert_path
+            )
+
+        assert sig_path.read_bytes() == b"sig-bytes"
+        assert cert_path.read_bytes() == b"pem-bytes"
+        assert captured[0][0] == "cosign"
+        assert str(binary_path) in captured[0]
 
 
 class TestSwapBinaries:
@@ -410,10 +536,23 @@ class TestApplyUpdate:
                 )
             if request.url.path.endswith(".sha256"):
                 return httpx.Response(200, text=f"{digest}  rivulets-linux-amd64\n")
+            if request.url.path.endswith((".sig", ".pem")):
+                return httpx.Response(200, content=b"stub")
             return httpx.Response(200, content=content)
 
         monkeypatch.setattr(update, "APP_VERSION", "0.1.0")
         monkeypatch.setattr(update.httpx, "AsyncClient", _mock_async_client_factory(handler))
+        monkeypatch.setattr(update.shutil, "which", lambda name="": "/usr/bin/cosign")
+
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            class _Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(update.subprocess, "run", fake_run)
 
         exe = tmp_path / "rivulets"
         exe.write_bytes(b"old fake binary")
@@ -431,3 +570,36 @@ class TestApplyUpdate:
         assert exe.read_bytes() == content
         assert (tmp_path / "rivulets.old").read_bytes() == b"old fake binary"
         assert spawned == [exe.resolve()]
+        # Downloaded sig/cert are scratch files, cleaned up either way.
+        assert not (tmp_path / "rivulets.sig").exists()
+        assert not (tmp_path / "rivulets.pem").exists()
+
+    async def test_raises_and_does_not_swap_when_cosign_missing(
+        self, monkeypatch: pytest.MonkeyPatch, frozen_linux_amd64: None, tmp_path: Path
+    ) -> None:
+        content = b"new fake binary"
+        digest = update.hashlib.sha256(content).hexdigest()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == f"/repos/{update.REPO}/releases/latest":
+                return httpx.Response(
+                    200, json={"tag_name": "v0.2.0", "assets": [{"name": "rivulets-linux-amd64"}]}
+                )
+            if request.url.path.endswith(".sha256"):
+                return httpx.Response(200, text=f"{digest}  rivulets-linux-amd64\n")
+            return httpx.Response(200, content=content)
+
+        monkeypatch.setattr(update, "APP_VERSION", "0.1.0")
+        monkeypatch.setattr(update.httpx, "AsyncClient", _mock_async_client_factory(handler))
+        monkeypatch.setattr(update.shutil, "which", lambda name="": None)
+
+        exe = tmp_path / "rivulets"
+        exe.write_bytes(b"old fake binary")
+        monkeypatch.setattr(sys, "executable", str(exe))
+
+        with pytest.raises(update.UpdateVerificationError, match="cosign"):
+            await update.apply_update()
+
+        assert exe.read_bytes() == b"old fake binary"
+        assert not (tmp_path / "rivulets.old").exists()
+        assert not (tmp_path / "rivulets.new").exists()

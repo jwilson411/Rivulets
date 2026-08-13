@@ -76,11 +76,13 @@ Rivulets ships as a single server process that serves both the API and the web U
 ### Quick install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/v0.4.0/scripts/install.sh | sh
 rivulets
 ```
 
-This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum, and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled. If [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is on your PATH, the script also verifies each binary's Sigstore signature — keyless, tied to the GitHub Actions workflow that built it — which a checksum alone can't do, since the checksum is published from the same release as the binary it's checking.
+The script is fetched from a tagged release rather than `main`, so a compromised commit to the default branch can't retroactively alter what a fresh `curl | sh` run downloads and verifies. This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum and its Sigstore signature (keyless, tied to the GitHub Actions workflow that built it — a checksum alone can't prove that, since it's published from the same release as the binary it's checking), and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled.
+
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is required for that signature check and the script refuses to install without it; pass `--insecure-checksum-only` (`curl ... | sh -s -- --insecure-checksum-only`) to accept checksum-only verification instead.
 
 **Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it. The Code Execution built-in tool is unavailable on Windows — there's no sandbox backend wired up yet (see [`docs/security.md`](docs/security.md)) — everything else works.
 
