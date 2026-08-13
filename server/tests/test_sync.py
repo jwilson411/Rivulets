@@ -700,6 +700,54 @@ async def test_apply_remote_file_change_does_not_fetch_when_engine_not_running(
     assert not local_path.exists()  # engine wasn't running, so no fetch was attempted
 
 
+async def test_apply_remote_file_change_rejects_non_hex_content_hash(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    """#239: a peer-supplied content_hash that isn't a valid SHA-256 hex
+    digest (e.g. a path-traversal payload) must be rejected outright,
+    never joined onto files_dir -- not applied, and no row written."""
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": "../../etc/passwd",
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 5,
+            "message_id": None,
+        },
+    )
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(File, "file-1") is None
+
+
+async def test_apply_remote_file_change_rejects_absolute_content_hash(
+    db_session: AsyncSession, not_running_sync_engine: None
+) -> None:
+    """Pathlib's `/` operator discards everything before an absolute
+    right-hand segment (Path("/data/files") / "/etc/passwd" ->
+    "/etc/passwd") -- a hash that merely looks path-like must be rejected
+    the same way a "../"-style value is."""
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": "/etc/passwd",
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 5,
+            "message_id": None,
+        },
+    )
+    assert result.applied is False
+    assert await db_session.get(File, "file-1") is None
+
+
 async def test_apply_remote_tool_change_writes_source_code_to_disk(
     db_session: AsyncSession,
 ) -> None:
@@ -763,6 +811,28 @@ async def test_apply_remote_tool_change_detects_conflict(db_session: AsyncSessio
     tool = await db_session.get(Tool, "tool-1")
     assert tool is not None
     assert tool.description == "Local version."  # untouched
+
+
+async def test_apply_remote_tool_change_rejects_invalid_name(db_session: AsyncSession) -> None:
+    """#239: payload['name'] becomes a literal `{name}.py` path segment
+    under tools_dir -- a peer-supplied name that isn't a valid identifier
+    (e.g. a path-traversal payload) must be rejected outright, never
+    written to disk."""
+    result = await apply_remote_tool_change(
+        db_session,
+        "tool-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "../../etc/cron.d/evil",
+            "description": "Malicious.",
+            "source_code": "import os\nos.system('echo pwned')\n",
+        },
+    )
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(Tool, "tool-1") is None
+    assert not (get_settings().tools_dir.parent / "etc" / "cron.d" / "evil.py").exists()
 
 
 async def _get_first_addr(engine: SyncEngine) -> str:
@@ -2264,6 +2334,29 @@ async def test_handle_file_transfer_stream_reports_hit(tmp_path: Path) -> None:
             stream.written
             == HIT_PREFIX + struct.pack(">Q", len(b"hello from disk")) + b"hello from disk"
         )
+        assert stream.closed is True
+    finally:
+        monkeypatch.undo()
+
+
+async def test_handle_file_transfer_stream_reports_miss_for_invalid_hash(tmp_path: Path) -> None:
+    """#239: content_hash comes straight off the wire from a peer -- a
+    non-hex value (e.g. an attempted path-traversal payload) must be
+    treated as a miss, never joined onto files_dir and read from disk."""
+    engine = SyncEngine(tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    try:
+        secret = tmp_path / "secret.txt"
+        secret.write_text("should never be readable via file transfer")
+        # Exactly HASH_LEN bytes (the protocol reads a fixed-length hash),
+        # but not a valid hex digest -- a "../"-style traversal attempt.
+        traversal_hash = ("../" * 20 + "secret.txt").ljust(HASH_LEN, "0")[:HASH_LEN]
+
+        stream = _FakeFileStream(to_read=traversal_hash.encode())
+        await engine._handle_file_transfer_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+        assert stream.written == MISS_MARKER
         assert stream.closed is True
     finally:
         monkeypatch.undo()

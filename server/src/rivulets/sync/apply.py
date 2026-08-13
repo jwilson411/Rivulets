@@ -100,6 +100,7 @@ from rivulets.db.models import (
 )
 from rivulets.db.session import session_scope
 from rivulets.sync.engine import get_sync_engine
+from rivulets.validation import TOOL_NAME_RE, local_path_for_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -407,8 +408,21 @@ async def apply_remote_tool_change(
         await db.commit()
         return ApplyResult(applied=False, conflict=True)
 
+    name = payload["name"]
+    if not TOOL_NAME_RE.match(name):
+        # #239: payload['name'] becomes a literal path segment below --
+        # reject it here rather than let sync apply skip the identifier
+        # check the HTTP create path (api/tools.py's ToolCreate) enforces.
+        logger.warning(
+            "Rejecting tool sync for %s from %s: invalid name %r",
+            entity_id,
+            remote_node_id,
+            name,
+        )
+        return ApplyResult(applied=False, conflict=False)
+
     tool = await db.get(Tool, entity_id)
-    source_path = str(get_settings().tools_dir / f"{payload['name']}.py")
+    source_path = str(get_settings().tools_dir / f"{name}.py")
     if tool is None:
         tool = Tool(id=entity_id, tool_type="custom", source_path=source_path)
         db.add(tool)
@@ -490,7 +504,19 @@ async def apply_remote_file_change(
         return ApplyResult(applied=False, conflict=True)
 
     content_hash = payload["content_hash"]
-    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    try:
+        local_path = local_path_for_content_hash(content_hash)
+    except ValueError:
+        # #239: content_hash becomes a literal path segment below -- reject
+        # it here rather than let sync apply skip the hex-digest check the
+        # HTTP upload path (api/files.py) gets for free from hashlib.
+        logger.warning(
+            "Rejecting file sync for %s from %s: invalid content_hash %r",
+            entity_id,
+            remote_node_id,
+            content_hash,
+        )
+        return ApplyResult(applied=False, conflict=False)
 
     file_row = await db.get(File, entity_id)
     if file_row is None:
@@ -569,8 +595,13 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
     deferred the fetch, or an eager fetch failed transiently) rather than
     serving a 404 for content a peer already has. Tries every node
     recorded by _remember_known_source until one has the bytes. Returns
-    whether local_path exists afterwards."""
-    local_path = Path(file_row.local_path)
+    whether local_path exists afterwards.
+
+    Re-derives the path from files_dir + content_hash rather than trusting
+    the stored `File.local_path` column (#239) -- the same reasoning as
+    apply_remote_file_change not copying a sender's local_path verbatim,
+    extended to reads."""
+    local_path = local_path_for_content_hash(file_row.content_hash)
     if local_path.exists():
         return True
     if not file_row.synced_to_nodes:
