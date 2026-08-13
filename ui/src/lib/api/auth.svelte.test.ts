@@ -9,6 +9,7 @@ import { auth } from './auth.svelte';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.useRealTimers();
 });
 
 describe('auth', () => {
@@ -205,5 +206,113 @@ describe('auth', () => {
 
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(auth.token).toBeNull();
+	});
+
+	it('login() stores expires_at', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(JSON.stringify({ token: 'tok-5', expires_at: '2099-06-01T00:00:00Z' }), {
+					status: 200
+				})
+			)
+		);
+
+		await auth.login('a b c');
+
+		expect(auth.expiresAt).toBe('2099-06-01T00:00:00Z');
+	});
+
+	it('clears the session and flips on sessionExpired when the JWT expiry timer fires', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(JSON.stringify({ token: 'tok-6', expires_at: '2024-01-01T00:00:05Z' }), {
+					status: 200
+				})
+			)
+		);
+
+		await auth.login('a b c');
+		expect(auth.isAuthenticated).toBe(true);
+		expect(auth.sessionExpired).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(5000);
+
+		expect(auth.token).toBeNull();
+		expect(auth.isAuthenticated).toBe(false);
+		expect(auth.sessionExpired).toBe(true);
+	});
+
+	it('a 401 on an authenticated request clears the session and sets sessionExpired', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response(JSON.stringify({ token: 'tok-7', expires_at: 'x' }), { status: 200 })
+				)
+		);
+		await auth.login('a b c');
+		expect(auth.isAuthenticated).toBe(true);
+
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(new Response('{"detail":"token expired"}', { status: 401 }))
+		);
+
+		await expect(auth.claimIdentity({ displayName: 'Ada' })).rejects.toThrow('token expired');
+
+		expect(auth.token).toBeNull();
+		expect(auth.isAuthenticated).toBe(false);
+		expect(auth.sessionExpired).toBe(true);
+	});
+
+	it('a 401 on the login attempt itself does not touch sessionExpired', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+		await auth.logout();
+		expect(auth.sessionExpired).toBe(false);
+
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(new Response('{"detail":"bad key"}', { status: 401 }))
+		);
+
+		await expect(auth.login('wrong words')).rejects.toThrow('bad key');
+
+		expect(auth.sessionExpired).toBe(false);
+	});
+
+	it('login() clears a stale sessionExpired flag on success', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response(JSON.stringify({ token: 'tok-8', expires_at: 'x' }), { status: 200 })
+				)
+		);
+		await auth.login('a b c');
+
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(new Response('{"detail":"expired"}', { status: 401 }))
+		);
+		await expect(auth.claimIdentity({ displayName: 'Ada' })).rejects.toThrow();
+		expect(auth.sessionExpired).toBe(true);
+
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response(JSON.stringify({ token: 'tok-9', expires_at: 'x' }), { status: 200 })
+				)
+		);
+		await auth.login('a b c');
+
+		expect(auth.sessionExpired).toBe(false);
 	});
 });

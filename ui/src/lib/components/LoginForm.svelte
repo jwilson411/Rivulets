@@ -8,6 +8,11 @@
 	import { generateMnemonic } from 'bip39';
 	import { auth } from '$lib/api/auth.svelte';
 
+	// Set by +layout.svelte's auth gate when it swaps back to LoginForm
+	// because a previously-valid session was torn down (401 / JWT expiry),
+	// rather than the user simply never having logged in.
+	let { sessionExpired = false }: { sessionExpired?: boolean } = $props();
+
 	let mnemonic = $state('');
 	let passphrase = $state('');
 	let loginError = $state<string | null>(null);
@@ -166,6 +171,13 @@
 			{/if}
 		</div>
 	{:else}
+		{#if sessionExpired}
+			<p
+				class="rounded-md border border-amber-600/40 bg-amber-100 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/40 dark:bg-amber-900/30 dark:text-amber-100"
+			>
+				Session expired — sign in again.
+			</p>
+		{/if}
 		<form onsubmit={handleLogin} class="flex flex-col gap-3">
 			<label class="text-sm font-medium text-ink dark:text-ink-dark" for="mnemonic">
 				Workspace recovery phrase (12 words)
