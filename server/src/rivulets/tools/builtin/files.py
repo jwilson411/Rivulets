@@ -9,13 +9,13 @@ know or care which.
 """
 
 import sqlite3
-from pathlib import Path
 
 from agno.media import Image
 from agno.tools import tool
 from agno.tools.function import ToolResult
 
 from rivulets.config import get_settings
+from rivulets.validation import local_path_for_content_hash
 
 _MAX_TEXT_BYTES = 200_000  # keep tool output within a reasonable context budget
 _TEXT_MIME_PREFIXES = ("text/",)
@@ -35,15 +35,21 @@ def read_attached_file(file_id: str) -> str | ToolResult:
     uri = f"file:{db_path}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         row = conn.execute(
-            "SELECT filename, mime_type, size_bytes, local_path FROM file WHERE id = ?",
+            "SELECT filename, mime_type, size_bytes, content_hash FROM file WHERE id = ?",
             (file_id,),
         ).fetchone()
 
     if row is None:
         raise ValueError(f"No file found with id {file_id!r}")
-    filename, mime_type, size_bytes, local_path = row
+    filename, mime_type, size_bytes, content_hash = row
 
-    path = Path(local_path)
+    # Re-derived from files_dir + content_hash rather than trusting the
+    # stored local_path column (#239) -- a hash written by older or buggy
+    # code could otherwise point outside files_dir.
+    try:
+        path = local_path_for_content_hash(content_hash)
+    except ValueError as exc:
+        raise ValueError(f"File {filename!r} has an invalid content hash") from exc
     if not path.exists():
         return (
             f"File {filename!r} ({mime_type}, {size_bytes} bytes) is registered but its "

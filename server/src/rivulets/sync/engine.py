@@ -85,7 +85,6 @@ from libp2p.tools.anyio_service import background_trio_service
 from libp2p.utils.address_validation import find_free_port, get_available_interfaces
 from multiaddr import Multiaddr
 
-from rivulets.config import get_settings
 from rivulets.sync.agent_dispatch import (
     AGENT_DISPATCH_PROTOCOL,
     AgentDispatchRequest,
@@ -102,6 +101,7 @@ from rivulets.sync.file_transfer import (
     read_exactly,
 )
 from rivulets.sync.identity import load_or_create_node_key
+from rivulets.validation import local_path_for_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -854,8 +854,14 @@ class SyncEngine:
         task per incoming stream, with nothing upstream to propagate to."""
         try:
             content_hash = (await read_exactly(stream, HASH_LEN)).decode()
-            local_path = get_settings().files_dir / content_hash[:2] / content_hash
-            if not local_path.exists():
+            # #239: content_hash comes straight from the peer on the wire --
+            # validate it the same way sync/apply.py's apply_remote_file_change
+            # does before it's ever used as a path segment.
+            try:
+                local_path = local_path_for_content_hash(content_hash)
+            except ValueError:
+                local_path = None
+            if local_path is None or not local_path.exists():
                 await stream.write(MISS_MARKER)
             else:
                 data = local_path.read_bytes()

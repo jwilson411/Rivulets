@@ -21,7 +21,6 @@ below writes straight to disk without recording a new version, so the DB's
 the source of truth for what this node currently has.
 """
 
-import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from rivulets.config import get_settings
 from rivulets.db.models import Tool, ToolVersion
 from rivulets.sync.publish import publish_current_state
 from rivulets.tools.builtin import code_exec
+from rivulets.validation import TOOL_NAME_RE
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -63,8 +63,9 @@ async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
 # body.name becomes both the Tool row's name and (via create_tool below)
 # a literal path segment in source_path -- restricted to a safe identifier
 # charset so it can never escape tools_dir (e.g. "../../etc/cron.d/x") or
-# collide with a dotfile/hidden path.
-_TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# collide with a dotfile/hidden path. sync/apply.py's apply_remote_tool_change
+# reuses this same regex (#239) rather than re-implementing the check.
+_TOOL_NAME_RE = TOOL_NAME_RE
 
 
 class ToolCreate(BaseModel):
