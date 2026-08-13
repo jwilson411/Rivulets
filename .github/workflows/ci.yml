@@ -21,6 +21,12 @@ on:
   pull_request:
     branches: [main, dev, staging]
 
+# No job here needs to write anything back to the repo or push packages --
+# an explicit read-only default means a compromised/typo'd step can't
+# silently pick up broader default-token permissions than it needs.
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "22"
@@ -33,7 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: "latest"
+          version: "0.12.3"
       - working-directory: server
         run: |
           uv sync --dev
@@ -47,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: "latest"
+          version: "0.12.3"
       - working-directory: server
         run: |
           uv sync --dev
@@ -60,7 +66,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: "latest"
+          version: "0.12.3"
       - working-directory: server
         run: |
           uv sync --dev
@@ -120,7 +126,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: "latest"
+          version: "0.12.3"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -144,7 +150,7 @@ jobs:
           retention-days: 7
 
   integration-test:
-    name: Integration test (health, create agent, verify)
+    name: Integration test (health, UI, info, agent, backup/restore)
     needs: build-check
     runs-on: ubuntu-latest
     steps:
@@ -153,8 +159,10 @@ jobs:
         with:
           name: rivulets-linux-amd64
           path: dist
-      # Smoke test script: start binary, health check, create an agent via
-      # the API, verify it exists.
+      # Smoke test script: start binary, health check, UI + version sanity,
+      # create an agent via the API, verify it exists, and round-trip a
+      # backup/restore. Each of these was a P0 launch blocker (#254) that
+      # the old health-only smoke test would never have caught.
       - name: Smoke test
         run: |
           chmod +x dist/rivulets-linux-amd64
@@ -166,6 +174,17 @@ jobs:
             sleep 1
           done
           curl -sf http://127.0.0.1:8484/api/v1/health | grep '"status":"ok"'
+
+          # UI is actually bundled into the binary, not just an API-only
+          # server (ui-build must have run and landed in the pyinstaller
+          # datas before this binary was built).
+          curl -sf http://127.0.0.1:8484/ | grep -q '<title>Rivulets</title>'
+
+          # Frozen binary reports the real package version, not a stale
+          # fallback literal (#230) -- server/pyproject.toml is the source
+          # of truth build-check just built from.
+          EXPECTED_VERSION=$(grep -m1 '^version = ' server/pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          curl -sf http://127.0.0.1:8484/api/v1/info | grep -q "\"version\":\"${EXPECTED_VERSION}\""
 
           TOKEN=$(curl -sf -X POST http://127.0.0.1:8484/api/v1/auth/login \
             -H "Content-Type: application/json" \
@@ -180,4 +199,125 @@ jobs:
           curl -sf http://127.0.0.1:8484/api/v1/agents \
             -H "Authorization: Bearer $TOKEN" | grep 'smoke-test'
 
+          # Backup/restore round trip (#243/#254): snapshot now, add a
+          # second agent only after the snapshot, restore, then confirm
+          # the pre-snapshot agent survived and the post-snapshot one
+          # didn't -- proving restore actually swaps state back rather
+          # than being a no-op that would pass even if it did nothing.
+          BACKUP_FILE=$(curl -sf -X POST http://127.0.0.1:8484/api/v1/backups \
+            -H "Authorization: Bearer $TOKEN" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['filename'])")
+
+          curl -sf -X POST http://127.0.0.1:8484/api/v1/agents \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d '{"name":"post-backup-agent","description":"should not survive restore","instructions":"noop","model":"test:mock"}' \
+            | grep '"name":"post-backup-agent"'
+
+          curl -sf -X POST "http://127.0.0.1:8484/api/v1/backups/${BACKUP_FILE}/restore" \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d "{\"confirm_filename\":\"${BACKUP_FILE}\"}"
+
+          RESTORED_AGENTS=$(curl -sf http://127.0.0.1:8484/api/v1/agents -H "Authorization: Bearer $TOKEN")
+          echo "$RESTORED_AGENTS" | grep -q 'smoke-test'
+          if echo "$RESTORED_AGENTS" | grep -q 'post-backup-agent'; then
+            echo "restore did not revert the post-snapshot agent" >&2
+            exit 1
+          fi
+
           kill $PID
+
+  e2e-smoke:
+    name: Playwright e2e smoke (login, create channel)
+    needs: build-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rivulets-linux-amd64
+          path: dist
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # ui/playwright.config.ts's testMatch (**/*.e2e.{ts,js}) previously
+      # matched zero files, and this binary-backed run is separate from
+      # `npm run test:coverage` (test-ui job, vitest-only) -- so this is
+      # the only place that actually exercises it.
+      - name: Start packaged binary
+        run: |
+          chmod +x dist/rivulets-linux-amd64
+          export RIVULETS_WORKSPACE_DIR="$(mktemp -d)"
+          nohup ./dist/rivulets-linux-amd64 > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8484/api/v1/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8484/api/v1/health | grep '"status":"ok"'
+
+      - name: Run Playwright e2e smoke
+        working-directory: ui
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8484
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: playwright-report
+          path: ui/playwright-report
+          retention-days: 7
+
+      - name: Stop packaged binary
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
+
+  docker-build:
+    name: Docker build (image, healthcheck, non-root /data write)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build image
+        run: docker build -t rivulets:ci .
+
+      - name: Run container
+        run: docker run -d --name rivulets-ci -p 8484:8484 -v rivulets-ci-data:/data rivulets:ci
+
+      # Dockerfile's own HEALTHCHECK, not a separate curl loop -- this is
+      # what `docker ps` / an orchestrator actually watches, so exercising
+      # anything else wouldn't catch a broken HEALTHCHECK command itself.
+      - name: Wait for HEALTHCHECK to report healthy
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format '{{.State.Health.Status}}' rivulets-ci)
+            [ "$STATUS" = "healthy" ] && break
+            sleep 2
+          done
+          docker inspect --format '{{.State.Health.Status}}' rivulets-ci | grep -q '^healthy$'
+
+      - name: Verify UI is bundled and served
+        run: curl -sf http://127.0.0.1:8484/ | grep -q '<title>Rivulets</title>'
+
+      # The image's USER directive and /data ownership/volume are only
+      # real if the process actually runs as that user and can write
+      # workspace state there -- not just that `useradd`/`chown` appear
+      # in the Dockerfile.
+      - name: Verify non-root user and writable /data
+        run: |
+          docker exec rivulets-ci whoami | grep -q '^rivulets$'
+          docker exec rivulets-ci sh -c 'touch /data/ci-write-check && rm /data/ci-write-check'
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker logs rivulets-ci
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f rivulets-ci
