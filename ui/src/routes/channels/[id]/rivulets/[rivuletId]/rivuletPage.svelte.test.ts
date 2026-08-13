@@ -390,6 +390,34 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Send' }).click();
 
 		await expect.element(page.getByText('Failed to send message')).toBeInTheDocument();
+		// A send failure must not hide the existing transcript behind the
+		// error -- it's a distinct `sendError`, not a reuse of `loadError`.
+		// (Rivulet has no title, so "Kickoff message" also matches the <h1>
+		// derived from it -- .last() targets the transcript message itself.)
+		await expect.element(page.getByText('Kickoff message').last()).toBeInTheDocument();
+	});
+
+	it('shows an error on the banner when resume fails, without throwing', async () => {
+		const pausedRivulet: Rivulet = { ...activeRivulet, status: 'paused' };
+		vi.mocked(channels.get).mockResolvedValue(generalChannel);
+		vi.mocked(rivulets.get).mockResolvedValue(pausedRivulet);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		vi.mocked(rivulets.resume).mockRejectedValueOnce(new Error('Failed to resume rivulet'));
+
+		render(RivuletPage);
+		await expect
+			.element(page.getByText('This rivulet is paused — agent replies are suppressed.'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Resume' }).click();
+
+		expect(rivulets.resume).toHaveBeenCalledWith('riv-1');
+		await expect.element(page.getByText('Failed to resume rivulet')).toBeInTheDocument();
+		// The banner (and its "still paused" implication) stays up rather than
+		// leaving the user staring at a resume button with no explanation.
+		await expect
+			.element(page.getByText('This rivulet is paused — agent replies are suppressed.'))
+			.toBeInTheDocument();
 	});
 
 	it('downloads an attachment when clicked', async () => {

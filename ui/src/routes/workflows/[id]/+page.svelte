@@ -82,6 +82,13 @@
 	let edgeDeleteBusy = $state(false);
 	let edgeDeleteError = $state<string | null>(null);
 	let connectError = $state<string | null>(null);
+	let nodesMoveError = $state<string | null>(null);
+	// Chained onto for every drag gesture so overlapping PATCH batches (the
+	// user drags node A, then immediately drags node B before A's request
+	// resolves) are sent one at a time instead of racing -- otherwise a
+	// slower first request finishing after the second could stomp on the
+	// second's already-persisted position.
+	let nodesMoveQueue: Promise<void> = Promise.resolve();
 	// #198: seeded from the selected connection's condition_json in
 	// startEditEdge -- 'none' means "always follow", the same as a null
 	// condition_json (see _validate_condition, api/workflows.py).
@@ -622,18 +629,40 @@
 	async function handleNodesMoved(updates: { id: string; positionX: number; positionY: number }[]) {
 		if (!workflow) return;
 		const workflowId = workflow.id;
+		const previousPositions = new Map(
+			updates.map((u) => {
+				const n = nodeList.find((n) => n.id === u.id);
+				return [u.id, { position_x: n?.position_x ?? null, position_y: n?.position_y ?? null }];
+			})
+		);
 		nodeList = nodeList.map((n) => {
 			const update = updates.find((u) => u.id === n.id);
 			return update ? { ...n, position_x: update.positionX, position_y: update.positionY } : n;
 		});
-		await Promise.all(
-			updates.map((u) =>
-				workflows.updateNode(workflowId, u.id, {
-					position_x: u.positionX,
-					position_y: u.positionY
-				})
-			)
-		);
+		nodesMoveQueue = nodesMoveQueue.then(async () => {
+			nodesMoveError = null;
+			try {
+				await Promise.all(
+					updates.map((u) =>
+						workflows.updateNode(workflowId, u.id, {
+							position_x: u.positionX,
+							position_y: u.positionY
+						})
+					)
+				);
+			} catch (err) {
+				nodesMoveError = err instanceof Error ? err.message : 'Failed to save step position';
+				// Revert only the nodes this gesture moved, back to where they
+				// were before it -- not a full reload, so an unrelated drag
+				// gesture that's still queued behind this one keeps its own
+				// already-applied optimistic position.
+				nodeList = nodeList.map((n) => {
+					const previous = previousPositions.get(n.id);
+					return previous ? { ...n, ...previous } : n;
+				});
+			}
+		});
+		await nodesMoveQueue;
 	}
 
 	function startEditEdge(edgeId: string) {
@@ -1343,6 +1372,10 @@
 
 		{#if connectError}
 			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
+		{/if}
+
+		{#if nodesMoveError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{nodesMoveError}</p>
 		{/if}
 
 		{#if editingEdgeId}

@@ -1198,6 +1198,27 @@ describe('workflows/[id]/+page.svelte', () => {
 		});
 	});
 
+	it('shows an error and reverts the position when persisting a dragged node fails', async () => {
+		mockLoad();
+		vi.mocked(workflows.updateNode).mockRejectedValueOnce(new Error('Cannot save step position'));
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+		await expect.element(page.getByTestId('workflow-node-n2')).toBeInTheDocument();
+
+		await page.getByTestId('workflow-node-n1').dropTo(page.getByTestId('workflow-node-n2'));
+
+		await expect.element(page.getByText('Cannot save step position')).toBeInTheDocument();
+		expect(workflows.updateNode).toHaveBeenCalledWith('wf-1', 'n1', {
+			position_x: expect.any(Number),
+			position_y: expect.any(Number)
+		});
+		// The node itself (and the rest of the canvas) survives the failure --
+		// this isn't a thrown, unhandled rejection.
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+	});
+
 	it('draws a connection by dragging from one node’s output handle to another’s input handle, supporting fan-out from a node that already has an outbound edge', async () => {
 		mockLoad();
 		vi.mocked(workflows.listNodes).mockResolvedValue([fetchNode, formatNode, orphanNode]);
