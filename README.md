@@ -66,7 +66,7 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 
 ### Local-first security posture
 
-- The web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed.
+- The web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed — on macOS and native Linux installs. The Code Execution tool isn't available on Windows or in the default Docker image (no sandbox backend on Windows yet; firejail isn't installed in the image — see [`docs/security.md`](docs/security.md)); it fails closed on those platforms rather than running unsandboxed.
 - **Multi-human workspaces via scoped invites** — a second person can join without ever seeing the recovery phrase; invite-based sessions are gated out of sensitive surfaces (provider credentials, sync control, settings) and never gain peer-to-peer mesh membership.
 
 ## Installation
@@ -82,7 +82,7 @@ rivulets
 
 This downloads the right binary for your OS/architecture from [GitHub Releases](https://github.com/jwilson411/Rivulets/releases), verifies its SHA-256 checksum, and installs it to `~/.local/bin`. No Python or Node.js required on your machine — everything is bundled. If [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is on your PATH, the script also verifies each binary's Sigstore signature — keyless, tied to the GitHub Actions workflow that built it — which a checksum alone can't do, since the checksum is published from the same release as the binary it's checking.
 
-**Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it.
+**Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it. The Code Execution built-in tool is unavailable on Windows — there's no sandbox backend wired up yet (see [`docs/security.md`](docs/security.md)) — everything else works.
 
 **Intel Mac:** no native binary yet (only Apple Silicon `darwin-arm64` is built) — use Docker or build from source below.
 
@@ -103,6 +103,8 @@ docker run -d --name rivulets \
 ```
 
 Workspace data (the SQLite database, uploaded files, keys, logs) lives in `/data` inside the container — always mount a volume there, or a container restart starts a fresh workspace. The port is published loopback-only (`127.0.0.1:8484`) by default, matching a native install's security posture: reachable from this machine only. Change that to `8484:8484` only if you deliberately want it reachable from your LAN — Rivulets has no additional network auth beyond the workspace key.
+
+**Code Execution tool:** unavailable in this image — it doesn't ship firejail, so the tool reports itself unavailable and fails closed rather than running agent code unsandboxed. See [`docs/security.md`](docs/security.md#code-execution-under-docker) for why, and the opt-in profile if you need it anyway.
 
 ### Build from source
 

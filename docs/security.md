@@ -54,7 +54,9 @@ Layer 5: Credential Isolation
 Layer 6: Sandboxed Code Execution
   └─ The code execution tool runs inside firejail (Linux) or sandbox-exec
      (macOS), restricted to the workspace directory with network access
-     denied by default.
+     denied by default. Unavailable on Windows and, by default, in the
+     published Docker image (see below) — the tool reports itself
+     unavailable and refuses to run rather than executing unsandboxed.
 ```
 
 ## Key derivation
@@ -78,8 +80,28 @@ All derived keys are computed at login time and held in memory only — they're 
 - **Network:** the App Server refuses to start bound to anything other than `127.0.0.1` unless explicitly overridden. CORS is disabled — the UI and API share an origin. A `Content-Security-Policy` header restricts script and connect sources to `'self'`.
 - **Auth:** sessions use a bearer JWT in the `Authorization` header, held in browser memory (not `localStorage`/`sessionStorage`) — never an ambient cookie, so there's no CSRF-style attack surface to defend against.
 - **File permissions:** everything under `~/.rivulets/` (the database, keys, config, logs) is created with a restrictive umask so it's readable only by the owning user.
-- **Sandboxed code execution:** the Code Execution tool runs under `firejail --private=<dir> --private-tmp --private-dev --caps.drop=all --seccomp`, with `--net=none` unless network access is explicitly allowed. On macOS, `sandbox-exec` provides the equivalent restriction. If neither is available on the host, the tool refuses to run rather than executing unsandboxed.
+- **Sandboxed code execution:** the Code Execution tool runs under `firejail --private=<dir> --private-tmp --private-dev --caps.drop=all --seccomp`, with `--net=none` unless network access is explicitly allowed. On macOS, `sandbox-exec` provides the equivalent restriction. If neither is available on the host, the tool refuses to run rather than executing unsandboxed. This includes Windows (no sandbox backend implemented yet) and the published Docker image (see "Code execution under Docker" below).
 - **Outbound request filtering:** the built-in `http_request` tool blocks requests to loopback, private, link-local, and other reserved IP ranges — including on redirect hops — since an agent's outbound requests can be driven by synced or otherwise untrusted content. This closes off SSRF against the node's own localhost services and LAN.
+- **API docs disabled:** `/docs`, `/redoc`, and `/openapi.json` are turned off (`docs_url=None` etc. in `app.py`). Every other route already sits behind the workspace JWT; this just removes unauthenticated surface with no product cost, since the API has no external integrators to document for.
+
+### Code execution under Docker
+
+The published Docker image does **not** install firejail, so the Code Execution tool reports itself unavailable under a stock `docker compose up` (it fails closed with `SandboxUnavailableError` rather than running agent-submitted code unsandboxed — same behavior as an unpatched Windows install).
+
+This is deliberate, not an oversight: firejail needs to create its own mount/user namespaces, which needs `CAP_SYS_ADMIN` — a capability outside Docker's default capability bounding set. Installing the firejail binary into the image without also granting that capability would leave it present but non-functional. Adding `CAP_SYS_ADMIN` to every container by default, to support one opt-in tool, would weaken this image's baseline hardening for every install to benefit the minority that use Code Execution under Docker.
+
+If you need Code Execution under Docker, you can opt in and accept that tradeoff yourself:
+
+1. Extend this repo's `Dockerfile` with `RUN apt-get update && apt-get install -y --no-install-recommends firejail && rm -rf /var/lib/apt/lists/*` in the runtime stage.
+2. Run the container with the extra capability and a permissive AppArmor profile, e.g. in `docker-compose.yml`:
+   ```yaml
+   cap_add:
+     - SYS_ADMIN
+   security_opt:
+     - apparmor:unconfined
+   ```
+
+Only do this if you understand and accept that it grants the container a capability capable of far more than firejail alone (mount manipulation, namespace creation) — it's a real reduction in the container's isolation from the host, not a free unlock.
 
 ## Threat model summary
 

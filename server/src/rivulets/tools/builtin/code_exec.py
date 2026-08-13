@@ -37,7 +37,10 @@ lands — api/tools.py surfaces this so an agent can't be handed a tool
 that will only fail the first time it's actually invoked (the same
 "unavailable" pattern NFR-2.4 already uses for unreachable model
 providers). The same applies on Linux/macOS if the required sandbox
-binary isn't installed.
+binary isn't installed — including the published Docker image, which
+does not install firejail (see Dockerfile's runtime-stage comment and
+docs/security.md for why, and the opt-in profile for installs that want
+it anyway).
 """
 
 import shutil

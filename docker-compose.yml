@@ -16,6 +16,25 @@ services:
     volumes:
       - rivulets-data:/data
     restart: unless-stopped
+    # Least-privilege container: the process already runs as a non-root
+    # user (see Dockerfile) and needs no Linux capability beyond that —
+    # it doesn't bind a privileged port, chown outside /data, or manage
+    # devices. no-new-privileges blocks setuid/setgid-based escalation
+    # (irrelevant here since firejail, which needs it, isn't installed —
+    # see docs/security.md — but harmless to keep on regardless).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Not enabled by default: read_only: true would additionally lock down
+    # the root filesystem, but needs a tmpfs mount for /tmp (and possibly
+    # /home/rivulets, depending on what libraries in use cache there) to
+    # avoid breaking things that expect a writable scratch dir outside
+    # /data. Add it yourself if you've verified your setup doesn't need
+    # writes outside /data and /tmp:
+    #   read_only: true
+    #   tmpfs:
+    #     - /tmp
 
 volumes:
   rivulets-data:
