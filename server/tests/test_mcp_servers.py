@@ -412,6 +412,108 @@ def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[st
     return {"Authorization": f"Bearer {accepted['token']}"}
 
 
+# #231: unregister/reconnect are owner-gated for a stdio server (local
+# subprocess execution) or any server holding stored headers/env
+# (keychain secrets) -- see api/mcp_servers.py's _requires_owner_to_mutate.
+
+
+def test_unregister_stdio_mcp_server_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="list_dir", description="Lists.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Filesystem tools", "transport": "stdio", "command": "npx"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=invite_headers)
+    assert response.status_code == 403
+
+    still_there = client.get(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers)
+    assert still_there.status_code == 200
+
+
+def test_reconnect_stdio_mcp_server_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="list_dir", description="Lists.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Filesystem tools", "transport": "stdio", "command": "npx"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=invite_headers)
+    assert response.status_code == 403
+
+
+def test_unregister_mcp_server_with_headers_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Authed server",
+            "url": "http://127.0.0.1:9999/mcp",
+            "headers": {"Authorization": "Bearer sk-real-secret"},
+        },
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=invite_headers)
+    assert response.status_code == 403
+
+
+def test_reconnect_mcp_server_with_headers_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={
+            "name": "Authed server",
+            "url": "http://127.0.0.1:9999/mcp",
+            "headers": {"Authorization": "Bearer sk-real-secret"},
+        },
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=invite_headers)
+    assert response.status_code == 403
+
+
+def test_unregister_plain_streamable_http_mcp_server_stays_open_to_invite_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server with no stdio transport and no stored headers/env carries
+    nothing sensitive to protect -- unregistering/reconnecting it stays
+    open to any grant, unchanged from before #231."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Plain server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    reconnected = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=invite_headers)
+    assert reconnected.status_code == 200, reconnected.text
+
+    deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=invite_headers)
+    assert deleted.status_code == 204
+
+
 def test_register_mcp_server_with_headers_stores_names_not_values(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

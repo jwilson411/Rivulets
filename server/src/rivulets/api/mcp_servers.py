@@ -166,6 +166,19 @@ async def _get_or_404(db: DbSession, server_id: str) -> MCPServer:
     return server
 
 
+def _requires_owner_to_mutate(server: MCPServer) -> bool:
+    """#231: a stdio server spawns a local subprocess (arbitrary local code
+    execution, module docstring), and a server with stored headers/env
+    holds keychain secrets -- deleting or reconnecting either is owner-only,
+    the same bar as registering them in the first place or replacing their
+    headers/env (set_mcp_server_headers/set_mcp_server_env below). A plain
+    streamable-http server with no stored auth stays open to any grant,
+    unchanged from before this check existed."""
+    return (
+        server.transport == "stdio" or bool(server.header_names_json) or bool(server.env_names_json)
+    )
+
+
 def _header_names(server: MCPServer) -> list[str]:
     return json.loads(server.header_names_json) if server.header_names_json else []
 
@@ -397,8 +410,15 @@ async def set_mcp_server_env(
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def unregister_mcp_server(server_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def unregister_mcp_server(
+    server_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
     server = await _get_or_404(db, server_id)
+    if _requires_owner_to_mutate(server) and claims.grant != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required")
     if server.header_names_json:
         delete_secret(mcp_header_ref(server.id))
     if server.env_names_json:
@@ -413,9 +433,14 @@ async def unregister_mcp_server(server_id: str, db: DbSession, _: CurrentWorkspa
 
 @router.post("/{server_id}/reconnect", response_model=MCPServerDetailOut)
 async def reconnect_mcp_server(
-    server_id: str, db: DbSession, _: CurrentWorkspaceId
+    server_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> MCPServerDetailOut:
     server = await _get_or_404(db, server_id)
+    if _requires_owner_to_mutate(server) and claims.grant != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required")
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)

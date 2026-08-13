@@ -8,6 +8,8 @@ provider configured -- see dispatch/rule_generation.py's module
 docstring), so agent creation here never makes a real LLM call.
 """
 
+from typing import cast
+
 from fastapi.testclient import TestClient
 
 from rivulets.db.models import SyncPendingOutbound
@@ -589,3 +591,213 @@ def test_set_agent_tool_scopes_requires_owner_grant(
     # Reading isn't owner-gated, same as the rest of this router.
     read = client.get(f"/api/v1/agents/{agent['id']}/tool-scopes", headers=invite_headers)
     assert read.status_code == 200
+
+
+# #231: invite-grant escalation paths -- see api/agents.py's
+# _check_tool_assignment_authorized/_agent_holds_owner_scope docstrings.
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def _tool_id_by_name(client: TestClient, auth_headers: dict[str, str], name: str) -> str:
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    (tool,) = [t for t in tools if t["name"] == name]
+    return cast(str, tool["id"])
+
+
+def test_create_agent_with_sensitive_builtin_tool_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    execute_python_id = _tool_id_by_name(client, auth_headers, "execute_python")
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Sneaky",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [execute_python_id],
+        },
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An owner session can, same request otherwise.
+    owner_created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Sneaky",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [execute_python_id],
+        },
+        headers=auth_headers,
+    )
+    assert owner_created.status_code == 201, owner_created.text
+
+
+def test_create_agent_with_scoped_non_sensitive_tool_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """create_invite isn't in SENSITIVE_BUILTIN_TOOL_NAMES, but it does
+    carry a required_scope (invites:manage) -- the "any tool with a
+    required_scope" arm of the gate, not just the fixed sensitive set."""
+    invite_headers = _invite_headers(client, auth_headers)
+    create_invite_id = _tool_id_by_name(client, auth_headers, "create_invite")
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Sneaky",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [create_invite_id],
+        },
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_create_agent_with_unscoped_tool_stays_open_to_invite_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    custom_tool = client.post(
+        "/api/v1/tools",
+        json={"name": "custom_tool", "description": "Does a thing."},
+        headers=auth_headers,
+    ).json()
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Harmless",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [custom_tool["id"]],
+        },
+        headers=invite_headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_update_agent_tool_ids_with_sensitive_tool_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    invite_headers = _invite_headers(client, auth_headers)
+    execute_python_id = _tool_id_by_name(client, auth_headers, "execute_python")
+
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"tool_ids": [execute_python_id]},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_update_agent_approved_for_unattended_tools_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"approved_for_unattended_tools": True},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    owner_response = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"approved_for_unattended_tools": True},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 200, owner_response.text
+    assert owner_response.json()["approved_for_unattended_tools"] is True
+
+
+def test_update_agent_holding_owner_scope_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    # Even an unrelated field (name) is blocked -- once an agent holds a
+    # standing scope, only the owner can touch it at all.
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"name": "Renamed"},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An agent with no granted scope stays open to ordinary edits.
+    other_agent = _create_agent(client, auth_headers, name="Unscoped")
+    ordinary = client.patch(
+        f"/api/v1/agents/{other_agent['id']}",
+        json={"name": "Renamed Fine"},
+        headers=invite_headers,
+    )
+    assert ordinary.status_code == 200, ordinary.text
+
+
+def test_update_routing_rules_on_agent_holding_owner_scope_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["settings:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}/routing-rules",
+        json={"rules": [{"rule_type": "keyword", "pattern": "db", "priority": 1}]},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_rollback_agent_version_on_agent_holding_owner_scope_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={"instructions": "You are an updated DBA."},
+        headers=auth_headers,
+    )
+    client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["workflows:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        f"/api/v1/agents/{agent['id']}/versions/1/rollback",
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
