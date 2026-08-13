@@ -279,3 +279,20 @@ def test_stream_ticket_is_a_short_lived_purpose_scoped_token(
     # Expires in roughly a minute, not the ~24h a normal session token gets.
     expires_at = datetime.fromisoformat(body["expires_at"])
     assert expires_at - datetime.now(UTC) < timedelta(minutes=2)
+
+
+def test_stream_ticket_cannot_be_used_as_a_bearer_session_token(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#234: `purpose == "stream"` is supposed to confine a minted ticket to
+    the one query-param auth path it was designed for (get_current_
+    workspace_id_for_stream) -- before this fix, _decode_token / get_
+    session_claims never inspected `purpose`, so presenting the ticket as a
+    normal `Authorization: Bearer` header made it a full, if short-lived,
+    session on every other route."""
+    ticket_response = client.post("/api/v1/auth/stream-ticket", headers=auth_headers)
+    assert ticket_response.status_code == 200
+    ticket = ticket_response.json()["ticket"]
+
+    response = client.get("/api/v1/channels", headers={"Authorization": f"Bearer {ticket}"})
+    assert response.status_code == 401
