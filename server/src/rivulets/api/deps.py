@@ -56,12 +56,31 @@ def _decode_token(token: str) -> SessionClaims:
     )
 
 
+def _decode_session_token(token: str) -> SessionClaims:
+    """Like _decode_token, but rejects any purpose-scoped ticket (#234) --
+    a token minted by POST /auth/stream-ticket carries `purpose == "stream"`
+    and decodes just fine (same signing key), but it's only meant to work
+    as a query-string credential on the one SSE route that needs it
+    (get_current_workspace_id_for_stream below). Every route that reaches
+    a session via the Authorization header -- which is every route except
+    that one -- must go through here instead of the bare _decode_token, or
+    a 60-second stream ticket leaked into logs/history/Referer would be a
+    full session token anywhere it's replayed as a Bearer header."""
+    claims = _decode_token(token)
+    if claims.purpose is not None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "A purpose-scoped ticket cannot be used as a session token",
+        )
+    return claims
+
+
 async def get_session_claims(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> SessionClaims:
     if credentials is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
-    return _decode_token(credentials.credentials)
+    return _decode_session_token(credentials.credentials)
 
 
 async def get_optional_session_claims(
@@ -76,7 +95,7 @@ async def get_optional_session_claims(
     if credentials is None:
         return None
     try:
-        return _decode_token(credentials.credentials)
+        return _decode_session_token(credentials.credentials)
     except HTTPException:
         return None
 
@@ -111,7 +130,7 @@ async def get_current_workspace_id_for_stream(
     is something that expires in seconds and is useless anywhere else.
     """
     if credentials is not None:
-        return _decode_token(credentials.credentials).workspace_id
+        return _decode_session_token(credentials.credentials).workspace_id
     token = request.query_params.get("token")
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")

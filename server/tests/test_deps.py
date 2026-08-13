@@ -7,14 +7,17 @@ token against an active session."""
 import jwt
 import pytest
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.datastructures import QueryParams
 from starlette.requests import Request
 
 from rivulets.api.deps import (
     SessionClaims,
+    _decode_session_token,  # pyright: ignore[reportPrivateUsage]
     _decode_token,  # pyright: ignore[reportPrivateUsage]
     get_current_human_id,
     get_current_workspace_id_for_stream,
+    get_session_claims,
     require_owner_grant,
 )
 from rivulets.security.session import get_session_key_store
@@ -86,6 +89,83 @@ async def test_get_current_workspace_id_for_stream_rejects_a_full_session_token(
 
         with pytest.raises(HTTPException) as exc_info:
             await get_current_workspace_id_for_stream(request, None)
+        assert exc_info.value.status_code == 401
+    finally:
+        get_session_key_store().clear()
+
+
+async def test_get_session_claims_rejects_a_stream_ticket_used_as_a_bearer_token() -> None:
+    """#234: a stream ticket (purpose="stream") is only meant to work as a
+    query-string credential on get_current_workspace_id_for_stream -- if
+    presented as a normal `Authorization: Bearer` header instead, it must
+    not be treated as a full session, or a leaked ticket would be a
+    60-second-but-otherwise-full session on every route, not just the one
+    it was minted for."""
+    signing_key = b"stream-signing-key"
+    get_session_key_store().set_key(signing_key)
+    try:
+        token = jwt.encode(
+            {"sub": "workspace-123", "grant": "owner", "purpose": "stream"},
+            signing_key,
+            algorithm="HS256",
+        )
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_session_claims(credentials)
+        assert exc_info.value.status_code == 401
+    finally:
+        get_session_key_store().clear()
+
+
+def test_decode_session_token_rejects_an_unknown_purpose() -> None:
+    """Not just "stream" -- any non-null `purpose` claim marks a
+    purpose-scoped ticket rather than a full session token, so a future
+    ticket type is closed off by default instead of needing its own
+    denylist entry here."""
+    signing_key = b"stream-signing-key"
+    get_session_key_store().set_key(signing_key)
+    try:
+        token = jwt.encode(
+            {"sub": "workspace-123", "purpose": "something-else"},
+            signing_key,
+            algorithm="HS256",
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            _decode_session_token(token)
+        assert exc_info.value.status_code == 401
+    finally:
+        get_session_key_store().clear()
+
+
+def test_decode_session_token_accepts_a_normal_session_token() -> None:
+    signing_key = b"stream-signing-key"
+    get_session_key_store().set_key(signing_key)
+    try:
+        token = jwt.encode({"sub": "workspace-123"}, signing_key, algorithm="HS256")
+        claims = _decode_session_token(token)
+        assert claims.workspace_id == "workspace-123"
+    finally:
+        get_session_key_store().clear()
+
+
+async def test_get_current_workspace_id_for_stream_rejects_a_stream_ticket_via_header() -> None:
+    """The header path is documented as "any normal session token, same as
+    every other route" -- a stream ticket sent as a Bearer header rather
+    than the `token` query param must be rejected the same way it is
+    everywhere else, not accepted just because this dependency already
+    knows how to read `purpose == "stream"` tokens."""
+    signing_key = b"stream-signing-key"
+    get_session_key_store().set_key(signing_key)
+    try:
+        token = jwt.encode(
+            {"sub": "workspace-123", "purpose": "stream"}, signing_key, algorithm="HS256"
+        )
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        request = Request({"type": "http", "query_string": b"", "headers": []})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_workspace_id_for_stream(request, credentials)
         assert exc_info.value.status_code == 401
     finally:
         get_session_key_store().clear()
