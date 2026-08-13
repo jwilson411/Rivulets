@@ -10,6 +10,12 @@ Cost is a best-effort static-pricing estimate (agentos/pricing.py); a run
 whose model isn't in that table contributes tokens but no cost, which would
 silently understate spend if not surfaced — `cost_incomplete` on the
 response flags that at least one included run's cost couldn't be estimated.
+
+#246: a dispatcher_call row (llm_fallback.py's routing call specifically)
+can have `agent_id is None` -- it evaluates a whole team's roster before
+any agent is matched, so there's nobody to attribute it to. Those rows
+still count toward totals/by_model (outerjoin, not join) but are excluded
+from by_agent, which has nothing to key them under.
 """
 
 from dataclasses import dataclass
@@ -97,7 +103,7 @@ async def get_usage(db: DbSession, _: CurrentWorkspaceId, range: UsageRange = "w
 
     result = await db.execute(
         select(AgentRun, Agent.name)
-        .join(Agent, Agent.id == AgentRun.agent_id)
+        .outerjoin(Agent, Agent.id == AgentRun.agent_id)
         .where(AgentRun.created_at >= since_iso)
     )
     rows = result.all()
@@ -109,8 +115,13 @@ async def get_usage(db: DbSession, _: CurrentWorkspaceId, range: UsageRange = "w
     for run, agent_name in rows:
         totals.add(run)
 
-        agent_bucket = by_agent.setdefault(run.agent_id, _Bucket(agent_name=agent_name))
-        agent_bucket.add(run)
+        # #246: dispatcher_call rows with no single agent (agent_name is
+        # also None from the outerjoin) still count toward totals/by_model
+        # above, just not here -- there's nothing to key a by_agent bucket
+        # under.
+        if run.agent_id is not None:
+            agent_bucket = by_agent.setdefault(run.agent_id, _Bucket(agent_name=agent_name))
+            agent_bucket.add(run)
 
         model_bucket = by_model.setdefault((run.model, run.tier), _Bucket())
         model_bucket.add(run)

@@ -1450,7 +1450,7 @@ async def _invoke_agent(
         # model_used stays None and run_agent falls through to the agent's
         # already-registered (cheap-tier) model -- see agentos/service.py's
         # _build_agno_agent "auto" fallback for the other half of this.
-        model_tier = await classify_tier(db, message_content)
+        model_tier = await classify_tier(db, agent, message_content)
         model_used = await resolve_tier_model(db, model_tier)
 
     assert rivulet.agentos_session_id is not None  # set by the top-level call before any agent runs

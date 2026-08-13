@@ -4,11 +4,14 @@ mocked so these run without a real provider/LLM call.
 """
 
 import json
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.db.models import ProviderConfig, WorkspaceSetting
+from rivulets.db.models import AgentRun, ProviderConfig, WorkspaceSetting
 from rivulets.dispatch.engine import AgentDispatchInfo
 from rivulets.dispatch.llm_fallback import (
     _DispatchDecision,  # pyright: ignore[reportPrivateUsage]
@@ -21,6 +24,16 @@ _AGENTS = [
         agent_id="frontend-1", name="Frontend", description="Handles UI/CSS questions."
     ),
 ]
+
+
+def _fake_run_output(decision: _DispatchDecision) -> Any:
+    """_run_decision now returns the raw RunOutput (#246), not just the
+    parsed decision -- these fakes stand in for that, with metrics/model
+    dump close enough that record_agent_run's getattr-based reads work."""
+    return SimpleNamespace(
+        content=decision,
+        metrics=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
+    )
 
 
 async def test_llm_fallback_returns_empty_with_no_provider(db_session: AsyncSession) -> None:
@@ -64,8 +77,8 @@ async def test_llm_fallback_defaults_to_enabled_when_setting_is_unset(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
-        return _DispatchDecision(agent_names=["DBA"])
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=["DBA"]))
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -104,8 +117,8 @@ async def test_llm_fallback_maps_agent_names_back_to_ids(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()  # never touched -- _run_decision is mocked below too
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
-        return _DispatchDecision(agent_names=["DBA"])
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=["DBA"]))
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -125,8 +138,8 @@ async def test_llm_fallback_is_case_insensitive_on_agent_name(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
-        return _DispatchDecision(agent_names=["dba"])
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=["dba"]))
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -148,8 +161,8 @@ async def test_llm_fallback_drops_hallucinated_agent_names(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
-        return _DispatchDecision(agent_names=["DBA", "NotOnThisTeam"])
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=["DBA", "NotOnThisTeam"]))
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -169,8 +182,8 @@ async def test_llm_fallback_returns_empty_when_nothing_matches(
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> _DispatchDecision:
-        return _DispatchDecision(agent_names=[])
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=[]))
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -184,16 +197,17 @@ async def test_llm_fallback_returns_empty_when_nothing_matches(
 async def test_llm_fallback_returns_empty_when_decision_is_none(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_run_decision returns None when the model's output didn't parse
-    into the expected schema -- must degrade gracefully, not raise."""
+    """_run_decision's RunOutput.content isn't a _DispatchDecision when the
+    model's output didn't parse into the expected schema -- must degrade
+    gracefully, not raise."""
     db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
     await db_session.commit()
 
     async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    async def fake_run_decision(*_args: object, **_kwargs: object) -> None:
-        return None
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(None)  # type: ignore[arg-type]
 
     monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
     monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
@@ -202,3 +216,49 @@ async def test_llm_fallback_returns_empty_when_decision_is_none(
     result = await fallback("totally unrelated message", _AGENTS)
     assert result.agent_ids == []
     assert result.invoked is True
+
+
+async def test_llm_fallback_records_dispatcher_call_spend(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#246: a completed LLM call here must show up as an AgentRun with no
+    agent_id (nobody was matched yet) and source='dispatcher_call', so its
+    tokens/cost stop being invisible to usage/budgets."""
+    db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
+    await db_session.commit()
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def fake_run_decision(*_args: object, **_kwargs: object) -> Any:
+        return _fake_run_output(_DispatchDecision(agent_names=["DBA"]))
+
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback._run_decision", fake_run_decision)
+
+    fallback = build_llm_fallback(db_session)
+    await fallback("query help please", _AGENTS)
+
+    run = (await db_session.execute(select(AgentRun))).scalars().one()
+    assert run.agent_id is None
+    assert run.source == "dispatcher_call"
+    assert run.input_tokens == 10
+    assert run.output_tokens == 5
+
+
+async def test_llm_fallback_does_not_record_when_the_call_raises(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
+    await db_session.commit()
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("no keychain in CI")
+
+    monkeypatch.setattr("rivulets.dispatch.llm_fallback.resolve_model", fake_resolve_model)
+
+    fallback = build_llm_fallback(db_session)
+    await fallback("How do I optimize this SQL query?", _AGENTS)
+
+    runs = (await db_session.execute(select(AgentRun))).scalars().all()
+    assert runs == []

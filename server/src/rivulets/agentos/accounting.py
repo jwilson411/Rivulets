@@ -25,13 +25,14 @@ from rivulets.db.models import Agent, AgentRun
 
 async def record_agent_run(
     db: AsyncSession,
-    agent: Agent,
+    agent: Agent | None,
     model: str,
     tier: ModelTier | None,
     status: str,
     run_output: RunOutput,
     *,
     requested_model: str | None = None,
+    source: str = "agent_run",
 ) -> AgentRun:
     """Persist one row of run/token/cost accounting. `model` may be the
     AUTO_MODEL sentinel itself (auto mode whose tier resolution failed,
@@ -44,7 +45,16 @@ async def record_agent_run(
     run instead of the model that was actually asked for -- `model` is
     then the one that answered, `requested_model` the one that failed
     first. Returns the created (flushed, so `.id` is populated) row --
-    #96's tracing needs it to size an agent_run span's cost/model."""
+    #96's tracing needs it to size an agent_run span's cost/model.
+
+    `agent` is None only for #246's dispatcher_call rows that can't be
+    attributed to a single agent (llm_fallback.py's routing call, which
+    evaluates a whole team's roster before any agent is matched) -- see
+    AgentRun.agent_id's docstring. `source='dispatcher_call'` marks a
+    dispatcher-side LLM call (routing/classification) rather than an
+    actual agent reply; log_tool_calls is still safe to call unconditionally
+    below since dispatcher calls never pass `tools=` to their AgnoAgent and
+    so always have an empty `run_output.tools`."""
     # getattr, not run_output.metrics: dispatch tests monkeypatch run_agent
     # with a plain SimpleNamespace duck-typing only .status/.tools/
     # .get_content_as_string() (test_rivulet_dispatch.py), which has no
@@ -60,7 +70,8 @@ async def record_agent_run(
         cost_usd = estimate_cost_usd(provider, model_name, input_tokens, output_tokens)
 
     run = AgentRun(
-        agent_id=agent.id,
+        agent_id=agent.id if agent is not None else None,
+        source=source,
         model=model,
         requested_model=requested_model,
         tier=tier,

@@ -26,6 +26,13 @@ Also honors the `dispatcher.fallback_enabled` workspace setting
 anywhere until now) so a workspace can turn this stage off entirely, e.g.
 for cost control or to keep routing fully deterministic/auditable.
 
+#246: every actual LLM call here is recorded via record_agent_run with
+agent_id=None, source='dispatcher_call' -- this call evaluates a whole
+team's roster before any single agent is matched, so there's no agent to
+attribute it to (see AgentRun.agent_id's docstring). Before this, the
+tokens/cost this stage spent were invisible to the usage dashboard and
+every budget cap.
+
 Returns an engine.LlmFallbackResult, not a bare list — R-4's dispatcher
 hit-rate tracking (#31) needs to tell "no provider configured/fallback
 disabled, nothing attempted" apart from "an LLM call ran and matched
@@ -43,9 +50,11 @@ import logging
 
 from agno.agent import Agent as AgnoAgent
 from agno.models.base import Model
+from agno.run.agent import RunOutput
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model
 from rivulets.db.models import WorkspaceSetting
 from rivulets.dispatch.engine import AgentDispatchInfo, LlmFallback, LlmFallbackResult
@@ -74,17 +83,17 @@ def _build_prompt(message: str, agents: list[AgentDispatchInfo]) -> str:
     return f"Team agents:\n{roster}\n\nMessage: {message}"
 
 
-async def _run_decision(model: Model, prompt: str) -> _DispatchDecision | None:
+async def _run_decision(model: Model, prompt: str) -> RunOutput:
     """Isolated seam for tests to monkeypatch — everything above this is
-    pure string/DB logic, everything below is the actual LLM call."""
+    pure string/DB logic, everything below is the actual LLM call. Returns
+    the raw RunOutput (not just the parsed decision) so the caller can
+    record its token/cost accounting (#246) as well as read `.content`."""
     decider = AgnoAgent(model=model, instructions=_INSTRUCTIONS)
     # arun()'s overloads carry Unknown type args from agno's own generics —
     # same benign gap noted in agentos/service.py's run_agent().
-    run_output = await decider.arun(  # pyright: ignore[reportUnknownMemberType]
+    return await decider.arun(  # pyright: ignore[reportUnknownMemberType]
         prompt, output_schema=_DispatchDecision, stream=False
     )
-    content = run_output.content
-    return content if isinstance(content, _DispatchDecision) else None
 
 
 async def _fallback_enabled(db: AsyncSession) -> bool:
@@ -105,14 +114,24 @@ def build_llm_fallback(db: AsyncSession) -> LlmFallback:
 
         try:
             model = await resolve_model(db, provider_model)
-            decision = await _run_decision(model, _build_prompt(message, agents))
+            run_output = await _run_decision(model, _build_prompt(message, agents))
         except Exception:
             logger.warning("LLM dispatch fallback failed", exc_info=True)
             # An LLM call was attempted (or at least committed to) before
             # failing — still a fallback invocation for R-4's cost-tracking
-            # purposes, just one that came back empty.
+            # purposes, just one that came back empty. Nothing to record
+            # here: a raised exception means there's no RunOutput (and
+            # possibly no tokens were actually spent) to account for.
             return LlmFallbackResult(agent_ids=[], invoked=True)
 
+        # #246: record this call's spend even though it isn't attributable
+        # to a single agent — see AgentRun.agent_id's docstring.
+        await record_agent_run(
+            db, None, provider_model, None, "completed", run_output, source="dispatcher_call"
+        )
+
+        content = run_output.content
+        decision = content if isinstance(content, _DispatchDecision) else None
         if decision is None:
             return LlmFallbackResult(agent_ids=[], invoked=True)
         name_to_id = {a.name.lower(): a.agent_id for a in agents}

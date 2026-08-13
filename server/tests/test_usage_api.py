@@ -197,3 +197,35 @@ async def test_usage_range_excludes_older_runs(
     for range_ in ("day", "week", "month"):
         body = client.get(f"/api/v1/usage?range={range_}", headers=auth_headers).json()
         assert body["run_count"] == 0, f"range={range_}"
+
+
+async def test_usage_counts_dispatcher_call_rows_in_totals_but_not_by_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#246: llm_fallback.py's routing call records an AgentRun with
+    agent_id=None, source='dispatcher_call' -- it must still count toward
+    workspace totals/by_model (an outerjoin, not an inner join), but has
+    nothing to key a by_agent bucket under."""
+    async with session_scope() as session:
+        session.add(
+            AgentRun(
+                agent_id=None,
+                source="dispatcher_call",
+                model="anthropic:claude-3-5-haiku-latest",
+                status="completed",
+                input_tokens=200,
+                output_tokens=100,
+                total_tokens=300,
+                cost_usd=0.0005,
+            )
+        )
+        await session.commit()
+
+    body = client.get("/api/v1/usage", headers=auth_headers).json()
+    assert body["run_count"] == 1
+    assert body["total_tokens"] == 300
+    assert body["total_cost_usd"] == pytest.approx(0.0005)
+    assert body["by_agent"] == []
+    assert len(body["by_model"]) == 1
+    assert body["by_model"][0]["model"] == "anthropic:claude-3-5-haiku-latest"
+    assert body["by_model"][0]["total_tokens"] == 300

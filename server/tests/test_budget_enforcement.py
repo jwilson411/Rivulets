@@ -247,10 +247,16 @@ def test_workspace_scope_cap_blocks_any_agent(
     assert len(calls) == 1
 
 
-def test_unpriced_runs_excluded_from_spend_but_counted_separately(
+def test_unpriced_runs_excluded_from_spend_but_block_hard_stop_caps(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#246: a hard_stop cap can't certify spend is under its limit once
+    an unpriced (unknown-cost) run shows up in its window, so it must
+    block on the very next call rather than fail open forever."""
+    calls: list[str] = []
+
     async def fake_unpriced(*_args: object, **_kwargs: object) -> Any:
+        calls.append("run")
         return SimpleNamespace(
             status=RunStatus.completed,
             tools=None,
@@ -292,17 +298,24 @@ def test_unpriced_runs_excluded_from_spend_but_counted_separately(
         headers=auth_headers,
     )
     rivulet_id = rivulet.json()["id"]
+    # Pre-run spend is $0/no unpriced runs yet -- the first call still goes
+    # through (#97's "in-flight work finishes" decision).
+    assert len(calls) == 1
+
     client.post(
         f"/api/v1/rivulets/{rivulet_id}/messages",
         json={"content": "another widget question"},
         headers=auth_headers,
     )
+    # The window now contains one unpriced run -- blocked before a second
+    # call, even though known spend_usd is still $0 and never neared the cap.
+    assert len(calls) == 1
 
     status_body = client.get(f"/api/v1/budgets/{cap_id}/status", headers=auth_headers).json()
     assert status_body["spend_usd"] == 0
-    assert status_body["unpriced_run_count"] == 2
+    assert status_body["unpriced_run_count"] == 1
     assert status_body["breached"] is False
-    assert status_body["blocked"] is False
+    assert status_body["blocked"] is True
 
 
 async def test_period_rollover_unblocks_without_override(

@@ -53,9 +53,16 @@ class BudgetStatus:
     spend_usd: float
     # Runs in this window whose model isn't in pricing.py's static table
     # (cost_usd is None) -- excluded from spend_usd rather than treated as
-    # zero cost, same as usage.py's cost_incomplete pattern, but surfaced
-    # here so a cap can't be silently exceeded by spend nobody can see.
+    # zero cost, same as usage.py's cost_incomplete pattern. A hard_stop
+    # cap treats unpriced_run_count > 0 as blocking on its own (see
+    # check_budget_caps) even when `breached` below is False, since spend
+    # nobody can see could already be over the limit.
     unpriced_run_count: int
+    # Pure dollar-threshold comparison (spend_usd >= cap.limit_usd) --
+    # doesn't factor in unpriced_run_count. check_budget_caps and
+    # api/budgets.py's _status_out both add the unpriced check on top of
+    # this for hard_stop caps specifically; 'alert' caps only ever look at
+    # this field, unchanged from before.
     breached: bool
 
 
@@ -159,23 +166,29 @@ async def check_budget_caps(
     workspace-scope caps, most specific first. Returns (alerts, blocking):
     `alerts` is every breached 'alert'-action cap not yet alerted this
     period (caller posts a system_alert for each, non-blocking); `blocking`
-    is the first breached 'hard_stop' cap not currently overridden for
-    this period, or None. Short-circuits on the first hard_stop match --
-    the call is refused either way, so there's no need to keep checking
-    once one is found."""
+    is the first 'hard_stop' cap not currently overridden for this period
+    whose dollar spend is breached *or* whose window contains an unpriced
+    run (see BudgetStatus.unpriced_run_count's docstring -- a hard_stop cap
+    can't certify spend is under its limit when some of that spend is
+    unknown, so it refuses rather than silently failing open), or None.
+    Short-circuits on the first hard_stop match -- the call is refused
+    either way, so there's no need to keep checking once one is found."""
     alerts: list[BudgetAlert] = []
     blocking: BudgetAlert | None = None
     for cap in await _applicable_caps(db, agent, team_id):
         status = await compute_spend(db, cap)
-        if not status.breached:
-            continue
-        state = await _get_or_create_state(db, cap.id)
         if cap.action == "hard_stop":
+            if not (status.breached or status.unpriced_run_count > 0):
+                continue
+            state = await _get_or_create_state(db, cap.id)
             if state.override_active and state.override_period_start == status.period_start:
                 continue  # overridden for this period
             blocking = BudgetAlert(cap=cap, status=status)
             break
         else:  # 'alert'
+            if not status.breached:
+                continue
+            state = await _get_or_create_state(db, cap.id)
             if state.alerted_at is not None and state.period_start == status.period_start:
                 continue  # already alerted this period, don't repeat every turn
             state.period_start = status.period_start
