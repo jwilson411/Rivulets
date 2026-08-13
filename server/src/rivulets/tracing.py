@@ -222,12 +222,20 @@ async def run_retention_loop() -> None:
     it never kills the loop."""
     while True:
         try:
-            async with session_scope() as db:
-                deleted = await prune_old_traces(db, retention_days=DEFAULT_RETENTION_DAYS)
-                if deleted:
-                    logger.info(
-                        "Pruned %d run trace(s) older than %d days", deleted, DEFAULT_RETENTION_DAYS
-                    )
+            await _retention_tick()
         except Exception:
             logger.exception("Run trace retention tick failed")
         await asyncio.sleep(RETENTION_POLL_INTERVAL_SECONDS)
+
+
+async def _retention_tick() -> None:
+    """One retention poll: its own `session_scope()`, matching workflows/
+    scheduler.py's `_tick()` -- pulled out of `run_retention_loop` so tests
+    can drive a single tick directly instead of the infinite loop."""
+    async with session_scope() as db:
+        deleted = await prune_old_traces(db, retention_days=DEFAULT_RETENTION_DAYS)
+        await db.commit()
+        if deleted:
+            logger.info(
+                "Pruned %d run trace(s) older than %d days", deleted, DEFAULT_RETENTION_DAYS
+            )
