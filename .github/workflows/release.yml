@@ -130,6 +130,22 @@ jobs:
             --output-certificate "${{ matrix.binary }}.pem" \
             "${{ matrix.binary }}"
 
+      # Release smoke test (issue #245): verify the signature this job just
+      # produced against the exact identity/issuer check install.sh and
+      # update.py apply to every download, so a broken cert/signature pair
+      # (or a workflow edit that silently weakens the identity regexp) fails
+      # the release itself instead of only surfacing once a user installs.
+      - name: Verify signature (release smoke test)
+        shell: bash
+        run: |
+          cd dist
+          cosign verify-blob \
+            --certificate "${{ matrix.binary }}.pem" \
+            --signature "${{ matrix.binary }}.sig" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@.+\$" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ matrix.binary }}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.binary }}

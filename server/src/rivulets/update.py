@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -34,11 +35,26 @@ logger = logging.getLogger(__name__)
 # Overridable the same way scripts/install.sh's RIVULETS_REPO env var is,
 # for testing against a fork -- but read once at import time since (unlike
 # install.sh, a fresh shell invocation each time) this module stays loaded
-# for the life of the process.
-REPO = os.environ.get("RIVULETS_REPO", "jwilson411/Rivulets")
+# for the life of the process. Ignored unless RIVULETS_ALLOW_REPO_OVERRIDE=1
+# is also set (issue #245): otherwise a compromised environment variable
+# alone (no filesystem/code access needed) could point self-update at an
+# attacker-controlled fork whose "latest release" is a malicious binary --
+# cosign verification below would even pass, since it's checked against
+# whatever REPO ends up being.
+_DEFAULT_REPO = "jwilson411/Rivulets"
+_repo_override = os.environ.get("RIVULETS_REPO", _DEFAULT_REPO)
+if _repo_override != _DEFAULT_REPO and os.environ.get("RIVULETS_ALLOW_REPO_OVERRIDE") != "1":
+    logger.warning(
+        "RIVULETS_REPO=%s ignored (set RIVULETS_ALLOW_REPO_OVERRIDE=1 to allow "
+        "self-update from a non-default repo)",
+        _repo_override,
+    )
+    _repo_override = _DEFAULT_REPO
+REPO = _repo_override
 
 _GITHUB_API_TIMEOUT = 10.0
 _DOWNLOAD_TIMEOUT = 120.0
+_COSIGN_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
 # Set on the freshly-spawned process by _spawn_restarted_process, read (and
 # consumed) by main.py before it binds -- see wait_for_port_free.
@@ -59,7 +75,8 @@ class UpdateNotAvailableError(UpdateError):
 
 
 class UpdateVerificationError(UpdateError):
-    """Downloaded binary's SHA-256 didn't match the published checksum."""
+    """Downloaded binary failed checksum or cosign signature verification,
+    or cosign isn't available on PATH to perform that verification."""
 
 
 @dataclass(frozen=True)
@@ -171,6 +188,58 @@ async def _download_and_verify(
     dest.chmod(0o755)
 
 
+def _cosign_available() -> bool:
+    return shutil.which("cosign") is not None
+
+
+async def _verify_cosign_signature(
+    client: httpx.AsyncClient, download_url: str, binary_path: Path, sig_path: Path, cert_path: Path
+) -> None:
+    """Sigstore keyless verification against release.yml's own OIDC identity
+    -- same check as scripts/install.sh's cosign step, but fails closed
+    rather than degrading to checksum-only (issue #245): install.sh is a
+    one-shot script a human reads before piping into `sh`, but this runs
+    unattended inside an already-trusted process, so silently accepting an
+    unsigned binary here is a much larger blast radius. A checksum alone
+    only proves the download wasn't corrupted in transit -- it's fetched
+    from the same GitHub Releases origin as the binary, so it proves
+    nothing about a compromised release pipeline.
+    """
+    if not _cosign_available():
+        raise UpdateVerificationError(
+            "cosign is required to verify update signatures but was not found on PATH. "
+            "Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/) "
+            "to enable self-update."
+        )
+
+    sig_response = await client.get(f"{download_url}.sig")
+    sig_response.raise_for_status()
+    cert_response = await client.get(f"{download_url}.pem")
+    cert_response.raise_for_status()
+    sig_path.write_bytes(sig_response.content)
+    cert_path.write_bytes(cert_response.content)
+
+    cosign_argv = [
+        "cosign",
+        "verify-blob",
+        "--certificate",
+        str(cert_path),
+        "--signature",
+        str(sig_path),
+        "--certificate-identity-regexp",
+        f"^https://github.com/{REPO}/.github/workflows/release.yml@.+$",
+        "--certificate-oidc-issuer",
+        _COSIGN_OIDC_ISSUER,
+        str(binary_path),
+    ]
+    result = subprocess.run(cosign_argv, capture_output=True, text=True, check=False)  # noqa: S603, S607
+    if result.returncode != 0:
+        raise UpdateVerificationError(
+            "cosign signature verification failed: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+
 def _swap_binaries(current_exe: Path, new_binary: Path) -> None:
     """Move the running binary aside, drop the verified download into its
     place. Same-directory renames only (new_binary is always written next
@@ -272,7 +341,19 @@ async def apply_update() -> None:
 
     current_exe = Path(sys.executable).resolve()
     new_binary = current_exe.with_name(current_exe.name + ".new")
+    sig_path = current_exe.with_name(current_exe.name + ".sig")
+    cert_path = current_exe.with_name(current_exe.name + ".pem")
     async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
         await _download_and_verify(client, status.download_url, status.checksum_url, new_binary)
+        try:
+            await _verify_cosign_signature(
+                client, status.download_url, new_binary, sig_path, cert_path
+            )
+        except UpdateVerificationError:
+            new_binary.unlink(missing_ok=True)
+            raise
+        finally:
+            sig_path.unlink(missing_ok=True)
+            cert_path.unlink(missing_ok=True)
     _swap_binaries(current_exe, new_binary)
     _spawn_restarted_process(current_exe)
