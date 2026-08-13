@@ -248,17 +248,32 @@ class AgentRun(Base):
     local telemetry, not user content; a fresh peer doesn't need another
     node's run history to function.
 
-    `source` leaves room for #31 (dispatcher hit-rate tracking) to record
-    dispatcher-side LLM calls (classification, rule generation, fallback
-    routing) in this same table without a schema change — those all record
-    `"dispatcher_call"` instead of the default `"agent_run"`.
+    `source` records dispatcher-side LLM calls (#246: llm_fallback.py's
+    routing decision, complexity_classifier.py's tier classification) in
+    this same table as `"dispatcher_call"` instead of the default
+    `"agent_run"`, so that spend is no longer invisible to the usage
+    dashboard and budget caps (#31's dispatcher hit-rate tracking can use
+    the same rows later).
+
+    `agent_id` is nullable for exactly one case: llm_fallback.py's routing
+    call runs before any agent has been matched, evaluating a whole team's
+    roster at once, so there's no single agent to attribute it to. Every
+    other AgentRun (including complexity_classifier.py's dispatcher_call
+    rows, which classify a specific agent's next reply) keeps a real
+    agent_id. A null-agent_id row only shows up in workspace-scope budget
+    caps (dispatch/budgets.py's compute_spend) and workspace usage totals
+    (api/usage.py) — agent/team-scope caps can't attribute it to anyone
+    more specific, which is an accepted v1 gap the same as BudgetCap's
+    documented no-cross-peer-aggregation limitation.
     """
 
     __tablename__ = "agent_run"
     __table_args__ = (Index("idx_agent_run_agent", "agent_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agent.id", ondelete="CASCADE"))
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent.id", ondelete="CASCADE"), default=None
+    )
     source: Mapped[str] = mapped_column(default="agent_run")  # 'agent_run' | 'dispatcher_call'
     model: Mapped[str]  # 'provider:model_name' — the concrete model that actually ran
     # Set only when a fallback chain (#103) served this run instead of the
@@ -1057,7 +1072,12 @@ class BudgetCap(Base):
     singleton consumer of #101's coordinator election, which is not
     wired yet -- the election primitive itself shipped). Same explicit
     v1 limitation WorkflowSchedule (#92) documents for its own
-    local-only firing.
+    local-only firing. #246's launch-readiness scan re-raised this same
+    gap (multiple online peers can each independently pass the same cap,
+    letting workspace-wide spend reach 2x the configured limit); accepted
+    as a documented v1 limitation rather than fixed there, same reasoning
+    as above -- the fix is consuming the coordinator election, not
+    something specific to budget enforcement.
 
     `ck_budget_cap_scope` mirrors EvalSuite's ck_eval_suite_single_subject:
     exactly one of agent_id/team_id is set for their respective scope_type,

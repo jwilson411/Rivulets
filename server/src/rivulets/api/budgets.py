@@ -82,7 +82,10 @@ class BudgetStatusOut(BudgetCapOut):
     spend_usd: float
     unpriced_run_count: int
     breached: bool
-    blocked: bool  # breached AND action == 'hard_stop' AND not currently overridden
+    # action == 'hard_stop' AND (breached OR unpriced_run_count > 0) AND not
+    # currently overridden -- see dispatch/budgets.py's check_budget_caps
+    # for why an unpriced run blocks on its own.
+    blocked: bool
     override_active: bool
 
 
@@ -101,7 +104,11 @@ async def _status_out(db: DbSession, cap: BudgetCap) -> BudgetStatusOut:
         and state.override_active
         and state.override_period_start == result.period_start
     )
-    blocked = result.breached and cap.action == "hard_stop" and not override_active
+    blocked = (
+        cap.action == "hard_stop"
+        and (result.breached or result.unpriced_run_count > 0)
+        and not override_active
+    )
     return BudgetStatusOut(
         id=cap.id,
         scope_type=cap.scope_type,
