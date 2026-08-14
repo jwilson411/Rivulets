@@ -53,6 +53,7 @@ from rivulets.db.models import (
     Tool,
     ToolVersion,
     Workflow,
+    WorkflowNode,
     WorkspaceSetting,
 )
 from rivulets.db.session import session_scope
@@ -66,6 +67,7 @@ from rivulets.sync.apply import (
     RIVULET_SPEC,
     TEAM_SPEC,
     TOMBSTONE_FIELD,
+    WORKFLOW_NODE_SPEC,
     WORKFLOW_SPEC,
     WORKSPACE_SETTING_SPEC,
     ClockComparison,
@@ -244,6 +246,86 @@ async def test_apply_remote_workflow_change_syncs_published(db_session: AsyncSes
     workflow = await db_session.get(Workflow, "wf-1")
     assert workflow is not None
     assert workflow.published is True
+
+
+async def test_apply_remote_workflow_change_syncs_remediation_and_on_call(
+    db_session: AsyncSession,
+) -> None:
+    """#316: `on_failure_workflow_id` and `on_call_agent_id` were added to
+    the Workflow model after WORKFLOW_SPEC and never synced -- a peer had
+    nothing to apply them onto, so auto-remediation (#94 layer 2) and
+    on-call @mention (#94 layer 3) silently never fired there."""
+    db_session.add(Workflow(id="wf-fallback", name="fallback-flow", description=None))
+    db_session.add(Agent(id="agent-oncall", name="OnCall", **_AGENT_FIELDS))
+    db_session.add(
+        Workflow(
+            id="wf-2",
+            name="remediated-flow",
+            description=None,
+            on_failure_workflow_id=None,
+            on_call_agent_id=None,
+        )
+    )
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        WORKFLOW_SPEC,
+        "wf-2",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "remediated-flow",
+            "description": None,
+            "published": False,
+            "on_failure_workflow_id": "wf-fallback",
+            "on_call_agent_id": "agent-oncall",
+        },
+    )
+    assert result.applied is True
+
+    workflow = await db_session.get(Workflow, "wf-2")
+    assert workflow is not None
+    assert workflow.on_failure_workflow_id == "wf-fallback"
+    assert workflow.on_call_agent_id == "agent-oncall"
+
+
+async def test_apply_remote_workflow_node_change_syncs_child_workflow_id(
+    db_session: AsyncSession,
+) -> None:
+    """#316: `child_workflow_id` (#85/#201) has the same FK shape as
+    `agent_id`, which is already synced, but was never added to
+    WORKFLOW_NODE_SPEC -- a nested-workflow node arrived on a peer with
+    child_workflow_id=None, so workflows/engine.py's
+    `_execute_workflow_node` had nothing to invoke."""
+    db_session.add(Workflow(id="wf-parent", name="parent-flow", description=None))
+    db_session.add(Workflow(id="wf-child", name="child-flow", description=None))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        WORKFLOW_NODE_SPEC,
+        "node-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "workflow_id": "wf-parent",
+            "name": "nested",
+            "node_type": "workflow",
+            "agent_id": None,
+            "child_workflow_id": "wf-child",
+            "config_json": None,
+            "retry_max_attempts": 0,
+            "retry_backoff_seconds": 5,
+            "position_x": None,
+            "position_y": None,
+        },
+    )
+    assert result.applied is True
+
+    node = await db_session.get(WorkflowNode, "node-1")
+    assert node is not None
+    assert node.child_workflow_id == "wf-child"
 
 
 async def test_apply_remote_delete_removes_local_entity(db_session: AsyncSession) -> None:

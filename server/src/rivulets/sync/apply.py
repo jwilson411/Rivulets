@@ -239,7 +239,16 @@ WORKFLOW_SPEC = EntitySpec(
     # workflow published on one peer actually become nest-runnable on
     # another, the same way it's already runnable there via the ordinary
     # slash-command/schedule/webhook trigger paths.
-    ("name", "description", "published"),
+    #
+    # #316: `on_failure_workflow_id` (#94 layer 2) and `on_call_agent_id`
+    # (#94 layer 3) were added to the model after this spec and never
+    # synced -- a peer applying a remote workflow change had nothing to
+    # apply them onto, so auto-remediation and on-call @mention silently
+    # never fire there even though api/workflows.py's update_workflow
+    # publishes the envelope for both fields. Same FK-ordering hazard as
+    # workflow_id below; same IntegrityError -> SyncPendingInbound retry
+    # queue closes the race window.
+    ("name", "description", "published", "on_failure_workflow_id", "on_call_agent_id"),
 )
 # workflow_id has the same FK-ordering hazard as Rivulet.channel_id/
 # Message.rivulet_id (module docstring): included anyway because a node/
@@ -254,6 +263,14 @@ WORKFLOW_NODE_SPEC = EntitySpec(
         "name",
         "node_type",
         "agent_id",
+        # #316: `child_workflow_id` (#85/#201, node_type='workflow') has the
+        # same FK-ordering shape as `agent_id` above -- and the same
+        # IntegrityError -> SyncPendingInbound retry queue -- but was never
+        # added when #85 landed. Without it a nested-workflow node arrives
+        # on a peer with child_workflow_id=None, so workflows/engine.py's
+        # _execute_workflow_node has nothing to invoke and the canvas shows
+        # a workflow-type node that doesn't actually nest.
+        "child_workflow_id",
         "config_json",
         "retry_max_attempts",
         "retry_backoff_seconds",
