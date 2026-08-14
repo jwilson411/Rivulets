@@ -46,10 +46,21 @@ on `WorkflowUpdate` that can be explicitly cleared back to null via
 PATCH -- `update_workflow` checks `body.model_fields_set` for both
 rather than the `is not None` shortcut every other field here uses,
 since each, once configured, needs a way to be turned back off.
-`_validate_on_failure_workflow` only checks existence, not
-self-reference, unlike `_validate_child_workflow` -- see
-Workflow.on_failure_workflow_id's own docstring for why a self-reference
-here is a legitimate "retry once" shape rather than a mistake.
+`_validate_on_failure_workflow` doesn't reject a self-reference, unlike
+`_validate_child_workflow` -- see Workflow.on_failure_workflow_id's own
+docstring for why a self-reference here is a legitimate "retry once"
+shape rather than a mistake. It does reject an unpublished target
+(#292), unlike `_validate_child_workflow` -- a 'workflow' node's
+`child_workflow_id` is a graph-building reference you can legitimately
+wire up before the child is published (workflows/engine.py's runtime
+check catches it if it's still a draft when the parent actually runs);
+`on_failure_workflow_id` fires unattended off a run's finalize, so this
+endpoint refuses to save one pointed at a draft in the first place,
+on top of workflows/engine.py's own `_maybe_trigger_remediation`
+re-checking `published` at trigger time for the same reason
+workflows/engine.py's `_execute_workflow_node` re-checks a
+`child_workflow_id`'s -- a workflow can be un-published again after
+this passed.
 `_validate_on_call_agent` is a plain existence check, same as any other
 entity-reference field here -- the workspace-wide fallback
 ('workflows.default_on_call_agent_id', api/settings.py) is the one
@@ -422,12 +433,21 @@ async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workfl
 
 
 async def _validate_on_failure_workflow(db: DbSession, on_failure_workflow_id: str) -> None:
-    """#94 layer 2: existence only -- unlike `_validate_child_workflow`, a
-    self-reference is deliberately *not* rejected here (see
-    Workflow.on_failure_workflow_id's docstring for why "retry this same
-    workflow once on failure" is safe without that check)."""
-    if await db.get(Workflow, on_failure_workflow_id) is None:
+    """#94 layer 2 / #292: existence and `published`. A self-reference is
+    deliberately *not* rejected here, unlike `_validate_child_workflow`
+    (see Workflow.on_failure_workflow_id's docstring for why "retry this
+    same workflow once on failure" is safe without that check) -- but
+    `published` is required, unlike `_validate_child_workflow`, since a
+    remediation run fires unattended off a run's finalize rather than as
+    part of the graph the workflow builder is actively editing."""
+    remediation_workflow = await db.get(Workflow, on_failure_workflow_id)
+    if remediation_workflow is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Remediation workflow not found")
+    if not remediation_workflow.published:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Workflow /{remediation_workflow.name} isn't published",
+        )
 
 
 async def _validate_on_call_agent(db: DbSession, on_call_agent_id: str) -> None:

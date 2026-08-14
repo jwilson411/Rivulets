@@ -860,11 +860,21 @@ async def _maybe_trigger_remediation(
     Deliberately not wired into run_workflow's own "no entry point"
     early-return failure -- that's a configuration error a remediation
     attempt can't possibly fix, exactly the kind of failure #94 itself
-    calls out as not worth auto-remediating."""
+    calls out as not worth auto-remediating.
+
+    #292: re-checks `remediation_workflow.published` here too, the same
+    gate #249 added to `_execute_workflow_node`'s nested 'workflow' node
+    -- this fires unattended (`triggered_by='remediation'` is in
+    `_UNATTENDED_TRIGGERS`) off a run's finalize, with no human in the
+    loop to notice an accidental draft reference the way a live slash
+    command or agent tool call would. Silently skipping (like the
+    `remediation_workflow is None` case just above) rather than raising:
+    there's no in-flight run left to fail here, `failed_run` already
+    finished and committed before this was ever called."""
     if workflow.on_failure_workflow_id is None or failed_run.triggered_by == "remediation":
         return
     remediation_workflow = await db.get(Workflow, workflow.on_failure_workflow_id)
-    if remediation_workflow is None:
+    if remediation_workflow is None or not remediation_workflow.published:
         return
 
     await _post_message(

@@ -100,6 +100,9 @@ def test_set_and_clear_on_failure_workflow_id(
     other WorkflowUpdate field -- explicitly clearable back to null."""
     workflow_id = _create_workflow(client, auth_headers, "flaky")
     fixer_id = _create_workflow(client, auth_headers, "fixer")
+    fixer_node_id = _add_transform_node(client, auth_headers, fixer_id, "recover", "{input}")
+    _connect(client, auth_headers, fixer_id, None, fixer_node_id)
+    _publish_workflow(client, auth_headers, fixer_id)  # #292: remediation target must be published
 
     set_resp = client.patch(
         f"/api/v1/workflows/{workflow_id}",
@@ -127,6 +130,9 @@ def test_on_failure_workflow_id_allows_self_reference(
     """Unlike child_workflow_id (#85), a workflow retrying itself once on
     failure is a legitimate shape, not rejected -- see #94's depth-1 cap."""
     workflow_id = _create_workflow(client, auth_headers, "self-retry")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "step", "{input}")
+    _connect(client, auth_headers, workflow_id, None, node_id)
+    _publish_workflow(client, auth_headers, workflow_id)  # #292: remediation target must be published
     resp = client.patch(
         f"/api/v1/workflows/{workflow_id}",
         json={"on_failure_workflow_id": workflow_id},
@@ -146,6 +152,24 @@ def test_on_failure_workflow_id_rejects_unknown_workflow(
         headers=auth_headers,
     )
     assert resp.status_code == 404
+
+
+def test_on_failure_workflow_id_rejects_unpublished_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#292: a draft can't be wired up as a remediation target -- unlike
+    child_workflow_id (a graph-building reference the runtime re-checks
+    later), a remediation run fires unattended off a finalize, so this
+    endpoint refuses to save one pointed at an unpublished workflow."""
+    workflow_id = _create_workflow(client, auth_headers, "flaky3")
+    draft_fixer_id = _create_workflow(client, auth_headers, "draft-fixer")
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": draft_fixer_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "isn't published" in resp.text
 
 
 def test_set_and_clear_on_call_agent_id(client: TestClient, auth_headers: dict[str, str]) -> None:
