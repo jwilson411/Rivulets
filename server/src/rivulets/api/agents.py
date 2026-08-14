@@ -211,19 +211,32 @@ async def _get_or_404(db: DbSession, agent_id: str) -> Agent:
 async def _check_tool_assignment_authorized(
     db: DbSession, tool_ids: list[str], claims: SessionClaims
 ) -> None:
-    """#231: assigning a tool with real blast radius -- one of the four
-    SENSITIVE_BUILTIN_TOOL_NAMES, or any tool whose required_scope is set
-    -- is owner-only. Assignment alone doesn't make a tool usable
-    (resolve_agent_tools still requires a separate AgentToolScope grant,
-    itself owner-only via set_agent_tool_scopes below), but an invite-grant
-    session shouldn't be able to stage one of these on an agent that
-    already holds, or might later be granted, the matching scope."""
+    """#231/#285: assigning a tool with real blast radius -- one of the
+    four SENSITIVE_BUILTIN_TOOL_NAMES, any tool whose required_scope is
+    set, or a custom/MCP tool -- is owner-only. Assignment alone doesn't
+    make a tool usable (resolve_agent_tools still requires a separate
+    AgentToolScope grant, itself owner-only via set_agent_tool_scopes
+    below), but an invite-grant session shouldn't be able to stage one of
+    these on an agent that already holds, or might later be granted, the
+    matching scope.
+
+    Custom and MCP tools have no required_scope (that field only exists
+    for builtins, agentos/tool_scopes.py's BUILTIN_TOOL_SCOPES), so they'd
+    otherwise fall through this gate entirely -- #285's confused-deputy
+    hole: a custom tool's code runs unsandboxed in the App Server process
+    (the reason POST /tools/{id}/versions is owner-gated, api/tools.py),
+    and an MCP tool resolves with the owner's stored headers/env
+    (tool_resolution.py's get_server_headers/get_server_env). Both are
+    real blast radius an invite-grant session shouldn't be able to hand a
+    self-authored agent."""
     if claims.grant == "owner" or not tool_ids:
         return
     result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
     for tool in result.scalars().all():
-        if tool.required_scope is not None or (
-            tool.tool_type == "builtin" and tool.name in SENSITIVE_BUILTIN_TOOL_NAMES
+        if (
+            tool.required_scope is not None
+            or tool.tool_type in ("custom", "mcp")
+            or (tool.tool_type == "builtin" and tool.name in SENSITIVE_BUILTIN_TOOL_NAMES)
         ):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
@@ -376,8 +389,22 @@ async def update_agent(
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_agent(
+    agent_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
+    """#285: mirrors update_agent/rollback_agent_version's
+    _agent_holds_owner_scope gate -- an invite-grant session couldn't
+    rewrite a privileged agent's instructions/tools/routing, but could
+    still delete it outright, which is at least as disruptive."""
     agent = await _get_or_404(db, agent_id)
+    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to delete an agent that holds a capability scope",
+        )
     await db.delete(agent)
     await db.commit()
     # Rebuilds AgentOS's registry from the remaining rows — the deleted
@@ -525,12 +552,26 @@ async def get_peer_preference(
 
 @router.put("/{agent_id}/peer-preference", response_model=PeerPreferenceOut)
 async def set_peer_preference(
-    agent_id: str, body: PeerPreferenceIn, db: DbSession, _: CurrentWorkspaceId
+    agent_id: str,
+    body: PeerPreferenceIn,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> PeerPreferenceOut:
     """capability_tag=None clears the preference. Clearing is local-only
     (not propagated to peers) -- same as Agent/Team deletion elsewhere in
-    this API, sync's generic path has no delete-propagation mechanism."""
+    this API, sync's generic path has no delete-propagation mechanism.
+
+    #285: mirrors update_agent's _agent_holds_owner_scope gate -- steering
+    which peer a privileged agent preferentially runs on is a subtler
+    version of the same confused-deputy risk as rewriting its
+    instructions."""
     await _get_or_404(db, agent_id)
+    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to set peer preference for an agent holding a capability scope",
+        )
     pref = await db.get(AgentPeerPreference, agent_id)
     if body.capability_tag is None:
         if pref is not None:

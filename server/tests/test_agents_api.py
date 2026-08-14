@@ -12,7 +12,7 @@ from typing import cast
 
 from fastapi.testclient import TestClient
 
-from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.models import MCPServer, SyncPendingOutbound, Tool
 from rivulets.db.session import session_scope
 
 
@@ -670,9 +670,13 @@ def test_create_agent_with_scoped_non_sensitive_tool_requires_owner_grant(
     assert response.status_code == 403
 
 
-def test_create_agent_with_unscoped_tool_stays_open_to_invite_grant(
+def test_create_agent_with_custom_tool_requires_owner_grant(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
+    """#285: a custom tool has required_scope=None (that field only
+    exists for builtins), but its code still runs unsandboxed in the App
+    Server process -- it must be gated the same as a sensitive builtin,
+    not fall through as "unscoped"."""
     invite_headers = _invite_headers(client, auth_headers)
     custom_tool = client.post(
         "/api/v1/tools",
@@ -691,7 +695,69 @@ def test_create_agent_with_unscoped_tool_stays_open_to_invite_grant(
         },
         headers=invite_headers,
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 403
+
+    owner_created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Harmless",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [custom_tool["id"]],
+        },
+        headers=auth_headers,
+    )
+    assert owner_created.status_code == 201, owner_created.text
+
+
+async def test_create_agent_with_mcp_tool_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#285: an MCP tool also has required_scope=None, and resolves at run
+    time with the owner's stored headers/env (tool_resolution.py's
+    get_server_headers/get_server_env) -- same gate as a custom tool."""
+    invite_headers = _invite_headers(client, auth_headers)
+    async with session_scope() as db:
+        server = MCPServer(name="test-server", url="http://localhost:9999/mcp")
+        db.add(server)
+        await db.commit()
+        tool_row = Tool(
+            name="remote_tool",
+            description="An MCP tool.",
+            tool_type="mcp",
+            mcp_server_id=server.id,
+            mcp_tool_name="remote_tool",
+        )
+        db.add(tool_row)
+        await db.commit()
+        mcp_tool_id = tool_row.id
+
+    response = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Harmless",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [mcp_tool_id],
+        },
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    owner_created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Harmless",
+            "description": "Handles database schema and SQL questions",
+            "instructions": "You are a DBA.",
+            "model": "anthropic:claude-haiku-4-5-20251001",
+            "tool_ids": [mcp_tool_id],
+        },
+        headers=auth_headers,
+    )
+    assert owner_created.status_code == 201, owner_created.text
 
 
 def test_update_agent_tool_ids_with_sensitive_tool_requires_owner_grant(
@@ -801,3 +867,51 @@ def test_rollback_agent_version_on_agent_holding_owner_scope_requires_owner_gran
         headers=invite_headers,
     )
     assert response.status_code == 403
+
+
+def test_delete_agent_holding_owner_scope_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(f"/api/v1/agents/{agent['id']}", headers=invite_headers)
+    assert response.status_code == 403
+
+    # An agent with no granted scope stays open to ordinary deletion.
+    other_agent = _create_agent(client, auth_headers, name="Unscoped")
+    ordinary = client.delete(f"/api/v1/agents/{other_agent['id']}", headers=invite_headers)
+    assert ordinary.status_code == 204
+
+
+def test_set_peer_preference_on_agent_holding_owner_scope_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    client.put(
+        f"/api/v1/agents/{agent['id']}/tool-scopes",
+        json={"scopes": ["settings:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An agent with no granted scope stays open to ordinary edits.
+    other_agent = _create_agent(client, auth_headers, name="Unscoped")
+    ordinary = client.put(
+        f"/api/v1/agents/{other_agent['id']}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=invite_headers,
+    )
+    assert ordinary.status_code == 200, ordinary.text

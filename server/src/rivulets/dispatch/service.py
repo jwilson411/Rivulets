@@ -45,6 +45,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -109,7 +110,7 @@ from rivulets.dispatch.llm_fallback import build_llm_fallback
 from rivulets.dispatch.rules import Rule, RuleType
 from rivulets.security import keys
 from rivulets.security.credentials import delete_secret
-from rivulets.security.network import detect_lan_address
+from rivulets.security.network import BlockedHostError, check_host_is_public, detect_lan_address
 from rivulets.streaming import publish
 from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
@@ -3314,6 +3315,23 @@ async def _sync_mcp_server_tools(db: AsyncSession, server: MCPServer) -> None:
         )
 
 
+def _mcp_server_requires_owner_to_mutate(server: MCPServer) -> bool:
+    """#285: mirrors api/mcp_servers.py's private _requires_owner_to_mutate
+    (duplicated rather than shared -- _sync_mcp_server_tools's docstring
+    above explains why dispatch/service.py never imports from api/). A
+    stdio server spawns a local subprocess, and a server with stored
+    headers/env holds keychain secrets; the HTTP route requires a live
+    owner *session* before reconnecting or deleting either. This trigger
+    handler has no session to check -- whoever is chatting with `agent`
+    drives it, which could be any invite-grant participant in the rivulet
+    -- so there's no live grant to compare against api/mcp_servers.py's
+    claims.grant. Refusing outright (never a "the owner is doing this"
+    exception) is the only sound default here."""
+    return (
+        server.transport == "stdio" or bool(server.header_names_json) or bool(server.env_names_json)
+    )
+
+
 async def _handle_register_mcp_server_trigger(
     db: AsyncSession, rivulet: Rivulet, agent: Agent, call: RegisterMcpServerCall
 ) -> list[Message]:
@@ -3322,7 +3340,15 @@ async def _handle_register_mcp_server_trigger(
     mcp_servers.py's module docstring) -- registration always persists
     the row even if the connection attempt fails (NFR-2.4), matching api/
     mcp_servers.py's register_mcp_server handler; reconnect_mcp_server can
-    retry later."""
+    retry later.
+
+    #285: `call.url` came out of a completed model run, i.e. untrusted
+    input by definition (the model could have been steered by injected
+    rivulet content, same threat model security/network.py's module
+    docstring describes for http_request.py) -- there's no "owner
+    deliberately chose this" exception the way there is for an owner
+    session driving api/mcp_servers.py's register_mcp_server directly, so
+    every call here goes through check_host_is_public, unconditionally."""
     if not call.url.strip():
         return [
             _system_message(
@@ -3330,6 +3356,28 @@ async def _handle_register_mcp_server_trigger(
                 rivulet,
                 f"@{agent.name} tried to register MCP server {call.name!r}, but didn't provide "
                 "a url.",
+            )
+        ]
+
+    host = urlsplit(call.url).hostname
+    if host is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to register MCP server {call.name!r}, but its url "
+                f"{call.url!r} has no host to connect to.",
+            )
+        ]
+    try:
+        check_host_is_public(host)
+    except BlockedHostError:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to register MCP server {call.name!r}, but its url points "
+                "at an internal/private network address, which isn't permitted.",
             )
         ]
 
@@ -3369,7 +3417,14 @@ async def _handle_reconnect_mcp_server_trigger(
     already stored -- reconnecting doesn't enter a new secret, so it
     isn't subject to the same restriction register_mcp_server is (tools/
     builtin/mcp_servers.py's module docstring). Mirrors api/
-    mcp_servers.py's reconnect_mcp_server handler."""
+    mcp_servers.py's reconnect_mcp_server handler.
+
+    #285: api/mcp_servers.py's reconnect_mcp_server route now requires a
+    live owner session for a stdio server, or one with stored headers/env
+    (_requires_owner_to_mutate) -- this trigger has no live session to
+    check (_mcp_server_requires_owner_to_mutate's docstring), so it
+    refuses those outright rather than silently reusing stored secrets/
+    respawning a subprocess on any rivulet participant's say-so."""
     result = await _resolve_mcp_server_ref(db, server_ref)
     if result is None:
         return [
@@ -3391,6 +3446,16 @@ async def _handle_reconnect_mcp_server_trigger(
             )
         ]
     server = result
+    if _mcp_server_requires_owner_to_mutate(server):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to reconnect MCP server {server.name!r}, but it's a stdio "
+                "server or has stored auth -- that requires a live owner session in the UI, not "
+                "just this chat.",
+            )
+        ]
 
     await _sync_mcp_server_tools(db, server)
     await db.commit()
@@ -3419,7 +3484,12 @@ async def _handle_delete_mcp_server_trigger(
 ) -> list[Message]:
     """#191: an agent called the delete_mcp_server tool. Mirrors api/
     mcp_servers.py's unregister_mcp_server handler (stored secret
-    cleanup, Tool rows cleared first for the FK)."""
+    cleanup, Tool rows cleared first for the FK).
+
+    #285: api/mcp_servers.py's unregister_mcp_server route now requires a
+    live owner session for a stdio server, or one with stored headers/env
+    (_requires_owner_to_mutate) -- same "no live session to check" gap as
+    reconnect above, closed the same way."""
     result = await _resolve_mcp_server_ref(db, server_ref)
     if result is None:
         return [
@@ -3441,6 +3511,16 @@ async def _handle_delete_mcp_server_trigger(
             )
         ]
     server = result
+    if _mcp_server_requires_owner_to_mutate(server):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete MCP server {server.name!r}, but it's a stdio "
+                "server or has stored auth -- that requires a live owner session in the UI, not "
+                "just this chat.",
+            )
+        ]
     server_name = server.name
     if server.header_names_json:
         delete_secret(mcp_header_ref(server.id))
