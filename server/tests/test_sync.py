@@ -90,7 +90,7 @@ from rivulets.sync.engine import (
     init_sync_engine,
     reset_sync_engine_for_testing,
 )
-from rivulets.sync.file_transfer import HASH_LEN, HIT_PREFIX, MISS_MARKER
+from rivulets.sync.file_transfer import HASH_LEN, HIT_PREFIX, MAX_FILE_BYTES, MISS_MARKER
 
 _AGENT_FIELDS = {
     "description": "A test agent used only in sync tests.",
@@ -691,7 +691,7 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
     """node-b is a LAN peer here, and sync.eager_files_lan defaults to
     True (unset in the DB), so this exercises the eager path end to end."""
     content = b"fetched over the wire"
-    content_hash = "b" * 64
+    content_hash = hashlib.sha256(content).hexdigest()
 
     class _FakeEngine:
         running = True
@@ -731,6 +731,48 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
     assert file_row is not None
     assert file_row.synced_to_nodes is not None
     assert json.loads(file_row.synced_to_nodes) == ["node-b"]
+
+
+async def test_apply_remote_file_change_discards_content_that_does_not_match_hash(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#288: a mesh peer can lie -- it can ack a request_file() call for
+    content_hash with any bytes it likes. Those bytes must be re-hashed
+    and compared before ever landing on disk under a name (content_hash)
+    that later readers (download_file, ingest_document) will trust
+    without re-checking."""
+    content_hash = hashlib.sha256(b"the real content").hexdigest()
+
+    class _FakeEngine:
+        running = True
+
+        def peer_is_lan(self, peer_id: str) -> bool:
+            return True
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            return b"not the bytes that hash to content_hash"
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 16,
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert not local_path.exists()
 
 
 async def test_apply_remote_file_change_defers_fetch_for_wan_peer_by_default(
@@ -782,7 +824,7 @@ async def test_apply_remote_file_change_fetches_wan_content_when_eager_wan_enabl
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     content = b"pushed over WAN"
-    content_hash = "e" * 64
+    content_hash = hashlib.sha256(content).hexdigest()
     db_session.add(WorkspaceSetting(key="sync.eager_files_wan", value="true"))
     await db_session.commit()
 
@@ -2552,7 +2594,7 @@ async def test_handle_file_transfer_stream_reports_hit(tmp_path: Path) -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
     try:
-        content_hash = "a" * HASH_LEN
+        content_hash = hashlib.sha256(b"hello from disk").hexdigest()
         local_path = get_settings().files_dir / content_hash[:2] / content_hash
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(b"hello from disk")
@@ -2564,6 +2606,31 @@ async def test_handle_file_transfer_stream_reports_hit(tmp_path: Path) -> None:
             stream.written
             == HIT_PREFIX + struct.pack(">Q", len(b"hello from disk")) + b"hello from disk"
         )
+        assert stream.closed is True
+    finally:
+        monkeypatch.undo()
+
+
+async def test_handle_file_transfer_stream_refuses_to_serve_mismatched_content(
+    tmp_path: Path,
+) -> None:
+    """#288: the file on disk under files_dir/<hash>/ must actually hash
+    to <hash> -- e.g. disk corruption, or a row written before this check
+    existed -- or it's served as a MISS rather than handed out as if it
+    were authentic content for the requested hash."""
+    engine = SyncEngine(tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+    try:
+        content_hash = "a" * HASH_LEN
+        local_path = get_settings().files_dir / content_hash[:2] / content_hash
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"this does not hash to content_hash")
+
+        stream = _FakeFileStream(to_read=content_hash.encode())
+        await engine._handle_file_transfer_stream(stream)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+        assert stream.written == MISS_MARKER
         assert stream.closed is True
     finally:
         monkeypatch.undo()
@@ -2766,6 +2833,56 @@ def test_trio_request_file_returns_none_on_miss(tmp_path: Path) -> None:
         assert result is None
 
     trio.run(main)
+
+
+def test_trio_request_file_rejects_oversized_declared_length(tmp_path: Path) -> None:
+    """#288: a peer can send HIT + an enormous length prefix (up to
+    2**64-1) before supplying a single byte of body. That must be
+    rejected before read_exactly(stream, length) ever tries to buffer it
+    -- not after, which would already have OOM'd the process."""
+    oversized_length = MAX_FILE_BYTES + 1
+    # No body bytes follow -- if the length check didn't reject this
+    # first, read_exactly would hang/EOF trying to read a body that was
+    # never sent, rather than this test hanging trying to construct one.
+    response = HIT_PREFIX + struct.pack(">Q", oversized_length)
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        with pytest.raises(ValueError, match="exceeds"):
+            await engine._trio_request_file(  # pyright: ignore[reportPrivateUsage]
+                _valid_base58_peer_id(), "f" * HASH_LEN
+            )
+
+    trio.run(main)
+
+
+async def test_request_file_returns_none_on_oversized_declared_length(tmp_path: Path) -> None:
+    """The public request_file() wraps _trio_request_file's rejection the
+    same way it wraps any other transport failure -- None, not a raised
+    exception, since callers (apply.py) already treat None as "not
+    available from this peer right now"."""
+    oversized_length = MAX_FILE_BYTES + 1
+    response = HIT_PREFIX + struct.pack(">Q", oversized_length)
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    engine = SyncEngine(tmp_path)
+    engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    async def _fake_call_trio(fn: Any, *args: Any) -> Any:
+        return await fn(*args)
+
+    engine._call_trio = _fake_call_trio  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    result = await engine.request_file(_valid_base58_peer_id(), "f" * HASH_LEN)
+    assert result is None
 
 
 async def test_request_file_returns_none_and_logs_on_transport_failure(tmp_path: Path) -> None:

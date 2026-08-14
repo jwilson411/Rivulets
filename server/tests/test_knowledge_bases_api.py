@@ -3,9 +3,12 @@ through the real HTTP API. Embedding calls are monkeypatched to a
 deterministic fake -- no real OpenAI network access in the test suite.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import File as FileRow
 from rivulets.db.models import SyncPendingOutbound
 from rivulets.db.session import session_scope
 
@@ -240,6 +243,44 @@ def test_ingest_document_without_embedding_provider_fails_clearly(
         f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers
     ).json()
     assert documents[0]["status"] == "failed"
+
+
+async def test_ingest_document_ignores_a_stale_local_path_pointing_outside_files_dir(
+    client: TestClient, auth_headers: dict[str, str], tmp_path: Path
+) -> None:
+    """#288: File.local_path was previously trusted verbatim here. A row
+    whose local_path was written by older/buggy code (or a peer before
+    the #239 apply fix) must not have that path followed -- ingest should
+    re-derive the path from files_dir + content_hash the same way
+    api/files.py's download_file already does, so a local_path like
+    /etc/passwd is never opened."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("this must never be ingested")
+
+    agent_id = _create_agent(client, auth_headers)
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    file_id = _upload(client, auth_headers, "notes.txt", b"hello world")
+
+    async with session_scope() as db:
+        row = await db.get(FileRow, file_id)
+        assert row is not None
+        row.local_path = str(secret)
+        await db.commit()
+
+    response = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    )
+
+    # The real files_dir path (from content_hash) still holds the
+    # originally-uploaded "hello world" bytes, so ingest succeeds -- just
+    # never against the corrupted local_path.
+    assert response.status_code == 201, response.text
 
 
 def test_delete_document_removes_it(client: TestClient, auth_headers: dict[str, str]) -> None:

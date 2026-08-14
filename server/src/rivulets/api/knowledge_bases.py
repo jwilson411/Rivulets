@@ -9,7 +9,6 @@ like budgets/providers/backups.
 """
 
 import json
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, model_validator
@@ -28,6 +27,7 @@ from rivulets.db.models import (
 from rivulets.knowledge_base.chunking import chunk_text
 from rivulets.knowledge_base.embeddings import NoEmbeddingProviderError, embed_texts
 from rivulets.sync.publish import publish_current_state, publish_tombstone
+from rivulets.validation import local_path_for_content_hash
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 
@@ -204,7 +204,16 @@ async def ingest_document(
     if file_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
-    path = Path(file_row.local_path)
+    # Re-derived from files_dir + content_hash rather than trusting the
+    # stored local_path column (#239/#288) -- a row whose local_path was
+    # written by older/buggy code, or by a peer before the #239 apply fix,
+    # would otherwise still be followed off files_dir here.
+    try:
+        path = local_path_for_content_hash(file_row.content_hash)
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "File has an invalid content hash"
+        ) from exc
     if not path.exists():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

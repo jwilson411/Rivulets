@@ -60,6 +60,7 @@ all. For File, content doesn't travel in the gossipsub payload at all
 point-to-point mechanism used to actually move bytes between peers.
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -720,6 +721,16 @@ async def _remember_known_source(db: AsyncSession, file_row: File, node_id: str)
     await db.commit()
 
 
+def _digest_matches(data: bytes, content_hash: str) -> bool:
+    """#288: a mesh peer sharing the workspace PSK is still untrusted to
+    actually send the bytes it claims to -- `content_hash` names what's
+    being requested, not what was received. Re-hashing the response before
+    it's ever written to files_dir is what makes that claim true, the same
+    way the HTTP upload path (api/files.py) derives content_hash FROM the
+    bytes rather than trusting a caller-supplied value."""
+    return hashlib.sha256(data).hexdigest() == content_hash
+
+
 async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path) -> None:
     engine = get_sync_engine()
     if not engine.running:
@@ -727,6 +738,14 @@ async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path)
     data = await engine.request_file(peer_id, content_hash)
     if data is None:
         logger.info("Peer %s doesn't have file content for hash=%s yet", peer_id, content_hash[:12])
+        return
+    if not _digest_matches(data, content_hash):
+        logger.warning(
+            "Discarding file content from %s: %d bytes don't hash to requested hash=%s",
+            peer_id,
+            len(data),
+            content_hash[:12],
+        )
         return
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(data)
@@ -755,10 +774,19 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
         return False
     for node_id in json.loads(file_row.synced_to_nodes):
         data = await engine.request_file(node_id, file_row.content_hash)
-        if data is not None:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_bytes(data)
-            return True
+        if data is None:
+            continue
+        if not _digest_matches(data, file_row.content_hash):
+            logger.warning(
+                "Discarding file content from %s: %d bytes don't hash to requested hash=%s",
+                node_id,
+                len(data),
+                file_row.content_hash[:12],
+            )
+            continue
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(data)
+        return True
     return False
 
 
