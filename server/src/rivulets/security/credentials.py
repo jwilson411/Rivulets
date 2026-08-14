@@ -23,8 +23,20 @@ raises on every operation). Rather than surfacing that as a hard error
 under Docker), operations here fall back to credential_fallback.py,
 encrypted with a key derived from the workspace mnemonic rather than a
 second passphrase (security/keys.py's derive_credential_store_key). The
-OS keychain remains strictly preferred: this fallback only ever engages
-when keyring itself reports no usable backend.
+OS keychain remains strictly preferred: secrets are only ever *written*
+to the fallback when keyring itself reports no usable backend for a
+given store_secret call.
+
+#323: the two backends must never independently disagree about whether a
+given ref is set, or a transient keyring outage (or a delete made while
+the keyring was briefly unusable) can silently lose or resurrect a
+secret. So reads (get_secret) always fall through to the fallback when
+the keyring doesn't have the ref, deletes (delete_secret) always clear
+both backends, and a successful keyring write clears any stale fallback
+row left over from an earlier outage — this can create/touch the
+otherwise-empty fallback db file even on a machine whose keyring has
+never failed, which is fine: an empty or cleaned-up fallback table
+reveals nothing.
 """
 
 import keyring
@@ -59,7 +71,15 @@ def is_keyring_available() -> bool:
 def store_secret(ref: str, value: str) -> None:
     """Store `value` in the OS keychain (or the encrypted-SQLite fallback
     if no keychain backend is available) under `ref`. Callers own the ref
-    format/uniqueness — this module just persists it."""
+    format/uniqueness — this module just persists it.
+
+    Whichever backend does *not* receive the write for this call is left
+    with whatever it had before — usually nothing, but if a prior call hit
+    the fallback (a transient keyring outage) and the keyring is back up
+    for this one, that prior fallback row is now stale and would resurrect
+    the old value if the keyring later went down again (#323). So a
+    successful keyring write also clears any stale fallback row for this
+    ref, keeping exactly one backend authoritative per ref at a time."""
     try:
         keyring.set_password(_SERVICE_NAME, ref, value)
     except keyring.errors.KeyringError:
@@ -69,12 +89,22 @@ def store_secret(ref: str, value: str) -> None:
             value,
             get_session_key_store().get_credential_store_key(),
         )
+    else:
+        credential_fallback.delete(get_settings().credential_fallback_db_path, ref)
 
 
 def get_secret(ref: str) -> str:
+    """Read `ref`, preferring the keyring but always falling through to the
+    encrypted-SQLite fallback when the keyring doesn't have it — whether
+    because it raised (no backend available) or simply returned `None`
+    (#323: a prior store may have landed in the fallback during a
+    transient keyring outage that has since recovered, and a live keyring
+    returning "not found" must not be treated as authoritative over that)."""
     try:
         secret = keyring.get_password(_SERVICE_NAME, ref)
     except keyring.errors.KeyringError:
+        secret = None
+    if secret is None:
         secret = credential_fallback.get(
             get_settings().credential_fallback_db_path,
             ref,
@@ -86,12 +116,17 @@ def get_secret(ref: str) -> str:
 
 
 def delete_secret(ref: str) -> None:
+    """Delete `ref` from both backends unconditionally (#323): deleting
+    only touched the fallback when the keyring itself was unusable, so a
+    fallback row written during an earlier outage would survive a delete
+    made once the keyring recovered — and come back on a later outage."""
     try:
         keyring.delete_password(_SERVICE_NAME, ref)
     except keyring.errors.PasswordDeleteError:
-        pass  # already gone — deletion is idempotent
+        pass  # already gone from the keyring — deletion is idempotent
     except keyring.errors.KeyringError:
-        credential_fallback.delete(get_settings().credential_fallback_db_path, ref)
+        pass  # keyring backend unusable — fallback delete below still runs
+    credential_fallback.delete(get_settings().credential_fallback_db_path, ref)
 
 
 def store_provider_key(provider_config_id: str, api_key: str) -> str:
