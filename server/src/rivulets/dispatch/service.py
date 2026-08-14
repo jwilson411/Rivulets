@@ -2939,10 +2939,9 @@ async def _handle_update_agent_peer_preference_trigger(
 ) -> list[Message]:
     """#190: an agent called the update_agent_peer_preference tool.
     Mirrors api/agents.py's set_peer_preference handler: capability_tag=
-    None clears the existing preference (local-only, not synced -- same
-    as that handler's own docstring note); setting a tag creates/updates
-    the row and publishes it (#10, sync/apply.py's
-    AGENT_PEER_PREFERENCE_SPEC)."""
+    None clears the existing preference and tombstones it (#311, same as
+    that handler); setting a tag creates/updates the row and publishes it
+    (#10, sync/apply.py's AGENT_PEER_PREFERENCE_SPEC)."""
     result = await _resolve_agent_ref(db, call.agent_ref)
     if result is None:
         return [
@@ -2960,6 +2959,7 @@ async def _handle_update_agent_peer_preference_trigger(
         if pref is not None:
             await db.delete(pref)
             await db.commit()
+            await publish_tombstone(db, "agent_peer_preference", target.id)
         message = _system_message(
             db, rivulet, f"@{agent.name} cleared peer preference for agent @{target.name}."
         )
