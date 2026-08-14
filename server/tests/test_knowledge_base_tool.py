@@ -2,14 +2,15 @@
 #98). Like test_files_tool.py, this tool opens get_settings().db_path
 directly with sqlite3 rather than through the app's async SQLAlchemy
 engine, so tests seed real `knowledge_base`/`knowledge_base_document`/
-`knowledge_base_chunk`/`file` rows in that real (per-session tempdir)
-file rather than using the `client`/`db_session` fixtures.
+`knowledge_base_chunk`/`file`/`team_agent` rows in that real (per-session
+tempdir) file rather than using the `client`/`db_session` fixtures.
 """
 
 import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -19,6 +20,13 @@ from rivulets.tools.builtin.knowledge_base import search_knowledge_base
 
 assert search_knowledge_base.entrypoint is not None
 _call = cast("Callable[..., str]", search_knowledge_base.entrypoint)
+
+# #327: search_knowledge_base now enforces ownership against the calling
+# AgnoAgent (injected by agno itself -- see the tool's module docstring),
+# so every call below has to pass one. A bare SimpleNamespace is enough:
+# the tool only ever reads `.id` off it.
+_OWNER = SimpleNamespace(id="owning-agent")
+_STRANGER = SimpleNamespace(id="stranger-agent")
 
 
 def _fixed_query_embedding(_query: str) -> list[float]:
@@ -31,13 +39,17 @@ def kb_db() -> Iterator[None]:
     db_path.unlink(missing_ok=True)
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute("CREATE TABLE knowledge_base (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE knowledge_base (id TEXT PRIMARY KEY, scope_type TEXT, "
+            "agent_id TEXT, team_id TEXT)"
+        )
         conn.execute("CREATE TABLE knowledge_base_document (id TEXT PRIMARY KEY, file_id TEXT)")
         conn.execute(
             "CREATE TABLE knowledge_base_chunk (id TEXT PRIMARY KEY, knowledge_base_id TEXT, "
             "document_id TEXT, chunk_index INTEGER, content TEXT, embedding_json TEXT)"
         )
         conn.execute("CREATE TABLE file (id TEXT PRIMARY KEY, filename TEXT)")
+        conn.execute("CREATE TABLE team_agent (team_id TEXT, agent_id TEXT)")
         conn.commit()
     finally:
         conn.close()
@@ -45,12 +57,37 @@ def kb_db() -> Iterator[None]:
     db_path.unlink(missing_ok=True)
 
 
-def _seed_chunk(
-    kb_id: str, document_id: str, file_id: str, filename: str, content: str, embedding: list[float]
+def _seed_kb(
+    kb_id: str, scope_type: str = "agent", agent_id: str | None = None, team_id: str | None = None
 ) -> None:
     conn = sqlite3.connect(get_settings().db_path)
     try:
-        conn.execute("INSERT OR IGNORE INTO knowledge_base (id) VALUES (?)", (kb_id,))
+        conn.execute(
+            "INSERT OR IGNORE INTO knowledge_base (id, scope_type, agent_id, team_id) "
+            "VALUES (?, ?, ?, ?)",
+            (kb_id, scope_type, agent_id, team_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_chunk(
+    kb_id: str,
+    document_id: str,
+    file_id: str,
+    filename: str,
+    content: str,
+    embedding: list[float],
+    owner_agent_id: str = _OWNER.id,
+) -> None:
+    conn = sqlite3.connect(get_settings().db_path)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO knowledge_base (id, scope_type, agent_id, team_id) "
+            "VALUES (?, 'agent', ?, NULL)",
+            (kb_id, owner_agent_id),
+        )
         conn.execute("INSERT OR IGNORE INTO file (id, filename) VALUES (?, ?)", (file_id, filename))
         conn.execute(
             "INSERT OR IGNORE INTO knowledge_base_document (id, file_id) VALUES (?, ?)",
@@ -72,7 +109,7 @@ def test_unknown_knowledge_base_id_raises(kb_db: None, monkeypatch: pytest.Monke
         "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
     )
     with pytest.raises(ValueError, match="No knowledge base found"):
-        _call(knowledge_base_id="does-not-exist", query="anything")
+        _call(agent=_OWNER, knowledge_base_id="does-not-exist", query="anything")
 
 
 def test_empty_knowledge_base_returns_a_clear_message(
@@ -81,12 +118,9 @@ def test_empty_knowledge_base_returns_a_clear_message(
     monkeypatch.setattr(
         "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
     )
-    conn = sqlite3.connect(get_settings().db_path)
-    conn.execute("INSERT INTO knowledge_base (id) VALUES ('kb-1')")
-    conn.commit()
-    conn.close()
+    _seed_kb("kb-1", agent_id=_OWNER.id)
 
-    result = _call(knowledge_base_id="kb-1", query="anything")
+    result = _call(agent=_OWNER, knowledge_base_id="kb-1", query="anything")
     assert result == "This knowledge base has no ingested documents yet."
 
 
@@ -97,7 +131,7 @@ def test_returns_chunks_ranked_by_similarity(kb_db: None, monkeypatch: pytest.Mo
         "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
     )
 
-    result = _call(knowledge_base_id="kb-1", query="tell me about the topic")
+    result = _call(agent=_OWNER, knowledge_base_id="kb-1", query="tell me about the topic")
     lines = result.split("\n\n")
     assert len(lines) == 2
     assert "closely related content" in lines[0]
@@ -113,7 +147,7 @@ def test_respects_top_k(kb_db: None, monkeypatch: pytest.MonkeyPatch) -> None:
         "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
     )
 
-    result = _call(knowledge_base_id="kb-1", query="q", top_k=2)
+    result = _call(agent=_OWNER, knowledge_base_id="kb-1", query="q", top_k=2)
     assert len(result.split("\n\n")) == 2
 
 
@@ -130,4 +164,50 @@ def test_no_embedding_provider_raises_value_error(
     monkeypatch.setattr("rivulets.tools.builtin.knowledge_base.embed_query_sync", _raise)
 
     with pytest.raises(ValueError, match="no provider configured"):
-        _call(knowledge_base_id="kb-1", query="q")
+        _call(agent=_OWNER, knowledge_base_id="kb-1", query="q")
+
+
+def test_agent_scoped_kb_refuses_a_non_owning_agent(
+    kb_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#327: the id existing is not ownership -- an agent this tool is
+    assigned to (unscoped, so no owner grant is required to assign it)
+    must not be able to dump a knowledge base scoped to a different
+    agent just by knowing its id."""
+    monkeypatch.setattr(
+        "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
+    )
+    _seed_chunk("kb-1", "doc-1", "file-1", "secret.txt", "confidential content", [1.0, 0.0, 0.0])
+
+    with pytest.raises(ValueError, match="No knowledge base found"):
+        _call(agent=_STRANGER, knowledge_base_id="kb-1", query="anything")
+
+
+def test_team_scoped_kb_allows_a_member_agent(kb_db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
+    )
+    _seed_kb("kb-team", scope_type="team", team_id="team-1")
+    conn = sqlite3.connect(get_settings().db_path)
+    conn.execute("INSERT INTO team_agent (team_id, agent_id) VALUES (?, ?)", ("team-1", _OWNER.id))
+    conn.commit()
+    conn.close()
+
+    result = _call(agent=_OWNER, knowledge_base_id="kb-team", query="anything")
+    assert result == "This knowledge base has no ingested documents yet."
+
+
+def test_team_scoped_kb_refuses_a_non_member_agent(
+    kb_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "rivulets.tools.builtin.knowledge_base.embed_query_sync", _fixed_query_embedding
+    )
+    _seed_kb("kb-team", scope_type="team", team_id="team-1")
+    conn = sqlite3.connect(get_settings().db_path)
+    conn.execute("INSERT INTO team_agent (team_id, agent_id) VALUES (?, ?)", ("team-1", _OWNER.id))
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(ValueError, match="No knowledge base found"):
+        _call(agent=_STRANGER, knowledge_base_id="kb-team", query="anything")

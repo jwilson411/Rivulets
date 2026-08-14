@@ -381,3 +381,170 @@ def test_delete_document_removes_it(client: TestClient, auth_headers: dict[str, 
     assert (
         client.get(f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers).json() == []
     )
+
+
+# #327: invite-grant confused-deputy paths -- see api/knowledge_bases.py's
+# module docstring and _require_owner_for_scoped_kb.
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def _grant_scope(client: TestClient, auth_headers: dict[str, str], agent_id: str) -> None:
+    granted = client.put(
+        f"/api/v1/agents/{agent_id}/tool-scopes",
+        json={"scopes": ["settings:manage"]},
+        headers=auth_headers,
+    )
+    assert granted.status_code == 200, granted.text
+
+
+def test_invite_grant_cannot_create_kb_scoped_to_a_privileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    agent_id = _create_agent(client, auth_headers, "Privileged Agent")
+    _grant_scope(client, auth_headers, agent_id)
+
+    response = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Poison", "scope_type": "agent", "agent_id": agent_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_invite_grant_can_create_kb_scoped_to_an_unprivileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Routine, unprivileged agent/team scoping stays open to any grant --
+    the same general openness Team/Agent/Tool CRUD already have."""
+    invite_headers = _invite_headers(client, auth_headers)
+    agent_id = _create_agent(client, auth_headers, "Plain Agent")
+
+    response = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_invite_grant_cannot_ingest_into_kb_scoped_to_a_privileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    agent_id = _create_agent(client, auth_headers, "Privileged Agent")
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    _grant_scope(client, auth_headers, agent_id)
+    file_id = _upload(client, invite_headers, "notes.txt", b"instructions to poison the agent")
+
+    response = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_invite_grant_cannot_delete_kb_scoped_to_a_privileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    agent_id = _create_agent(client, auth_headers, "Privileged Agent")
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Production Corpus", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    _grant_scope(client, auth_headers, agent_id)
+
+    response = client.delete(f"/api/v1/knowledge-bases/{kb_id}", headers=invite_headers)
+    assert response.status_code == 403, response.text
+    assert client.get(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers).status_code == 200
+
+
+def test_invite_grant_cannot_delete_document_in_kb_scoped_to_a_privileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    agent_id = _create_agent(client, auth_headers, "Privileged Agent")
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    file_id = _upload(client, auth_headers, "notes.txt", b"hello world")
+    document_id = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    ).json()["id"]
+    _grant_scope(client, auth_headers, agent_id)
+
+    response = client.delete(
+        f"/api/v1/knowledge-bases/{kb_id}/documents/{document_id}", headers=invite_headers
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_invite_grant_cannot_write_to_team_scoped_kb_with_a_privileged_member(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """A team-scoped knowledge base is reachable by every member agent, so
+    one scoped member (not necessarily the team's only agent) is enough to
+    make a non-owner write to it a confused-deputy risk too."""
+    invite_headers = _invite_headers(client, auth_headers)
+    team_id = client.post("/api/v1/teams", json={"name": "Ops"}, headers=auth_headers).json()["id"]
+    privileged_agent_id = _create_agent(client, auth_headers, "Privileged Team Agent")
+    _grant_scope(client, auth_headers, privileged_agent_id)
+    patched = client.patch(
+        f"/api/v1/agents/{privileged_agent_id}",
+        json={"team_ids": [team_id]},
+        headers=auth_headers,
+    )
+    assert patched.status_code == 200, patched.text
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Team Docs", "scope_type": "team", "team_id": team_id},
+        headers=auth_headers,
+    ).json()["id"]
+
+    response = client.delete(f"/api/v1/knowledge-bases/{kb_id}", headers=invite_headers)
+    assert response.status_code == 403, response.text
+
+
+def test_owner_grant_can_still_write_to_kb_scoped_to_a_privileged_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The gate is non-owner-only -- an owner session must keep the full
+    reach it always had over its own privileged agents' knowledge bases."""
+    agent_id = _create_agent(client, auth_headers, "Privileged Agent")
+    _grant_scope(client, auth_headers, agent_id)
+
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    file_id = _upload(client, auth_headers, "notes.txt", b"hello world")
+    ingested = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    )
+    assert ingested.status_code == 201, ingested.text
+
+    deleted = client.delete(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers)
+    assert deleted.status_code == 204

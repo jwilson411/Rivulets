@@ -3,18 +3,37 @@ docstring (db/models.py) for the full sync-scope design: definitions
 sync across the workspace like Team/Agent; documents/chunks are local,
 per-peer ingestion state.
 
-Not owner-gated -- knowledge bases are agent/team-scoped content, the
-same openness Team/Agent/Tool CRUD already have, not workspace policy
-like budgets/providers/backups.
+Not fully owner-gated -- knowledge bases are agent/team-scoped content,
+the same general openness Team/Agent/Tool CRUD already have, not
+workspace policy like budgets/providers/backups. That openness has a
+confused-deputy limit, though (#327): create/ingest/delete refuse a
+non-owner session when the target knowledge base's scope (agent, or any
+agent on its team) already holds an owner-granted capability scope --
+mirrors api/agents.py's agent_holds_owner_scope gate on update_agent/
+delete_agent/etc (#231/#285/#310). Without this, an invite-grant session
+could scope a knowledge base to an already-privileged agent, ingest
+attacker-controlled text into it, and have that text surface as
+"trusted" retrieved content the next time that agent's conversation
+calls search_knowledge_base -- a RAG-flavored instruction rewrite by the
+same confused-deputy route #231 closed elsewhere. Routine metadata edits
+(update_knowledge_base's name/description) stay open to any grant,
+mirroring update_workflow's name/description precedent.
 """
 
 import json
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, model_validator
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.agents import agent_holds_owner_scope, team_holds_owner_scope
+from rivulets.api.deps import (
+    CurrentWorkspaceId,
+    DbSession,
+    SessionClaims,
+    get_session_claims,
+)
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
     Agent,
@@ -102,6 +121,29 @@ async def _get_kb_or_404(db: DbSession, kb_id: str) -> KnowledgeBase:
     return kb
 
 
+async def _require_owner_for_scoped_kb(
+    db: DbSession, claims: SessionClaims, scope_type: str, agent_id: str | None, team_id: str | None
+) -> None:
+    """#327: refuses a non-owner session's create/ingest/delete against a
+    knowledge base whose scope (or, for a team scope, any member agent)
+    already holds an owner-granted capability scope -- see this module's
+    docstring."""
+    if claims.grant == "owner":
+        return
+    if scope_type == "agent":
+        assert agent_id is not None
+        scoped = await agent_holds_owner_scope(db, agent_id)
+    else:
+        assert team_id is not None
+        scoped = await team_holds_owner_scope(db, team_id)
+    if scoped:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to write to a knowledge base scoped to an agent "
+            "holding a capability scope",
+        )
+
+
 async def _document_count(db: DbSession, kb_id: str) -> int:
     result = await db.execute(
         select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id)
@@ -129,12 +171,16 @@ async def list_knowledge_bases(db: DbSession, _: CurrentWorkspaceId) -> list[Kno
 
 @router.post("", response_model=KnowledgeBaseOut, status_code=status.HTTP_201_CREATED)
 async def create_knowledge_base(
-    body: KnowledgeBaseCreate, db: DbSession, _: CurrentWorkspaceId
+    body: KnowledgeBaseCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> KnowledgeBaseOut:
     if body.agent_id is not None and await db.get(Agent, body.agent_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     if body.team_id is not None and await db.get(Team, body.team_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
+    await _require_owner_for_scoped_kb(db, claims, body.scope_type, body.agent_id, body.team_id)
 
     kb = KnowledgeBase(
         name=body.name,
@@ -172,8 +218,14 @@ async def update_knowledge_base(
 
 
 @router.delete("/{kb_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_knowledge_base(kb_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_knowledge_base(
+    kb_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
     kb = await _get_kb_or_404(db, kb_id)
+    await _require_owner_for_scoped_kb(db, claims, kb.scope_type, kb.agent_id, kb.team_id)
     await db.delete(kb)
     await db.commit()
     await publish_tombstone(db, "knowledge_base", kb_id)
@@ -196,7 +248,11 @@ async def list_documents(
     status_code=status.HTTP_201_CREATED,
 )
 async def ingest_document(
-    kb_id: str, body: IngestDocumentIn, db: DbSession, _: CurrentWorkspaceId
+    kb_id: str,
+    body: IngestDocumentIn,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> KnowledgeBaseDocument:
     """Chunks and embeds an already-uploaded file (api/files.py's
     POST /files/upload) into this knowledge base. v1 is single-file,
@@ -205,6 +261,7 @@ async def ingest_document(
     upload becoming a slow ingest call is an acceptable v1 trade-off, not
     a background job queue this app doesn't otherwise have."""
     kb = await _get_kb_or_404(db, kb_id)
+    await _require_owner_for_scoped_kb(db, claims, kb.scope_type, kb.agent_id, kb.team_id)
     file_row = await db.get(File, body.file_id)
     if file_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
@@ -299,9 +356,14 @@ async def ingest_document(
 
 @router.delete("/{kb_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
-    kb_id: str, document_id: str, db: DbSession, _: CurrentWorkspaceId
+    kb_id: str,
+    document_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> None:
-    await _get_kb_or_404(db, kb_id)
+    kb = await _get_kb_or_404(db, kb_id)
+    await _require_owner_for_scoped_kb(db, claims, kb.scope_type, kb.agent_id, kb.team_id)
     document = await db.get(KnowledgeBaseDocument, document_id)
     if document is None or document.knowledge_base_id != kb_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
