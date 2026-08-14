@@ -271,8 +271,14 @@ async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: Ow
 
 @router.get("/{tool_id}/versions", response_model=list[ToolVersionOut])
 async def list_tool_versions(
-    tool_id: str, db: DbSession, _: CurrentWorkspaceId
+    tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> list[ToolVersion]:
+    """Owner-gated (#321): ToolVersionOut carries source_code, and custom
+    tools are exactly where operators put integration secrets (API keys,
+    webhook URLs) that were deliberately kept off provider_config/the
+    keychain. #285 stopped invite-grant from writing that source
+    (save_tool_version above); this stops it from reading it back out
+    over the same API."""
     await _get_or_404(db, tool_id)
     result = await db.execute(
         select(ToolVersion)

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { ApiError } from '$lib/api/client';
+	import { auth } from '$lib/api/auth.svelte';
 	import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
@@ -45,6 +46,11 @@
 		loadError = null;
 		try {
 			toolList = await tools.list();
+			// #321: GET /tools/{id}/versions carries source_code and is now
+			// OwnerGrant-only server-side -- an invite-grant session would
+			// just get a 403 for each, so skip the fetch (and the panel
+			// that would show it, below) entirely for non-owners.
+			if (auth.grant !== 'owner') return;
 			const customTools = toolList.filter((t) => t.tool_type === 'custom');
 			const entries = await Promise.all(
 				customTools.map(async (t) => [t.id, await tools.listVersions(t.id)] as const)
@@ -292,7 +298,11 @@
 						{/if}
 					</div>
 
-					{#if tool.tool_type === 'custom'}
+					{#if tool.tool_type === 'custom' && auth.grant === 'owner'}
+						<!-- #321: source_code (in the draft textarea and version history below)
+						     is exactly what save_tool_version/list_tool_versions are OwnerGrant-gated
+						     for server-side -- an invite-grant session can't fetch it, so there's
+						     nothing here for it to see or act on. -->
 						<div class="mt-3 flex flex-col gap-3 border-t border-ink/10 pt-3 dark:border-white/10">
 							{#if rowError[tool.id]}
 								<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
