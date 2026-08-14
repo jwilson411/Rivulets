@@ -17,6 +17,8 @@ from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
 from rivulets.agentos.mcp import DiscoveredTool, MCPConnectionError
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
 from rivulets.dispatch.service import (
     _find_delete_mcp_server_call,  # pyright: ignore[reportPrivateUsage]
     _find_list_mcp_servers_call,  # pyright: ignore[reportPrivateUsage]
@@ -363,6 +365,35 @@ def test_delete_mcp_server_removes_server_and_tools(
     assert client.get(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers).status_code == 404
     tools = client.get("/api/v1/tools", headers=auth_headers).json()
     assert all(t["tool_type"] != "mcp" for t in tools)
+
+
+async def test_delete_mcp_server_trigger_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#287: an agent-triggered delete (dispatch/service.py's
+    _handle_delete_mcp_server_trigger) must tombstone the same as the HTTP
+    unregister_mcp_server route does."""
+    agent_id = _create_agent(client, auth_headers, "SyncDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_mcp_server")
+    server_name = f"delete-sync-target-{agent_id}"
+    server_id = _register_server_via_api(client, auth_headers, monkeypatch, server_name)
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("delete_mcp_server", {"server": server_id})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go delete it"},
+        headers=auth_headers,
+    )
+    client.get(f"/api/v1/rivulets/{rivulet.json()['id']}/messages", headers=auth_headers)
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("mcp_server", server_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_delete_mcp_server_unknown_reference_is_rejected(

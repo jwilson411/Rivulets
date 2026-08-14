@@ -9,9 +9,13 @@ logic this module just exposes over HTTP.
 Suite/case *definitions* sync across peers like Agent/Workflow (sync/
 apply.py); EvalRun/EvalCaseResult (execution history) are read-only here,
 local to whichever node actually ran them -- same split as Workflow/
-WorkflowRun. Suite/case deletes don't call publish_current_state, mirroring
-delete_workflow's actual current behavior: deletions aren't propagated
-through the generic sync path in this codebase at all today.
+WorkflowRun. Suite/case deletes call publish_tombstone (#287) so a peer
+that still has the row doesn't resurrect it on its next edit -- delete_case
+needs its own tombstone since a lone case delete leaves its parent suite
+in place, but delete_suite's cascade-deleted EvalCase children don't:
+EvalCase.suite_id has a real ondelete='CASCADE' FK (db/models.py), so a
+peer applying the suite's tombstone has its own case rows cascade-deleted
+at the SQLite level too.
 
 `structural` judging is rejected for a workflow-attached suite (create_case
 and update_case) since only an agent run's RunOutput.tools carries
@@ -29,7 +33,7 @@ from sqlalchemy import func, select
 from rivulets.api.deps import CurrentHumanId, CurrentWorkspaceId, DbSession
 from rivulets.db.models import Agent, EvalCase, EvalCaseResult, EvalRun, EvalSuite, Workflow
 from rivulets.evals import run_eval_suite
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +285,7 @@ async def delete_suite(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> N
     suite = await _get_suite_or_404(db, suite_id)
     await db.delete(suite)
     await db.commit()
+    await publish_tombstone(db, "eval_suite", suite_id)
 
 
 @router.post(
@@ -371,6 +376,7 @@ async def delete_case(suite_id: str, case_id: str, db: DbSession, _: CurrentWork
     case = await _get_case_or_404(db, suite_id, case_id)
     await db.delete(case)
     await db.commit()
+    await publish_tombstone(db, "eval_case", case_id)
 
 
 @router.post("/suites/{suite_id}/run", response_model=EvalRunOut)

@@ -14,6 +14,9 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
+
 
 def _create_workflow(client: TestClient, headers: dict[str, str], name: str) -> str:
     created = client.post(
@@ -536,6 +539,65 @@ def test_delete_workflow_cascades_nodes_and_connections(
     resp = client.delete(f"/api/v1/workflows/{workflow_id}", headers=auth_headers)
     assert resp.status_code == 204
     assert client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 404
+
+
+async def test_delete_workflow_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: the `client` fixture never actually starts the sync engine, so
+    a successful delete queues a tombstone retry (SyncPendingOutbound.
+    deleted=True) instead of the delete never reaching any peer at all --
+    mirrors test_teams_api.py's equivalent for delete_team."""
+    workflow_id = _create_workflow(client, auth_headers, "doomed-sync")
+
+    resp = client.delete(f"/api/v1/workflows/{workflow_id}", headers=auth_headers)
+    assert resp.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("workflow", workflow_id))
+        assert pending is not None
+        assert pending.deleted is True
+
+
+async def test_delete_node_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: a lone node delete (workflow left in place) needs its own
+    tombstone -- unlike delete_workflow's cascade, there's no parent
+    tombstone for a peer's apply to cascade this node away with."""
+    workflow_id = _create_workflow(client, auth_headers, "doomed-node-sync")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+
+    resp = client.delete(f"/api/v1/workflows/{workflow_id}/nodes/{node_id}", headers=auth_headers)
+    assert resp.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("workflow_node", node_id))
+        assert pending is not None
+        assert pending.deleted is True
+
+
+async def test_delete_connection_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: same reasoning as test_delete_node_queues_sync_tombstone."""
+    workflow_id = _create_workflow(client, auth_headers, "doomed-connection-sync")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "a", "{input}")
+    _connect(client, auth_headers, workflow_id, None, node_id)
+    connections = client.get(
+        f"/api/v1/workflows/{workflow_id}/connections", headers=auth_headers
+    ).json()
+    connection_id = connections[0]["id"]
+
+    resp = client.delete(
+        f"/api/v1/workflows/{workflow_id}/connections/{connection_id}", headers=auth_headers
+    )
+    assert resp.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("workflow_connection", connection_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def _create_channel(client: TestClient, headers: dict[str, str], name: str) -> str:

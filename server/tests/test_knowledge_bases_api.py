@@ -6,6 +6,9 @@ deterministic fake -- no real OpenAI network access in the test suite.
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
+
 
 def _create_agent(client: TestClient, headers: dict[str, str], name: str = "KB Agent") -> str:
     created = client.post(
@@ -130,6 +133,30 @@ def test_delete_knowledge_base_removes_it(client: TestClient, auth_headers: dict
     deleted = client.delete(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers)
     assert deleted.status_code == 204
     assert client.get(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers).status_code == 404
+
+
+async def test_delete_knowledge_base_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: the `client` fixture never actually starts the sync engine, so
+    a successful delete queues a tombstone retry (SyncPendingOutbound.
+    deleted=True) instead of the delete never reaching any peer at all --
+    mirrors test_teams_api.py's equivalent for delete_team."""
+    agent_id = _create_agent(client, auth_headers)
+    created = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Doomed Sync", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    )
+    kb_id = created.json()["id"]
+
+    deleted = client.delete(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("knowledge_base", kb_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_ingest_document_chunks_and_embeds_a_text_file(

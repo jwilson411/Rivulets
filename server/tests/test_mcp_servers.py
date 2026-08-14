@@ -23,6 +23,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.agentos.mcp import DiscoveredTool, MCPConnectionError, discover_tools
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
 
 
 class _FakeMCPTools:
@@ -400,6 +402,30 @@ def test_unregister_mcp_server_removes_server_and_tools(
     assert client.get(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers).status_code == 404
     tools = client.get("/api/v1/tools", headers=auth_headers).json()
     assert all(t["tool_type"] != "mcp" for t in tools)
+
+
+async def test_unregister_mcp_server_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#287: the `client` fixture never actually starts the sync engine, so
+    a successful delete queues a tombstone retry (SyncPendingOutbound.
+    deleted=True) instead of the delete never reaching any peer at all --
+    mirrors test_teams_api.py's equivalent for delete_team."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Doomed server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+
+    deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("mcp_server", server_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:

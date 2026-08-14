@@ -80,7 +80,7 @@ from rivulets.db.base import utcnow_iso
 from rivulets.db.models import MCPServer, Tool
 from rivulets.security.credentials import delete_secret, store_secret
 from rivulets.security.network import BlockedHostError, check_host_is_public
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +429,12 @@ async def unregister_mcp_server(
     await db.execute(delete(Tool).where(Tool.mcp_server_id == server_id))
     await db.delete(server)
     await db.commit()
+    # #287: without this, a peer that still has this server's row would
+    # keep it, and its own next edit (or /reconnect-driven change) would
+    # arrive here as a plain REMOTE_NEWER update and recreate the server
+    # we just deleted -- same #238 failure mode publish_tombstone already
+    # closed for delete_agent/delete_team.
+    await publish_tombstone(db, "mcp_server", server_id)
 
 
 @router.post("/{server_id}/reconnect", response_model=MCPServerDetailOut)

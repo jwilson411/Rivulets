@@ -16,6 +16,8 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
 from rivulets.dispatch.service import (
     _find_create_workflow_call,  # pyright: ignore[reportPrivateUsage]
     _find_delete_workflow_call,  # pyright: ignore[reportPrivateUsage]
@@ -399,6 +401,35 @@ def test_delete_workflow_removes_workflow(
     assert "deleted workflow" in messages[2]["content"]
 
     assert client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 404
+
+
+async def test_delete_workflow_trigger_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#287: an agent-triggered delete (dispatch/service.py's
+    _handle_delete_workflow_trigger) must tombstone the same as the HTTP
+    delete_workflow route does."""
+    agent_id = _create_agent(client, auth_headers, "SyncDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_workflow")
+    name = f"delete-sync-target-{agent_id}"
+    workflow_id = _create_workflow_via_api(client, auth_headers, name)
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("delete_workflow", {"workflow": workflow_id})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go delete it"},
+        headers=auth_headers,
+    )
+    client.get(f"/api/v1/rivulets/{rivulet.json()['id']}/messages", headers=auth_headers)
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("workflow", workflow_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_delete_workflow_unknown_reference_is_rejected(
