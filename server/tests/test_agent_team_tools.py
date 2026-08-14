@@ -742,6 +742,42 @@ def test_update_agent_peer_preference_sets_and_clears(
     assert pref2["capability_tag"] is None
 
 
+async def test_update_agent_peer_preference_clear_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#311: an agent-triggered clear (dispatch/service.py's
+    _handle_update_agent_peer_preference_trigger) must tombstone the same
+    as the HTTP set_peer_preference route does -- otherwise a peer that
+    still has the row never learns the preference was withdrawn."""
+    controller_id = _create_controller_agent(client, auth_headers, "PeerClearer")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_peer_preference"
+    )
+
+    _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution(
+            "update_agent_peer_preference", {"agent": controller_id, "capability_tag": "gpu"}
+        ),
+    )
+    _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("update_agent_peer_preference", {"agent": controller_id}),
+    )
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("agent_peer_preference", controller_id))
+        assert pending is not None
+        assert pending.deleted is True
+
+
 def test_rollback_agent_version_reverts_instructions(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -412,6 +412,54 @@ def test_set_and_clear_peer_preference(client: TestClient, auth_headers: dict[st
     assert read_after_clear.json() == {"capability_tag": None}
 
 
+async def test_clear_peer_preference_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#311: clearing a preference must tombstone it the same way agent
+    delete does (#238) -- otherwise a peer that still has the row keeps
+    steering at the old tag forever, and its own next edit would recreate
+    the row here. The `client` fixture never starts the sync engine (see
+    conftest.py), so a successful publish attempt queues a tombstone
+    (SyncPendingOutbound.deleted=True) instead of dropping the clear."""
+    agent = _create_agent(client, auth_headers)
+    client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": "gpu"},
+        headers=auth_headers,
+    )
+
+    cleared = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": None},
+        headers=auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("agent_peer_preference", agent["id"]))
+        assert pending is not None
+        assert pending.deleted is True
+
+
+async def test_clear_peer_preference_with_no_existing_row_does_not_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Clearing when there was never a preference set is a no-op -- no
+    local row to delete, so nothing should be queued for sync either."""
+    agent = _create_agent(client, auth_headers)
+
+    cleared = client.put(
+        f"/api/v1/agents/{agent['id']}/peer-preference",
+        json={"capability_tag": None},
+        headers=auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("agent_peer_preference", agent["id"]))
+        assert pending is None
+
+
 def test_set_peer_preference_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.put(
         "/api/v1/agents/nonexistent/peer-preference",
