@@ -76,7 +76,7 @@ Rivulets ships as a single server process that serves both the API and the web U
 ### Quick install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/v0.4.0/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/v0.5.0/scripts/install.sh | sh
 rivulets
 ```
 
