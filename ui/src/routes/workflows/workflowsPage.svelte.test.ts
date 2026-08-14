@@ -8,12 +8,22 @@ import { render } from 'vitest-browser-svelte';
 import WorkflowsPage from './+page.svelte';
 import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
 vi.mock('$lib/api/workflows', () => ({
 	workflows: {
 		list: vi.fn(),
 		create: vi.fn(),
 		remove: vi.fn(),
 		listFailedRuns: vi.fn()
+	}
+}));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
 	}
 }));
 
@@ -64,6 +74,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('workflows/+page.svelte', () => {
@@ -131,6 +142,19 @@ describe('workflows/+page.svelte', () => {
 
 		expect(workflows.remove).toHaveBeenCalledWith('wf-1');
 		await expect.element(page.getByText(/No workflows yet/)).toBeInTheDocument();
+	});
+
+	// #315: DELETE /workflows/{id} is now OwnerGrant-only server-side --
+	// hide the control an invite-grant session can't actually use, same
+	// treatment as the webhook Enable/Disable control after #285.
+	it('hides the Delete control for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		vi.mocked(workflows.list).mockResolvedValue([reviewFlow]);
+
+		render(WorkflowsPage);
+
+		await expect.element(page.getByText('review-pr')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
 	});
 
 	it('surfaces a failed workflow list load instead of failing silently', async () => {

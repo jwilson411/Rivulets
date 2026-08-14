@@ -167,6 +167,12 @@
 		return edge ? isLoopEdge(connectionList, edge) : false;
 	});
 
+	// #315: mirrors api/workflows.py's _require_owner_if_published -- an
+	// invite-grant session can freely edit a draft workflow's graph, same
+	// as an owner, but once it's published only the owner can rewrite the
+	// live graph a schedule/webhook/slash-command can already fire against.
+	const canEditGraph = $derived(auth.grant === 'owner' || !workflow?.published);
+
 	async function load(workflowId: string) {
 		loadError = null;
 		try {
@@ -535,6 +541,10 @@
 
 	async function handleEditNode(nodeId: string, values: WorkflowNodeFormValues) {
 		if (!workflow) return;
+		if (!canEditGraph) {
+			editError = "Owner access required to edit a published workflow's graph — unpublish it first";
+			return;
+		}
 		editError = null;
 		editBusy = true;
 		try {
@@ -557,6 +567,10 @@
 
 	async function handleDeleteNode(nodeId: string) {
 		if (!workflow) return;
+		if (!canEditGraph) {
+			editError = "Owner access required to edit a published workflow's graph — unpublish it first";
+			return;
+		}
 		editError = null;
 		deleteBusy = true;
 		try {
@@ -576,6 +590,7 @@
 	// form (at the drop position) rather than special-casing the types that
 	// happen to need no further input.
 	function startAddNode(nodeType: WorkflowNodeType, position: { x: number; y: number }) {
+		if (!canEditGraph) return;
 		addError = null;
 		editingNodeId = null;
 		editingEdgeId = null;
@@ -584,7 +599,7 @@
 	}
 
 	async function handleAddNode(values: WorkflowNodeFormValues) {
-		if (!workflow || !addingNode) return;
+		if (!workflow || !addingNode || !canEditGraph) return;
 		addError = null;
 		addBusy = true;
 		try {
@@ -633,7 +648,7 @@
 	// $derived from nodeList, so this takes effect the moment nodeList
 	// changes, no reload needed.
 	async function handleNodesMoved(updates: { id: string; positionX: number; positionY: number }[]) {
-		if (!workflow) return;
+		if (!workflow || !canEditGraph) return;
 		const workflowId = workflow.id;
 		const previousPositions = new Map(
 			updates.map((u) => {
@@ -689,6 +704,11 @@
 
 	async function handleUpdateEdgeCondition(edgeId: string) {
 		if (!workflow) return;
+		if (!canEditGraph) {
+			conditionError =
+				"Owner access required to edit a published workflow's graph — unpublish it first";
+			return;
+		}
 		if (editingEdgeCondition.operator !== 'none' && !editingEdgeCondition.value.trim()) return;
 		conditionError = null;
 		conditionBusy = true;
@@ -713,7 +733,7 @@
 	// optimistic edge with the server's real id (on success) or removes it
 	// again (on failure) rather than leaving a phantom edge on screen.
 	async function handleConnect(connection: Connection) {
-		if (!workflow) return;
+		if (!workflow || !canEditGraph) return;
 		const workflowId = workflow.id;
 		connectError = null;
 		try {
@@ -730,6 +750,11 @@
 
 	async function handleDeleteConnection(connectionId: string) {
 		if (!workflow) return;
+		if (!canEditGraph) {
+			edgeDeleteError =
+				"Owner access required to edit a published workflow's graph — unpublish it first";
+			return;
+		}
 		edgeDeleteError = null;
 		edgeDeleteBusy = true;
 		try {
@@ -850,17 +875,19 @@
 						{/if}
 					</div>
 					<div class="flex flex-none items-center gap-2">
-						<button
-							onclick={togglePublish}
-							disabled={publishBusy}
-							class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-						>
-							{#if publishBusy}
-								…
-							{:else}
-								{workflow.published ? 'Unpublish' : 'Publish'}
-							{/if}
-						</button>
+						{#if auth.grant === 'owner'}
+							<button
+								onclick={togglePublish}
+								disabled={publishBusy}
+								class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+							>
+								{#if publishBusy}
+									…
+								{:else}
+									{workflow.published ? 'Unpublish' : 'Publish'}
+								{/if}
+							</button>
+						{/if}
 						<button
 							onclick={startRename}
 							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
@@ -891,7 +918,7 @@
 			<select
 				value={workflow.on_failure_workflow_id ?? ''}
 				onchange={(e) => updateRemediation(e.currentTarget.value)}
-				disabled={remediationBusy}
+				disabled={remediationBusy || auth.grant !== 'owner'}
 				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
 			>
 				<option value="">None</option>
@@ -914,7 +941,7 @@
 			<select
 				value={workflow.on_call_agent_id ?? ''}
 				onchange={(e) => updateOnCallAgent(e.currentTarget.value)}
-				disabled={onCallBusy}
+				disabled={onCallBusy || auth.grant !== 'owner'}
 				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
 			>
 				<option value="">Workspace default</option>
@@ -1322,6 +1349,7 @@
 				onpalettedrop={startAddNode}
 				onconnect={handleConnect}
 				onedgeclick={startEditEdge}
+				readOnly={!canEditGraph}
 			/>
 		</section>
 

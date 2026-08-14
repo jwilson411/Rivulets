@@ -26,7 +26,8 @@
 		onnodesmoved,
 		onpalettedrop,
 		onconnect,
-		onedgeclick
+		onedgeclick,
+		readOnly = false
 	}: {
 		nodes: FlowNode[];
 		edges: Edge[];
@@ -36,6 +37,14 @@
 		onpalettedrop: (nodeType: WorkflowNodeType, position: { x: number; y: number }) => void;
 		onconnect: (connection: Connection) => void;
 		onedgeclick: (edgeId: string) => void;
+		// #315: an invite-grant session viewing a published workflow can
+		// still look at the graph and click into a step's read-only detail
+		// (onnodeclick/onedgeclick stay wired either way), but every
+		// gesture that would rewrite it -- dragging a palette entry in,
+		// moving a node, drawing a new edge -- is disabled here rather
+		// than left to round-trip into the 403 api/workflows.py's
+		// _require_owner_if_published now returns for the same guest.
+		readOnly?: boolean;
 	} = $props();
 
 	let viewport = $state<Viewport>({ x: 0, y: 0, zoom: 1 });
@@ -56,12 +65,14 @@
 	}
 
 	function handleDragOver(event: DragEvent) {
+		if (readOnly) return;
 		if (!event.dataTransfer?.types.includes(PALETTE_DRAG_MIME)) return;
 		event.preventDefault();
 		event.dataTransfer.dropEffect = 'copy';
 	}
 
 	function handleDrop(event: DragEvent) {
+		if (readOnly) return;
 		const nodeType = event.dataTransfer?.getData(PALETTE_DRAG_MIME);
 		if (!nodeType) return;
 		event.preventDefault();
@@ -70,7 +81,9 @@
 </script>
 
 <div class="canvas-root">
-	<WorkflowNodePalette />
+	{#if !readOnly}
+		<WorkflowNodePalette />
+	{/if}
 	<div
 		bind:this={paneEl}
 		data-testid="workflow-canvas"
@@ -83,7 +96,8 @@
 			{edges}
 			{nodeTypes}
 			fitView
-			nodesDraggable
+			nodesDraggable={!readOnly}
+			nodesConnectable={!readOnly}
 			{colorMode}
 			bind:viewport
 			onnodeclick={(e) => onnodeclick(e.node.id)}

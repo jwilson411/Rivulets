@@ -1035,3 +1035,181 @@ def test_list_failed_runs_spans_workflows_and_excludes_completed(
     assert body[0]["rivulet_id"] == failed_rivulet_id
     assert body[0]["status"] == "failed"
     assert "provider is down" in (body[0]["error_message"] or "")
+
+
+# #315: invite-grant escalation paths -- see api/workflows.py's
+# _require_owner_if_published/publish_workflow/unpublish_workflow/
+# delete_workflow/update_workflow docstrings.
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def test_invite_grant_cannot_publish_or_unpublish(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-publish-flow")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "step", "{input}")
+    _connect(client, auth_headers, workflow_id, None, node_id)
+
+    assert (
+        client.post(f"/api/v1/workflows/{workflow_id}/publish", headers=invite_headers).status_code
+        == 403
+    )
+
+    _publish_workflow(client, auth_headers, workflow_id)
+    unpublish_resp = client.post(
+        f"/api/v1/workflows/{workflow_id}/unpublish", headers=invite_headers
+    )
+    assert unpublish_resp.status_code == 403
+
+    # An owner session can, same requests otherwise.
+    unpublished = client.post(f"/api/v1/workflows/{workflow_id}/unpublish", headers=auth_headers)
+    assert unpublished.status_code == 200, unpublished.text
+
+
+def test_invite_grant_cannot_delete_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-delete-flow")
+
+    resp = client.delete(f"/api/v1/workflows/{workflow_id}", headers=invite_headers)
+    assert resp.status_code == 403
+
+    owner_resp = client.delete(f"/api/v1/workflows/{workflow_id}", headers=auth_headers)
+    assert owner_resp.status_code == 204
+
+
+def test_invite_grant_cannot_set_on_failure_workflow_id_or_on_call_agent_id(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-remediation-flow")
+    remediation_id = _create_workflow(client, auth_headers, "guest-remediation-target")
+    remediation_node_id = _add_transform_node(
+        client, auth_headers, remediation_id, "step", "{input}"
+    )
+    _connect(client, auth_headers, remediation_id, None, remediation_node_id)
+    _publish_workflow(client, auth_headers, remediation_id)
+    agent_id = _create_agent(client, auth_headers, "GuestOncall")
+
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_failure_workflow_id": remediation_id},
+        headers=invite_headers,
+    )
+    assert resp.status_code == 403
+
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"on_call_agent_id": agent_id},
+        headers=invite_headers,
+    )
+    assert resp.status_code == 403
+
+    # Routine fields (name/description) stay open to an invite grant.
+    renamed = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"description": "guest-edited"},
+        headers=invite_headers,
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["description"] == "guest-edited"
+
+
+def test_invite_grant_cannot_rewrite_published_workflow_graph(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-live-flow")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "step", "{input}")
+    _connect(client, auth_headers, workflow_id, None, node_id)
+    _publish_workflow(client, auth_headers, workflow_id)
+
+    assert (
+        client.post(
+            f"/api/v1/workflows/{workflow_id}/nodes",
+            json={"name": "extra", "node_type": "transform", "config": {"template": "{input}"}},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            f"/api/v1/workflows/{workflow_id}/nodes/{node_id}",
+            json={"name": "renamed"},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(
+            f"/api/v1/workflows/{workflow_id}/nodes/{node_id}", headers=invite_headers
+        ).status_code
+        == 403
+    )
+
+    other_node_id = _add_transform_node(client, auth_headers, workflow_id, "other", "{input}")
+    assert (
+        client.post(
+            f"/api/v1/workflows/{workflow_id}/connections",
+            json={"from_node_id": node_id, "to_node_id": other_node_id},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+
+    connections = client.get(
+        f"/api/v1/workflows/{workflow_id}/connections", headers=auth_headers
+    ).json()
+    connection_id = connections[0]["id"]
+    assert (
+        client.patch(
+            f"/api/v1/workflows/{workflow_id}/connections/{connection_id}",
+            json={"condition_json": {"contains": "x"}},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(
+            f"/api/v1/workflows/{workflow_id}/connections/{connection_id}", headers=invite_headers
+        ).status_code
+        == 403
+    )
+
+    # The owner can still freely edit the same published graph.
+    owner_edit = client.patch(
+        f"/api/v1/workflows/{workflow_id}/nodes/{node_id}",
+        json={"name": "renamed-by-owner"},
+        headers=auth_headers,
+    )
+    assert owner_edit.status_code == 200, owner_edit.text
+
+
+def test_invite_grant_can_edit_draft_workflow_graph(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#315: the write gate is specifically about a *published* graph --
+    an invite-grant session can still build out a still-draft workflow,
+    same as before this fix."""
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-draft-flow")
+
+    node_id = _add_transform_node(client, invite_headers, workflow_id, "step", "{input}")
+    renamed = client.patch(
+        f"/api/v1/workflows/{workflow_id}/nodes/{node_id}",
+        json={"name": "renamed"},
+        headers=invite_headers,
+    )
+    assert renamed.status_code == 200, renamed.text
+    _connect(client, invite_headers, workflow_id, None, node_id)
