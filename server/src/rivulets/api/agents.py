@@ -54,6 +54,7 @@ from rivulets.db.models import (
     AgentRun,
     AgentToolScope,
     AgentVersion,
+    TeamAgent,
     Tool,
 )
 from rivulets.sync.apply import AGENT_TOOL_SCOPE_SPEC
@@ -280,6 +281,22 @@ async def agent_holds_owner_scope(db: DbSession, agent_id: str) -> bool:
     who last edited the agent."""
     scope = await db.scalar(
         select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id).limit(1)
+    )
+    return scope is not None
+
+
+async def team_holds_owner_scope(db: DbSession, team_id: str) -> bool:
+    """Team-scoped analog of agent_holds_owner_scope above: true if any
+    agent on `team_id` currently holds an owner-granted capability scope.
+    A team-scoped resource (e.g. #327's KnowledgeBase) is reachable by
+    every member agent, so one scoped member is enough to make a
+    non-owner write to that resource the same confused-deputy risk a
+    directly agent-scoped resource is."""
+    scope = await db.scalar(
+        select(AgentToolScope.scope)
+        .join(TeamAgent, TeamAgent.agent_id == AgentToolScope.agent_id)
+        .where(TeamAgent.team_id == team_id)
+        .limit(1)
     )
     return scope is not None
 
