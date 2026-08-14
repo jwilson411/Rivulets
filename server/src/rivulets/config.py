@@ -18,15 +18,20 @@ class Settings(BaseSettings):
     app_server_host: str = "127.0.0.1"
     app_server_port: int = 8484
 
-    # #247: with app_server_host=0.0.0.0 (the Docker default), the app is
-    # reachable before the owner's first login -- without this, whoever
-    # sends the first valid-looking POST /auth/login claims the single
-    # workspace row, permanently locking out the real mnemonic. Only
-    # gates *creating* that row (api/auth.py); every login afterward is
-    # unaffected, and a loopback-only bind never needed this to begin
-    # with. Left unset, first login over 0.0.0.0 refuses to bootstrap at
-    # all -- fails closed rather than defaulting to the old unauthenticated
-    # race.
+    # #247/#318: when the app is reachable before the owner's first login,
+    # whoever sends the first valid-looking POST /auth/login claims the
+    # single workspace row, permanently locking out the real mnemonic.
+    # `app_server_host == "0.0.0.0"` is NOT a reliable signal for that --
+    # it's the Docker image's *hard-coded* internal bind (Dockerfile),
+    # true whether the host only published it to loopback (safe, no race
+    # possible -- same as a native install) or to the LAN (unsafe). So
+    # this gate is keyed on `require_bootstrap_token` instead, an
+    # operator-set signal that's independent of the in-container bind --
+    # the default compose profile (loopback-only) leaves it unset; only a
+    # profile that deliberately publishes beyond loopback sets it, along
+    # with this token. Only gates *creating* the workspace row
+    # (api/auth.py); every login afterward is unaffected.
+    require_bootstrap_token: bool = False
     bootstrap_token: str | None = None
 
     # NFR-3.5 / ADR-008: the Code Execution tool denies outbound network
