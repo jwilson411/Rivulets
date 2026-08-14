@@ -207,3 +207,81 @@ def test_preview_endpoint_returns_error_for_invalid_cron(
     assert body["valid"] is False
     assert body["next_fire_at"] is None
     assert body["error"] is not None
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": created_invite["url"].rsplit("/", 1)[-1], "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def test_create_schedule_is_forbidden_for_an_invite_grant_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#314: a schedule is a durable, unattended trigger that fires on a
+    timer and spends the owner's provider keys after the guest's invite
+    session ends -- same owner-only bar as webhook create (#242), see
+    test_workflow_webhooks_api.py's version of this."""
+    workflow_id = _create_workflow(client, auth_headers, "owner-gated")
+    channel_id = _create_channel(client, auth_headers, "owner-gated-channel")
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        f"/api/v1/workflows/{workflow_id}/schedules",
+        json={"channel_id": channel_id, "cron_expression": "0 9 * * *"},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    listed = client.get(f"/api/v1/workflows/{workflow_id}/schedules", headers=auth_headers).json()
+    assert listed == []
+
+
+def test_update_schedule_is_forbidden_for_an_invite_grant_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#314: PATCH can re-enable a schedule the owner (or the approval
+    queue) deliberately left disabled -- the same write
+    dispatch/approvals.py's _approve_schedule performs, without going
+    through POST /approvals/{id}/approve."""
+    workflow_id = _create_workflow(client, auth_headers, "owner-gated-update")
+    channel_id = _create_channel(client, auth_headers, "owner-gated-update-channel")
+    schedule = _create_schedule(client, auth_headers, workflow_id, channel_id)
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/workflows/{workflow_id}/schedules/{schedule['id']}",
+        json={"enabled": False},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    unchanged = client.get(
+        f"/api/v1/workflows/{workflow_id}/schedules", headers=auth_headers
+    ).json()
+    assert unchanged[0]["enabled"] is True
+
+
+def test_delete_schedule_is_forbidden_for_an_invite_grant_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#314: deleting removes the owner's production schedule -- same
+    owner-only bar as create/update."""
+    workflow_id = _create_workflow(client, auth_headers, "owner-gated-delete")
+    channel_id = _create_channel(client, auth_headers, "owner-gated-delete-channel")
+    schedule = _create_schedule(client, auth_headers, workflow_id, channel_id)
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(
+        f"/api/v1/workflows/{workflow_id}/schedules/{schedule['id']}",
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    still_there = client.get(
+        f"/api/v1/workflows/{workflow_id}/schedules", headers=auth_headers
+    ).json()
+    assert len(still_there) == 1

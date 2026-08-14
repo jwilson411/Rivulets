@@ -779,12 +779,23 @@ async def delete_connection(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_schedule(
-    workflow_id: str, body: WorkflowScheduleCreate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    body: WorkflowScheduleCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    _o: OwnerGrant,
 ) -> WorkflowSchedule:
     """#92: publish-state is deliberately NOT checked here -- same as
     nodes, a schedule can be configured against a still-draft workflow;
     only workflows/scheduler.py's _fire re-checks Workflow.published at
-    fire time, the single gate every trigger path shares."""
+    fire time, the single gate every trigger path shares.
+
+    #314: owner-gated, same bucket as webhook CRUD (#242) -- a schedule
+    is a durable, unattended trigger that fires on a timer and spends the
+    owner's provider keys after the guest's invite session ends. Agent-
+    created schedules go through the approval queue and start disabled
+    (dispatch/approvals.py's _approve_schedule); this HTTP path must not
+    let an invite-grant session hand itself an already-armed one."""
     await _get_workflow_or_404(db, workflow_id)
     if await db.get(Channel, body.channel_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Channel not found")
@@ -826,7 +837,13 @@ async def update_schedule(
     body: WorkflowScheduleUpdate,
     db: DbSession,
     _: CurrentWorkspaceId,
+    _o: OwnerGrant,
 ) -> WorkflowSchedule:
+    """#314: owner-gated, same bucket as webhook CRUD (#242) -- see
+    create_schedule's docstring. `enabled` here re-arms a trigger the
+    approval queue (or the owner) may have deliberately left disabled,
+    the same write _approve_schedule performs outside POST
+    /approvals/{id}/approve."""
     schedule = await _get_schedule_or_404(db, workflow_id, schedule_id)
     if body.channel_id is not None:
         if await db.get(Channel, body.channel_id) is None:
@@ -870,8 +887,10 @@ async def update_schedule(
 
 @router.delete("/{workflow_id}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_schedule(
-    workflow_id: str, schedule_id: str, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str, schedule_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> None:
+    """#314: owner-gated, same bucket as webhook CRUD (#242) -- see
+    create_schedule's docstring."""
     schedule = await _get_schedule_or_404(db, workflow_id, schedule_id)
     await db.delete(schedule)
     await db.commit()
