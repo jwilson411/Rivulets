@@ -495,6 +495,61 @@ async def test_apply_remote_agent_peer_preference_detects_conflict(
     assert pref.capability_tag == "cpu-heavy"  # untouched
 
 
+async def test_apply_remote_delete_removes_agent_peer_preference(
+    db_session: AsyncSession,
+) -> None:
+    """#311: the receiving side already dispatches tombstones generically
+    for every type in _ALL_SPECS, including agent_peer_preference (pk_field
+    'agent_id', not 'id' -- same EntitySpec.pk_field case as the create/
+    update tests above). This just confirms a tombstone for this type
+    actually removes the row, the way it already does for 'agent'/'team'."""
+    db_session.add(Agent(id="agent-1", name="Pref Agent", **_AGENT_FIELDS))
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+
+    result = await apply_remote_delete(
+        db_session, "agent_peer_preference", "agent-1", {"node-b": 1}, "node-b"
+    )
+
+    assert result.applied is True
+    assert result.conflict is False
+    assert await db_session.get(AgentPeerPreference, "agent-1") is None
+
+
+async def test_apply_remote_delete_of_agent_peer_preference_vs_concurrent_edit_does_not_resurrect(
+    db_session: AsyncSession,
+) -> None:
+    """Mirrors test_apply_remote_delete_vs_concurrent_edit_does_not_resurrect
+    for agent_peer_preference: a peer's not-yet-seen edit built from the
+    pre-clear state must not recreate the row this node already cleared --
+    the whole point of #311's tombstone. Without it, the peer's own next
+    edit would arrive as a plain REMOTE_NEWER update and resurrect the
+    withdrawn preference (the exact failure mode the issue describes)."""
+    db_session.add(Agent(id="agent-1", name="Pref Agent", **_AGENT_FIELDS))
+    db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
+    await db_session.commit()
+    await record_local_change(db_session, "agent_peer_preference", "agent-1", "node-a")
+
+    delete_result = await apply_remote_delete(
+        db_session, "agent_peer_preference", "agent-1", {"node-a": 2}, "node-a"
+    )
+    assert delete_result.applied is True
+    assert await db_session.get(AgentPeerPreference, "agent-1") is None
+
+    edit_result = await apply_remote_change(
+        db_session,
+        AGENT_PEER_PREFERENCE_SPEC,
+        "agent-1",
+        {"node-a": 1, "node-b": 1},
+        "node-b",
+        {"capability_tag": "cpu-heavy"},
+    )
+
+    assert edit_result.applied is False
+    assert edit_result.conflict is True
+    assert await db_session.get(AgentPeerPreference, "agent-1") is None  # still cleared
+
+
 async def test_handle_incoming_agent_change_resyncs_agentos_registry(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

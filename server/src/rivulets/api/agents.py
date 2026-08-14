@@ -577,9 +577,11 @@ async def set_peer_preference(
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> PeerPreferenceOut:
-    """capability_tag=None clears the preference. Clearing is local-only
-    (not propagated to peers) -- same as Agent/Team deletion elsewhere in
-    this API, sync's generic path has no delete-propagation mechanism.
+    """capability_tag=None clears the preference. #311: clearing now
+    tombstones the row the same way Agent/Team deletion does (#287) --
+    the generic apply path (sync/apply.py's AGENT_PEER_PREFERENCE_SPEC)
+    already honors a tombstone for this type, only the write side hadn't
+    called publish_tombstone yet.
 
     #285: mirrors update_agent's agent_holds_owner_scope gate -- steering
     which peer a privileged agent preferentially runs on is a subtler
@@ -596,6 +598,7 @@ async def set_peer_preference(
         if pref is not None:
             await db.delete(pref)
             await db.commit()
+            await publish_tombstone(db, "agent_peer_preference", agent_id)
         return PeerPreferenceOut(capability_tag=None)
     if pref is None:
         pref = AgentPeerPreference(agent_id=agent_id, capability_tag=body.capability_tag)
