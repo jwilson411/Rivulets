@@ -104,10 +104,15 @@ export const auth = {
 	get sessionExpired() {
 		return sessionExpired;
 	},
-	async login(mnemonic: string, passphrase?: string): Promise<void> {
+	// bootstrapToken (server/api/auth.py's LoginRequest.bootstrap_token,
+	// #247/#291) is only consulted server-side when this login is about to
+	// create the workspace row while app_server_host is 0.0.0.0 -- fine to
+	// send unconditionally, since the server ignores it otherwise.
+	async login(mnemonic: string, passphrase?: string, bootstrapToken?: string): Promise<void> {
 		const response = await api.post<LoginResponse>('/auth/login', {
 			key: mnemonic,
-			passphrase
+			passphrase,
+			bootstrap_token: bootstrapToken
 		});
 		token = response.token;
 		grant = response.grant;
