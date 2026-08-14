@@ -29,7 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import File, SyncPendingOutbound, Tool
 from rivulets.sync import get_sync_engine
-from rivulets.sync.apply import TOMBSTONE_FIELD, get_entity_spec, record_local_change
+from rivulets.sync.apply import (
+    TOMBSTONE_FIELD,
+    EntitySpec,
+    encode_entity_id,
+    entity_pk_value,
+    get_entity_spec,
+    record_local_change,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +111,37 @@ async def build_entity_payload(
     spec = get_entity_spec(entity_type)
     if spec is None:
         return None
-    instance = await db.get(spec.model, entity_id)
+    instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
     if instance is None:
         return None
     return {field: getattr(instance, field) for field in spec.synced_fields}
+
+
+async def replace_join_entities(
+    db: AsyncSession,
+    entity_type: str,
+    spec: EntitySpec,
+    old_keys: set[tuple[str, ...]],
+    new_keys: set[tuple[str, ...]],
+) -> None:
+    """#317: the publish-side counterpart to a join table's "delete all
+    rows matching X, then re-add the current list" mutation pattern
+    (agent_lifecycle.py's set_agent_tools/set_agent_teams, api/teams.py's
+    update_team, api/agents.py's set_agent_tool_scopes) -- called after
+    the caller's own commit, with `old_keys`/`new_keys` as the pk_fields
+    tuples (e.g. (team_id, agent_id)) present before/after that
+    replacement. A pair present in both sets is republished too, not just
+    added ones: a join row can carry a non-key field (TeamAgent.position)
+    that changes even when the key pair itself didn't, and
+    publish_current_state re-reading current DB state is cheap and
+    idempotent on a peer that already has the identical row (LWW judges
+    an unchanged payload as no-op, not a spurious conflict, unless a
+    peer's own concurrent edit is genuinely racing it -- the same
+    conflict machinery every other entity type already relies on)."""
+    for key in old_keys - new_keys:
+        await publish_tombstone(db, entity_type, encode_entity_id(spec, key))
+    for key in new_keys:
+        await publish_current_state(db, entity_type, encode_entity_id(spec, key))
 
 
 async def _build_tool_payload(db: AsyncSession, entity_id: str) -> dict[str, Any] | None:

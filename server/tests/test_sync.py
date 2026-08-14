@@ -38,10 +38,14 @@ from libp2p.peer.id import ID as _ID  # pyright: ignore[reportMissingTypeStubs]
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.tool_resolution import resolve_agent_tools
 from rivulets.config import get_settings
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
+    AgentRoutingRule,
+    AgentTool,
+    AgentToolScope,
     Channel,
     File,
     MCPServer,
@@ -50,6 +54,7 @@ from rivulets.db.models import (
     SyncConflict,
     SyncPendingInbound,
     Team,
+    TeamAgent,
     Tool,
     ToolVersion,
     Workflow,
@@ -59,11 +64,15 @@ from rivulets.db.session import session_scope
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
 from rivulets.sync.apply import (
     AGENT_PEER_PREFERENCE_SPEC,
+    AGENT_ROUTING_RULE_SPEC,
     AGENT_SPEC,
+    AGENT_TOOL_SCOPE_SPEC,
+    AGENT_TOOL_SPEC,
     CHANNEL_SPEC,
     MCP_SERVER_SPEC,
     MESSAGE_SPEC,
     RIVULET_SPEC,
+    TEAM_AGENT_SPEC,
     TEAM_SPEC,
     TOMBSTONE_FIELD,
     WORKFLOW_SPEC,
@@ -74,6 +83,8 @@ from rivulets.sync.apply import (
     apply_remote_file_change,
     apply_remote_tool_change,
     compare_vector_clocks,
+    encode_entity_id,
+    entity_pk_value,
     handle_incoming_state_change,
     merge_vector_clocks,
     record_local_change,
@@ -220,6 +231,327 @@ async def test_apply_remote_team_change_creates_team(db_session: AsyncSession) -
     team = await db_session.get(Team, "team-1")
     assert team is not None
     assert team.name == "Eng"
+
+
+def test_encode_entity_id_roundtrips_single_and_composite_keys() -> None:
+    assert entity_pk_value(TEAM_SPEC, encode_entity_id(TEAM_SPEC, ("team-1",))) == "team-1"
+    composite = encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1"))
+    assert composite == "team-1:agent-1"
+    assert entity_pk_value(TEAM_AGENT_SPEC, composite) == ("team-1", "agent-1")
+
+
+def test_encode_entity_id_survives_colon_in_scope_name() -> None:
+    """#317: AgentToolScope.scope values contain their own colons (e.g.
+    "channels:manage", agentos/tool_scopes.py's TOOL_SCOPES) -- decoding
+    must only ever split on the *first* colon, or a scope name would get
+    mangled into the wrong tuple."""
+    entity_id = encode_entity_id(AGENT_TOOL_SCOPE_SPEC, ("agent-1", "channels:manage"))
+    assert entity_id == "agent-1:channels:manage"
+    assert entity_pk_value(AGENT_TOOL_SCOPE_SPEC, entity_id) == ("agent-1", "channels:manage")
+
+
+def test_encode_entity_id_rejects_colon_in_non_last_component() -> None:
+    with pytest.raises(ValueError, match="must not contain"):
+        encode_entity_id(TEAM_AGENT_SPEC, ("team:1", "agent-1"))
+
+
+async def test_apply_remote_team_agent_change_creates_membership(db_session: AsyncSession) -> None:
+    """#317: team membership is its own synced entity (TEAM_AGENT_SPEC),
+    keyed by the (team_id, agent_id) pair -- previously this join table
+    wasn't synced at all, so a second node had a team with no members."""
+    db_session.add(Team(id="team-1", name="Support"))
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        TEAM_AGENT_SPEC,
+        encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1")),
+        {"node-b": 1},
+        "node-b",
+        {"position": 2},
+    )
+    assert result.applied is True
+    membership = await db_session.get(TeamAgent, ("team-1", "agent-1"))
+    assert membership is not None
+    assert membership.position == 2
+
+
+async def test_apply_remote_team_agent_change_ignores_stale(db_session: AsyncSession) -> None:
+    entity_id = encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1"))
+    await record_local_change(db_session, "team_agent", entity_id, "node-a")
+
+    result = await apply_remote_change(
+        db_session, TEAM_AGENT_SPEC, entity_id, {"node-a": 0}, "node-b", {"position": 0}
+    )
+    assert result.applied is False
+    assert await db_session.get(TeamAgent, ("team-1", "agent-1")) is None
+
+
+async def test_apply_remote_delete_removes_team_agent_membership(db_session: AsyncSession) -> None:
+    db_session.add(Team(id="team-1", name="Support"))
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    db_session.add(TeamAgent(team_id="team-1", agent_id="agent-1", position=0))
+    await db_session.commit()
+    entity_id = encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1"))
+
+    result = await apply_remote_delete(db_session, "team_agent", entity_id, {"node-b": 1}, "node-b")
+    assert result.applied is True
+    assert await db_session.get(TeamAgent, ("team-1", "agent-1")) is None
+
+
+async def test_apply_remote_agent_tool_change_creates_assignment(db_session: AsyncSession) -> None:
+    """#317: tool assignment (agent_tool) is a synced fact independent of
+    Tool itself -- an agent's tools existing on a peer without this join
+    row meant the agent replied with none of them."""
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    db_session.add(
+        Tool(id="tool-1", name="lookup", description="Looks something up.", tool_type="builtin")
+    )
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        AGENT_TOOL_SPEC,
+        encode_entity_id(AGENT_TOOL_SPEC, ("agent-1", "tool-1")),
+        {"node-b": 1},
+        "node-b",
+        {},
+    )
+    assert result.applied is True
+    assert await db_session.get(AgentTool, ("agent-1", "tool-1")) is not None
+
+
+async def test_apply_remote_agent_tool_scope_change_creates_grant(db_session: AsyncSession) -> None:
+    """#317 reverses AgentToolScope's earlier "not P2P-synced" design --
+    see db/models.py's docstring. Uses a real scope name with a colon in
+    it (agentos/tool_scopes.py's TOOL_SCOPES) to exercise the composite
+    entity_id decode with real data, not just the unit-level encode/decode
+    tests above."""
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        AGENT_TOOL_SCOPE_SPEC,
+        encode_entity_id(AGENT_TOOL_SCOPE_SPEC, ("agent-1", "channels:manage")),
+        {"node-b": 1},
+        "node-b",
+        {},
+    )
+    assert result.applied is True
+    assert await db_session.get(AgentToolScope, ("agent-1", "channels:manage")) is not None
+
+
+async def test_apply_remote_agent_routing_rule_change_creates_rule(
+    db_session: AsyncSession,
+) -> None:
+    """#317: AgentRoutingRule has a real `id`, so it's on the ordinary
+    single-key generic path -- FR-3.3's deterministic routing previously
+    only ever worked on whichever node generated the rules."""
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        AGENT_ROUTING_RULE_SPEC,
+        "rule-1",
+        {"node-b": 1},
+        "node-b",
+        {"agent_id": "agent-1", "rule_type": "keyword", "pattern": '["support"]', "priority": 0},
+    )
+    assert result.applied is True
+    rule = await db_session.get(AgentRoutingRule, "rule-1")
+    assert rule is not None
+    assert rule.agent_id == "agent-1"
+    assert rule.rule_type == "keyword"
+
+
+async def test_apply_remote_channel_change_syncs_team_id(db_session: AsyncSession) -> None:
+    """#317: Channel.team_id used to be excluded from CHANNEL_SPEC on the
+    theory that FK-ordering needed a retry queue this module didn't have
+    -- it already did (SyncPendingInbound), so this now syncs like any
+    other optional FK (Rivulet.channel_id's existing hazard)."""
+    db_session.add(Team(id="team-1", name="Support"))
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        CHANNEL_SPEC,
+        "chan-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "general",
+            "description": None,
+            "position": 0,
+            "archived": False,
+            "team_id": "team-1",
+        },
+    )
+    assert result.applied is True
+    channel = await db_session.get(Channel, "chan-1")
+    assert channel is not None
+    assert channel.team_id == "team-1"
+
+
+async def test_apply_remote_channel_change_queues_when_team_missing(
+    db_session: AsyncSession,
+) -> None:
+    """Same FK-ordering hazard as Rivulet.channel_id (module docstring):
+    a channel's team assignment can arrive before the team's own create
+    message has, over gossipsub's no-cross-type ordering guarantee."""
+    result = await apply_remote_change(
+        db_session,
+        CHANNEL_SPEC,
+        "chan-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "general",
+            "description": None,
+            "position": 0,
+            "archived": False,
+            "team_id": "missing-team",
+        },
+    )
+    assert result.applied is False
+    assert result.conflict is False
+    assert await db_session.get(Channel, "chan-1") is None
+    pending = list((await db_session.execute(select(SyncPendingInbound))).scalars().all())
+    assert len(pending) == 1
+    assert pending[0].entity_type == "channel"
+
+
+async def test_apply_remote_agent_change_syncs_approved_for_unattended_tools(
+    db_session: AsyncSession,
+) -> None:
+    """#317: an owner's unattended-tool approval used to stay behind on
+    whichever node the owner happened to use -- every other node kept
+    failing the agent's sensitive tools closed regardless."""
+    result = await apply_remote_change(
+        db_session,
+        AGENT_SPEC,
+        "agent-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Rex", "approved_for_unattended_tools": True, **_AGENT_FIELDS},
+    )
+    assert result.applied is True
+    agent = await db_session.get(Agent, "agent-1")
+    assert agent is not None
+    assert agent.approved_for_unattended_tools is True
+
+
+async def test_multi_peer_dispatch_topology_replicates(db_session: AsyncSession) -> None:
+    """#317's core scenario: a second node receiving every dispatch-
+    topology entity type purely through sync-apply -- no live libp2p
+    needed to prove this (see the module docstring's three-tier split) --
+    ends up with a *working* topology, not just rows sitting unconnected.
+
+    Deliberately applies team_agent before its team exists, to exercise
+    the FK-ordering retry queue (module docstring) for one of #317's new
+    join entities the same way it already covers Rivulet.channel_id.
+    Finishes by calling tool_resolution.resolve_agent_tools -- the same
+    function agentos/service.py's _build_agno_agent calls when actually
+    building the agent to run -- to prove the tool is genuinely usable
+    once assignment (agent_tool) *and* scope (agent_tool_scope) have both
+    landed, not merely present as disconnected DB rows."""
+    remote = "node-a"
+
+    membership_id = encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1"))
+    result = await apply_remote_change(
+        db_session, TEAM_AGENT_SPEC, membership_id, {remote: 1}, remote, {"position": 0}
+    )
+    assert result.applied is False  # team-1 doesn't exist here yet
+    assert await db_session.get(TeamAgent, ("team-1", "agent-1")) is None
+
+    await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-1",
+        {remote: 1},
+        remote,
+        {"name": "Support", "description": None},
+    )
+    await apply_remote_change(
+        db_session,
+        AGENT_SPEC,
+        "agent-1",
+        {remote: 1},
+        remote,
+        {"name": "Rex", "approved_for_unattended_tools": True, **_AGENT_FIELDS},
+    )
+    # handle_incoming_state_change calls this after every successful apply
+    # (module docstring) -- called explicitly here since this test drives
+    # apply_remote_change directly rather than through that entry point.
+    await retry_pending_inbound(db_session)
+
+    membership = await db_session.get(TeamAgent, ("team-1", "agent-1"))
+    assert membership is not None, "team_agent never got retried once its team arrived"
+    assert membership.position == 0
+
+    await apply_remote_change(
+        db_session,
+        CHANNEL_SPEC,
+        "chan-1",
+        {remote: 1},
+        remote,
+        {
+            "name": "support-chat",
+            "description": None,
+            "position": 0,
+            "archived": False,
+            "team_id": "team-1",
+        },
+    )
+    channel = await db_session.get(Channel, "chan-1")
+    assert channel is not None
+    assert channel.team_id == "team-1"
+
+    # A builtin tool -- seeded locally by every node's own startup, not
+    # synced (module docstring: "'builtin' tools aren't user-created at
+    # all"), unlike the custom-tool case apply_remote_tool_change already
+    # covers elsewhere in this file.
+    db_session.add(
+        Tool(
+            id="tool-1",
+            name="create_channel",
+            description="Creates a channel.",
+            tool_type="builtin",
+            required_scope="channels:manage",
+        )
+    )
+    await db_session.commit()
+
+    await apply_remote_change(
+        db_session,
+        AGENT_TOOL_SPEC,
+        encode_entity_id(AGENT_TOOL_SPEC, ("agent-1", "tool-1")),
+        {remote: 1},
+        remote,
+        {},
+    )
+    assert await db_session.get(AgentTool, ("agent-1", "tool-1")) is not None
+
+    agent = await db_session.get(Agent, "agent-1")
+    assert agent is not None
+    # Assigned but not yet scope-granted -- #188's two-gate design means
+    # this must still fail closed even though the join row now exists.
+    assert await resolve_agent_tools(db_session, agent) == []
+
+    await apply_remote_change(
+        db_session,
+        AGENT_TOOL_SCOPE_SPEC,
+        encode_entity_id(AGENT_TOOL_SCOPE_SPEC, ("agent-1", "channels:manage")),
+        {remote: 1},
+        remote,
+        {},
+    )
+    assert await db_session.get(AgentToolScope, ("agent-1", "channels:manage")) is not None
+
+    resolved = await resolve_agent_tools(db_session, agent)
+    assert len(resolved) == 1
 
 
 async def test_apply_remote_workflow_change_syncs_published(db_session: AsyncSession) -> None:
@@ -389,7 +721,7 @@ async def test_apply_remote_workspace_setting_change_creates_setting(
     db_session: AsyncSession,
 ) -> None:
     """WorkspaceSetting's primary key is `key`, not `id` like every other
-    synced entity -- this is the regression test for EntitySpec.pk_field,
+    synced entity -- this is the regression test for EntitySpec.pk_fields,
     not just a routine "does sync work" check."""
     result = await apply_remote_change(
         db_session,
@@ -431,7 +763,7 @@ async def test_apply_remote_workspace_setting_change_updates_existing(
 
 async def test_apply_remote_agent_peer_preference_creates_row(db_session: AsyncSession) -> None:
     """Like WorkspaceSetting, AgentPeerPreference's primary key is
-    agent_id, not id -- another EntitySpec.pk_field regression case, plus
+    agent_id, not id -- another EntitySpec.pk_fields regression case, plus
     coverage that issue #10's new entity type is actually wired into
     _DISPATCH (handle_incoming_state_change), not just apply_remote_change
     directly."""
@@ -499,10 +831,11 @@ async def test_apply_remote_delete_removes_agent_peer_preference(
     db_session: AsyncSession,
 ) -> None:
     """#311: the receiving side already dispatches tombstones generically
-    for every type in _ALL_SPECS, including agent_peer_preference (pk_field
-    'agent_id', not 'id' -- same EntitySpec.pk_field case as the create/
-    update tests above). This just confirms a tombstone for this type
-    actually removes the row, the way it already does for 'agent'/'team'."""
+    for every type in _ALL_SPECS, including agent_peer_preference (pk_fields
+    ('agent_id',), not ('id',) -- same EntitySpec.pk_fields case as the
+    create/update tests above). This just confirms a tombstone for this
+    type actually removes the row, the way it already does for
+    'agent'/'team'."""
     db_session.add(Agent(id="agent-1", name="Pref Agent", **_AGENT_FIELDS))
     db_session.add(AgentPeerPreference(agent_id="agent-1", capability_tag="gpu"))
     await db_session.commit()

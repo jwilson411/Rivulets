@@ -23,7 +23,7 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import SyncConflict
 from rivulets.sync import get_sync_engine
-from rivulets.sync.apply import clear_delete_blockers, get_entity_spec
+from rivulets.sync.apply import clear_delete_blockers, entity_pk_value, get_entity_spec
 from rivulets.sync.capabilities import load_capabilities, save_capabilities
 from rivulets.sync.engine import PeerInfo as EnginePeerInfo
 
@@ -243,7 +243,7 @@ async def resolve_conflict(
     if body.keep == "remote":
         spec = get_entity_spec(conflict.entity_type)
         if spec is not None:
-            instance = await db.get(spec.model, conflict.entity_id)
+            instance = await db.get(spec.model, entity_pk_value(spec, conflict.entity_id))
             if instance is not None:
                 remote = json.loads(conflict.remote_snapshot)
                 if remote.get("deleted"):

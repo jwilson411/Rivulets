@@ -58,8 +58,11 @@ from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.agent_lifecycle import (
     generate_and_store_routing_rules,
     publish_agent_change,
+    publish_agent_teams_change,
+    publish_agent_tools_change,
     record_agent_version,
     register_agent_with_agentos,
+    replace_routing_rules,
     set_agent_teams,
     set_agent_tools,
 )
@@ -115,8 +118,13 @@ from rivulets.security.network import BlockedHostError, check_host_is_public, de
 from rivulets.streaming import publish
 from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
+from rivulets.sync.apply import TEAM_AGENT_SPEC
 from rivulets.sync.capabilities import load_capabilities
-from rivulets.sync.publish import publish_current_state, publish_tombstone
+from rivulets.sync.publish import (
+    publish_current_state,
+    publish_tombstone,
+    replace_join_entities,
+)
 from rivulets.tracing import TraceContext, finish_span, start_span
 
 logger = logging.getLogger(__name__)
@@ -2677,10 +2685,11 @@ async def _handle_create_agent_trigger(
     )
     db.add(new_agent)
     await db.flush()  # populate new_agent.id before using it in join rows
-    await set_agent_teams(db, new_agent.id, [t.id for t in teams])
+    old_team_ids, new_team_ids = await set_agent_teams(db, new_agent.id, [t.id for t in teams])
     await record_agent_version(db, new_agent)
     await db.commit()
 
+    await publish_agent_teams_change(db, new_agent.id, old_team_ids, new_team_ids)
     await generate_and_store_routing_rules(db, new_agent)
     await register_agent_with_agentos(db, new_agent)
     await publish_agent_change(db, new_agent)
@@ -2837,10 +2846,12 @@ async def _handle_update_agent_trigger(
         target.instructions = call.instructions
     if call.model is not None:
         target.model = call.model
+    tool_diff: tuple[set[str], set[str]] | None = None
     if call.tool_ids is not None:
-        await set_agent_tools(db, target.id, call.tool_ids)
+        tool_diff = await set_agent_tools(db, target.id, call.tool_ids)
+    team_diff: tuple[set[str], set[str]] | None = None
     if call.team_ids is not None:
-        await set_agent_teams(db, target.id, call.team_ids)
+        team_diff = await set_agent_teams(db, target.id, call.team_ids)
 
     if target.instructions != old_instructions or target.model != old_model:
         await record_agent_version(db, target)
@@ -2848,8 +2859,12 @@ async def _handle_update_agent_trigger(
     target.vector_clock += 1
     await db.commit()
 
+    if tool_diff is not None:
+        await publish_agent_tools_change(db, target.id, *tool_diff)
+    if team_diff is not None:
+        await publish_agent_teams_change(db, target.id, *team_diff)
+
     if rule_regen:
-        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
         await generate_and_store_routing_rules(db, target)
 
     await register_agent_with_agentos(db, target)
@@ -2979,14 +2994,7 @@ async def _handle_update_agent_routing_rules_trigger(
             ]
         parsed.append(rule)
 
-    await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
-    for rule_type, pattern, priority in parsed:
-        db.add(
-            AgentRoutingRule(
-                agent_id=target.id, rule_type=rule_type, pattern=pattern, priority=priority
-            )
-        )
-    await db.flush()
+    await replace_routing_rules(db, target.id, parsed)
 
     message = _system_message(
         db, rivulet, f"@{agent.name} set {len(parsed)} routing rule(s) for agent @{target.name}."
@@ -3125,7 +3133,6 @@ async def _handle_rollback_agent_version_trigger(
     await db.commit()
 
     if instructions_changed:
-        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == target.id))
         await generate_and_store_routing_rules(db, target)
 
     await db.refresh(target)
@@ -3246,6 +3253,8 @@ async def _handle_update_team_trigger(
         team.name = call.name
     if call.description is not None:
         team.description = call.description
+    old_member_ids: set[str] | None = None
+    new_member_ids: set[str] | None = None
     if call.agent_ids is not None:
         # De-duped by id, first-seen order preserved -- two different refs
         # (e.g. an agent's name and its id) can resolve to the same Agent,
@@ -3253,12 +3262,26 @@ async def _handle_update_team_trigger(
         # inserting the same agent twice would otherwise hit an
         # IntegrityError on commit.
         deduped = list({member.id: member for member in resolved_agents}.values())
+        old_member_ids = set(
+            (
+                await db.scalars(select(TeamAgent.agent_id).where(TeamAgent.team_id == team.id))
+            ).all()
+        )
         await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team.id))
         for position, member in enumerate(deduped):
             db.add(TeamAgent(team_id=team.id, agent_id=member.id, position=position))
+        new_member_ids = {member.id for member in deduped}
 
     await db.commit()
     await publish_current_state(db, "team", team.id)
+    if old_member_ids is not None and new_member_ids is not None:
+        await replace_join_entities(
+            db,
+            "team_agent",
+            TEAM_AGENT_SPEC,
+            {(team.id, member_id) for member_id in old_member_ids},
+            {(team.id, member_id) for member_id in new_member_ids},
+        )
 
     message = _system_message(db, rivulet, f"@{agent.name} updated team {previous_name!r}.")
     publish(

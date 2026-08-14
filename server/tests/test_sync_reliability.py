@@ -120,6 +120,8 @@ async def test_build_entity_payload_reconstructs_current_state(db_session: Async
         "model": _AGENT_FIELDS["model"],
         "fallback_models": None,
         "output_schema": None,
+        # #317: now part of AGENT_SPEC's synced fields.
+        "approved_for_unattended_tools": False,
     }
 
 
