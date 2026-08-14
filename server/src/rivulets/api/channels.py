@@ -4,12 +4,14 @@ Also synced (FR-9.1) — name/description/position/archived/team_id (#317:
 see sync/apply.py's CHANNEL_SPEC)."""
 
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_session_claims
+from rivulets.api.teams import team_holds_owner_scoped_agent
 from rivulets.db.models import Channel
 from rivulets.sync.publish import publish_current_state
 
@@ -88,9 +90,28 @@ async def get_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> 
 
 @router.patch("/{channel_id}", response_model=ChannelOut)
 async def update_channel(
-    channel_id: str, body: ChannelUpdate, db: DbSession, _: CurrentWorkspaceId
+    channel_id: str,
+    body: ChannelUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> Channel:
     channel = await _get_or_404(db, channel_id)
+    if (
+        claims.grant != "owner"
+        and "team_id" in body.model_fields_set
+        and body.team_id is not None
+        and body.team_id != channel.team_id
+        and await team_holds_owner_scoped_agent(db, body.team_id)
+    ):
+        # #326: same confused-deputy concern as update_team's new-agent
+        # gate -- pointing a channel at a team that already has a
+        # capability-scoped agent on it makes that agent @mention-able
+        # from chat, same as adding it to the team directly.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to point a channel at a team with a capability-scoped agent",
+        )
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(channel, field, value)
     channel.updated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

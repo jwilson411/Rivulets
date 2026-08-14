@@ -25,12 +25,21 @@ _run_workflow_case always returns an empty tool-call list).
 
 import json
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 
-from rivulets.api.deps import CurrentHumanId, CurrentWorkspaceId, DbSession
+from rivulets.api.agents import agent_holds_owner_scope
+from rivulets.api.deps import (
+    CurrentHumanId,
+    CurrentWorkspaceId,
+    DbSession,
+    SessionClaims,
+    get_session_claims,
+)
+from rivulets.api.workflows import workflow_holds_owner_scoped_agent
 from rivulets.db.models import Agent, EvalCase, EvalCaseResult, EvalRun, EvalSuite, Workflow
 from rivulets.evals import run_eval_suite
 from rivulets.sync.publish import publish_current_state, publish_tombstone
@@ -173,6 +182,33 @@ class EvalCaseResultOut(BaseModel):
         )
 
 
+async def _require_owner_for_scoped_subject(
+    db: DbSession, claims: SessionClaims, *, agent_id: str | None, workflow_id: str | None
+) -> None:
+    """#326: an eval suite executes its subject directly (evals/runner.py's
+    run_eval_suite -> run_agent/run_workflow), bypassing both the workflow
+    published gate (find_workflow_by_name) and channel dispatch entirely --
+    the same confused-deputy reach as attaching a scoped agent to a team
+    (teams.py) or a workflow node (workflows.py), just via a third
+    invocation path. Checked on both create (fail fast) and run (the
+    authoritative check -- dispatch honors a scope grant made *after* the
+    suite was created, same as agent_holds_owner_scope's own docstring)."""
+    if claims.grant == "owner":
+        return
+    if agent_id is not None and await agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to run an eval suite against an agent that holds a "
+            "capability scope",
+        )
+    if workflow_id is not None and await workflow_holds_owner_scoped_agent(db, workflow_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to run an eval suite against a workflow with a "
+            "capability-scoped agent node",
+        )
+
+
 async def _get_suite_or_404(db: DbSession, suite_id: str) -> EvalSuite:
     suite = await db.get(EvalSuite, suite_id)
     if suite is None:
@@ -234,11 +270,19 @@ def _validate_case_fields(
 
 
 @router.post("/suites", response_model=EvalSuiteOut, status_code=status.HTTP_201_CREATED)
-async def create_suite(body: EvalSuiteCreate, db: DbSession, _: CurrentWorkspaceId) -> EvalSuiteOut:
+async def create_suite(
+    body: EvalSuiteCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> EvalSuiteOut:
     if body.agent_id is not None and await db.get(Agent, body.agent_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     if body.workflow_id is not None and await db.get(Workflow, body.workflow_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=body.agent_id, workflow_id=body.workflow_id
+    )
 
     suite = EvalSuite(
         name=body.name,
@@ -381,12 +425,22 @@ async def delete_case(suite_id: str, case_id: str, db: DbSession, _: CurrentWork
 
 @router.post("/suites/{suite_id}/run", response_model=EvalRunOut)
 async def run_suite(
-    suite_id: str, db: DbSession, _: CurrentWorkspaceId, human_id: CurrentHumanId
+    suite_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    human_id: CurrentHumanId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> EvalRun:
     """Runs synchronously within this request -- on-demand-only is the
     confirmed v1 scope, and no background-job infrastructure exists
     elsewhere in this codebase to reuse for a queued alternative."""
     suite = await _get_suite_or_404(db, suite_id)
+    # #326: the authoritative check -- see _require_owner_for_scoped_subject's
+    # docstring for why this is re-checked here rather than only at
+    # create_suite time.
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     case_count = await db.scalar(
         select(func.count()).select_from(EvalCase).where(EvalCase.suite_id == suite_id)
     )

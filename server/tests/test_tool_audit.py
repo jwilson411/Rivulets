@@ -331,6 +331,40 @@ async def test_unattended_scheduled_run_allows_approved_sensitive_agent(
     assert run.status == "completed"
 
 
+async def test_unattended_eval_run_blocks_unapproved_sensitive_agent(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#326: 'eval' joined _UNATTENDED_TRIGGERS alongside schedule/
+    remediation/webhook -- a workflow-attached eval suite has no human
+    reviewing the specific call, same reasoning as a schedule fire.
+    Mirrors test_unattended_scheduled_run_blocks_unapproved_sensitive_agent
+    with triggered_by='eval' instead of 'schedule'."""
+    agent = await _make_agent(db_session, name="Eval Coder")
+    await _assign_sensitive_tool(db_session, agent)
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow_with_agent_node(db_session, agent, "eval-sensitive-flow")
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        pytest.fail("run_agent should never be called -- the gate must block before this")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session,
+        workflow,
+        rivulet,
+        "go",
+        triggered_by="eval",
+        triggered_by_id="eval-run-1",
+    )
+
+    assert run.unattended is True
+    assert run.status == "failed"
+    assert run.error_message is not None
+    assert "Eval Coder" in run.error_message
+    assert "execute_python" in run.error_message
+
+
 async def test_human_triggered_run_is_not_gated_even_with_unapproved_sensitive_agent(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

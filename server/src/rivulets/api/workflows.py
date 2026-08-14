@@ -102,6 +102,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from rivulets.api.agents import agent_holds_owner_scope
 from rivulets.api.deps import (
     CurrentWorkspaceId,
     DbSession,
@@ -492,6 +493,44 @@ async def _validate_on_call_agent(db: DbSession, on_call_agent_id: str) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
 
+async def _require_owner_for_scoped_agent_node(
+    db: DbSession, claims: SessionClaims, agent_id: str | None
+) -> None:
+    """#326: attaching a capability-scoped agent to a workflow node is
+    gated regardless of `workflow.published` -- only an owner can publish
+    (_o: OwnerGrant on publish_workflow below), but a *draft* workflow can
+    still be run directly by an eval suite (evals/runner.py's
+    _run_workflow_case loads by id, skipping find_workflow_by_name's
+    published check), so draft status alone doesn't block invocation the
+    way it does for a schedule/webhook/slash-command trigger."""
+    if agent_id is None or claims.grant == "owner":
+        return
+    if await agent_holds_owner_scope(db, agent_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to attach an agent that holds a capability scope to a "
+            "workflow node",
+        )
+
+
+async def workflow_holds_owner_scoped_agent(db: DbSession, workflow_id: str) -> bool:
+    """#326: True if any 'agent' node in `workflow_id` references an agent
+    holding an owner-granted capability scope -- reused by api/evals.py to
+    gate a workflow-attached eval suite's create/run the same way
+    _require_owner_for_scoped_agent_node gates the node write itself."""
+    result = await db.execute(
+        select(WorkflowNode.agent_id).where(
+            WorkflowNode.workflow_id == workflow_id,
+            WorkflowNode.node_type == "agent",
+            WorkflowNode.agent_id.is_not(None),
+        )
+    )
+    for agent_id in result.scalars().all():
+        if agent_id is not None and await agent_holds_owner_scope(db, agent_id):
+            return True
+    return False
+
+
 def _require_owner_if_published(claims: SessionClaims, workflow: Workflow) -> None:
     """#315: node/connection writes are open to any grant on a draft
     workflow (same as always -- see this module's docstring), but an
@@ -674,6 +713,7 @@ async def create_node(
             )
         if await db.get(Agent, body.agent_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+        await _require_owner_for_scoped_agent_node(db, claims, body.agent_id)
     if body.node_type == "workflow":
         if body.child_workflow_id is None:
             raise HTTPException(
@@ -750,6 +790,7 @@ async def update_node(
             )
         if await db.get(Agent, body.agent_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+        await _require_owner_for_scoped_agent_node(db, claims, body.agent_id)
         node.agent_id = body.agent_id
     if body.child_workflow_id is not None:
         if node.node_type != "workflow":

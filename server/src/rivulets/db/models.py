@@ -835,12 +835,14 @@ class WorkflowRun(Base):
 
     `unattended` (#100): True iff nothing resembling a human was watching
     this run happen live -- derived once at creation from `triggered_by`
-    ('schedule'/'remediation'/'webhook' are unattended; everything else --
-    'human', 'agent' (a live chat's own run_workflow tool call), 'workflow'
-    (a nested run, which inherits its *parent* run's unattended-ness
-    rather than being derived from the literal string 'workflow'), 'eval'
-    -- is not) by `run_workflow`'s own default-derivation logic, unless a
-    nested invocation passes it through explicitly. Persisted (not just
+    ('schedule'/'remediation'/'webhook'/'eval' are unattended -- #326:
+    an eval suite runs its subject with no human reviewing the specific
+    call, same as a schedule fire; everything else -- 'human', 'agent' (a
+    live chat's own run_workflow tool call), 'workflow' (a nested run,
+    which inherits its *parent* run's unattended-ness rather than being
+    derived from the literal string 'workflow') -- is not) by
+    `run_workflow`'s own default-derivation logic, unless a nested
+    invocation passes it through explicitly. Persisted (not just
     held in the in-memory `_RunContext`) so `resume_workflow` can restore
     it after a pause/resume boundary, which starts a fresh `_RunContext`.
     Read by `workflows/nodes.py`'s `execute_agent_node` to gate an 'agent'

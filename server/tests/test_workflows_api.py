@@ -1213,3 +1213,78 @@ def test_invite_grant_can_edit_draft_workflow_graph(
     )
     assert renamed.status_code == 200, renamed.text
     _connect(client, invite_headers, workflow_id, None, node_id)
+
+
+# #326: invite-grant escalation via a workflow agent node -- see
+# api/workflows.py's _require_owner_for_scoped_agent_node docstring. Gated
+# regardless of draft/published status (unlike _require_owner_if_published
+# above) since an eval suite can run a *draft* workflow directly.
+
+
+def test_invite_grant_cannot_create_agent_node_with_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    scoped_agent = _create_agent(client, auth_headers, "NodeScoped")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-scoped-node-flow")
+
+    response = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": scoped_agent},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An owner session can, same request otherwise.
+    owner_response = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": scoped_agent},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 201, owner_response.text
+
+
+def test_invite_grant_cannot_update_agent_node_to_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    unscoped_agent = _create_agent(client, auth_headers, "NodeUnscoped")
+    scoped_agent = _create_agent(client, auth_headers, "NodeScoped2")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    workflow_id = _create_workflow(client, auth_headers, "guest-scoped-node-update-flow")
+    node = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": unscoped_agent},
+        headers=auth_headers,
+    ).json()
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/workflows/{workflow_id}/nodes/{node['id']}",
+        json={"agent_id": scoped_agent},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_invite_grant_can_attach_unscoped_agent_to_node(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    unscoped_agent = _create_agent(client, auth_headers, "NodeUnscoped2")
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-unscoped-node-flow")
+
+    response = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": unscoped_agent},
+        headers=invite_headers,
+    )
+    assert response.status_code == 201, response.text
