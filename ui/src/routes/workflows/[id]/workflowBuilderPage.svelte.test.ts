@@ -322,6 +322,63 @@ describe('workflows/[id]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
+	// #315: POST /publish and /unpublish are now OwnerGrant-only server-side
+	// -- hide the control an invite-grant session can't actually use, same
+	// treatment as the webhook Enable/Disable control after #285.
+	it('hides the Publish/Unpublish control for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Published')).toBeInTheDocument();
+
+		await expect.element(page.getByRole('button', { name: 'Unpublish' })).not.toBeInTheDocument();
+	});
+
+	// #315: on_failure_workflow_id/on_call_agent_id are now owner-only
+	// fields on PATCH /workflows/{id} -- disable the selects an invite-grant
+	// session can't actually use rather than letting them 403 on change.
+	it('disables the remediation selects for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Published')).toBeInTheDocument();
+
+		const remediationPicker = page.getByRole('combobox').first();
+		const onCallPicker = page.getByRole('combobox').nth(1);
+		await expect.element(remediationPicker).toBeDisabled();
+		await expect.element(onCallPicker).toBeDisabled();
+	});
+
+	// #315: node/connection writes are refused server-side for an
+	// invite-grant session once the workflow is published -- the canvas
+	// goes read-only (no palette to drag from, no dragging/connecting)
+	// rather than letting every gesture round-trip into a 403.
+	it('makes the canvas read-only for an invite-grant session on a published workflow', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await expect.element(page.getByTestId('palette-node-transform')).not.toBeInTheDocument();
+	});
+
+	// #315: the same invite-grant session can still build out a still-draft
+	// workflow's graph -- the read-only gate is specifically about an
+	// already-published graph, not invite-grant sessions in general.
+	it('keeps the canvas editable for an invite-grant session on a draft workflow', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+		vi.mocked(workflows.get).mockResolvedValue({ ...reviewFlow, published: false });
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByTestId('workflow-node-n1')).toBeInTheDocument();
+
+		await expect.element(page.getByTestId('palette-node-transform')).toBeInTheDocument();
+	});
+
 	it('loads and expands run history', async () => {
 		mockLoad();
 		vi.mocked(workflows.listRuns).mockResolvedValueOnce([

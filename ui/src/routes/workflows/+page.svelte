@@ -3,6 +3,7 @@
 	import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 	import { timeAgo } from '$lib/format';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+	import { auth } from '$lib/api/auth.svelte';
 
 	const workflowFilters: ListFilter<Workflow>[] = [
 		{
@@ -214,12 +215,14 @@
 						{/if}
 						<p class="mt-1 text-xs text-neutral-500">Updated {timeAgo(workflow.updated_at)}</p>
 					</a>
-					<button
-						onclick={() => handleDelete(workflow.id)}
-						class="ml-3 flex-none text-xs text-neutral-500 hover:text-agent-magenta-600"
-					>
-						Delete
-					</button>
+					{#if auth.grant === 'owner'}
+						<button
+							onclick={() => handleDelete(workflow.id)}
+							class="ml-3 flex-none text-xs text-neutral-500 hover:text-agent-magenta-600"
+						>
+							Delete
+						</button>
+					{/if}
 				</li>
 			{/snippet}
 		</FilterableList>

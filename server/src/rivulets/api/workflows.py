@@ -23,9 +23,28 @@ multiple matching edges fan out.
 `publish_workflow`/`unpublish_workflow` (#84) flip `Workflow.published`,
 the gate on whether `/{name}` or the run_workflow tool can start a new
 run — see Workflow's own docstring for exactly what that does and
-doesn't protect. Editing nodes/connections isn't otherwise restricted by
-publish state; a published workflow can still be freely edited here,
-same as before this existed.
+doesn't protect. Both are owner-gated (#315), same bucket as webhook
+create/rotate/delete (#242) -- arming or disarming an unattended trigger
+against the workspace shouldn't be something a guest session can do to
+itself. `delete_workflow` is owner-gated too, for the same reason
+delete_webhook is (#242's docstring): deleting is at least as disruptive
+as flipping `published`, tombstone-syncs to every peer, and isn't
+something an invite-grant session should be able to do to an owner's
+workflow regardless of its publish state.
+
+Editing nodes/connections isn't restricted by publish state for an owner
+session -- a published workflow can still be freely edited by its owner,
+same as before this existed. An invite-grant session is different (#315):
+`_require_owner_if_published` refuses node/connection writes to a
+workflow that's currently published, the same "unpublish -> edit ->
+republish" a guest has to go through, since publish/unpublish are
+themselves owner-only now -- a guest that could still rewrite a live
+graph in place (retarget an agent node, an edge's condition, a
+`child_workflow_id`) would have the identical confused-deputy reach as
+one that could republish after editing, just without the extra click.
+A draft (unpublished) workflow's graph is unaffected -- this is only
+about the *live*, already-trusted graph a schedule/webhook/slash-command
+can fire against.
 
 A node_type='workflow' node's `child_workflow_id` (#85) only gets the
 cheap, always-correct check at save time -- rejecting a direct
@@ -45,7 +64,13 @@ only discoverable per-workflow via `list_runs`, with no way to see
 on `WorkflowUpdate` that can be explicitly cleared back to null via
 PATCH -- `update_workflow` checks `body.model_fields_set` for both
 rather than the `is not None` shortcut every other field here uses,
-since each, once configured, needs a way to be turned back off.
+since each, once configured, needs a way to be turned back off. Both
+are also owner-gated (#315): each fires unattended off a run's finalize
+against whatever workflow/agent is currently configured, so retargeting
+or clearing either is the same unattended-trigger reach as minting a
+webhook -- `update_workflow` checks `claims.grant` for these two fields
+specifically rather than gating the whole PATCH, so an invite-grant
+session can still rename/redescribe a workflow it owns.
 `_validate_on_failure_workflow` doesn't reject a self-reference, unlike
 `_validate_child_workflow` -- see Workflow.on_failure_workflow_id's own
 docstring for why a self-reference here is a legitimate "retry once"
@@ -70,13 +95,20 @@ that generic settings table is opaque JSON already.
 
 import json
 import logging
+from typing import Annotated
 
 from croniter import CroniterError
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
+from rivulets.api.deps import (
+    CurrentWorkspaceId,
+    DbSession,
+    OwnerGrant,
+    SessionClaims,
+    get_session_claims,
+)
 from rivulets.db.models import (
     Agent,
     Channel,
@@ -460,6 +492,23 @@ async def _validate_on_call_agent(db: DbSession, on_call_agent_id: str) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
 
+def _require_owner_if_published(claims: SessionClaims, workflow: Workflow) -> None:
+    """#315: node/connection writes are open to any grant on a draft
+    workflow (same as always -- see this module's docstring), but an
+    invite-grant session editing an already-published one is rewriting the
+    live graph a schedule/webhook/slash-command can fire against next,
+    without the owner ever approving the change. Mirrors publish_workflow/
+    unpublish_workflow being owner-gated: since only an owner can put a
+    workflow back into draft, this is the same "unpublish -> edit ->
+    republish" round-trip enforced on the write side instead of relying on
+    a guest to take that detour voluntarily."""
+    if claims.grant != "owner" and workflow.published:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to edit a published workflow's graph — unpublish it first",
+        )
+
+
 @router.post("", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
 async def create_workflow(body: WorkflowCreate, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
     existing = await db.scalar(select(Workflow).where(Workflow.name == body.name))
@@ -488,9 +537,27 @@ async def get_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -
 
 @router.patch("/{workflow_id}", response_model=WorkflowOut)
 async def update_workflow(
-    workflow_id: str, body: WorkflowUpdate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    body: WorkflowUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> Workflow:
     workflow = await _get_workflow_or_404(db, workflow_id)
+    # #315: owner-gated same as create/rotate a webhook secret -- these two
+    # fields fire unattended off a run's finalize (see this module's
+    # docstring), so retargeting or clearing either is minting/rewiring an
+    # unattended trigger, not a routine edit like name/description below.
+    if claims.grant != "owner":
+        if "on_failure_workflow_id" in body.model_fields_set:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Owner access required to change on_failure_workflow_id",
+            )
+        if "on_call_agent_id" in body.model_fields_set:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Owner access required to change on_call_agent_id"
+            )
     if body.name is not None and body.name != workflow.name:
         existing = await db.scalar(select(Workflow).where(Workflow.name == body.name))
         if existing is not None:
@@ -515,7 +582,10 @@ async def update_workflow(
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_workflow(
+    workflow_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> None:
+    """#315: owner-gated -- see this module's docstring."""
     workflow = await _get_workflow_or_404(db, workflow_id)
     await db.delete(workflow)
     await db.commit()
@@ -530,13 +600,18 @@ async def delete_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId
 
 
 @router.post("/{workflow_id}/publish", response_model=WorkflowOut)
-async def publish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
+async def publish_workflow(
+    workflow_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> Workflow:
     """#84: only a published workflow can be triggered via `/{name}` or
     the run_workflow tool (workflows/trigger.py's find_workflow_by_name)
     -- see Workflow's docstring for what this does and doesn't guarantee.
     Refuses (400) without an entry connection, the same "can this even
     run" check the engine itself makes at trigger time -- publishing is
-    meant to mean "ready", not just "flagged"."""
+    meant to mean "ready", not just "flagged".
+
+    #315: owner-gated, same bucket as create_webhook -- see this module's
+    docstring."""
     workflow = await _get_workflow_or_404(db, workflow_id)
     entry = await db.scalar(
         select(WorkflowConnection).where(
@@ -557,11 +632,19 @@ async def publish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceI
 
 
 @router.post("/{workflow_id}/unpublish", response_model=WorkflowOut)
-async def unpublish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId) -> Workflow:
+async def unpublish_workflow(
+    workflow_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> Workflow:
     """Reverts to draft -- new triggers stop matching this workflow's name
     (find_workflow_by_name), but this has no effect on any WorkflowRun
     already in flight (workflows/engine.py's graph_snapshot_json is what
-    protects those, not `published`)."""
+    protects those, not `published`).
+
+    #315: owner-gated -- see this module's docstring. Also closes the
+    node/connection write gate below back to any grant (a workflow can't
+    be published while a guest is mid-edit and the owner isn't the one
+    who unpublished it), since it's the only way for it to flip back to
+    False in the first place now."""
     workflow = await _get_workflow_or_404(db, workflow_id)
     workflow.published = False
     await db.commit()
@@ -574,9 +657,14 @@ async def unpublish_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspac
     "/{workflow_id}/nodes", response_model=WorkflowNodeOut, status_code=status.HTTP_201_CREATED
 )
 async def create_node(
-    workflow_id: str, body: WorkflowNodeCreate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    body: WorkflowNodeCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> WorkflowNodeOut:
-    await _get_workflow_or_404(db, workflow_id)
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     if body.node_type not in NODE_TYPES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown node_type {body.node_type!r}")
     if body.node_type == "agent":
@@ -643,8 +731,15 @@ async def list_nodes(
 
 @router.patch("/{workflow_id}/nodes/{node_id}", response_model=WorkflowNodeOut)
 async def update_node(
-    workflow_id: str, node_id: str, body: WorkflowNodeUpdate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    node_id: str,
+    body: WorkflowNodeUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> WorkflowNodeOut:
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     node = await _get_node_or_404(db, workflow_id, node_id)
     if body.name is not None:
         node.name = body.name
@@ -681,7 +776,15 @@ async def update_node(
 
 
 @router.delete("/{workflow_id}/nodes/{node_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_node(workflow_id: str, node_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_node(
+    workflow_id: str,
+    node_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     node = await _get_node_or_404(db, workflow_id, node_id)
     await db.delete(node)
     await db.commit()
@@ -697,9 +800,14 @@ async def delete_node(workflow_id: str, node_id: str, db: DbSession, _: CurrentW
     status_code=status.HTTP_201_CREATED,
 )
 async def create_connection(
-    workflow_id: str, body: WorkflowConnectionCreate, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    body: WorkflowConnectionCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> WorkflowConnectionOut:
-    await _get_workflow_or_404(db, workflow_id)
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     if body.from_node_id is not None:
         await _get_node_or_404(db, workflow_id, body.from_node_id)
     await _get_node_or_404(db, workflow_id, body.to_node_id)
@@ -750,7 +858,10 @@ async def update_connection(
     body: WorkflowConnectionUpdate,
     db: DbSession,
     _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> WorkflowConnectionOut:
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     connection = await _get_connection_or_404(db, workflow_id, connection_id)
     if "condition_json" in body.model_fields_set:
         _validate_condition(body.condition_json)
@@ -763,8 +874,14 @@ async def update_connection(
 
 @router.delete("/{workflow_id}/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_connection(
-    workflow_id: str, connection_id: str, db: DbSession, _: CurrentWorkspaceId
+    workflow_id: str,
+    connection_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> None:
+    workflow = await _get_workflow_or_404(db, workflow_id)
+    _require_owner_if_published(claims, workflow)
     connection = await _get_connection_or_404(db, workflow_id, connection_id)
     await db.delete(connection)
     await db.commit()
