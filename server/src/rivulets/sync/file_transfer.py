@@ -36,6 +36,14 @@ HASH_LEN = 64
 MISS_MARKER = b"MISS"
 HIT_PREFIX = b"HIT "
 
+# Mirrors api/files.py's HTTP upload cap (_MAX_FILE_BYTES) -- a peer is
+# never entitled to make this node hold more file content than a human
+# uploader is. Enforced against the length prefix a peer sends *before*
+# read_exactly(stream, length) is ever called for the body, so a peer
+# advertising e.g. length=2**64-1 gets rejected instead of turned into an
+# unbounded read that tries to buffer that many bytes in memory.
+MAX_FILE_BYTES = 100 * 1024 * 1024
+
 
 async def read_exactly(stream: INetStream, n: int) -> bytes:
     buf = bytearray()

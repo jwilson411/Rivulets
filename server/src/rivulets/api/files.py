@@ -98,7 +98,16 @@ async def download_file(file_id: str, db: DbSession, _: CurrentWorkspaceId) -> F
     # Re-derived from files_dir + content_hash rather than trusting the
     # stored local_path column (#239) -- a hash written by older or buggy
     # code could otherwise point outside files_dir.
-    local_path = local_path_for_content_hash(row.content_hash)
+    try:
+        local_path = local_path_for_content_hash(row.content_hash)
+    except ValueError as exc:
+        # #288: a row whose stored content_hash isn't a valid digest (e.g.
+        # written before #239's validation existed) has no content this
+        # node could ever legitimately serve -- 404, not an unhandled
+        # ValueError bubbling up as a 500.
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "File content not available locally yet"
+        ) from exc
     if not local_path.exists():
         # Lazy sync (sync.eager_files_lan/_wan, issue #123) may have
         # deferred fetching this file's bytes when its metadata synced in

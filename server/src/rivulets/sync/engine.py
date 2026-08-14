@@ -62,6 +62,7 @@ below.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -97,6 +98,7 @@ from rivulets.sync.file_transfer import (
     FILE_TRANSFER_PROTOCOL,
     HASH_LEN,
     HIT_PREFIX,
+    MAX_FILE_BYTES,
     MISS_MARKER,
     read_exactly,
 )
@@ -865,7 +867,21 @@ class SyncEngine:
                 await stream.write(MISS_MARKER)
             else:
                 data = local_path.read_bytes()
-                await stream.write(HIT_PREFIX + struct.pack(">Q", len(data)) + data)
+                # #288: don't serve bytes that don't actually match the
+                # hash they're stored under -- a row written by
+                # older/buggy code, or on-disk corruption, would otherwise
+                # be handed out as if it were authentic content for
+                # content_hash. Refusing (MISS, not an error) is the same
+                # trust posture as an unreadable path: the peer just
+                # doesn't have this content from us.
+                if hashlib.sha256(data).hexdigest() != content_hash:
+                    logger.warning(
+                        "Refusing to serve %s: on-disk content doesn't match its own hash",
+                        content_hash[:12],
+                    )
+                    await stream.write(MISS_MARKER)
+                else:
+                    await stream.write(HIT_PREFIX + struct.pack(">Q", len(data)) + data)
         except Exception:
             logger.warning("Error handling file-transfer stream request", exc_info=True)
         finally:
@@ -905,6 +921,17 @@ class SyncEngine:
                 if marker == MISS_MARKER:
                     return None
                 (length,) = struct.unpack(">Q", await read_exactly(stream, 8))
+                # #288: a malicious/buggy peer can send HIT + an enormous
+                # length (up to 2**64-1) before ever supplying a byte of
+                # body -- read_exactly would then try to buffer that many
+                # bytes and OOM this process. Reject before the body read,
+                # mirroring api/files.py's HTTP upload cap, rather than
+                # trusting a peer-declared length.
+                if length > MAX_FILE_BYTES:
+                    raise ValueError(
+                        f"Peer {peer_id} declared file size {length} exceeds "
+                        f"{MAX_FILE_BYTES} byte limit"
+                    )
                 return await read_exactly(stream, length)
         finally:
             await stream.close()
