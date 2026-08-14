@@ -87,6 +87,18 @@ async def test_create_backup_includes_sync_node_identity(
         assert "./sync/node_key" in archive.getnames()
 
 
+async def test_create_backup_includes_custom_tool_source(
+    settings: Settings, engine: AsyncEngine
+) -> None:
+    settings.tools_dir.mkdir(parents=True, exist_ok=True)
+    (settings.tools_dir / "greet.py").write_text("# a custom tool\n")
+
+    path = await backup.create_backup(settings, engine, prefix=backup.MANUAL_PREFIX)
+
+    with tarfile.open(path) as archive:
+        assert "./tools/greet.py" in archive.getnames()
+
+
 async def test_create_backup_daily_is_idempotent_per_day(
     settings: Settings, engine: AsyncEngine
 ) -> None:
@@ -286,6 +298,35 @@ async def test_restore_from_backup_pairs_credentials_db_with_snapshot(
         rows = conn.execute("SELECT ref FROM provider_keys").fetchall()
         conn.close()
         assert rows == [("provider-key:abc",)]
+    finally:
+        await get_engine().dispose()
+        override_engine(None)
+
+
+async def test_restore_from_backup_pairs_tool_source_with_snapshot(
+    settings: Settings, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#290: a backup taken while a custom tool's source file existed must
+    restore it (even if the live file was later lost/mutated), and a
+    restore must also clear any tool file created *after* that snapshot
+    so tools_dir stays 1:1 with the Tool rows that came back in
+    rivulets.db instead of mixing two points in time."""
+    monkeypatch.setattr("rivulets.db.session.get_settings", lambda: settings)
+    override_engine(engine)
+    try:
+        settings.tools_dir.mkdir(parents=True, exist_ok=True)
+        (settings.tools_dir / "greet.py").write_text("# v1")
+        snapshot = await backup.create_backup(settings, engine, prefix=backup.MANUAL_PREFIX)
+
+        # Mutated after the snapshot, plus an entirely new file with no
+        # matching row at snapshot time.
+        (settings.tools_dir / "greet.py").write_text("# mutated after snapshot")
+        (settings.tools_dir / "post_snapshot_tool.py").write_text("# should not survive restore")
+
+        await backup.restore_from_backup(settings, snapshot)
+
+        assert (settings.tools_dir / "greet.py").read_text() == "# v1"
+        assert not (settings.tools_dir / "post_snapshot_tool.py").exists()
     finally:
         await get_engine().dispose()
         override_engine(None)

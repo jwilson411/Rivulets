@@ -22,6 +22,13 @@ workspace back to a *consistent* state (#243), not just the app database:
   running node is a no-op in practice (they're created once and never
   change) and doesn't retroactively change an already-started SyncEngine's
   in-memory identity — see restore_from_backup's docstring.
+- `tools/` — custom tool source files (api/tools.py writes one
+  `{name}.py` per row at `Settings.tools_dir`; `Tool.source_path` in
+  `rivulets.db` points at it). Small source text, not in the same size
+  class as `files/` below — #290: leaving it out meant a restored
+  `rivulets.db` still listed custom `Tool` rows whose `source_path` no
+  longer resolved to anything, so `_load_custom_tool` silently skipped
+  them and every custom tool invocation became a no-op after restore.
 
 Deliberately NOT included: `files/` (user-uploaded attachments) and
 `agentos.db` (AgentOS's own run/session history — agentos/service.py).
@@ -82,6 +89,7 @@ VERSION_MARKER_NAME = ".last_version"
 _ARCHIVE_DB_NAME = "rivulets.db"
 _ARCHIVE_CREDENTIALS_NAME = "credentials.db"
 _ARCHIVE_SYNC_DIRNAME = "sync"
+_ARCHIVE_TOOLS_DIRNAME = "tools"
 
 
 class BackupIntegrityError(RuntimeError):
@@ -161,6 +169,13 @@ async def _build_backup_archive(settings: Settings, engine: AsyncEngine, dest: P
             for item in settings.sync_dir.iterdir():
                 if item.is_file():
                     shutil.copyfile(item, sync_dest / item.name)
+
+        if settings.tools_dir.is_dir():
+            tools_dest = tmp_path / _ARCHIVE_TOOLS_DIRNAME
+            tools_dest.mkdir()
+            for item in settings.tools_dir.iterdir():
+                if item.is_file():
+                    shutil.copyfile(item, tools_dest / item.name)
 
         with tarfile.open(dest, "w") as archive:
             archive.add(tmp_path, arcname=".")
@@ -289,10 +304,16 @@ async def restore_from_backup(settings: Settings, backup_path: Path) -> None:
     *pre*-restore snapshot of that same corrupted DB failed its own
     integrity check would defeat the point of having a restore path.
 
-    Swaps in `rivulets.db` and, if present in the archive, `credentials.db`
-    and `sync/`'s node-identity files (absent from the archive means they
-    didn't exist at backup time either, so the live copies are removed to
-    match rather than left stale). `agentos.db` — not part of the archive,
+    Swaps in `rivulets.db` and, if present in the archive, `credentials.db`,
+    `sync/`'s node-identity files, and `tools/`'s custom-tool source
+    (absent from the archive means they didn't exist at backup time
+    either, so the live copies are removed to match rather than left
+    stale). `tools/` is fully replaced rather than merged — every local
+    `.py` file is cleared first — so it stays 1:1 with the `Tool` rows
+    that just came in via `rivulets.db` (#290: a stale local tool file
+    left over from after the backup, with no matching row, is harmless
+    on its own, but clearing keeps the on-disk state a true snapshot
+    instead of a mix of two points in time). `agentos.db` — not part of the archive,
     see module docstring — is wiped unconditionally rather than restored;
     callers are expected to re-initialize AgentOS and call
     `agentos.sync_agents()` afterward (api/backups.py's restore handler
@@ -342,6 +363,16 @@ async def restore_from_backup(settings: Settings, backup_path: Path) -> None:
             for item in sync_src.iterdir():
                 if item.is_file():
                     shutil.copyfile(item, settings.sync_dir / item.name)
+
+        tools_src = tmp_path / _ARCHIVE_TOOLS_DIRNAME
+        settings.tools_dir.mkdir(parents=True, exist_ok=True)
+        for existing in settings.tools_dir.iterdir():
+            if existing.is_file():
+                existing.unlink()
+        if tools_src.is_dir():
+            for item in tools_src.iterdir():
+                if item.is_file():
+                    shutil.copyfile(item, settings.tools_dir / item.name)
 
     _unlink_with_sidecars(settings.agentos_db_path)
     override_engine(None)
