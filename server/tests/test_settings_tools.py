@@ -20,7 +20,7 @@ from rivulets.dispatch.service import (
     _find_update_workspace_settings_call,  # pyright: ignore[reportPrivateUsage]
 )
 from rivulets.tools.builtin.settings import get_workspace_settings, update_workspace_settings
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -58,11 +58,7 @@ def test_find_get_workspace_settings_call() -> None:
 def test_find_update_workspace_settings_call_extracts_args() -> None:
     run_output = RunOutput(
         status=RunStatus.completed,
-        tools=[
-            _tool_execution(
-                "update_workspace_settings", {"settings": {"guard.turn_limit": 5}}
-            )
-        ],
+        tools=[_tool_execution("update_workspace_settings", {"settings": {"guard.turn_limit": 5}})],
     )
     call = _find_update_workspace_settings_call(run_output)
     assert call == {"guard.turn_limit": 5}
@@ -163,9 +159,7 @@ def test_update_workspace_settings_updates_known_key(
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(
-            _tool_execution(
-                "update_workspace_settings", {"settings": {"guard.turn_limit": 5}}
-            )
+            _tool_execution("update_workspace_settings", {"settings": {"guard.turn_limit": 5}})
         ),
     )
     rivulet = client.post(

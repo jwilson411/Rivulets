@@ -32,7 +32,7 @@ from rivulets.tools.builtin.workflows import (
     unpublish_workflow,
     update_workflow,
 )
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -238,9 +238,7 @@ def test_create_workflow_creates_workflow(
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(
-            _tool_execution(
-                "create_workflow", {"name": "new-workflow", "description": "fresh"}
-            )
+            _tool_execution("create_workflow", {"name": "new-workflow", "description": "fresh"})
         ),
     )
     rivulet = client.post(
@@ -400,9 +398,7 @@ def test_delete_workflow_removes_workflow(
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "deleted workflow" in messages[2]["content"]
 
-    assert (
-        client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 404
-    )
+    assert client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 404
 
 
 def test_delete_workflow_unknown_reference_is_rejected(

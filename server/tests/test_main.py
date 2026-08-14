@@ -25,7 +25,7 @@ main_module: ModuleType = sys.modules["rivulets.main"]
 
 
 @pytest.fixture(autouse=True)
-def _restore_process_umask() -> Any:
+def _restore_process_umask() -> Any:  # pyright: ignore[reportUnusedFunction]
     """#244: main() now calls os.umask(0o077), which is process-wide, not
     per-call state monkeypatch can undo -- without this, the first test
     below would permanently tighten every other test's file-creation mode
@@ -82,9 +82,7 @@ def test_main_allows_0_0_0_0_for_docker(monkeypatch: pytest.MonkeyPatch, tmp_pat
     run_main()  # must not raise
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX umask bits aren't meaningful on Windows"
-)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX umask bits aren't meaningful on Windows")
 def test_main_sets_a_restrictive_process_umask(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -41,9 +41,7 @@ def upgrade() -> None:
     with op.batch_alter_table(_TABLE) as batch_op:
         if "visit_counts_json" not in existing:
             batch_op.add_column(
-                sa.Column(
-                    "visit_counts_json", sa.Text(), nullable=False, server_default="{}"
-                )
+                sa.Column("visit_counts_json", sa.Text(), nullable=False, server_default="{}")
             )
         if "total_steps" not in existing:
             batch_op.add_column(
