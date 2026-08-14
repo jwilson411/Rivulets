@@ -44,8 +44,8 @@ from sqlalchemy import select
 
 from rivulets.api.deps import (
     CurrentHumanId,
+    CurrentStreamClaims,
     CurrentWorkspaceId,
-    CurrentWorkspaceIdForStream,
     DbSession,
 )
 from rivulets.api.files import publish_file_change
@@ -480,7 +480,7 @@ async def close_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -
 
 @router.get("/rivulets/{rivulet_id}/stream")
 async def stream_rivulet(
-    rivulet_id: str, request: Request, db: DbSession, _: CurrentWorkspaceIdForStream
+    rivulet_id: str, request: Request, db: DbSession, claims: CurrentStreamClaims
 ) -> StreamingResponse:
     """SSE endpoint (api-design.md#sse-protocol), backed by streaming.py's
     in-process pub/sub. Stays open for the life of the connection — a
@@ -496,13 +496,20 @@ async def stream_rivulet(
     never args, per FR-5.5); the handoff tool specifically also still gets
     its own dedicated `handoff` event once the call completes.
 
+    Not owner-gated — an invite-grant session opening this route is by
+    design (it's how an invitee sees the conversation they were invited
+    into). What's gated is per-event: subscribe() records this session's
+    grant so streaming.py's publish() can skip owner_only events (#286,
+    e.g. a freshly created invite's one-shot URL) for anyone who isn't the
+    owner, without needing a separate channel or route.
+
     The DB session this pulls in via dependency injection stays open for
     as long as the connection does, same as the subscription — acceptable
     overhead for a local single-user SQLite-backed app, not worth the
     added complexity of releasing it early for one existence check.
     """
     await _get_rivulet_or_404(db, rivulet_id)
-    queue = subscribe(rivulet_id)
+    queue = subscribe(rivulet_id, is_owner=claims.grant == "owner")
 
     async def event_source() -> AsyncIterator[bytes]:
         try:

@@ -7,14 +7,19 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets import streaming
+from rivulets.api.deps import SessionClaims
 from rivulets.api.rivulets import stream_rivulet
 from rivulets.db.models import Channel, Message, Rivulet
 from rivulets.db.session import session_scope
+
+_OWNER_CLAIMS = SessionClaims(workspace_id="workspace-1", human_id=None, grant="owner")
+_INVITE_CLAIMS = SessionClaims(workspace_id="workspace-1", human_id="human-1", grant="invite")
 
 
 def test_list_rivulets_returns_404_for_unknown_channel(
@@ -109,6 +114,12 @@ class _FakeStreamRequest:
         return self._checks > 1
 
 
+async def _call_stream_rivulet(
+    rivulet_id: str, request: _FakeStreamRequest, db_session: AsyncSession, claims: SessionClaims
+) -> StreamingResponse:
+    return await stream_rivulet(rivulet_id, request, db_session, claims)  # type: ignore[arg-type]
+
+
 async def test_stream_rivulet_yields_a_published_event_then_exits_on_disconnect(
     db_session: AsyncSession,
 ) -> None:
@@ -117,7 +128,7 @@ async def test_stream_rivulet_yields_a_published_event_then_exits_on_disconnect(
     await db_session.commit()
 
     request = _FakeStreamRequest()
-    response = await stream_rivulet("riv-1", request, db_session, "workspace-1")  # type: ignore[arg-type]
+    response = await _call_stream_rivulet("riv-1", request, db_session, _OWNER_CLAIMS)
 
     # subscribe() already ran synchronously inside stream_rivulet, before the
     # generator itself starts -- publishing now lands in the same queue the
@@ -134,10 +145,77 @@ async def test_stream_rivulet_yields_a_published_event_then_exits_on_disconnect(
 
 async def test_stream_rivulet_returns_404_for_unknown_rivulet(db_session: AsyncSession) -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await stream_rivulet(
-            "does-not-exist",
-            _FakeStreamRequest(),  # type: ignore[arg-type]
-            db_session,
-            "workspace-1",
+        await _call_stream_rivulet(
+            "does-not-exist", _FakeStreamRequest(), db_session, _OWNER_CLAIMS
         )
     assert exc_info.value.status_code == 404
+
+
+async def test_stream_rivulet_owner_only_event_reaches_an_owner_session(
+    db_session: AsyncSession,
+) -> None:
+    """#286: publish()'s `owner_only=True` (used for a freshly created
+    invite's one-shot URL) must still reach a genuine owner session's
+    stream -- the filtering in streaming.py is per-subscriber grant, not a
+    blanket drop."""
+    db_session.add(Channel(id="chan-owner-only", name="general"))
+    db_session.add(
+        Rivulet(
+            id="riv-owner-only", channel_id="chan-owner-only", created_by="human", status="active"
+        )
+    )
+    await db_session.commit()
+
+    request = _FakeStreamRequest()
+    response = await _call_stream_rivulet("riv-owner-only", request, db_session, _OWNER_CLAIMS)
+
+    streaming.publish(
+        "riv-owner-only",
+        "system_alert",
+        {"type": "invite_created", "url": "http://127.0.0.1:1234/invite/abc.secret"},
+        owner_only=True,
+    )
+
+    chunks: list[bytes] = [chunk async for chunk in response.body_iterator]  # type: ignore[union-attr]
+
+    assert len(chunks) == 1
+    assert "abc.secret" in chunks[0].decode()
+
+
+async def test_stream_rivulet_owner_only_event_never_reaches_an_invite_grant_session(
+    db_session: AsyncSession,
+) -> None:
+    """#286: an invite-grant EventSource on the rivulet must not observe
+    the raw invite secret's URL -- create_invite's `system_alert` payload
+    is published with `owner_only=True` specifically so a watching invitee
+    can't harvest the next owner-class invite link."""
+    db_session.add(Channel(id="chan-invite-grant", name="general"))
+    db_session.add(
+        Rivulet(
+            id="riv-invite-grant",
+            channel_id="chan-invite-grant",
+            created_by="human",
+            status="active",
+        )
+    )
+    await db_session.commit()
+
+    request = _FakeStreamRequest()
+    response = await _call_stream_rivulet("riv-invite-grant", request, db_session, _INVITE_CLAIMS)
+
+    streaming.publish(
+        "riv-invite-grant",
+        "system_alert",
+        {"type": "invite_created", "url": "http://127.0.0.1:1234/invite/abc.secret"},
+        owner_only=True,
+    )
+    # A non-owner_only event still must come through -- the invite-grant
+    # session is a legitimate subscriber of everything else on this stream.
+    streaming.publish("riv-invite-grant", "agent_token", {"token": "hi"})
+
+    chunks: list[bytes] = [chunk async for chunk in response.body_iterator]  # type: ignore[union-attr]
+
+    assert len(chunks) == 1
+    text = chunks[0].decode()
+    assert "event: agent_token" in text
+    assert "abc.secret" not in text

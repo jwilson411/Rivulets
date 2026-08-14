@@ -206,7 +206,7 @@ def test_handoff_publishes_sse_event(
     )
     rivulet_id = first.json()["id"]
 
-    event_queue = subscribe(rivulet_id)
+    event_queue = subscribe(rivulet_id, is_owner=True)
     try:
         client.post(
             f"/api/v1/rivulets/{rivulet_id}/messages",

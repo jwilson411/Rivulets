@@ -111,7 +111,7 @@ async def get_current_workspace_id(
 async def get_current_workspace_id_for_stream(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-) -> str:
+) -> SessionClaims:
     """Same validation as get_current_workspace_id, but also accepts a
     token via a `token` query parameter — needed only for the SSE stream
     route (api/rivulets.py), since the browser's native EventSource API
@@ -128,9 +128,15 @@ async def get_current_workspace_id_for_stream(
     hours-long session token is rejected there even though it would
     decode successfully, so the only thing that can ever end up in a URL
     is something that expires in seconds and is useless anywhere else.
-    """
+
+    Returns the full SessionClaims, not just the workspace id, because the
+    stream route (streaming.py's subscribe/publish) needs `grant` too --
+    #286: owner-only payloads like a fresh invite secret must never reach
+    an invite-grant session's EventSource, and the stream ticket carries
+    the original session's grant along (api/auth.py's mint_stream_ticket)
+    specifically so this check still works for a query-string ticket."""
     if credentials is not None:
-        return _decode_session_token(credentials.credentials).workspace_id
+        return _decode_session_token(credentials.credentials)
     token = request.query_params.get("token")
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
@@ -141,7 +147,7 @@ async def get_current_workspace_id_for_stream(
             "A query-string token must be a short-lived stream ticket "
             "(POST /auth/stream-ticket), not a full session token",
         )
-    return claims.workspace_id
+    return claims
 
 
 async def get_current_human_id(
@@ -168,15 +174,15 @@ async def require_owner_grant(
 
 
 CurrentWorkspaceId = Annotated[str, Depends(get_current_workspace_id)]
-CurrentWorkspaceIdForStream = Annotated[str, Depends(get_current_workspace_id_for_stream)]
+CurrentStreamClaims = Annotated[SessionClaims, Depends(get_current_workspace_id_for_stream)]
 CurrentHumanId = Annotated[str, Depends(get_current_human_id)]
 OwnerGrant = Annotated[None, Depends(require_owner_grant)]
 OptionalSessionClaims = Annotated[SessionClaims | None, Depends(get_optional_session_claims)]
 
 __all__ = [
     "CurrentHumanId",
+    "CurrentStreamClaims",
     "CurrentWorkspaceId",
-    "CurrentWorkspaceIdForStream",
     "DbSession",
     "OptionalSessionClaims",
     "OwnerGrant",
