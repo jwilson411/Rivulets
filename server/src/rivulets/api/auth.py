@@ -168,14 +168,19 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(claims: OptionalSessionClaims) -> None:
-    """Requires a genuine session token before touching process-wide state
-    (#228) -- an unauthenticated POST here used to be able to wipe the
-    JWT signing key, P2P PSK, credential-store key, and webhook-secret
-    key, and stop sync, for every session on the node, from a plain
-    cross-site form POST. A missing or invalid token is a silent 204
-    no-op instead of a 401 so a client that's already logged out (or
-    never was) can still "sign out" locally without an error."""
-    if claims is None:
+    """Requires a genuine *owner* session token before touching process-wide
+    state (#228, #284) -- an unauthenticated POST here used to be able to
+    wipe the JWT signing key, P2P PSK, credential-store key, and
+    webhook-secret key, and stop sync, for every session on the node, from a
+    plain cross-site form POST (#228). That was tightened to require some
+    valid session, but any *valid* session -- including an invite-redeemed
+    one (#15, grant="invite") -- still passed, letting an invited guest's
+    Sign out button take the whole node down until the owner re-entered the
+    mnemonic (#284). A missing/invalid token or a non-owner grant is a
+    silent 204 no-op instead of a 401/403 so a client that's already logged
+    out (or never had owner access) can still "sign out" locally without an
+    error -- the UI already drops the local JWT first regardless."""
+    if claims is None or claims.grant != "owner":
         return
     get_session_key_store().clear()
     await get_sync_engine().stop()
