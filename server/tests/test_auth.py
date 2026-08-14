@@ -8,6 +8,7 @@ from rivulets.config import Settings, get_settings
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
 from rivulets.security.session import get_session_key_store
+from rivulets.sync import get_sync_engine
 
 _ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- exercising #247's gate, never actually bound
 _TEST_BOOTSTRAP_TOKEN = "correct-token"  # noqa: S105 -- test fixture value, not a real secret
@@ -242,6 +243,44 @@ def test_unauthenticated_logout_does_not_clear_a_logged_in_workspaces_session(
 
     # The already-logged-in workspace's session must still be intact.
     assert client.get("/api/v1/channels", headers=auth_headers).status_code == 200
+
+
+def test_invite_grant_logout_does_not_clear_the_owners_session(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#284: an invite-redeemed session (#15, grant="invite") passing
+    _decode_session_token successfully used to be enough to reach the same
+    process-wide teardown #228 gated against unauthenticated callers --
+    letting an invited guest's Sign out button wipe the JWT signing key,
+    P2P PSK, credential-store key, and webhook-secret key, and stop sync,
+    for the whole node. Only grant="owner" may do that; an invite-grant
+    logout must be a silent 204 no-op, same as no token at all."""
+    stop_calls = 0
+
+    async def _count_stop(*_args: object, **_kwargs: object) -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+
+    # The `client` fixture already no-ops SyncEngine.stop (conftest.py) so
+    # the suite never touches real sockets -- swapped here for a call
+    # counter instead, since `.running` never flips True under that no-op
+    # either way and can't be used as a stand-in for "was stop() reached".
+    monkeypatch.setattr(get_sync_engine(), "stop", _count_stop)
+
+    created = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": created["url"].rsplit("/", 1)[-1], "display_name": "Guest One"},
+    ).json()
+    invite_headers = {"Authorization": f"Bearer {accepted['token']}"}
+
+    response = client.post("/api/v1/auth/logout", headers=invite_headers)
+    assert response.status_code == 204
+    assert stop_calls == 0
+
+    # The owner's own session must still be intact.
+    assert client.get("/api/v1/channels", headers=auth_headers).status_code == 200
+    assert get_session_key_store().get_key()
 
 
 def test_login_derives_a_credential_store_key(client: TestClient) -> None:
