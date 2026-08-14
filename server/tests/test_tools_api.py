@@ -411,6 +411,27 @@ def test_custom_tool_write_routes_require_owner_grant(
     assert not Path(tool["source_path"]).exists()
 
 
+def test_list_tool_versions_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#321: list_tool_versions returns ToolVersionOut.source_code -- the
+    same secrets-bearing payload the write routes above are gated to keep
+    away from invite-grant. Reading every version's source is just as much
+    a leak as writing it, so this needs the same OwnerGrant."""
+    tool = _create_custom_tool_named(client, auth_headers, "read_gate_test_tool")
+    client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "SECRET_WEBHOOK_URL = 'https://example.com/hook?token=shh'"},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.get(f"/api/v1/tools/{tool['id']}/versions", headers=invite_headers)
+
+    assert response.status_code == 403
+    assert "SECRET_WEBHOOK_URL" not in response.text
+
+
 def test_create_tool_rejects_names_that_would_escape_tools_dir(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

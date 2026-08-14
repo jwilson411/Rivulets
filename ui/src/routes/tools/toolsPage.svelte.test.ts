@@ -4,11 +4,27 @@
 // simple-mode-codegen-not-wired-up special case).
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import ToolsPage from './+page.svelte';
 import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
 import { ApiError } from '$lib/api/client';
+
+// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
+// follows -- defaults to 'owner' so the existing (pre-#321) tests below
+// don't have to know about grants at all.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		},
+		get token() {
+			return 'test-token';
+		}
+	}
+}));
 
 vi.mock('$lib/api/tools', () => ({
 	tools: {
@@ -50,6 +66,10 @@ const customToolVersion: ToolVersion = {
 	created_at: '2026-08-01T00:00:00Z'
 };
 
+beforeEach(() => {
+	authState.grant = 'owner';
+});
+
 afterEach(() => {
 	vi.clearAllMocks();
 });
@@ -67,6 +87,24 @@ describe('tools/+page.svelte', () => {
 		await expect.element(page.getByText(/v1 —/)).toBeInTheDocument();
 		// Only the custom tool gets a Delete action.
 		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+	});
+
+	it('hides the version/source panel for a non-owner (invite-grant) session', async () => {
+		// #321: GET /tools/{id}/versions is now OwnerGrant-only server-side
+		// (it carries source_code), so a non-owner session shouldn't even
+		// call it -- and has nothing to show if it somehow did.
+		authState.grant = 'invite';
+		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
+
+		render(ToolsPage);
+
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		expect(tools.listVersions).not.toHaveBeenCalled();
+		await expect.element(page.getByText('Version history')).not.toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Tool source code')).not.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Open in editor' }))
+			.not.toBeInTheDocument();
 	});
 
 	it('creates a tool in advanced mode without a prompt field', async () => {
