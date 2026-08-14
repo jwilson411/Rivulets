@@ -1,8 +1,7 @@
 """Channel CRUD (FR-2.1, FR-2.4, FR-2.5).
 
-Also synced (FR-9.1) — name/description/position/archived, not team_id
-(see sync/apply.py's CHANNEL_SPEC and module docstring for why team
-assignment doesn't sync yet)."""
+Also synced (FR-9.1) — name/description/position/archived/team_id (#317:
+see sync/apply.py's CHANNEL_SPEC)."""
 
 from datetime import UTC, datetime
 

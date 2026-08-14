@@ -1,8 +1,8 @@
 """Team CRUD (FR-2.2).
 
-Also synced (FR-9.1) — name/description only; team membership (agent_ids,
-a join table) isn't synced yet for the same foreign-key-ordering reason
-Channel.team_id isn't (see sync/apply.py's module docstring)."""
+Also synced (FR-9.1) — name/description on `team` itself, and (#317)
+membership as its own `team_agent` entity per row (sync/apply.py's
+TEAM_AGENT_SPEC)."""
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -10,7 +10,12 @@ from sqlalchemy import delete, select, update
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession
 from rivulets.db.models import Channel, Team, TeamAgent
-from rivulets.sync.publish import publish_current_state, publish_tombstone
+from rivulets.sync.apply import TEAM_AGENT_SPEC
+from rivulets.sync.publish import (
+    publish_current_state,
+    publish_tombstone,
+    replace_join_entities,
+)
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
@@ -92,12 +97,24 @@ async def update_team(
         team.name = body.name
     if body.description is not None:
         team.description = body.description
+    old_agent_ids: set[str] | None = None
+    new_agent_ids: set[str] | None = None
     if body.agent_ids is not None:
+        old_agent_ids = set(await _agent_ids(db, team_id))
         await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team_id))
+        new_agent_ids = set(dict.fromkeys(body.agent_ids))
         for position, agent_id in enumerate(body.agent_ids):
             db.add(TeamAgent(team_id=team_id, agent_id=agent_id, position=position))
     await db.commit()
     await _publish_team_change(db, team)
+    if old_agent_ids is not None and new_agent_ids is not None:
+        await replace_join_entities(
+            db,
+            "team_agent",
+            TEAM_AGENT_SPEC,
+            {(team_id, agent_id) for agent_id in old_agent_ids},
+            {(team_id, agent_id) for agent_id in new_agent_ids},
+        )
     return TeamDetailOut(
         id=team.id,
         name=team.name,

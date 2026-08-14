@@ -30,8 +30,11 @@ from rivulets.agentos import sync_agents
 from rivulets.agentos.agent_lifecycle import (
     generate_and_store_routing_rules,
     publish_agent_change,
+    publish_agent_teams_change,
+    publish_agent_tools_change,
     record_agent_version,
     register_agent_with_agentos,
+    replace_routing_rules,
     set_agent_teams,
     set_agent_tools,
 )
@@ -53,7 +56,12 @@ from rivulets.db.models import (
     AgentVersion,
     Tool,
 )
-from rivulets.sync.publish import publish_current_state, publish_tombstone
+from rivulets.sync.apply import AGENT_TOOL_SCOPE_SPEC
+from rivulets.sync.publish import (
+    publish_current_state,
+    publish_tombstone,
+    replace_join_entities,
+)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -322,11 +330,13 @@ async def create_agent(
             status.HTTP_409_CONFLICT, f"An agent named {body.name!r} already exists"
         ) from exc
 
-    await set_agent_tools(db, agent.id, body.tool_ids)
-    await set_agent_teams(db, agent.id, body.team_ids)
+    old_tool_ids, new_tool_ids = await set_agent_tools(db, agent.id, body.tool_ids)
+    old_team_ids, new_team_ids = await set_agent_teams(db, agent.id, body.team_ids)
     await record_agent_version(db, agent)
     await db.commit()
 
+    await publish_agent_tools_change(db, agent.id, old_tool_ids, new_tool_ids)
+    await publish_agent_teams_change(db, agent.id, old_team_ids, new_team_ids)
     await generate_and_store_routing_rules(db, agent)
     await register_agent_with_agentos(db, agent)
     await publish_agent_change(db, agent)
@@ -379,10 +389,12 @@ async def update_agent(
         agent.fallback_models = json.dumps(body.fallback_models) if body.fallback_models else None
     if body.output_schema is not None:
         agent.output_schema = json.dumps(body.output_schema) if body.output_schema else None
+    tool_diff: tuple[set[str], set[str]] | None = None
     if body.tool_ids is not None:
-        await set_agent_tools(db, agent_id, body.tool_ids)
+        tool_diff = await set_agent_tools(db, agent_id, body.tool_ids)
+    team_diff: tuple[set[str], set[str]] | None = None
     if body.team_ids is not None:
-        await set_agent_teams(db, agent_id, body.team_ids)
+        team_diff = await set_agent_teams(db, agent_id, body.team_ids)
 
     if agent.instructions != old_instructions or agent.model != old_model:
         await record_agent_version(db, agent)
@@ -398,8 +410,12 @@ async def update_agent(
             status.HTTP_409_CONFLICT, f"An agent named {body.name!r} already exists"
         ) from exc
 
+    if tool_diff is not None:
+        await publish_agent_tools_change(db, agent_id, *tool_diff)
+    if team_diff is not None:
+        await publish_agent_teams_change(db, agent_id, *team_diff)
+
     if needs_rule_regen:
-        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
         await generate_and_store_routing_rules(db, agent)
 
     await register_agent_with_agentos(db, agent)
@@ -504,7 +520,6 @@ async def rollback_agent_version(
     await db.commit()
 
     if instructions_changed:
-        await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
         await generate_and_store_routing_rules(db, agent)
 
     await db.refresh(agent)
@@ -540,21 +555,15 @@ async def update_routing_rules(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to modify routing rules for an agent holding a capability scope",
         )
-    await db.execute(delete(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent_id))
-    rows = [
-        AgentRoutingRule(
-            agent_id=agent_id,
-            rule_type=r.rule_type,
-            pattern=r.pattern,
-            priority=r.priority,
-        )
-        for r in body.rules
-    ]
-    db.add_all(rows)
-    await db.commit()
-    for row in rows:
-        await db.refresh(row)
-    return rows
+    await replace_routing_rules(
+        db, agent_id, [(r.rule_type, r.pattern, r.priority) for r in body.rules]
+    )
+    result = await db.execute(
+        select(AgentRoutingRule)
+        .where(AgentRoutingRule.agent_id == agent_id)
+        .order_by(AgentRoutingRule.priority.desc())
+    )
+    return list(result.scalars().all())
 
 
 @router.get("/{agent_id}/peer-preference", response_model=PeerPreferenceOut)
@@ -638,15 +647,35 @@ async def set_agent_tool_scopes(
     ever match it) while looking like it worked. Re-syncs AgentOS
     afterward so the change actually takes effect -- tool resolution
     happens at agent-build time (agentos/service.py's _build_agno_agent),
-    not per run."""
+    not per run.
+
+    #317: also publishes the grant/revoke diff to peers (AGENT_TOOL_SCOPE_
+    SPEC) -- see db/models.py's AgentToolScope docstring for why this
+    owner-only HTTP gate is what makes that safe: sync only ever
+    propagates the *result* of a grant this endpoint already authorized,
+    it never lets a peer originate one."""
     agent = await _get_or_404(db, agent_id)
     unknown = sorted(set(body.scopes) - TOOL_SCOPES)
     if unknown:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown scope(s): {', '.join(unknown)}")
+    old_scopes = set(
+        (
+            await db.scalars(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id)
+            )
+        ).all()
+    )
     await db.execute(delete(AgentToolScope).where(AgentToolScope.agent_id == agent_id))
     granted = set(body.scopes)
     for scope in granted:
         db.add(AgentToolScope(agent_id=agent_id, scope=scope))
     await db.commit()
+    await replace_join_entities(
+        db,
+        "agent_tool_scope",
+        AGENT_TOOL_SCOPE_SPEC,
+        {(agent_id, scope) for scope in old_scopes},
+        {(agent_id, scope) for scope in granted},
+    )
     await register_agent_with_agentos(db, agent)
     return AgentToolScopesOut(scopes=sorted(granted))

@@ -4,6 +4,14 @@ Every synced entity carries a `vector_clock` column used by the P2P sync
 engine for last-write-wins conflict resolution (FR-9.6). Tables noted as
 "not synced" in the data model (provider_config, rivulet_guard_state,
 sync_state) intentionally omit or ignore that column's sync semantics.
+The three join-table entities #317 added to sync (TeamAgent, AgentTool,
+AgentToolScope) are the one exception among *synced* tables: this column
+is only ever a human-visible cache of the real per-node vector clock
+(VectorClockTracker, keyed by entity_type/entity_id, not by anything on
+the row itself) -- sync/apply.py's `if hasattr(instance, "vector_clock")`
+already treats it as optional, and a join row's own identity (the pk
+pair) has no other field worth caching a "highest version seen" number
+onto.
 """
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, LargeBinary, UniqueConstraint, text
@@ -120,7 +128,11 @@ class Team(Base):
 
 
 class TeamAgent(Base):
-    """Join table: which agents are on which teams."""
+    """Join table: which agents are on which teams. P2P-synced as of #317
+    (sync/apply.py's TEAM_AGENT_SPEC, keyed by the (team_id, agent_id)
+    pair) -- without this, a second node has the team and its agents but
+    no membership between them, so dispatch/service.py's team-lookup
+    queries find nobody to route to."""
 
     __tablename__ = "team_agent"
 
@@ -161,7 +173,10 @@ class Agent(Base):
     # the specific unattended paths workflows/engine.py's `unattended`
     # threading identifies. False by default: an agent with a sensitive
     # tool assigned is unattended-safe only once a human explicitly opts
-    # it in (agents/+page.svelte), not the moment it's created.
+    # it in (agents/+page.svelte), not the moment it's created. P2P-synced
+    # as of #317 (AGENT_SPEC) -- an owner's approval had been staying
+    # behind on whichever node they used, so every other node kept
+    # failing this agent's sensitive tools closed regardless.
     approved_for_unattended_tools: Mapped[bool] = mapped_column(default=False)
     # #107: JSON Schema object (JSON-in-TEXT, same convention as
     # fallback_models above) constraining this agent's reply. None (the
@@ -210,6 +225,13 @@ class AgentVersion(Base):
 
 
 class AgentRoutingRule(Base):
+    """P2P-synced as of #317 (sync/apply.py's AGENT_ROUTING_RULE_SPEC) --
+    previously generated on create/edit and never published, so FR-3.3's
+    deterministic routing only ever worked on whichever node last
+    regenerated an agent's rules. Unlike TeamAgent/AgentTool/
+    AgentToolScope above, this already has a real single-column `id`, so
+    it needs no composite-key handling on the sync side."""
+
     __tablename__ = "agent_routing_rule"
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
@@ -364,7 +386,11 @@ class DispatchDecision(Base):
 
 
 class AgentTool(Base):
-    """Join table: which tools are assigned to which agents."""
+    """Join table: which tools are assigned to which agents. P2P-synced as
+    of #317 (sync/apply.py's AGENT_TOOL_SPEC, keyed by the
+    (agent_id, tool_id) pair) -- without this, an agent's assigned tools
+    (already-synced Tool rows) exist on a second node but nothing there
+    says this agent may use them, so it replies with none of its tools."""
 
     __tablename__ = "agent_tool"
 
@@ -389,9 +415,22 @@ class AgentToolScope(Base):
     agent_tool's existing update path (open to any valid session, same as
     the rest of api/agents.py).
 
-    Not P2P-synced, same as AgentTool itself (sync/apply.py's AGENT_SPEC
-    doesn't cover either join table) -- local-node authorization state,
-    not shared workspace content."""
+    P2P-synced as of #317 (sync/apply.py's AGENT_TOOL_SCOPE_SPEC), reversing
+    an earlier "local-node authorization state, not shared workspace
+    content" design here. That reasoning didn't survive #317's audit: the
+    OwnerGrant check above still only ever runs on whichever node
+    processes the HTTP request -- syncing this table doesn't create a new
+    way to grant a scope, it just lets the *result* of an already-
+    authorized grant reach an agent's other running copies on other
+    nodes, exactly like every other synced entity's writes already do for
+    a workspace-PSK-holding peer (Agent.instructions is no less
+    consequential to trust from a peer than a scope grant is). Leaving it
+    unsynced didn't add containment: it left AgentTool (which tools are
+    *assigned*) syncing while AgentToolScope (which of those tools are
+    actually *usable*, for the ones gated by Tool.required_scope) quietly
+    didn't, so a scoped tool assigned on one node simply failed closed
+    everywhere else -- not a deliberate security boundary, just the gap
+    #317 was filed to close."""
 
     __tablename__ = "agent_tool_scope"
 

@@ -16,36 +16,35 @@ Each entity carries two related but distinct clocks:
 
 `apply_remote_change()` is the generic entity-sync path, driven by an
 `EntitySpec` (model class + which fields are synced) — Agent, Channel,
-Team, MCPServer, Rivulet, Message, and WorkspaceSetting all go through it.
-Two things deliberately don't sync:
+Team, MCPServer, Rivulet, Message, WorkspaceSetting, and (#317) the
+dispatch-topology join entities (TeamAgent, AgentTool, AgentToolScope,
+AgentRoutingRule) all go through it. One thing deliberately doesn't sync:
 
-  - Foreign keys whose target entity type has no natural creation
-    ordering relative to the referencing one aren't synced at all.
-    `Channel.team_id` is excluded from `CHANNEL_SPEC`, and team
-    membership (a join table) isn't synced either: gossipsub doesn't
-    guarantee delivery order across different entity types, so a
-    channel's "assigned to team X" change could arrive before team X's
-    own create message has, and SQLite's foreign_keys=ON would reject
-    the write. A real fix needs a retry/pending-apply queue keyed on the
-    missing reference; out of scope for this pass. `Rivulet.channel_id`
-    and `Message.rivulet_id`, by contrast, ARE synced despite having the
-    same theoretical hazard — a rivulet/message is meaningless without
-    its parent, unlike a channel's *optional* team assignment, so
-    excluding them would make rivulet/message sync pointless. Instead
-    `apply_remote_change`'s final commit catches IntegrityError and queues
-    the message (SyncPendingInbound) rather than dropping it or crashing
-    the sync-message handler — `handle_incoming_state_change` retries the
-    whole queue after every subsequent successful apply, on the chance the
-    missing dependency just arrived too. In practice channels and rivulets
-    are created far less often than messages and the dependency chain is
-    one hop, so the race window is real but narrow; this queue is what
-    closes it instead of the message being silently lost forever.
   - Per-node status fields aren't synced: `MCPServer.connected` and
     `last_connected_at` reflect *this node's own* connection attempt, not
     shared state — each node reconnects to a synced MCPServer's url
     independently. `Rivulet.agentos_session_id` is the same idea: each
     node's own AgentOS instance owns its own session bookkeeping. Same
     reasoning FR-9.2 already applies to provider credentials.
+
+Several synced fields/entities are foreign keys whose target entity type
+has no natural creation ordering relative to the referencing one:
+`Channel.team_id`, `TeamAgent.team_id`/`.agent_id`, `AgentTool.agent_id`/
+`.tool_id`, `AgentToolScope.agent_id`, and `AgentRoutingRule.agent_id`
+(#317) join `Rivulet.channel_id` and `Message.rivulet_id` in this
+category — gossipsub doesn't guarantee delivery order across different
+entity types, so e.g. a channel's "assigned to team X" change, or a team
+membership row, can arrive before team X's own create message has, and
+SQLite's foreign_keys=ON would reject the write. `apply_remote_change`'s
+final commit catches that IntegrityError and queues the message
+(SyncPendingInbound) rather than dropping it or crashing the sync-message
+handler — `handle_incoming_state_change` retries the whole queue after
+every subsequent successful apply, on the chance the missing dependency
+just arrived too. (An earlier version of this module left
+`Channel.team_id`/`TeamAgent` unsynced entirely on the theory that this
+queue would need to be built for them — it already existed, generic
+across every entity type, so that reasoning didn't hold once #317 went
+looking for why a second node's dispatch topology was empty.)
 
 `Tool` and `File` don't use the generic path at all (apply_remote_tool_change
 /apply_remote_file_change, below) — FR-9.1 explicitly includes "tool code"
@@ -78,6 +77,9 @@ from rivulets.db.base import Base
 from rivulets.db.models import (
     Agent,
     AgentPeerPreference,
+    AgentRoutingRule,
+    AgentTool,
+    AgentToolScope,
     BudgetCap,
     Channel,
     EvalCase,
@@ -91,6 +93,7 @@ from rivulets.db.models import (
     SyncConflict,
     SyncPendingInbound,
     Team,
+    TeamAgent,
     Tool,
     ToolVersion,
     VectorClockTracker,
@@ -189,20 +192,132 @@ class EntitySpec:
     entity_type: str
     model: type[Base]
     synced_fields: tuple[str, ...]
-    # Every synced entity so far has an `id` primary key except
-    # WorkspaceSetting, whose primary key is its `key` string — pk_field
-    # lets it stay on this generic path instead of needing a third bespoke
-    # apply function (like Tool/File) just to construct a new row.
-    pk_field: str = "id"
+    # Every synced entity so far has a single `id` primary key except
+    # WorkspaceSetting (`key`), AgentPeerPreference (`agent_id`), and the
+    # join-table entities added by #317 (TeamAgent/AgentTool/
+    # AgentToolScope), which have no single natural key at all —
+    # pk_fields lets all of these stay on this generic path instead of
+    # needing a bespoke apply function (like Tool/File) just to construct
+    # a new row. A join entity's wire-format entity_id is its pk_fields'
+    # values colon-joined (encode_entity_id/_decode_pk below); this is
+    # safe even though AgentToolScope.scope values contain their own
+    # colons (e.g. "channels:manage", agentos/tool_scopes.py's
+    # TOOL_SCOPES) because decoding only ever splits on the *first*
+    # len(pk_fields)-1 colons, so a colon inside the last field's value
+    # is never mistaken for a separator.
+    pk_fields: tuple[str, ...] = ("id",)
+
+
+def encode_entity_id(spec: EntitySpec, key_values: tuple[str, ...]) -> str:
+    """The wire-format entity_id for a row identified by `key_values`
+    (in spec.pk_fields order) -- what publish call sites pass to
+    publish_current_state/publish_tombstone for a join entity. Every
+    non-last component is rejected if it contains a colon: _decode_pk's
+    bounded split only protects the *last* field from being mis-split,
+    so an earlier field with a colon in it would still decode wrong."""
+    if len(key_values) == 1:
+        return key_values[0]
+    for value in key_values[:-1]:
+        if ":" in value:
+            raise ValueError(
+                f"{spec.entity_type}: composite key component {value!r} must not contain ':'"
+            )
+    return ":".join(key_values)
+
+
+def _decode_pk(spec: EntitySpec, entity_id: str) -> tuple[str, ...]:
+    if len(spec.pk_fields) == 1:
+        return (entity_id,)
+    parts = tuple(entity_id.split(":", maxsplit=len(spec.pk_fields) - 1))
+    if len(parts) != len(spec.pk_fields):
+        raise ValueError(f"{spec.entity_type}: malformed composite entity_id {entity_id!r}")
+    return parts
+
+
+def entity_pk_value(spec: EntitySpec, entity_id: str) -> Any:
+    """What db.get(spec.model, ...) needs: a bare scalar for a
+    single-column primary key (every entity type before #317's join
+    entities), a tuple (in declared-column order) for a composite one."""
+    key = _decode_pk(spec, entity_id)
+    return key[0] if len(key) == 1 else key
 
 
 AGENT_SPEC = EntitySpec(
     "agent",
     Agent,
-    ("name", "description", "instructions", "model", "fallback_models", "output_schema"),
+    (
+        "name",
+        "description",
+        "instructions",
+        "model",
+        "fallback_models",
+        "output_schema",
+        # #317: an owner's unattended-tool approval is meaningless if it
+        # stays behind on the node the owner happened to be using --
+        # every other node still fails closed (tool_resolution.py) on an
+        # agent whose sensitive tools were assigned there via sync but
+        # whose approval never arrived.
+        "approved_for_unattended_tools",
+    ),
 )
-CHANNEL_SPEC = EntitySpec("channel", Channel, ("name", "description", "position", "archived"))
+# #317: team_id is a channel's *optional* FK to team -- previously excluded
+# (see the old module docstring reasoning, now corrected below) on the
+# theory that FK-ordering needed a retry queue this module didn't have.
+# It's had one since day one (SyncPendingInbound, this same
+# apply_remote_change's IntegrityError branch) -- Rivulet.channel_id and
+# Message.rivulet_id already rely on it for the identical hazard.
+CHANNEL_SPEC = EntitySpec(
+    "channel", Channel, ("name", "description", "position", "archived", "team_id")
+)
 TEAM_SPEC = EntitySpec("team", Team, ("name", "description"))
+# #317: team membership (the join table itself) is its own synced entity
+# rather than a field on TEAM_SPEC or AGENT_SPEC -- it's set from *either*
+# end (api/teams.py's update_team from the team side, agent_lifecycle.py's
+# set_agent_teams from the agent side), and a single row's key pair
+# (team_id, agent_id) is a natural, stable wire-format entity_id
+# (encode_entity_id above) that doesn't require picking one side to own
+# the whole list. `position` is the only non-key field -- ordering within
+# a team's member list, meaningful only when set from the team side (see
+# api/teams.py); agent_lifecycle.py's set_agent_teams leaves it at its
+# default (0) for every row it creates.
+TEAM_AGENT_SPEC = EntitySpec(
+    "team_agent", TeamAgent, ("position",), pk_fields=("team_id", "agent_id")
+)
+# #317: same reasoning as TEAM_AGENT_SPEC -- assignment (this join row) is
+# a fact independent of tool eligibility (Tool itself, already synced via
+# apply_remote_tool_change). No non-key fields to carry; the row's mere
+# existence is the synced fact.
+AGENT_TOOL_SPEC = EntitySpec("agent_tool", AgentTool, (), pk_fields=("agent_id", "tool_id"))
+# #317: reverses AgentToolScope's earlier "not P2P-synced, local-node
+# authorization state" design (see db/models.py's AgentToolScope
+# docstring for the full reasoning) -- an owner-only HTTP grant
+# (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) still only
+# happens on whichever node processes the request; sync propagates its
+# *result* to peers exactly the same way it already propagates every
+# other synced entity's writes (Agent.instructions, Channel.team_id,
+# etc), all of which a workspace-PSK-holding peer is already trusted to
+# assert. Withholding just this one join table didn't add real
+# containment -- it left agent_tool (assignment) syncing while
+# AgentToolScope (eligibility for a scoped tool) silently didn't, so a
+# scoped tool assigned on node A simply failed closed on every other
+# node, not a deliberate security boundary.
+AGENT_TOOL_SCOPE_SPEC = EntitySpec(
+    "agent_tool_scope", AgentToolScope, (), pk_fields=("agent_id", "scope")
+)
+# #317: AgentRoutingRule already has a real single-column `id` primary
+# key (unlike the three join specs above), so it needs no composite-key
+# handling -- it's on the generic path purely because nothing published
+# it before. Regenerating rules locally from the agent's own
+# name/description/instructions (already-synced AGENT_SPEC fields) on
+# every peer, as the issue floats as an alternative, would silently drop
+# a human's or an agent's own manual override (api/agents.py's
+# update_routing_rules, dispatch/service.py's
+# _handle_update_agent_routing_rules_trigger) the moment the owning
+# agent's row next synced -- syncing the rows themselves is what
+# preserves that override across peers instead.
+AGENT_ROUTING_RULE_SPEC = EntitySpec(
+    "agent_routing_rule", AgentRoutingRule, ("agent_id", "rule_type", "pattern", "priority")
+)
 MCP_SERVER_SPEC = EntitySpec(
     "mcp_server", MCPServer, ("name", "url", "transport", "command", "args_json")
 )
@@ -221,10 +336,10 @@ MESSAGE_SPEC = EntitySpec(
     ),
 )
 WORKSPACE_SETTING_SPEC = EntitySpec(
-    "workspace_setting", WorkspaceSetting, ("value",), pk_field="key"
+    "workspace_setting", WorkspaceSetting, ("value",), pk_fields=("key",)
 )
 AGENT_PEER_PREFERENCE_SPEC = EntitySpec(
-    "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_field="agent_id"
+    "agent_peer_preference", AgentPeerPreference, ("capability_tag",), pk_fields=("agent_id",)
 )
 HUMAN_SPEC = EntitySpec("human", Human, ("display_name",))
 WORKFLOW_SPEC = EntitySpec(
@@ -369,9 +484,9 @@ async def apply_remote_change(
         return ApplyResult(applied=False, conflict=True)
 
     # REMOTE_NEWER: a clean, non-conflicting update -- apply it.
-    instance = await db.get(spec.model, entity_id)
+    instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
     if instance is None:
-        instance = spec.model(**{spec.pk_field: entity_id})
+        instance = spec.model(**dict(zip(spec.pk_fields, _decode_pk(spec, entity_id), strict=True)))
         db.add(instance)
     for field in spec.synced_fields:
         if field in payload:
@@ -458,7 +573,9 @@ async def apply_remote_delete(
 
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
     spec = get_entity_spec(entity_type)
-    instance = await db.get(spec.model, entity_id) if spec is not None else None
+    instance = (
+        await db.get(spec.model, entity_pk_value(spec, entity_id)) if spec is not None else None
+    )
 
     if comparison is ClockComparison.CONCURRENT:
         db.add(
@@ -807,10 +924,21 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
     return False
 
 
+# #317: entity types whose sync application should trigger sync_agents()
+# (rebuild AgentOS's in-process registry) -- anything that changes what
+# _build_agno_agent (agentos/service.py) would resolve for an agent's
+# tools, not just live-queried-per-request state like TeamAgent/
+# AgentRoutingRule (see handle_incoming_state_change below).
+_AGENTOS_RESYNC_ENTITY_TYPES = frozenset({"agent", "agent_tool", "agent_tool_scope"})
+
 _DISPATCH: dict[str, EntitySpec] = {
     "agent": AGENT_SPEC,
     "channel": CHANNEL_SPEC,
     "team": TEAM_SPEC,
+    "team_agent": TEAM_AGENT_SPEC,
+    "agent_tool": AGENT_TOOL_SPEC,
+    "agent_tool_scope": AGENT_TOOL_SCOPE_SPEC,
+    "agent_routing_rule": AGENT_ROUTING_RULE_SPEC,
     "mcp_server": MCP_SERVER_SPEC,
     "rivulet": RIVULET_SPEC,
     "message": MESSAGE_SPEC,
@@ -909,7 +1037,8 @@ async def handle_incoming_state_change(
     from the trio thread whenever a gossipsub message arrives. Opens its
     own DB session since it isn't running inside a FastAPI request.
 
-    Covers FR-9.1's full sync scope: agent/channel/team/mcp_server/tool/
+    Covers FR-9.1's full sync scope: agent/channel/team/team_agent/
+    agent_tool/agent_tool_scope/agent_routing_rule/mcp_server/tool/
     rivulet/message/file/workspace_setting/workflow/workflow_node/
     workflow_connection/eval_suite/eval_case. Anything else is logged and
     dropped, matching this module's generalization path."""
@@ -949,7 +1078,7 @@ async def handle_incoming_state_change(
             logger.info(
                 "Applied remote change for %s/%s from %s", entity_type, entity_id, origin_node_id
             )
-            if entity_type == "agent":
+            if entity_type in _AGENTOS_RESYNC_ENTITY_TYPES:
                 # Without this, a node that only ever *receives* an Agent
                 # row via sync has the DB row but no matching in-process
                 # AgentOS registration -- run_agent() would raise "Agent
@@ -957,6 +1086,17 @@ async def handle_incoming_state_change(
                 # anything (including issue #10's remote dispatch) tried
                 # to invoke it here. Local create/update already calls
                 # this itself (api/agents.py); a remotely-applied change
-                # was the one path that didn't.
+                # was the one path that didn't. #317: agent_tool/
+                # agent_tool_scope changes need the identical resync --
+                # tool resolution happens at agent-*build*-time
+                # (agentos/service.py's _build_agno_agent), so a tool or
+                # scope assigned/tombstoned via sync is invisible here
+                # until the registry is rebuilt, same as a local
+                # set_agent_tools/set_agent_tool_scopes call already
+                # triggers via register_agent_with_agentos. team_agent is
+                # deliberately not in this set -- dispatch/service.py and
+                # api/teams.py read TeamAgent rows live off the DB on
+                # every request, with no in-process cache to invalidate,
+                # unlike tool resolution's build-time snapshot.
                 await sync_agents(db)
             await retry_pending_inbound(db)
