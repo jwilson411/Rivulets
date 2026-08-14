@@ -39,7 +39,7 @@ Rivulets is a **local-first, peer-to-peer-synced, single-binary application** ma
 
    Node A ◄── libp2p + Tailscale/WireGuard ──► Node B
    Node A ◄── libp2p + Tailscale/WireGuard ──► Node C
-   (gossipsub for structured data, rsync-delta for files)
+   (gossipsub for structured data, a direct libp2p stream for full-content file transfer)
 ```
 
 ### What shaped this design
@@ -112,14 +112,14 @@ Multiple humans can share a workspace: each browser session claims a display ide
 |---|---|---|
 | **Transport** | libp2p (noise handshake + gossipsub) | mDNS for LAN discovery; noise protocol for encrypted transport using the workspace key as a pre-shared key; gossipsub for pub/sub state-change events. |
 | **NAT traversal** | Tailscale / WireGuard | Handles cross-network NAT scenarios and adds an additional encryption layer. Same-LAN sync works without it. |
-| **File transfer** | Custom rsync-style delta over a libp2p stream | Content-hash comparison skips unchanged files; chunked transfer for large ones. |
+| **File transfer** | Full-content request/response over a dedicated libp2p stream | Content-hash comparison means a peer that already has a given hash never re-requests it; no byte-level delta transfer. Fetch timing is configurable — eager on LAN by default, lazy (on-demand) elsewhere. |
 
 ### Tools
 
 | Layer | Choice | Why |
 |---|---|---|
 | **Tool SDK** | Agno SDK (`agno.tools`) | Built-in tools, custom tools, and MCP-discovered tools all register through the same interface. |
-| **Sandboxing** | firejail (Linux), sandbox-exec (macOS), job objects (Windows) | Platform-native sandboxing for the Code Execution tool. |
+| **Sandboxing** | firejail (Linux), sandbox-exec (macOS) | Platform-native sandboxing for the Code Execution tool. No Windows backend exists yet — the tool reports itself unavailable there rather than running unsandboxed. |
 
 ### Development & operations
 
