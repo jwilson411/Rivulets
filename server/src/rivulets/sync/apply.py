@@ -150,6 +150,17 @@ async def _load_vector_clock(db: AsyncSession, entity_type: str, entity_id: str)
     return {row.node_id: row.clock for row in result.scalars().all()}
 
 
+async def current_vector_clock(
+    db: AsyncSession, entity_type: str, entity_id: str
+) -> dict[str, int]:
+    """Public read accessor for VectorClockTracker rows -- api/sync.py's
+    resolve_conflict needs the clock already merged by apply_remote_change/
+    apply_remote_delete's CONCURRENT branch (stored before resolve_conflict
+    ever runs) to stamp a freshly recreated instance's cached vector_clock
+    column the same way REMOTE_NEWER's create-new-entity path does below."""
+    return await _load_vector_clock(db, entity_type, entity_id)
+
+
 async def _store_vector_clock(
     db: AsyncSession, entity_type: str, entity_id: str, vector_clock: dict[str, int]
 ) -> None:
@@ -232,6 +243,16 @@ def _decode_pk(spec: EntitySpec, entity_id: str) -> tuple[str, ...]:
     if len(parts) != len(spec.pk_fields):
         raise ValueError(f"{spec.entity_type}: malformed composite entity_id {entity_id!r}")
     return parts
+
+
+def new_entity_instance(spec: EntitySpec, entity_id: str) -> Any:
+    """Constructs a fresh, unsaved instance of spec.model with its primary
+    key field(s) set from entity_id -- the shape apply_remote_change (below)
+    uses when a REMOTE_NEWER message names an entity this node has never
+    seen. Exposed for api/sync.py's resolve_conflict, which needs the
+    identical shape when "keep remote" recreates a row that a local delete
+    removed (#325)."""
+    return spec.model(**dict(zip(spec.pk_fields, _decode_pk(spec, entity_id), strict=True)))
 
 
 def entity_pk_value(spec: EntitySpec, entity_id: str) -> Any:
@@ -486,7 +507,7 @@ async def apply_remote_change(
     # REMOTE_NEWER: a clean, non-conflicting update -- apply it.
     instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
     if instance is None:
-        instance = spec.model(**dict(zip(spec.pk_fields, _decode_pk(spec, entity_id), strict=True)))
+        instance = new_entity_instance(spec, entity_id)
         db.add(instance)
     for field in spec.synced_fields:
         if field in payload:

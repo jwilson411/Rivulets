@@ -57,6 +57,7 @@ from rivulets.db.models import (
     TeamAgent,
     Tool,
     ToolVersion,
+    VectorClockTracker,
     Workflow,
     WorkflowNode,
     WorkspaceSetting,
@@ -2077,6 +2078,139 @@ async def test_resolve_conflict_keep_remote_deletes_for_a_delete_conflict(
     assert resolved.status_code == 200, resolved.text
 
     assert client.get(f"/api/v1/agents/{agent_id}", headers=auth_headers).status_code == 404
+
+
+async def test_resolve_conflict_keep_local_bumps_clock_and_republishes(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#325: "keep local" used to only flip `resolved` on this node -- both
+    sides already merged to the identical vector clock the moment the
+    conflict was detected, so a peer holding node-b's edit had no way to
+    ever judge this node's copy as newer, and the mesh stayed split forever
+    even though the UI reported the conflict resolved. Fixed by
+    republishing: capture what actually gets handed to
+    SyncEngine.publish_state_change and confirm it carries node-a's own
+    unchanged field values under a clock that strictly dominates the clock
+    a second node independently converged to for the same conflict."""
+    create = client.post("/api/v1/channels", json={"name": "local-name-chan"}, headers=auth_headers)
+    channel_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "channel", channel_id, "node-a")
+        result = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-b": 1},
+            "node-b",
+            {
+                "name": "remote-name-chan",
+                "description": "from remote",
+                "position": 0,
+                "archived": False,
+            },
+        )
+        assert result.conflict is True
+
+        # What an independent second node converges to on detecting the
+        # identical conflict itself -- both sides merge to the same clock.
+        rows = (
+            await db.execute(
+                select(VectorClockTracker).where(
+                    VectorClockTracker.entity_type == "channel",
+                    VectorClockTracker.entity_id == channel_id,
+                )
+            )
+        ).scalars().all()
+        second_node_clock_before = {row.node_id: row.clock for row in rows}
+    assert second_node_clock_before == {"node-a": 1, "node-b": 1}
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == channel_id)
+
+    published: list[tuple[str, str, dict[str, Any], dict[str, int]]] = []
+
+    class _FakePublishEngine:
+        running = True
+        node_id = "node-a"
+
+        async def publish_state_change(
+            self,
+            entity_type: str,
+            entity_id: str,
+            payload: dict[str, Any],
+            vector_clock: dict[str, int],
+        ) -> None:
+            published.append((entity_type, entity_id, payload, vector_clock))
+
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: _FakePublishEngine())
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "local"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    assert len(published) == 1
+    entity_type, entity_id, payload, vector_clock = published[0]
+    assert entity_type == "channel"
+    assert entity_id == channel_id
+    assert payload["name"] == "local-name-chan"  # node-a's own value, untouched
+    comparison = compare_vector_clocks(second_node_clock_before, vector_clock)
+    assert comparison is ClockComparison.REMOTE_NEWER
+
+
+async def test_resolve_conflict_keep_remote_recreates_entity_after_local_delete(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#325: "keep remote" used to require the local row to still exist --
+    `if instance is not None:` guarded the whole apply block, so the other
+    modify/delete race (this node deletes locally, a peer concurrently
+    edits) recorded the conflict as resolved without ever recreating the
+    row, silently dropping the surviving edit. Fixed by recreating from
+    remote_snapshot the same way apply_remote_change does for an entity_id
+    this node has never seen."""
+    create = client.post(
+        "/api/v1/agents",
+        json={"name": "Doomed Locally", **_AGENT_FIELDS},
+        headers=auth_headers,
+    )
+    agent_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "agent", agent_id, "node-a")
+        instance = await db.get(Agent, agent_id)
+        assert instance is not None
+        await db.delete(instance)  # this node's own local delete
+        await db.commit()
+
+        result = await apply_remote_change(
+            db,
+            AGENT_SPEC,
+            agent_id,
+            {"node-b": 1},
+            "node-b",
+            {"name": "Renamed By Peer", **_AGENT_FIELDS},
+        )
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    matching = [c for c in conflicts if c["entity_id"] == agent_id]
+    assert len(matching) == 1
+    assert matching[0]["remote_snapshot"]["name"] == "Renamed By Peer"
+    conflict_id = matching[0]["id"]
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    recreated = client.get(f"/api/v1/agents/{agent_id}", headers=auth_headers)
+    assert recreated.status_code == 200, recreated.text
+    assert recreated.json()["name"] == "Renamed By Peer"
 
 
 def test_agent_create_does_not_fail_when_sync_engine_not_running(

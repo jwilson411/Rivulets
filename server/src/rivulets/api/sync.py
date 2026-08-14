@@ -23,9 +23,16 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import SyncConflict
 from rivulets.sync import get_sync_engine
-from rivulets.sync.apply import clear_delete_blockers, entity_pk_value, get_entity_spec
+from rivulets.sync.apply import (
+    clear_delete_blockers,
+    current_vector_clock,
+    entity_pk_value,
+    get_entity_spec,
+    new_entity_instance,
+)
 from rivulets.sync.capabilities import load_capabilities, save_capabilities
 from rivulets.sync.engine import PeerInfo as EnginePeerInfo
+from rivulets.sync.publish import build_entity_payload, publish_current_state, publish_tombstone
 
 logger = logging.getLogger(__name__)
 
@@ -244,23 +251,58 @@ async def resolve_conflict(
         spec = get_entity_spec(conflict.entity_type)
         if spec is not None:
             instance = await db.get(spec.model, entity_pk_value(spec, conflict.entity_id))
-            if instance is not None:
-                remote = json.loads(conflict.remote_snapshot)
-                if remote.get("deleted"):
-                    # #238: a modify/delete conflict's remote_snapshot is
-                    # {"deleted": True}, not a set of spec.synced_fields --
-                    # without this branch the loop below would find none of
-                    # its fields in `remote` and silently do nothing,
-                    # making "keep remote" on a delete-conflict a no-op
-                    # that looks like it worked.
+            remote = json.loads(conflict.remote_snapshot)
+            if remote.get("deleted"):
+                # #238: a modify/delete conflict's remote_snapshot is
+                # {"deleted": True}, not a set of spec.synced_fields --
+                # without this branch the loop below would find none of
+                # its fields in `remote` and silently do nothing,
+                # making "keep remote" on a delete-conflict a no-op
+                # that looks like it worked.
+                if instance is not None:
                     await clear_delete_blockers(db, conflict.entity_type, conflict.entity_id)
                     await db.delete(instance)
-                else:
-                    for field in spec.synced_fields:
-                        if field in remote:
-                            setattr(instance, field, remote[field])
+            else:
+                if instance is None:
+                    # #325: the local row can be gone -- e.g. this node
+                    # deleted it locally while a peer concurrently edited
+                    # it, so apply_remote_change's own CONCURRENT branch
+                    # recorded the conflict with no local instance to work
+                    # with. "Keep remote" must recreate the row (same shape
+                    # apply_remote_change uses for a brand-new entity_id),
+                    # not silently no-op because there was nothing to
+                    # `setattr` onto.
+                    instance = new_entity_instance(spec, conflict.entity_id)
+                    db.add(instance)
+                for field in spec.synced_fields:
+                    if field in remote:
+                        setattr(instance, field, remote[field])
+                if hasattr(instance, "vector_clock"):
+                    vc = await current_vector_clock(db, conflict.entity_type, conflict.entity_id)
+                    if vc:
+                        setattr(instance, "vector_clock", max(vc.values()))  # noqa: B010
 
     conflict.resolved = True
     await db.commit()
     await db.refresh(conflict)
+
+    if body.keep == "local":
+        # #325: a resolved conflict must actually converge the mesh, not
+        # just silence this node's own copy of it. Both sides already
+        # merged to the same vector clock the moment the conflict was
+        # detected (apply_remote_change/apply_remote_delete's CONCURRENT
+        # branch), so without republishing here, this node's data can never
+        # be judged newer than what peers already have -- the mesh stays
+        # split even though the UI reports the conflict resolved.
+        # publish_current_state/publish_tombstone bump this node's own
+        # clock component past that merged value (via record_local_change),
+        # so peers apply it as REMOTE_NEWER. Whether the local row still
+        # exists decides which one applies: "keep local" after a local
+        # delete means keeping the delete.
+        payload = await build_entity_payload(db, conflict.entity_type, conflict.entity_id)
+        if payload is not None:
+            await publish_current_state(db, conflict.entity_type, conflict.entity_id)
+        else:
+            await publish_tombstone(db, conflict.entity_type, conflict.entity_id)
+
     return _conflict_out(conflict)
