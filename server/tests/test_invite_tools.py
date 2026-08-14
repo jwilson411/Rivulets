@@ -14,6 +14,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets import streaming
 from rivulets.dispatch.service import (
     _find_create_invite_call,  # pyright: ignore[reportPrivateUsage]
     _find_list_invites_call,  # pyright: ignore[reportPrivateUsage]
@@ -237,6 +238,67 @@ def test_create_invite_does_not_publish_to_sync(
     rivulet_id = rivulet.json()["id"]
     client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers)
     assert all(entity_type != "invite" for entity_type, _ in published)
+
+
+def test_create_invite_system_alert_never_reaches_an_invite_grant_subscriber(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#286: create_invite's `system_alert` (dispatch/service.py's
+    _handle_create_invite_trigger) must be published owner_only=True --
+    an invite-grant session subscribed to this rivulet's SSE stream
+    (streaming.py's publish()) must never see the raw invite URL, even
+    though it's allowed to open the stream at all (api/rivulets.py's
+    stream_rivulet has no OwnerGrant gate)."""
+    agent_id = _create_agent(client, auth_headers, "BroadcastCheckInviter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_invite")
+
+    # A separate, owner-created invite redeemed into an invite-grant
+    # session -- the "watching invitee" the issue describes.
+    bootstrap_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    bootstrap_token = bootstrap_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": bootstrap_token, "display_name": "Watcher"},
+    ).json()
+    assert accepted["grant"] == "invite"
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "not yet triggering"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    owner_queue = streaming.subscribe(rivulet_id, is_owner=True)
+    invite_grant_queue = streaming.subscribe(rivulet_id, is_owner=False)
+    try:
+        monkeypatch.setattr(
+            "rivulets.dispatch.service.run_agent",
+            _fake_run_agent(_tool_execution("create_invite", {"display_name_hint": "Alex"})),
+        )
+        response = client.post(
+            f"/api/v1/rivulets/{rivulet_id}/messages",
+            json={"content": "go invite someone"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+
+        owner_events = []
+        while not owner_queue.empty():
+            owner_events.append(owner_queue.get_nowait())
+        invite_grant_events = []
+        while not invite_grant_queue.empty():
+            invite_grant_events.append(invite_grant_queue.get_nowait())
+    finally:
+        streaming.unsubscribe(rivulet_id, owner_queue)
+        streaming.unsubscribe(rivulet_id, invite_grant_queue)
+
+    owner_alert = next(e for e in owner_events if e["event"] == "system_alert")
+    assert owner_alert["data"]["type"] == "invite_created"
+    assert "/invite/" in owner_alert["data"]["url"]
+
+    assert all(e["event"] != "system_alert" for e in invite_grant_events)
 
 
 def test_list_invites_reports_existing_invites(

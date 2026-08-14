@@ -3903,7 +3903,16 @@ async def _handle_create_invite_trigger(
     `system_alert` payload instead (streaming.py's publish() -- in-memory,
     per-process, never persisted or gossiped, the same "nowhere but this
     one delivery" shape the tool's own return value already has, see
-    tools/builtin/invites.py's module docstring)."""
+    tools/builtin/invites.py's module docstring).
+
+    #286: that `system_alert` still isn't safe to fan out to every
+    subscriber of this rivulet's stream -- an invite-grant session can
+    open the same stream an owner session can (api/rivulets.py's
+    stream_rivulet has no OwnerGrant gate, by design), so an invitee
+    sitting on an open EventSource would otherwise harvest the next
+    owner-class invite URL the moment any agent here calls create_invite.
+    publish()'s `owner_only=True` makes streaming.py skip every
+    non-owner subscriber for this event specifically."""
     secret = keys.generate_invite_secret()
     expires_at = datetime.now(UTC) + timedelta(hours=call.expires_in_hours)
     invite = Invite(
@@ -3947,6 +3956,7 @@ async def _handle_create_invite_trigger(
             "url": url,
             "loopback_only": lan_ip is None,
         },
+        owner_only=True,
     )
     return [message]
 

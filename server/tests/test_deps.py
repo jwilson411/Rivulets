@@ -64,9 +64,9 @@ async def test_get_current_workspace_id_for_stream_accepts_a_stream_ticket_via_q
             {"type": "http", "query_string": f"token={token}".encode(), "headers": []}
         )
 
-        workspace_id = await get_current_workspace_id_for_stream(request, None)
+        claims = await get_current_workspace_id_for_stream(request, None)
 
-        assert workspace_id == "workspace-123"
+        assert claims.workspace_id == "workspace-123"
     finally:
         get_session_key_store().clear()
 

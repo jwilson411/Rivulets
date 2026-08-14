@@ -19,7 +19,7 @@ def test_publish_with_no_subscribers_does_not_raise() -> None:
 
 
 def test_subscriber_receives_published_event() -> None:
-    queue = subscribe("rivulet-1")
+    queue = subscribe("rivulet-1", is_owner=True)
     try:
         publish("rivulet-1", "agent_token", {"token": "hi"})
         event = queue.get_nowait()
@@ -29,8 +29,8 @@ def test_subscriber_receives_published_event() -> None:
 
 
 def test_multiple_subscribers_all_receive_the_same_event() -> None:
-    queue_a = subscribe("rivulet-2")
-    queue_b = subscribe("rivulet-2")
+    queue_a = subscribe("rivulet-2", is_owner=True)
+    queue_b = subscribe("rivulet-2", is_owner=True)
     try:
         publish("rivulet-2", "done", {"rivulet_id": "rivulet-2"})
         assert queue_a.get_nowait()["event"] == "done"
@@ -41,7 +41,7 @@ def test_multiple_subscribers_all_receive_the_same_event() -> None:
 
 
 def test_unsubscribed_queue_receives_nothing_further() -> None:
-    queue = subscribe("rivulet-3")
+    queue = subscribe("rivulet-3", is_owner=True)
     unsubscribe("rivulet-3", queue)
     publish("rivulet-3", "done", {"rivulet_id": "rivulet-3"})
     with pytest.raises(asyncio.QueueEmpty):
@@ -49,7 +49,7 @@ def test_unsubscribed_queue_receives_nothing_further() -> None:
 
 
 def test_unsubscribe_is_idempotent() -> None:
-    queue = subscribe("rivulet-4")
+    queue = subscribe("rivulet-4", is_owner=True)
     unsubscribe("rivulet-4", queue)
     unsubscribe("rivulet-4", queue)  # must not raise
 
@@ -108,7 +108,7 @@ def test_dispatch_publishes_documented_sse_event_sequence(
     )
     rivulet_id = rivulet.json()["id"]
 
-    event_queue = subscribe(rivulet_id)
+    event_queue = subscribe(rivulet_id, is_owner=True)
     try:
         response = client.post(
             f"/api/v1/rivulets/{rivulet_id}/messages",
