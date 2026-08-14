@@ -27,6 +27,10 @@ _PRICING_USD_PER_MILLION: dict[tuple[str, str], tuple[float, float]] = {
     ("openai", "o3-mini"): (1.10, 4.40),
     ("deepseek", "deepseek-chat"): (0.27, 1.10),
     ("deepseek", "deepseek-reasoner"): (0.55, 2.19),
+    # Embeddings (#98/#320): input-token-only, no output leg -- the 0.0
+    # output rate is inert since knowledge_base/embeddings.py always
+    # records 0 output_tokens for an embedding call.
+    ("openai", "text-embedding-3-small"): (0.02, 0.0),
 }
 
 

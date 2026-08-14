@@ -21,20 +21,38 @@ Two entry points, matching the two contexts embeddings run in:
     agno's synchronous tool-call loop and reads the workspace DB via raw
     sqlite3 rather than the async engine (files.py/db_query.py's shared
     rationale).
+
+`record_embedding_run` (#320): ingestion never went through
+agentos/accounting.py's `record_agent_run` at all before this -- an
+embedding call has no `Agent` and no agno `RunOutput`, unlike every other
+billed call in this codebase, so its spend was invisible to the usage
+dashboard and to budget caps. Reuses `record_agent_run` anyway (rather
+than a bespoke AgentRun(...) construction) via a duck-typed stand-in for
+`RunOutput` -- `agent_id=None`, same "can't attribute to a single agent"
+precedent #246's dispatcher_call rows already established (see
+AgentRun.agent_id's docstring) -- so ingestion spend counts toward
+workspace-scope budget caps the same way every other unattributable spend
+already does. Retrieval (`embed_query_sync`) is not accounted for here:
+it's a per-query, per-tool-call cost on an already-billed agent turn
+(#98/#320's scope stayed at ingestion, the actually-unbounded spend path
+the issue called out).
 """
 
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from openai import AsyncOpenAI, OpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.config import get_settings
-from rivulets.db.models import ProviderConfig
+from rivulets.db.models import AgentRun, ProviderConfig
 from rivulets.security.credentials import get_provider_key
 
 EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_PROVIDER_MODEL = f"openai:{EMBEDDING_MODEL}"
 
 
 class NoEmbeddingProviderError(RuntimeError):
@@ -42,7 +60,16 @@ class NoEmbeddingProviderError(RuntimeError):
     supported embedding provider)."""
 
 
-async def embed_texts(db: AsyncSession, texts: list[str]) -> list[list[float]]:
+@dataclass
+class EmbeddingResult:
+    vectors: list[list[float]]
+    # OpenAI's embeddings usage has no output/completion leg -- this is
+    # the whole bill for the call (see pricing.py's 0.0 output rate for
+    # this model).
+    prompt_tokens: int
+
+
+async def embed_texts(db: AsyncSession, texts: list[str]) -> EmbeddingResult:
     """Embed a batch of texts (ingestion path, async). Preserves input
     order -- callers zip texts/embeddings positionally."""
     config = await db.scalar(select(ProviderConfig).where(ProviderConfig.provider == "openai"))
@@ -54,7 +81,43 @@ async def embed_texts(db: AsyncSession, texts: list[str]) -> list[list[float]]:
     api_key = get_provider_key(config.api_key_ref)
     client = AsyncOpenAI(api_key=api_key)
     response = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return [item.embedding for item in response.data]
+    return EmbeddingResult(
+        vectors=[item.embedding for item in response.data],
+        prompt_tokens=response.usage.prompt_tokens,
+    )
+
+
+async def record_embedding_run(db: AsyncSession, prompt_tokens: int) -> AgentRun:
+    """Persists one ingest call's embedding spend as an AgentRun, via the
+    same `record_agent_run` choke point every other billed call in this
+    codebase uses -- see this module's docstring for why. `run_output` is
+    a duck-typed stand-in (`record_agent_run` only reads `.metrics.
+    input_tokens/output_tokens/total_tokens` and, via `log_tool_calls`,
+    `.tools`, which this correctly leaves absent -- an embedding call
+    makes no tool calls).
+
+    Lazy import: `rivulets.agentos`'s package init pulls in
+    agentos.service -> agentos.tool_resolution ->
+    tools/builtin/knowledge_base.py, which imports this module for
+    `embed_query_sync` -- a module-level import of agentos.accounting
+    here would be circular whenever something imports this module before
+    `rivulets.agentos` has already been loaded."""
+    from rivulets.agentos.accounting import record_agent_run
+
+    run_output = SimpleNamespace(
+        metrics=SimpleNamespace(
+            input_tokens=prompt_tokens, output_tokens=0, total_tokens=prompt_tokens
+        )
+    )
+    return await record_agent_run(
+        db,
+        None,
+        EMBEDDING_PROVIDER_MODEL,
+        None,
+        "completed",
+        run_output,  # pyright: ignore[reportArgumentType]
+        source="embedding",
+    )
 
 
 def _resolve_openai_key_sync(db_path: Path) -> str:
