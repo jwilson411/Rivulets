@@ -7,6 +7,7 @@ itself has no dependency on either (see its docstring); that composition
 is exercised end-to-end in test_backups_api.py instead, against the real
 `client` fixture that already initializes AgentOS."""
 
+import os
 import sqlite3
 import tarfile
 from collections.abc import AsyncIterator
@@ -327,6 +328,78 @@ async def test_restore_from_backup_pairs_tool_source_with_snapshot(
 
         assert (settings.tools_dir / "greet.py").read_text() == "# v1"
         assert not (settings.tools_dir / "post_snapshot_tool.py").exists()
+    finally:
+        await get_engine().dispose()
+        override_engine(None)
+
+
+async def test_restore_from_backup_rejects_corrupt_archive_db_without_touching_live_file(
+    settings: Settings, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#319: a corrupt or missing rivulets.db inside the archive must abort
+    *before* the live db is disposed/unlinked — the live workspace has to
+    stay fully intact and queryable after a rejected restore."""
+    monkeypatch.setattr("rivulets.db.session.get_settings", lambda: settings)
+    override_engine(engine)
+    try:
+        async with session_scope() as db:
+            db.add(WorkspaceSetting(key="k", value='"still here"'))
+            await db.commit()
+
+        snapshot = await backup.create_backup(settings, engine, prefix=backup.MANUAL_PREFIX)
+        live_db_bytes_before = settings.db_path.read_bytes()
+
+        def _always_fails(_path: Path) -> bool:
+            return False
+
+        monkeypatch.setattr(backup, "_integrity_check", _always_fails)
+        with pytest.raises(backup.RestoreIntegrityError):
+            await backup.restore_from_backup(settings, snapshot)
+
+        # The live file on disk is untouched...
+        assert settings.db_path.read_bytes() == live_db_bytes_before
+        # ...and the engine was never disposed, so it's still usable as-is.
+        async with session_scope() as db:
+            row = await db.get(WorkspaceSetting, "k")
+            assert row is not None
+            assert row.value == '"still here"'
+    finally:
+        await get_engine().dispose()
+        override_engine(None)
+
+
+async def test_restore_from_backup_never_leaves_db_path_missing(
+    settings: Settings, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#319: the live db must be replaced via a copy-then-rename
+    (`os.replace` over a staging file already holding the new content),
+    not unlink-then-copy — so `db_path` is never observably missing on
+    disk at any point during the swap."""
+    monkeypatch.setattr("rivulets.db.session.get_settings", lambda: settings)
+    override_engine(engine)
+    try:
+        snapshot = await backup.create_backup(settings, engine, prefix=backup.MANUAL_PREFIX)
+
+        real_replace = os.replace
+        replace_dests: list[Path] = []
+
+        def _tracking_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            dst_path = Path(dst)
+            # An unlink-then-copy regression would have already removed
+            # db_path by this point; the atomic-rename approach leaves it
+            # in place (as the pre-restore file) right up until this
+            # single rename call replaces it.
+            if dst_path == settings.db_path:
+                assert dst_path.exists()
+                replace_dests.append(dst_path)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", _tracking_replace)
+
+        await backup.restore_from_backup(settings, snapshot)
+
+        assert replace_dests == [settings.db_path]
+        assert settings.db_path.exists()
     finally:
         await get_engine().dispose()
         override_engine(None)
