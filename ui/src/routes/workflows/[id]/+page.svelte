@@ -932,12 +932,14 @@
 		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
 			<div class="flex items-center justify-between">
 				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Schedules</h2>
-				<button
-					onclick={openAddSchedule}
-					class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-				>
-					+ Add schedule
-				</button>
+				{#if auth.grant === 'owner'}
+					<button
+						onclick={openAddSchedule}
+						class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+					>
+						+ Add schedule
+					</button>
+				{/if}
 			</div>
 			{#if !workflow.published}
 				<p class="text-xs text-neutral-500">
@@ -963,20 +965,22 @@
 									{/if}
 								</span>
 								<div class="flex items-center gap-2">
-									{#if schedule.enabled || !isSpentOneOff(schedule)}
+									{#if auth.grant === 'owner'}
+										{#if schedule.enabled || !isSpentOneOff(schedule)}
+											<button
+												onclick={() => toggleScheduleEnabled(schedule)}
+												class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+											>
+												{schedule.enabled ? 'Disable' : 'Enable'}
+											</button>
+										{/if}
 										<button
-											onclick={() => toggleScheduleEnabled(schedule)}
-											class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+											onclick={() => removeSchedule(schedule.id)}
+											class="text-neutral-500 hover:text-agent-magenta-600"
 										>
-											{schedule.enabled ? 'Disable' : 'Enable'}
+											Remove
 										</button>
 									{/if}
-									<button
-										onclick={() => removeSchedule(schedule.id)}
-										class="text-neutral-500 hover:text-agent-magenta-600"
-									>
-										Remove
-									</button>
 								</div>
 							</div>
 							{#if isPendingAgentApproval(schedule)}
