@@ -3,14 +3,17 @@
 # docker compose down        # stop (workspace data survives — it's in the volume)
 #
 # Published loopback-only (127.0.0.1:8484) by default, matching a native
-# install's NFR-3.4 posture: reachable from this machine only. To expose it
-# to your LAN instead, change the port mapping below to "8484:8484" — do
-# that deliberately, not by accident, since Rivulets has no built-in network
-# auth beyond the workspace key. If you do, also set RIVULETS_BOOTSTRAP_TOKEN
-# (#247, README.md's Docker section) before the first login: the container
-# binds 0.0.0.0 internally regardless of this port mapping, so anyone who
-# reaches it before you've logged in once could otherwise claim the
-# workspace with their own recovery phrase.
+# install's NFR-3.4 posture: reachable from this machine only — first login
+# works out of the box, no token needed, same as a native install. To
+# expose it to your LAN instead, change the port mapping below to
+# "8484:8484" — do that deliberately, not by accident, since Rivulets has
+# no built-in network auth beyond the workspace key. If you do, also
+# uncomment both environment lines below (#247/#318, README.md's Docker
+# section) before the first login: the container binds 0.0.0.0 internally
+# regardless of this port mapping, so RIVULETS_APP_SERVER_HOST alone can't
+# tell loopback-only publishing apart from LAN publishing — without the
+# token, anyone who reaches the LAN-published port before you've logged in
+# once could otherwise claim the workspace with their own recovery phrase.
 services:
   rivulets:
     build: .
@@ -18,6 +21,7 @@ services:
     ports:
       - "127.0.0.1:8484:8484"
     # environment:
+    #   RIVULETS_REQUIRE_BOOTSTRAP_TOKEN: "1"
     #   RIVULETS_BOOTSTRAP_TOKEN: ${RIVULETS_BOOTSTRAP_TOKEN:?set this before exposing beyond loopback}
     volumes:
       - rivulets-data:/data

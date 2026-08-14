@@ -10,18 +10,24 @@ from rivulets.security.rate_limit import get_login_rate_limiter
 from rivulets.security.session import get_session_key_store
 from rivulets.sync import get_sync_engine
 
-_ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- exercising #247's gate, never actually bound
+_ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- exercising #318's gate, never actually bound
 _TEST_BOOTSTRAP_TOKEN = "correct-token"  # noqa: S105 -- test fixture value, not a real secret
 
 
-def _settings_bound_to(host: str, *, bootstrap_token: str | None = None) -> Settings:
+def _settings_bound_to(
+    host: str,
+    *,
+    require_bootstrap_token: bool = False,
+    bootstrap_token: str | None = None,
+) -> Settings:
     # Same fields as get_settings() would produce, just with app_server_host
-    # (and optionally bootstrap_token) overridden -- workspace_dir/db paths
-    # are irrelevant to login() and never touched by these tests.
+    # (and optionally the bootstrap-token gate) overridden -- workspace_dir/db
+    # paths are irrelevant to login() and never touched by these tests.
     base = get_settings()
     return Settings(
         app_server_host=host,
         workspace_dir=base.workspace_dir,
+        require_bootstrap_token=require_bootstrap_token,
         bootstrap_token=bootstrap_token,
     )
 
@@ -48,14 +54,15 @@ def test_second_login_requires_same_mnemonic(client: TestClient) -> None:
     assert rejected.status_code == 401
 
 
-def test_bootstrap_over_0_0_0_0_refuses_without_a_bootstrap_token(
+def test_bootstrap_with_require_flag_refuses_without_a_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#247: with no workspace yet and the app reachable from the network
-    (app_server_host=0.0.0.0), the first login must not be able to claim
-    the workspace unless RIVULETS_BOOTSTRAP_TOKEN is configured."""
+    """#247/#318: with no workspace yet and RIVULETS_REQUIRE_BOOTSTRAP_TOKEN
+    set, the first login must not be able to claim the workspace unless
+    RIVULETS_BOOTSTRAP_TOKEN is configured."""
     monkeypatch.setattr(
-        "rivulets.api.auth.get_settings", lambda: _settings_bound_to(_ALL_INTERFACES)
+        "rivulets.api.auth.get_settings",
+        lambda: _settings_bound_to(_ALL_INTERFACES, require_bootstrap_token=True),
     )
 
     response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
@@ -64,12 +71,14 @@ def test_bootstrap_over_0_0_0_0_refuses_without_a_bootstrap_token(
     assert "bootstrap" in response.json()["detail"].lower()
 
 
-def test_bootstrap_over_0_0_0_0_refuses_a_wrong_bootstrap_token(
+def test_bootstrap_with_require_flag_refuses_a_wrong_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         "rivulets.api.auth.get_settings",
-        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+        lambda: _settings_bound_to(
+            _ALL_INTERFACES, require_bootstrap_token=True, bootstrap_token=_TEST_BOOTSTRAP_TOKEN
+        ),
     )
 
     response = client.post(
@@ -80,12 +89,14 @@ def test_bootstrap_over_0_0_0_0_refuses_a_wrong_bootstrap_token(
     assert response.status_code == 401
 
 
-def test_bootstrap_over_0_0_0_0_succeeds_with_the_correct_bootstrap_token(
+def test_bootstrap_with_require_flag_succeeds_with_the_correct_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         "rivulets.api.auth.get_settings",
-        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+        lambda: _settings_bound_to(
+            _ALL_INTERFACES, require_bootstrap_token=True, bootstrap_token=_TEST_BOOTSTRAP_TOKEN
+        ),
     )
 
     response = client.post(
@@ -97,7 +108,7 @@ def test_bootstrap_over_0_0_0_0_succeeds_with_the_correct_bootstrap_token(
     assert response.json()["token"]
 
 
-def test_bootstrap_over_0_0_0_0_rejects_a_length_mismatched_token_with_401(
+def test_bootstrap_with_require_flag_rejects_a_length_mismatched_token_with_401(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#291: hmac.compare_digest(supplied.encode(), configured.encode())
@@ -107,7 +118,9 @@ def test_bootstrap_over_0_0_0_0_rejects_a_length_mismatched_token_with_401(
     mismatch, and should fail closed the same documented 401 way."""
     monkeypatch.setattr(
         "rivulets.api.auth.get_settings",
-        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+        lambda: _settings_bound_to(
+            _ALL_INTERFACES, require_bootstrap_token=True, bootstrap_token=_TEST_BOOTSTRAP_TOKEN
+        ),
     )
 
     response = client.post(
@@ -119,7 +132,7 @@ def test_bootstrap_over_0_0_0_0_rejects_a_length_mismatched_token_with_401(
     assert "bootstrap" in response.json()["detail"].lower()
 
 
-def test_second_login_over_0_0_0_0_does_not_require_a_bootstrap_token(
+def test_second_login_with_require_flag_does_not_require_a_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Once the workspace already exists, the bootstrap-token gate no
@@ -130,7 +143,8 @@ def test_second_login_over_0_0_0_0_does_not_require_a_bootstrap_token(
     assert first.status_code == 200
 
     monkeypatch.setattr(
-        "rivulets.api.auth.get_settings", lambda: _settings_bound_to(_ALL_INTERFACES)
+        "rivulets.api.auth.get_settings",
+        lambda: _settings_bound_to(_ALL_INTERFACES, require_bootstrap_token=True),
     )
     second = client.post("/api/v1/auth/login", json={"key": mnemonic})
 
@@ -140,13 +154,34 @@ def test_second_login_over_0_0_0_0_does_not_require_a_bootstrap_token(
 def test_bootstrap_over_loopback_does_not_require_a_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default bind (127.0.0.1) is only reachable from this machine
-    already -- the token gate is scoped to the network-reachable bind."""
+    """The default bind (127.0.0.1), with the gate off by default, is only
+    reachable from this machine already -- no token needed."""
     monkeypatch.setattr("rivulets.api.auth.get_settings", lambda: _settings_bound_to("127.0.0.1"))
 
     response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
 
     assert response.status_code == 200, response.text
+
+
+def test_bootstrap_over_0_0_0_0_does_not_require_a_bootstrap_token_by_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#318: the Docker image always binds 0.0.0.0 internally, including
+    the documented default (loopback-published) compose/`docker run` path,
+    which never sets RIVULETS_REQUIRE_BOOTSTRAP_TOKEN. That default must
+    behave like a native loopback install -- first login succeeds with no
+    token -- since app_server_host alone can't tell a loopback-only
+    publish from a LAN one apart (see config.py's require_bootstrap_token
+    docstring). Before this fix, gating on app_server_host=="0.0.0.0"
+    directly meant this always 401'd."""
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings", lambda: _settings_bound_to(_ALL_INTERFACES)
+    )
+
+    response = client.post("/api/v1/auth/login", json={"key": keys.generate_mnemonic()})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["token"]
 
 
 def test_protected_endpoint_requires_token(client: TestClient) -> None:

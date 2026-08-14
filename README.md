@@ -106,7 +106,7 @@ docker run -d --name rivulets \
 
 Workspace data (the SQLite database, uploaded files, keys, logs) lives in `/data` inside the container — always mount a volume there, or a container restart starts a fresh workspace. The port is published loopback-only (`127.0.0.1:8484`) by default, matching a native install's security posture: reachable from this machine only. Change that to `8484:8484` only if you deliberately want it reachable from your LAN — Rivulets has no additional network auth beyond the workspace key.
 
-**If you do publish it beyond loopback**, set `RIVULETS_BOOTSTRAP_TOKEN` before the first login: the container binds `0.0.0.0` internally regardless of the host port mapping (see `main.py`), so anyone reaching the container before you've logged in for the first time could otherwise claim the workspace with their own recovery phrase. With the token set, first login must supply it (as `bootstrap_token` in the `POST /auth/login` body) to create the workspace; every login afterward is unaffected.
+**If you do publish it beyond loopback**, set both `RIVULETS_REQUIRE_BOOTSTRAP_TOKEN=1` and `RIVULETS_BOOTSTRAP_TOKEN` before the first login: the container binds `0.0.0.0` internally regardless of the host port mapping (see `main.py`), so the app can't tell a loopback-only publish from a LAN one on its own — without the token, anyone reaching the container before you've logged in for the first time could otherwise claim the workspace with their own recovery phrase. With both set, first login must supply the token (as `bootstrap_token` in the `POST /auth/login` body) to create the workspace; every login afterward is unaffected.
 
 ```bash
 export RIVULETS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
@@ -114,6 +114,7 @@ echo "Bootstrap token (needed for first login only): $RIVULETS_BOOTSTRAP_TOKEN"
 
 docker run -d --name rivulets \
   -p 8484:8484 \
+  -e RIVULETS_REQUIRE_BOOTSTRAP_TOKEN=1 \
   -e RIVULETS_BOOTSTRAP_TOKEN \
   -v rivulets-data:/data \
   rivulets:local
@@ -166,7 +167,8 @@ All configuration is via `RIVULETS_*` environment variables:
 | `RIVULETS_WORKSPACE_DIR` | `~/.rivulets` | Where the database, files, keys, and logs live. |
 | `RIVULETS_APP_SERVER_HOST` | `127.0.0.1` | Bind address. Also accepts `0.0.0.0` (the Docker image's default) — see the Docker section above for what actually controls exposure in that case. |
 | `RIVULETS_APP_SERVER_PORT` | `8484` | Port for the API + UI. |
-| `RIVULETS_BOOTSTRAP_TOKEN` | unset | Required to create the workspace (first login only) when `RIVULETS_APP_SERVER_HOST=0.0.0.0` — see the Docker section above. Ignored once a workspace already exists, and unused when bound to loopback. |
+| `RIVULETS_REQUIRE_BOOTSTRAP_TOKEN` | `false` | Require `RIVULETS_BOOTSTRAP_TOKEN` to create the workspace (first login only) — set this when publishing beyond loopback (see the Docker section above). Ignored once a workspace already exists. |
+| `RIVULETS_BOOTSTRAP_TOKEN` | unset | The token first login must supply when `RIVULETS_REQUIRE_BOOTSTRAP_TOKEN` is set — see the Docker section above. |
 
 ## Repository layout
 
