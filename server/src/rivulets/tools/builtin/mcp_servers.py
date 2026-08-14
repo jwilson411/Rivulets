@@ -45,10 +45,18 @@ things it exposes are left out here, on purpose:
 reconnect_mcp_server and delete_mcp_server aren't subject to either
 concern -- reconnecting reuses whatever headers/env are already stored
 (no new secret enters the picture) and deleting never touches a secret's
-*value*, so both are offered for either transport, matching how neither
-endpoint carries extra gating beyond CurrentWorkspaceId in api/
-mcp_servers.py today. list_mcp_servers is read-only and deliberately left
-unscoped, mirroring list_channels/list_agents/list_teams.
+*value* -- but api/mcp_servers.py's HTTP routes now require a live owner
+*session* (not just CurrentWorkspaceId) before reconnecting or deleting a
+stdio server or one with stored headers/env (#231's
+_requires_owner_to_mutate). dispatch/service.py's
+_handle_reconnect_mcp_server_trigger / _handle_delete_mcp_server_trigger
+have no live session to check that against -- whoever is chatting with
+the agent drives it, which could be any invite-grant participant in the
+rivulet -- so they refuse outright on either kind of server rather than
+reproducing a check they can't actually perform (#285). Plain
+streamable-http servers with no stored auth are still offered for
+either. list_mcp_servers is read-only and deliberately left unscoped,
+mirroring list_channels/list_agents/list_teams.
 """
 
 from agno.tools import tool

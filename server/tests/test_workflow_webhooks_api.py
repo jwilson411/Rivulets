@@ -169,6 +169,32 @@ def test_create_webhook_is_forbidden_for_an_invite_grant_session(
     assert response.status_code == 403
 
 
+def test_update_webhook_is_forbidden_for_an_invite_grant_session(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#285: PATCH doesn't touch the HMAC secret, but it can re-enable a
+    webhook the owner disabled after a leak, retarget the trusted external
+    trigger to another channel, or rewrite input_template so the next
+    legitimate delivery injects attacker-controlled workflow input -- same
+    owner-only bar as create/rotate/delete."""
+    workflow_id = _create_workflow(client, auth_headers, "owner-gated-update")
+    channel_id = _create_channel(client, auth_headers, "owner-gated-update-channel")
+    created = _create_webhook(client, auth_headers, workflow_id, channel_id)
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/workflows/{workflow_id}/webhooks/{created['id']}",
+        json={"enabled": False},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    unchanged = client.get(
+        f"/api/v1/workflows/{workflow_id}/webhooks", headers=auth_headers
+    ).json()
+    assert unchanged[0]["enabled"] is True
+
+
 def test_rotate_webhook_secret_is_forbidden_for_an_invite_grant_session(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

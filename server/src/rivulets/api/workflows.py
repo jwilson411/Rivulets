@@ -943,7 +943,16 @@ async def update_webhook(
     body: WorkflowWebhookUpdate,
     db: DbSession,
     _: CurrentWorkspaceId,
+    _o: OwnerGrant,
 ) -> WorkflowWebhook:
+    """#285: owner-gated, same bucket as create/rotate/delete
+    (create_webhook's docstring) -- `enabled` re-arms a trigger the owner
+    may have disabled after a leak, `channel_id` retargets where a
+    trusted external delivery lands, and `input_template` controls what
+    the *next* legitimate delivery injects as workflow input. None of
+    that needs the HMAC secret itself; leaving this PATCH open to any
+    grant was as durable an unattended-trigger hole as create/rotate ever
+    were."""
     webhook = await _get_webhook_or_404(db, workflow_id, webhook_id)
     if body.channel_id is not None:
         if await db.get(Channel, body.channel_id) is None:

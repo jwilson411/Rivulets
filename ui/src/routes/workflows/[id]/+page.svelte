@@ -15,6 +15,7 @@
 		type WorkflowWebhookCreated
 	} from '$lib/api/workflows';
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
+	import { auth } from '$lib/api/auth.svelte';
 	import type { Connection } from '@xyflow/svelte';
 	import { channels as channelsApi, type Channel } from '$lib/api/channels';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
@@ -1222,12 +1223,14 @@
 									{webhook.name ?? webhook.id.slice(0, 8)}
 								</span>
 								<div class="flex items-center gap-2">
-									<button
-										onclick={() => toggleWebhookEnabled(webhook)}
-										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-									>
-										{webhook.enabled ? 'Disable' : 'Enable'}
-									</button>
+									{#if auth.grant === 'owner'}
+										<button
+											onclick={() => toggleWebhookEnabled(webhook)}
+											class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+										>
+											{webhook.enabled ? 'Disable' : 'Enable'}
+										</button>
+									{/if}
 									<button
 										onclick={() => rotateWebhookSecret(webhook.id)}
 										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"

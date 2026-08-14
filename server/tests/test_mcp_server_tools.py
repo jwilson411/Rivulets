@@ -8,6 +8,8 @@ test_mcp_servers.py monkeypatches api.mcp_servers.discover_tools, since a
 real MCP handshake isn't something these tests can produce.
 """
 
+import json
+import socket
 from typing import Any
 
 import pytest
@@ -17,7 +19,7 @@ from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
 from rivulets.agentos.mcp import DiscoveredTool, MCPConnectionError
-from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.models import MCPServer, SyncPendingOutbound
 from rivulets.db.session import session_scope
 from rivulets.dispatch.service import (
     _find_delete_mcp_server_call,  # pyright: ignore[reportPrivateUsage]
@@ -36,6 +38,19 @@ from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[r
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
     return ToolExecution(tool_name=tool_name, tool_args=tool_args)
+
+
+def _patch_getaddrinfo_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#285: register_mcp_server's trigger handler now runs every url
+    through check_host_is_public unconditionally (dispatch/service.py's
+    _handle_register_mcp_server_trigger docstring) -- same convention
+    test_mcp_servers.py's SSRF tests use, so a plain hostname resolves to
+    a real public IP without depending on actual DNS/network access."""
+
+    def fake_getaddrinfo(_host: str, _port: object) -> list[tuple[object, ...]]:
+        return [(None, None, None, None, ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 # --- tool entrypoints -------------------------------------------------
@@ -202,11 +217,13 @@ def test_register_mcp_server_creates_server(
     _patch_dispatch_discover_tools(
         monkeypatch, [DiscoveredTool(name="add", description="Adds numbers.")]
     )
+    _patch_getaddrinfo_public(monkeypatch)
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(
             _tool_execution(
-                "register_mcp_server", {"name": "Math server", "url": "http://127.0.0.1:9999/mcp"}
+                "register_mcp_server",
+                {"name": "Math server", "url": "http://mcp.example.com/mcp"},
             )
         ),
     )
@@ -236,11 +253,12 @@ def test_register_mcp_server_degrades_gracefully_on_connection_failure(
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "register_mcp_server")
 
     _patch_dispatch_discover_tools(monkeypatch, MCPConnectionError("could not connect"))
+    _patch_getaddrinfo_public(monkeypatch)
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(
             _tool_execution(
-                "register_mcp_server", {"name": "Dead server", "url": "http://127.0.0.1:1/mcp"}
+                "register_mcp_server", {"name": "Dead server", "url": "http://dead.example.com/mcp"}
             )
         ),
     )
@@ -276,6 +294,38 @@ def test_register_mcp_server_missing_url_is_rejected(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "didn't provide a url" in messages[2]["content"]
+
+    listed = client.get("/api/v1/mcp-servers", headers=auth_headers).json()
+    assert listed == []
+
+
+def test_register_mcp_server_at_a_private_address_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#285: _handle_register_mcp_server_trigger runs every url through
+    check_host_is_public unconditionally -- unlike the HTTP route, there's
+    no "an owner deliberately chose this" exception here, since there's no
+    live session behind an agent-driven tool call to know that from."""
+    agent_id = _create_agent(client, auth_headers, "SSRFRegistrar")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "register_mcp_server")
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(
+            _tool_execution(
+                "register_mcp_server", {"name": "Internal", "url": "http://127.0.0.1:9999/mcp"}
+            )
+        ),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go register a server"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "internal/private network address" in messages[2]["content"]
 
     listed = client.get("/api/v1/mcp-servers", headers=auth_headers).json()
     assert listed == []
@@ -338,6 +388,42 @@ def test_reconnect_mcp_server_unknown_reference_is_rejected(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "no server with that id or name" in messages[2]["content"]
+
+
+async def test_reconnect_mcp_server_with_stored_headers_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#285: api/mcp_servers.py's reconnect_mcp_server route requires a
+    live owner session for a server holding stored headers/env
+    (_requires_owner_to_mutate) -- the trigger handler has no live session
+    to check that against, so it refuses outright rather than reusing the
+    stored secret on any rivulet participant's say-so."""
+    agent_id = _create_agent(client, auth_headers, "HeaderReconnector")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reconnect_mcp_server")
+
+    async with session_scope() as db:
+        server = MCPServer(
+            name="authed-server",
+            transport="streamable-http",
+            url="http://127.0.0.1:9999/mcp",
+            header_names_json=json.dumps(["Authorization"]),
+        )
+        db.add(server)
+        await db.commit()
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("reconnect_mcp_server", {"server": "authed-server"})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go reconnect it"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "requires a live owner session" in messages[2]["content"]
 
 
 def test_delete_mcp_server_removes_server_and_tools(
@@ -415,6 +501,44 @@ def test_delete_mcp_server_unknown_reference_is_rejected(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "no server with that id or name" in messages[2]["content"]
+
+
+async def test_delete_mcp_server_with_stored_headers_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#285: same "no live session to check owner-gating against" refusal
+    as reconnect above, for delete -- mirrors api/mcp_servers.py's
+    unregister_mcp_server requiring a live owner session for a server
+    holding stored headers/env."""
+    agent_id = _create_agent(client, auth_headers, "HeaderDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_mcp_server")
+
+    async with session_scope() as db:
+        server = MCPServer(
+            name="authed-server",
+            transport="streamable-http",
+            url="http://127.0.0.1:9999/mcp",
+            header_names_json=json.dumps(["Authorization"]),
+        )
+        db.add(server)
+        await db.commit()
+        server_id = server.id
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("delete_mcp_server", {"server": "authed-server"})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go delete it"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "requires a live owner session" in messages[2]["content"]
+
+    assert client.get(f"/api/v1/mcp-servers/{server_id}", headers=auth_headers).status_code == 200
 
 
 def test_list_mcp_servers_reports_existing_servers(

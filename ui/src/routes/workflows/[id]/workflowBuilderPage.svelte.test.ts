@@ -20,6 +20,7 @@ import { channels } from '$lib/api/channels';
 import { providers, type Provider } from '$lib/api/providers';
 
 const gotoMock = vi.hoisted(() => vi.fn());
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
 
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'wf-1' }, url: new URL('http://localhost/workflows/wf-1') }
@@ -79,6 +80,14 @@ vi.mock('$lib/api/channels', () => ({
 
 vi.mock('$lib/api/providers', () => ({
 	providers: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
 }));
 
 const reviewFlow: Workflow = {
@@ -228,6 +237,7 @@ function mockLoad() {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('workflows/[id]/+page.svelte', () => {
@@ -1925,6 +1935,23 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('never', { exact: false })).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Disable' })).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Enable' })).toBeInTheDocument();
+	});
+
+	// #285: PATCH /webhooks/{id} is now OwnerGrant-only server-side (it can
+	// re-enable a webhook the owner disabled, retarget its channel, or
+	// rewrite input_template) -- hide the control an invite-grant session
+	// can't actually use, rather than showing a button that always 403s.
+	it('hides the Enable/Disable control for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+		vi.mocked(workflows.listWebhooks).mockResolvedValueOnce([namedWebhook]);
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByText('Fetch')).toBeInTheDocument();
+
+		await expect.element(page.getByText('GitHub')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Disable' })).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Enable' })).not.toBeInTheDocument();
 	});
 
 	it('toggles a webhook enabled state, and surfaces an error on failure', async () => {
