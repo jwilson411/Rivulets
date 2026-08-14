@@ -5,11 +5,16 @@ are no-op'd for the `client` fixture (see conftest.py) — this file only
 exercises what a user triggers directly.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.agentos import get_agentos
+from rivulets.agentos.tool_resolution import resolve_agent_tools
 from rivulets.backup import BackupIntegrityError
+from rivulets.db.models import Agent, AgentTool
+from rivulets.db.session import session_scope
 
 
 def test_create_manual_backup_returns_metadata(
@@ -191,6 +196,71 @@ def test_restore_resyncs_agentos_so_the_restored_agent_is_runnable(
     agent_ids_in_registry = {a.id for a in get_agentos().agents or []}
     assert agent["id"] in agent_ids_in_registry
     assert post_snapshot_agent["id"] not in agent_ids_in_registry
+
+
+async def test_restore_brings_back_custom_tool_source_so_it_still_execs(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#290: restore must bring `tools/` back along with `rivulets.db` --
+    otherwise the restored Tool row's source_path points at a file that no
+    longer exists, and _load_custom_tool (agentos/tool_resolution.py)
+    silently skips it instead of raising, so every invocation of a custom
+    tool that existed at backup time would quietly become a no-op."""
+    create = client.post(
+        "/api/v1/tools",
+        json={"name": "greet", "description": "Greets someone."},
+        headers=auth_headers,
+    )
+    assert create.status_code == 201, create.text
+    tool = create.json()
+
+    source = (
+        "from agno.tools import tool\n\n\n"
+        "@tool\n"
+        "def greet(name: str) -> str:\n"
+        '    return f"Hello, {name}!"\n'
+    )
+    saved = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": source},
+        headers=auth_headers,
+    )
+    assert saved.status_code == 201, saved.text
+
+    backup = client.post("/api/v1/backups", headers=auth_headers).json()
+
+    # Simulate the on-disk source being gone by the time of restore (e.g.
+    # a restore onto replacement hardware where only the backup archive
+    # travels with the workspace) -- the archive, not the live file, must
+    # be what restore relies on.
+    Path(tool["source_path"]).unlink()
+
+    restore = client.post(
+        f"/api/v1/backups/{backup['filename']}/restore",
+        json={"confirm_filename": backup["filename"]},
+        headers=auth_headers,
+    )
+    assert restore.status_code == 204, restore.text
+    assert Path(tool["source_path"]).read_text() == source
+
+    async with session_scope() as db:
+        agent = Agent(
+            id="tool-roundtrip-agent",
+            name="Tool Roundtrip Agent",
+            description="A test agent for the tool restore round-trip.",
+            instructions="Do the thing.",
+            model="openai:gpt-4o-mini",
+        )
+        db.add(agent)
+        await db.commit()
+        db.add(AgentTool(agent_id=agent.id, tool_id=tool["id"]))
+        await db.commit()
+
+        resolved = await resolve_agent_tools(db, agent)
+
+    assert len(resolved) == 1
+    assert resolved[0].entrypoint is not None
+    assert resolved[0].entrypoint("World") == "Hello, World!"
 
 
 def test_create_manual_backup_returns_500_on_integrity_failure(
