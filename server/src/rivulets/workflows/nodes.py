@@ -96,12 +96,33 @@ async def execute_agent_node(
     tool_audit.py's `ensure_unattended_tools_allowed`. Checked inside the
     span's try/except like any other failure this function can raise, so
     a blocked node shows up in the trace/run history the same way a
-    genuine agent error would, not as something invisible."""
+    genuine agent error would, not as something invisible.
+
+    #320: also runs dispatch/budgets.py's check before ever calling
+    `run_agent` -- a workflow agent node is a spend path same as a
+    channel-dispatched one, and #246 only wired the check into channel
+    dispatch. No team_id here (unlike dispatch/service.py's
+    channel.team_id): a workflow isn't scoped to a team, so only
+    agent-scope and workspace-scope caps apply. A BudgetCapBlockedError
+    propagates like any other node failure (see this function's
+    docstring above and _run_node_with_retries' uniform handling) --
+    there's no rivulet/channel context here to post a system_alert
+    Message into the way channel dispatch does, so the block surfaces as
+    the node/run's own error_message instead."""
     if node.agent_id is None:
         raise ValueError(f"Node {node.name!r} has no agent assigned")
     agent = await db.get(Agent, node.agent_id)
     if agent is None:
         raise ValueError(f"Node {node.name!r} references a deleted agent")
+
+    # Lazy import: dispatch/__init__.py -> dispatch.service -> api.agents
+    # -> api (package init) -> api.workflows -> this package -> this
+    # module, so a module-level import of dispatch.budgets here would be
+    # circular -- same reasoning as execute_summarize_node's lazy import
+    # of dispatch.rule_generation below.
+    from rivulets.dispatch.budgets import enforce_budget_caps
+
+    await enforce_budget_caps(db, agent, None)
 
     span_id = await start_span(
         db, trace_ctx, span_type="agent_run", entity_id=None, name=agent.name

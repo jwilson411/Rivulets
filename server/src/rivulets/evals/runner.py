@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.agentos import run_agent
 from rivulets.db.base import utcnow_iso, uuid7
 from rivulets.db.models import (
+    Agent,
     Channel,
     EvalCase,
     EvalCaseResult,
@@ -131,8 +132,28 @@ async def _run_agent_case(
     db: AsyncSession, agent_id: str, input_content: str
 ) -> tuple[str, list[ToolCallDict]]:
     """A fresh AgentOS session_id per case gives full isolation -- no
-    Rivulet/Channel needed at all, unlike a workflow case."""
+    Rivulet/Channel needed at all, unlike a workflow case.
+
+    #320: also runs dispatch/budgets.py's check before calling
+    `run_agent` -- an eval-suite agent case is a spend path same as any
+    other agent invocation, and #246 only wired the check into channel
+    dispatch. No team_id: an eval suite isn't scoped to a team, so only
+    agent-scope and workspace-scope caps apply. A BudgetCapBlockedError
+    propagates to `_run_case`'s existing `except Exception` handling,
+    which records it as this case's own 'error' result rather than
+    aborting the whole suite -- same as any other case-execution failure.
+    Lazy import: rivulets.dispatch's package init pulls in
+    rivulets.api (via dispatch.service -> api.agents), whose own init
+    imports this package back via api.evals -- same circular-import
+    hazard workflows/nodes.py's execute_agent_node already works around
+    the same way."""
+    from rivulets.dispatch.budgets import enforce_budget_caps
+
     session_id = uuid7()
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        raise RuntimeError("Agent no longer exists")
+    await enforce_budget_caps(db, agent, None)
     run_output = await run_agent(db, agent_id, input_content, session_id=session_id, user_id="eval")
     if run_output.status is RunStatus.error:
         raise RuntimeError(str(run_output.content))

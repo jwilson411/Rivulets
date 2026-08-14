@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from rivulets.db.models import AgentRun, SyncPendingOutbound
 from rivulets.db.models import File as FileRow
-from rivulets.db.models import SyncPendingOutbound
 from rivulets.db.session import session_scope
+from rivulets.knowledge_base.embeddings import EmbeddingResult
 
 
 def _create_agent(client: TestClient, headers: dict[str, str], name: str = "KB Agent") -> str:
@@ -44,10 +46,13 @@ def _upload(
 
 @pytest.fixture(autouse=True)
 def _fake_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
-    async def _fake_embed_texts(_db: object, texts: list[str]) -> list[list[float]]:
+    async def _fake_embed_texts(_db: object, texts: list[str]) -> EmbeddingResult:
         # Deterministic per-text vector so cosine-similarity ranking is
         # exercisable without a real embedding model.
-        return [[float(len(t)), 1.0, 0.0] for t in texts]
+        return EmbeddingResult(
+            vectors=[[float(len(t)), 1.0, 0.0] for t in texts],
+            prompt_tokens=sum(len(t) for t in texts),
+        )
 
     monkeypatch.setattr("rivulets.api.knowledge_bases.embed_texts", _fake_embed_texts)
 
@@ -191,6 +196,78 @@ def test_ingest_document_chunks_and_embeds_a_text_file(
 
     kb_after = client.get(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers)
     assert kb_after.json()["document_count"] == 1
+
+
+async def test_ingest_document_records_embedding_spend_as_an_agent_run(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#320: ingestion's embedding call was invisible to the usage
+    dashboard/budget caps before this -- no AgentRun was ever created for
+    it. agent_id is None (same #246 dispatcher_call precedent as any
+    other spend that can't be attributed to a single agent invocation)."""
+    agent_id = _create_agent(client, auth_headers)
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    file_id = _upload(client, auth_headers, "notes.txt", b"x" * 2500)
+
+    ingested = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    )
+    assert ingested.status_code == 201, ingested.text
+
+    async with session_scope() as db:
+        run = (
+            (await db.execute(select(AgentRun).where(AgentRun.source == "embedding")))
+            .scalars()
+            .one()
+        )
+    assert run.agent_id is None
+    assert run.model == "openai:text-embedding-3-small"
+    assert run.cost_usd is not None and run.cost_usd > 0
+
+
+async def test_ingest_document_blocked_by_a_tripped_hard_stop_budget_cap(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#320: a KB ingest embeds against the owner's OpenAI key same as any
+    other billed call -- #246 only wired dispatch/budgets.py's check into
+    channel dispatch, leaving ingestion able to keep spending past a
+    tripped workspace hard_stop cap."""
+    agent_id = _create_agent(client, auth_headers)
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    created = client.post(
+        "/api/v1/budgets",
+        json={"scope_type": "workspace", "period": "day", "limit_usd": 0.01, "action": "hard_stop"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+
+    async with session_scope() as db:
+        db.add(AgentRun(agent_id=None, model="openai:gpt-4o", status="completed", cost_usd=1.0))
+        await db.commit()
+
+    file_id = _upload(client, auth_headers, "notes.txt", b"x" * 2500)
+    response = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    )
+    assert response.status_code == 402, response.text
+    assert "budget cap" in response.text.lower()
+
+    documents = client.get(
+        f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers
+    ).json()
+    assert documents[0]["status"] == "failed"
 
 
 def test_ingest_document_rejects_non_text_file(

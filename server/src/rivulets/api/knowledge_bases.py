@@ -24,8 +24,13 @@ from rivulets.db.models import (
     KnowledgeBaseDocument,
     Team,
 )
+from rivulets.dispatch.budgets import BudgetCapBlockedError, enforce_budget_caps
 from rivulets.knowledge_base.chunking import chunk_text
-from rivulets.knowledge_base.embeddings import NoEmbeddingProviderError, embed_texts
+from rivulets.knowledge_base.embeddings import (
+    NoEmbeddingProviderError,
+    embed_texts,
+    record_embedding_run,
+)
 from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.validation import local_path_for_content_hash
 
@@ -247,16 +252,35 @@ async def ingest_document(
         await db.refresh(document)
         return document
 
+    # #320: an embedding call is billed spend same as any agent LLM call,
+    # but ingestion never checked budget caps at all before this -- an
+    # owner's workspace hard_stop was silently bypassed by KB ingest. Uses
+    # the knowledge base's own scope (agent/team) rather than
+    # workspace-only, so an agent- or team-scoped cap that's already
+    # tripped from that agent's chat spend also stops its KB from
+    # ingesting new (billed) content, not just a workspace-wide cap.
+    scope_agent = await db.get(Agent, kb.agent_id) if kb.scope_type == "agent" else None
+    scope_team_id = kb.team_id if kb.scope_type == "team" else None
     try:
-        vectors = await embed_texts(db, chunks)
+        await enforce_budget_caps(db, scope_agent, scope_team_id)
+    except BudgetCapBlockedError as exc:
+        document.status = "failed"
+        document.error_message = str(exc)
+        await db.commit()
+        await db.refresh(document)
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
+
+    try:
+        embedding = await embed_texts(db, chunks)
     except NoEmbeddingProviderError as exc:
         document.status = "failed"
         document.error_message = str(exc)
         await db.commit()
         await db.refresh(document)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await record_embedding_run(db, embedding.prompt_tokens)
 
-    for index, (chunk_content, vector) in enumerate(zip(chunks, vectors, strict=True)):
+    for index, (chunk_content, vector) in enumerate(zip(chunks, embedding.vectors, strict=True)):
         db.add(
             KnowledgeBaseChunk(
                 knowledge_base_id=kb.id,

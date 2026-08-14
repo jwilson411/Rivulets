@@ -254,6 +254,59 @@ async def test_agent_node_calls_run_agent_and_chains_its_output(
     assert message.sender_id == agent.id
 
 
+async def test_agent_node_is_blocked_by_a_tripped_hard_stop_budget_cap(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#320: a workflow agent node is a spend path same as channel
+    dispatch's -- #246 only wired dispatch/budgets.py's check into
+    dispatch/service.py's _invoke_agent, leaving workflow agent nodes
+    able to keep spending past a tripped workspace/agent hard_stop cap."""
+    from rivulets.db.models import Agent, AgentRun, BudgetCap
+
+    agent = Agent(
+        name="Spendy",
+        description="An agent whose prior spend already breaches its own budget cap.",
+        instructions="Say hi.",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    db_session.add(
+        BudgetCap(
+            scope_type="agent", agent_id=agent.id, period="day", limit_usd=0.5, action="hard_stop"
+        )
+    )
+    # Already over the $0.50 cap before this run ever starts.
+    db_session.add(AgentRun(agent_id=agent.id, model=agent.model, status="completed", cost_usd=1.0))
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="agent-flow")
+    node = WorkflowNode(workflow_id=workflow.id, name="greet", node_type="agent", agent_id=agent.id)
+    db_session.add(node)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id)
+    )
+    await db_session.commit()
+
+    calls: list[str] = []
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        calls.append("called")
+        return SimpleNamespace(get_content_as_string=lambda: "Hello there!")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "hi", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert calls == []  # the model was never invoked
+    assert run.status == "failed"
+    assert "budget cap" in (run.error_message or "").lower()
+    assert "blocked" in (run.error_message or "").lower()
+
+
 async def test_node_retries_on_failure_then_succeeds(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

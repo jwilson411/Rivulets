@@ -136,6 +136,55 @@ async def test_run_eval_suite_records_execution_error_without_aborting_run(
     assert run.pass_count == 0
 
 
+async def test_run_eval_suite_case_is_blocked_by_a_tripped_hard_stop_budget_cap(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#320: an eval-suite agent case is a spend path same as channel
+    dispatch's -- #246 only wired dispatch/budgets.py's check into
+    dispatch/service.py's _invoke_agent, leaving eval runs able to keep
+    spending past a tripped hard_stop cap. Blocked before the model is
+    ever called, same "in-flight work finishes, only the next call is
+    refused" semantics as test_budget_enforcement.py's channel-dispatch
+    coverage -- here that just means the very first (only) case."""
+    from rivulets.db.models import AgentRun, BudgetCap
+
+    agent = await _make_agent(db_session, name="Spendy")
+    db_session.add(
+        BudgetCap(
+            scope_type="agent", agent_id=agent.id, period="day", limit_usd=0.5, action="hard_stop"
+        )
+    )
+    # Already over the $0.50 cap before this run ever starts.
+    db_session.add(AgentRun(agent_id=agent.id, model=agent.model, status="completed", cost_usd=1.0))
+    suite = EvalSuite(name="s-budget", agent_id=agent.id)
+    db_session.add(suite)
+    await db_session.flush()
+    db_session.add(_exact_case(suite.id, "greets", "hi", "hello"))
+    await db_session.commit()
+
+    calls: list[str] = []
+
+    async def counting_fake(*_args: object, **_kwargs: object) -> Any:
+        calls.append("called")
+        return await _fake_run_agent("hello")()
+
+    monkeypatch.setattr("rivulets.evals.runner.run_agent", counting_fake)
+
+    run = await run_eval_suite(db_session, suite, human_id=None)
+
+    assert calls == []  # the model was never invoked
+    assert run.case_count == 1
+    assert run.error_count == 1
+    assert run.pass_count == 0
+
+    result = (
+        await db_session.scalars(select(EvalCaseResult).where(EvalCaseResult.run_id == run.id))
+    ).one()
+    assert result.status == "error"
+    assert "budget cap" in (result.error_message or "").lower()
+    assert "blocked" in (result.error_message or "").lower()
+
+
 async def test_run_eval_suite_structural_case_collects_tool_calls(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

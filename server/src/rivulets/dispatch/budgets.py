@@ -115,22 +115,32 @@ async def _get_or_create_state(db: AsyncSession, cap_id: str) -> BudgetCapState:
     return state
 
 
-async def _applicable_caps(db: AsyncSession, agent: Agent, team_id: str | None) -> list[BudgetCap]:
+async def _applicable_caps(
+    db: AsyncSession, agent: Agent | None, team_id: str | None
+) -> list[BudgetCap]:
     """Most-specific scope first: agent, then team, then workspace --
-    matches check_budget_caps' short-circuit order for hard_stop caps."""
-    caps: list[BudgetCap] = list(
-        (
-            await db.execute(
-                select(BudgetCap).where(
-                    BudgetCap.enabled.is_(True),
-                    BudgetCap.scope_type == "agent",
-                    BudgetCap.agent_id == agent.id,
+    matches check_budget_caps' short-circuit order for hard_stop caps.
+
+    `agent` is None for call sites with no single agent to attribute the
+    spend to (knowledge_base ingest's workspace-only check below) -- same
+    "can't be more specific than workspace" shape as AgentRun.agent_id's
+    own null case, just skipping the agent-scope query entirely rather
+    than querying for a cap that could never match."""
+    caps: list[BudgetCap] = []
+    if agent is not None:
+        caps.extend(
+            (
+                await db.execute(
+                    select(BudgetCap).where(
+                        BudgetCap.enabled.is_(True),
+                        BudgetCap.scope_type == "agent",
+                        BudgetCap.agent_id == agent.id,
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     if team_id is not None:
         caps.extend(
             (
@@ -160,7 +170,7 @@ async def _applicable_caps(db: AsyncSession, agent: Agent, team_id: str | None) 
 
 
 async def check_budget_caps(
-    db: AsyncSession, agent: Agent, team_id: str | None
+    db: AsyncSession, agent: Agent | None, team_id: str | None
 ) -> tuple[list[BudgetAlert], BudgetAlert | None]:
     """Checks agent-scope, then team-scope (if team_id given), then
     workspace-scope caps, most specific first. Returns (alerts, blocking):
@@ -206,3 +216,31 @@ def budget_alert_text(alert: BudgetAlert, *, blocked: bool) -> str:
         f"${cap.limit_usd:.2f}/{cap.period} limit "
         f"(${status.spend_usd:.2f} spent this {cap.period})."
     )
+
+
+class BudgetCapBlockedError(Exception):
+    """Raised by `enforce_budget_caps` for the non-channel-dispatch call
+    sites (workflow agent nodes, eval agent/workflow runs, KB ingest) --
+    they don't have dispatch/service.py's own message/SSE/pending-approval
+    plumbing built around check_budget_caps' return value, they just need
+    the call refused with a clear reason (#320)."""
+
+    def __init__(self, alert: BudgetAlert):
+        self.alert = alert
+        super().__init__(budget_alert_text(alert, blocked=True))
+
+
+async def enforce_budget_caps(
+    db: AsyncSession, agent: Agent | None, team_id: str | None
+) -> list[BudgetAlert]:
+    """check_budget_caps, raising BudgetCapBlockedError in place of a
+    separate 'blocking' return value -- for callers that just need the
+    invocation refused, not dispatch/service.py's richer handling (a
+    posted system_alert Message, an SSE event, a PendingApproval row).
+    Returns the breached 'alert'-action caps, if any, for the caller to
+    surface however fits its own context (or ignore, same as before this
+    helper existed for these call sites)."""
+    alerts, blocking = await check_budget_caps(db, agent, team_id)
+    if blocking is not None:
+        raise BudgetCapBlockedError(blocking)
+    return alerts
