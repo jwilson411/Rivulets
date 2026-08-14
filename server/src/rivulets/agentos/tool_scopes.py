@@ -42,13 +42,21 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # #190 (tools/builtin/agents_teams.py) is the second: nine mutating
 # agent/team tools share one "agents_teams:manage" scope. This is the
 # highest-reach category so far -- update_agent's tool_ids lets an agent
-# reassign any agent's tool assignments, including its own -- but
-# assignment alone still isn't eligibility: a reassigned tool with its own
-# required_scope only actually resolves if the target agent separately
+# reassign any agent's tool assignments, including its own. For a builtin
+# tool with its own required_scope, assignment alone still isn't
+# eligibility: it only actually resolves if the target agent separately
 # holds that scope via AgentToolScope, which stays an owner-only grant
 # (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) with no
-# built-in tool exposing it. list_agents/list_teams are read-only and
-# deliberately left out, same as list_channels.
+# built-in tool exposing it. That does NOT extend to custom or MCP tools
+# (#310 corrected an earlier version of this comment that implied it did)
+# -- those have no required_scope field to gate on, so assignment *is*
+# eligibility: a custom tool runs unsandboxed the moment it's called, an
+# MCP tool resolves with the owner's stored headers/env. update_agent's
+# dispatch handler (dispatch/service.py's _handle_update_agent_trigger)
+# refuses to assign a custom/MCP/required_scope/SENSITIVE_BUILTIN_TOOL_NAMES
+# tool at all via tool_ids, rather than relying on this scope to bound it.
+# list_agents/list_teams are read-only and deliberately left out, same as
+# list_channels.
 #
 # #191 (tools/builtin/mcp_servers.py) is the third: register_mcp_server/
 # reconnect_mcp_server/delete_mcp_server share one "mcp_servers:manage"

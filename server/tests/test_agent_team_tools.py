@@ -17,7 +17,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
-from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.models import MCPServer, SyncPendingOutbound, Tool
 from rivulets.db.session import session_scope
 from rivulets.dispatch.service import (
     _find_create_agent_call,  # pyright: ignore[reportPrivateUsage]
@@ -524,16 +524,32 @@ def test_update_agent_dedupes_repeated_team_id(
 def test_update_agent_no_changes_specified_is_rejected(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#310: the target must be a separate, unscoped agent -- the
+    controller itself now holds the agents_teams:manage AgentToolScope
+    authorize_agent_for_builtin_tool grants it, so a self-targeted call
+    would be refused by the new agent_holds_owner_scope gate before this
+    "no changes" validation ever runs."""
     controller_id = _create_controller_agent(client, auth_headers, "Indecisive")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
     authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
+    target_name = f"IndecisiveTarget-{controller_id}"
+    client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent with no scope.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
 
     messages = _trigger(
         client,
         auth_headers,
         channel_id,
         monkeypatch,
-        _tool_execution("update_agent", {"agent": controller_id}),
+        _tool_execution("update_agent", {"agent": target_name}),
     )
     assert "didn't specify any changes" in messages[2]["content"]
 
@@ -685,10 +701,23 @@ def test_update_agent_routing_rules_replaces_rules(
 def test_update_agent_routing_rules_rejects_invalid_rule(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#310: target must be a separate, unscoped agent -- see
+    test_update_agent_no_changes_specified_is_rejected's docstring."""
     controller_id = _create_controller_agent(client, auth_headers, "BadRuleSetter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
     authorize_agent_for_builtin_tool(
         client, auth_headers, controller_id, "update_agent_routing_rules"
+    )
+    target_name = f"BadRuleTarget-{controller_id}"
+    client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent with no scope.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
     )
 
     messages = _trigger(
@@ -698,7 +727,7 @@ def test_update_agent_routing_rules_rejects_invalid_rule(
         monkeypatch,
         _tool_execution(
             "update_agent_routing_rules",
-            {"agent": controller_id, "rules": [{"rule_type": "not-a-real-type"}]},
+            {"agent": target_name, "rules": [{"rule_type": "not-a-real-type"}]},
         ),
     )
     assert "isn't a valid rule" in messages[2]["content"]
@@ -707,11 +736,24 @@ def test_update_agent_routing_rules_rejects_invalid_rule(
 def test_update_agent_peer_preference_sets_and_clears(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#310: target must be a separate, unscoped agent -- see
+    test_update_agent_no_changes_specified_is_rejected's docstring."""
     controller_id = _create_controller_agent(client, auth_headers, "PeerSetter")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
     authorize_agent_for_builtin_tool(
         client, auth_headers, controller_id, "update_agent_peer_preference"
     )
+    target_name = f"PeerTarget-{controller_id}"
+    target = client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent with no scope.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    ).json()
 
     messages = _trigger(
         client,
@@ -719,13 +761,11 @@ def test_update_agent_peer_preference_sets_and_clears(
         channel_id,
         monkeypatch,
         _tool_execution(
-            "update_agent_peer_preference", {"agent": controller_id, "capability_tag": "gpu"}
+            "update_agent_peer_preference", {"agent": target_name, "capability_tag": "gpu"}
         ),
     )
     assert "gpu" in messages[2]["content"]
-    pref = client.get(
-        f"/api/v1/agents/{controller_id}/peer-preference", headers=auth_headers
-    ).json()
+    pref = client.get(f"/api/v1/agents/{target['id']}/peer-preference", headers=auth_headers).json()
     assert pref["capability_tag"] == "gpu"
 
     messages2 = _trigger(
@@ -733,11 +773,11 @@ def test_update_agent_peer_preference_sets_and_clears(
         auth_headers,
         channel_id,
         monkeypatch,
-        _tool_execution("update_agent_peer_preference", {"agent": controller_id}),
+        _tool_execution("update_agent_peer_preference", {"agent": target_name}),
     )
     assert "cleared peer preference" in messages2[-1]["content"]
     pref2 = client.get(
-        f"/api/v1/agents/{controller_id}/peer-preference", headers=auth_headers
+        f"/api/v1/agents/{target['id']}/peer-preference", headers=auth_headers
     ).json()
     assert pref2["capability_tag"] is None
 
@@ -748,12 +788,16 @@ async def test_update_agent_peer_preference_clear_queues_sync_tombstone(
     """#311: an agent-triggered clear (dispatch/service.py's
     _handle_update_agent_peer_preference_trigger) must tombstone the same
     as the HTTP set_peer_preference route does -- otherwise a peer that
-    still has the row never learns the preference was withdrawn."""
+    still has the row never learns the preference was withdrawn.
+
+    #310: target must be a separate, unscoped agent -- see
+    test_update_agent_no_changes_specified_is_rejected's docstring."""
     controller_id = _create_controller_agent(client, auth_headers, "PeerClearer")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
     authorize_agent_for_builtin_tool(
         client, auth_headers, controller_id, "update_agent_peer_preference"
     )
+    target = _create_unscoped_target(client, auth_headers, f"PeerClearTarget-{controller_id}")
 
     _trigger(
         client,
@@ -761,7 +805,7 @@ async def test_update_agent_peer_preference_clear_queues_sync_tombstone(
         channel_id,
         monkeypatch,
         _tool_execution(
-            "update_agent_peer_preference", {"agent": controller_id, "capability_tag": "gpu"}
+            "update_agent_peer_preference", {"agent": target["name"], "capability_tag": "gpu"}
         ),
     )
     _trigger(
@@ -769,11 +813,11 @@ async def test_update_agent_peer_preference_clear_queues_sync_tombstone(
         auth_headers,
         channel_id,
         monkeypatch,
-        _tool_execution("update_agent_peer_preference", {"agent": controller_id}),
+        _tool_execution("update_agent_peer_preference", {"agent": target["name"]}),
     )
 
     async with session_scope() as db:
-        pending = await db.get(SyncPendingOutbound, ("agent_peer_preference", controller_id))
+        pending = await db.get(SyncPendingOutbound, ("agent_peer_preference", target["id"]))
         assert pending is not None
         assert pending.deleted is True
 
@@ -817,16 +861,29 @@ def test_rollback_agent_version_reverts_instructions(
 def test_rollback_agent_version_unknown_version_rejected(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#310: target must be a separate, unscoped agent -- see
+    test_update_agent_no_changes_specified_is_rejected's docstring."""
     controller_id = _create_controller_agent(client, auth_headers, "BadRollbacker")
     channel_id = _create_channel_with_team(client, auth_headers, controller_id)
     authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "rollback_agent_version")
+    target_name = f"BadRollbackTarget-{controller_id}"
+    client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent with no scope.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
 
     messages = _trigger(
         client,
         auth_headers,
         channel_id,
         monkeypatch,
-        _tool_execution("rollback_agent_version", {"agent": controller_id, "version": 999}),
+        _tool_execution("rollback_agent_version", {"agent": target_name, "version": 999}),
     )
     assert "doesn't exist" in messages[2]["content"]
 
@@ -1061,3 +1118,233 @@ def test_delete_agent_call_ignored_without_agents_teams_manage_grant(
     )
 
     assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).status_code == 200
+
+
+# #310: dispatch/service.py's agent-tool trigger handlers have no live
+# session to check a claims.grant == "owner" bypass against -- unlike
+# api/agents.py's HTTP routes, where an owner *session* can PATCH a
+# custom/MCP tool onto an agent or edit one holding a capability scope,
+# whoever is chatting with a controller agent that already holds
+# agents_teams:manage could be any invite-grant participant in the
+# rivulet. These trigger handlers must refuse outright, the same way
+# _mcp_server_requires_owner_to_mutate's register/reconnect/delete
+# triggers already do.
+
+
+def _create_unscoped_target(
+    client: TestClient, headers: dict[str, str], name: str
+) -> dict[str, Any]:
+    return client.post(
+        "/api/v1/agents",
+        json={
+            "name": name,
+            "description": "A target agent with no capability scope.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=headers,
+    ).json()
+
+
+def test_update_agent_tool_ids_with_custom_tool_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors api/agents.py's test_create_agent_with_custom_tool_requires_
+    owner_grant at the dispatch layer -- a custom tool's code runs
+    unsandboxed the moment it's assigned and called (find_unauthorized_
+    tool_assignment's docstring), so update_agent's tool_ids must refuse
+    it even though the calling controller legitimately holds
+    agents_teams:manage."""
+    controller_id = _create_controller_agent(client, auth_headers, "CustomToolAssigner")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
+    target = _create_unscoped_target(client, auth_headers, f"CustomToolTarget-{controller_id}")
+    custom_tool_name = f"custom_tool_{controller_id.replace('-', '_')}"
+    custom_tool = client.post(
+        "/api/v1/tools",
+        json={"name": custom_tool_name, "description": "Does a thing."},
+        headers=auth_headers,
+    ).json()
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("update_agent", {"agent": target["name"], "tool_ids": [custom_tool["id"]]}),
+    )
+    assert "requires a live owner session" in messages[2]["content"]
+    assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).json()[
+        "instructions"
+    ] == "Do nothing."
+
+
+async def test_update_agent_tool_ids_with_mcp_tool_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors api/agents.py's test_create_agent_with_mcp_tool_requires_
+    owner_grant at the dispatch layer -- an MCP tool resolves with the
+    owner's stored headers/env, so it needs the same refusal a custom
+    tool gets."""
+    controller_id = _create_controller_agent(client, auth_headers, "McpToolAssigner")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
+    target = _create_unscoped_target(client, auth_headers, f"McpToolTarget-{controller_id}")
+    async with session_scope() as db:
+        server = MCPServer(name=f"test-server-{controller_id}", url="http://localhost:9999/mcp")
+        db.add(server)
+        await db.commit()
+        tool_row = Tool(
+            name=f"remote_tool-{controller_id}",
+            description="An MCP tool.",
+            tool_type="mcp",
+            mcp_server_id=server.id,
+            mcp_tool_name="remote_tool",
+        )
+        db.add(tool_row)
+        await db.commit()
+        mcp_tool_id = tool_row.id
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("update_agent", {"agent": target["name"], "tool_ids": [mcp_tool_id]}),
+    )
+    assert "requires a live owner session" in messages[2]["content"]
+
+
+def test_update_agent_target_holding_owner_scope_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The confused-deputy case #310 closes: a controller with a
+    legitimate agents_teams:manage grant must not be able to rewrite an
+    agent that separately holds an owner-granted AgentToolScope, even
+    though the controller never touched that scope itself."""
+    controller_id = _create_controller_agent(client, auth_headers, "PrivRewriter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_agent")
+    target = _create_unscoped_target(client, auth_headers, f"PrivTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{target['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("update_agent", {"agent": target["name"], "instructions": "Be evil."}),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+    assert (
+        client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).json()["instructions"]
+        == "Do nothing."
+    )
+
+
+def test_delete_agent_target_holding_owner_scope_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller_id = _create_controller_agent(client, auth_headers, "PrivDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_agent")
+    target = _create_unscoped_target(client, auth_headers, f"PrivDeleteTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{target['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("delete_agent", {"agent": target["name"]}),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+    assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).status_code == 200
+
+
+def test_update_agent_routing_rules_target_holding_owner_scope_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller_id = _create_controller_agent(client, auth_headers, "PrivRuleSetter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_routing_rules"
+    )
+    target = _create_unscoped_target(client, auth_headers, f"PrivRuleTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{target['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution(
+            "update_agent_routing_rules",
+            {"agent": target["name"], "rules": [{"rule_type": "always", "priority": 0}]},
+        ),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+
+
+def test_update_agent_peer_preference_target_holding_owner_scope_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller_id = _create_controller_agent(client, auth_headers, "PrivPeerSetter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(
+        client, auth_headers, controller_id, "update_agent_peer_preference"
+    )
+    target = _create_unscoped_target(client, auth_headers, f"PrivPeerTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{target['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution(
+            "update_agent_peer_preference", {"agent": target["name"], "capability_tag": "gpu"}
+        ),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+    pref = client.get(f"/api/v1/agents/{target['id']}/peer-preference", headers=auth_headers).json()
+    assert pref["capability_tag"] is None
+
+
+def test_rollback_agent_version_target_holding_owner_scope_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller_id = _create_controller_agent(client, auth_headers, "PrivRollbacker")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "rollback_agent_version")
+    target = _create_unscoped_target(client, auth_headers, f"PrivRollbackTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{target['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("rollback_agent_version", {"agent": target["name"], "version": 1}),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
