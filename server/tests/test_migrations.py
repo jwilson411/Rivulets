@@ -135,6 +135,52 @@ async def test_run_migrations_upgrades_legacy_schema(settings: Settings) -> None
     assert row == ("Old Agent", 0, None, None)
 
 
+async def test_run_migrations_adds_workspace_singleton_constraint(settings: Settings) -> None:
+    """#324: a workspace already sitting at 0005 (before Workspace.singleton
+    existed, see _LEGACY_SCHEMA_SQL's `workspace` table above) gets the
+    column and its UNIQUE constraint backfilled by 0006 -- and, once
+    backfilled, a second `workspace` row is rejected at the DB layer
+    instead of silently succeeding."""
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.executescript(_LEGACY_SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO workspace (id, name, key_hash, created_at, updated_at, vector_clock) "
+            "VALUES ('legacy-workspace-1', 'My Workspace', 'hash', "
+            "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    engine = make_engine(settings)
+    try:
+        await run_migrations(engine)
+    finally:
+        await engine.dispose()
+
+    assert "singleton" in _sqlite_columns(settings.db_path, "workspace")
+
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        # The pre-existing row survived the rebuild, backfilled to the
+        # ORM-level default rather than left null.
+        row = conn.execute(
+            "SELECT singleton FROM workspace WHERE id = 'legacy-workspace-1'"
+        ).fetchone()
+        assert row == (1,)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO workspace "
+                "(id, singleton, name, key_hash, created_at, updated_at, vector_clock) "
+                "VALUES ('legacy-workspace-2', 1, 'My Workspace', 'hash', "
+                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)"
+            )
+    finally:
+        conn.close()
+
+
 async def test_run_migrations_is_idempotent(settings: Settings) -> None:
     engine = make_engine(settings)
     try:

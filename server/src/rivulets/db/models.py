@@ -21,9 +21,25 @@ from rivulets.db.base import Base, utcnow_iso, uuid7
 
 
 class Workspace(Base):
+    """There is exactly one workspace per install (product invariant,
+    api/auth.py's login() module docstring). `singleton` makes that a
+    physical DB constraint rather than an assumption every
+    `select(Workspace).scalar_one_or_none()` call quietly relied on (#324):
+    a constant column value with a UNIQUE constraint means a second row's
+    INSERT fails at the DB layer -- IntegrityError, mapped to a 409 by
+    app.py's global handler -- instead of silently succeeding and leaving
+    two rows for every later singleton-assuming query (this one, and
+    api/invites.py's accept_invite) to trip over as an unhandled
+    MultipleResultsFound. login() additionally serializes concurrent
+    first-logins with db/session.py's begin_immediate so the losing side
+    normally never reaches that INSERT at all; this constraint is the
+    backstop for whenever it still does."""
+
     __tablename__ = "workspace"
+    __table_args__ = (UniqueConstraint("singleton", name="idx_workspace_singleton"),)
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    singleton: Mapped[int] = mapped_column(default=1)
     name: Mapped[str] = mapped_column(default="My Workspace")
     key_hash: Mapped[str]
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
