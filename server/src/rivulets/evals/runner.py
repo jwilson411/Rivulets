@@ -142,11 +142,20 @@ async def _run_agent_case(
     propagates to `_run_case`'s existing `except Exception` handling,
     which records it as this case's own 'error' result rather than
     aborting the whole suite -- same as any other case-execution failure.
+    #326: also runs tool_audit.py's ensure_unattended_tools_allowed --
+    unlike a workflow-attached suite's agent nodes (executed through
+    workflows/nodes.py's execute_agent_node, gated when unattended), an
+    agent-attached suite calls run_agent directly and would otherwise skip
+    the unattended sensitive-tool approval gate entirely. An eval run has
+    no human reviewing this specific call, same reasoning as a schedule
+    fire.
+
     Lazy import: rivulets.dispatch's package init pulls in
     rivulets.api (via dispatch.service -> api.agents), whose own init
     imports this package back via api.evals -- same circular-import
     hazard workflows/nodes.py's execute_agent_node already works around
     the same way."""
+    from rivulets.agentos.tool_audit import ensure_unattended_tools_allowed
     from rivulets.dispatch.budgets import enforce_budget_caps
 
     session_id = uuid7()
@@ -154,6 +163,7 @@ async def _run_agent_case(
     if agent is None:
         raise RuntimeError("Agent no longer exists")
     await enforce_budget_caps(db, agent, None)
+    await ensure_unattended_tools_allowed(db, agent)
     run_output = await run_agent(db, agent_id, input_content, session_id=session_id, user_id="eval")
     if run_output.status is RunStatus.error:
         raise RuntimeError(str(run_output.content))

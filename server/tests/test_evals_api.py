@@ -338,6 +338,52 @@ def test_run_agent_suite_end_to_end(
     assert results[0]["actual_output"] == "hello there"
 
 
+def test_run_agent_suite_blocks_unapproved_sensitive_agent(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#326: an agent-attached suite calls run_agent directly (unlike a
+    workflow-attached one, executed through workflows/nodes.py's
+    execute_agent_node) -- ensure_unattended_tools_allowed is now called
+    from _run_agent_case itself, so this needs its own coverage rather
+    than relying on test_tool_audit.py's workflow-node-level tests."""
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        pytest.fail("run_agent should never be called -- the gate must block before this")
+
+    monkeypatch.setattr("rivulets.evals.runner.run_agent", fake_run_agent)
+
+    agent_id = _create_agent(client, auth_headers, "Unapproved Grader")
+    tools = client.get("/api/v1/tools", headers=auth_headers).json()
+    (execute_python,) = [t for t in tools if t["name"] == "execute_python"]
+    client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"tool_ids": [execute_python["id"]]},
+        headers=auth_headers,
+    )
+    suite = _create_suite(client, auth_headers, "unapproved-sensitive-suite", agent_id=agent_id)
+    client.post(
+        f"/api/v1/evals/suites/{suite['id']}/cases",
+        json={
+            "name": "greets",
+            "input_content": "hi",
+            "judge_type": "substring",
+            "expected_output": "hi",
+        },
+        headers=auth_headers,
+    )
+
+    run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=auth_headers)
+    assert run_resp.status_code == 200, run_resp.text
+    run = run_resp.json()
+    assert run["error_count"] == 1
+
+    results = client.get(
+        f"/api/v1/evals/suites/{suite['id']}/runs/{run['id']}/results", headers=auth_headers
+    ).json()
+    assert results[0]["status"] == "error"
+    assert "execute_python" in (results[0]["error_message"] or "")
+
+
 def test_deleting_agent_cascades_suite(client: TestClient, auth_headers: dict[str, str]) -> None:
     agent_id = _create_agent(client, auth_headers, "Deletable")
     suite = _create_suite(client, auth_headers, "cascade-suite", agent_id=agent_id)
@@ -347,3 +393,139 @@ def test_deleting_agent_cascades_suite(client: TestClient, auth_headers: dict[st
     assert (
         client.get(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers).status_code == 404
     )
+
+
+# #326: invite-grant escalation via an eval suite's subject -- see
+# api/evals.py's _require_owner_for_scoped_subject docstring. An eval runs
+# its subject directly, bypassing both channel dispatch and (for a
+# workflow subject) the published gate, so this is checked independently
+# of #231/#315's own gates on the agent/workflow-node writes themselves.
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def test_invite_grant_cannot_create_suite_against_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    scoped_agent = _create_agent(client, auth_headers, "SuiteScoped")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-suite", "agent_id": scoped_agent},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An owner session can, same request otherwise.
+    owner_response = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-suite", "agent_id": scoped_agent},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 201, owner_response.text
+
+
+def test_invite_grant_cannot_create_suite_against_workflow_with_scoped_agent_node(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    scoped_agent = _create_agent(client, auth_headers, "SuiteScopedNode")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    workflow_id = _create_workflow(client, auth_headers, "suite-scoped-flow")
+    client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "call", "node_type": "agent", "agent_id": scoped_agent},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-workflow-suite", "workflow_id": workflow_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_invite_grant_can_create_and_run_suite_against_unscoped_agent(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "hi"
+        )
+
+    monkeypatch.setattr("rivulets.evals.runner.run_agent", fake_run_agent)
+
+    unscoped_agent = _create_agent(client, auth_headers, "SuiteUnscoped")
+    invite_headers = _invite_headers(client, auth_headers)
+
+    created = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-unscoped-suite", "agent_id": unscoped_agent},
+        headers=invite_headers,
+    )
+    assert created.status_code == 201, created.text
+    suite = created.json()
+
+    client.post(
+        f"/api/v1/evals/suites/{suite['id']}/cases",
+        json={
+            "name": "greets",
+            "input_content": "hi",
+            "judge_type": "substring",
+            "expected_output": "hi",
+        },
+        headers=invite_headers,
+    )
+
+    run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=invite_headers)
+    assert run_resp.status_code == 200, run_resp.text
+
+
+def test_invite_grant_cannot_run_suite_scoped_after_creation(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The owner-scope check runs again at execution time, not just at
+    create -- an agent can gain a scope grant after a guest already
+    created a suite against it, and dispatch honors that standing scope
+    regardless of who last touched the agent."""
+    agent_id = _create_agent(client, auth_headers, "LaterScoped")
+    invite_headers = _invite_headers(client, auth_headers)
+    suite = _create_suite(client, invite_headers, "later-scoped-suite", agent_id=agent_id)
+    client.post(
+        f"/api/v1/evals/suites/{suite['id']}/cases",
+        json={
+            "name": "greets",
+            "input_content": "hi",
+            "judge_type": "substring",
+            "expected_output": "hi",
+        },
+        headers=invite_headers,
+    )
+
+    client.put(
+        f"/api/v1/agents/{agent_id}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+
+    response = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=invite_headers)
+    assert response.status_code == 403

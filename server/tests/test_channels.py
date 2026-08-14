@@ -72,3 +72,87 @@ def test_reorder_channels(client: TestClient, auth_headers: dict[str, str]) -> N
 
     listed = client.get("/api/v1/channels", headers=auth_headers).json()
     assert [c["id"] for c in listed] == list(reversed(ids))
+
+
+# #326: invite-grant escalation via Channel.team_id -- see api/channels.py's
+# update_channel docstring.
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def _create_agent(client: TestClient, headers: dict[str, str], name: str) -> str:
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": name,
+            "description": "A test agent.",
+            "instructions": "Be helpful.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    return created.json()["id"]
+
+
+def test_invite_grant_cannot_point_channel_at_team_with_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    scoped_agent = _create_agent(client, auth_headers, "Channel Scoped")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Scoped Team"}, headers=auth_headers
+    ).json()["id"]
+    client.patch(
+        f"/api/v1/teams/{team_id}", json={"agent_ids": [scoped_agent]}, headers=auth_headers
+    )
+    channel_id = client.post(
+        "/api/v1/channels", json={"name": "guest-retarget"}, headers=auth_headers
+    ).json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/channels/{channel_id}",
+        json={"team_id": team_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # An owner session can, same request otherwise.
+    owner_response = client.patch(
+        f"/api/v1/channels/{channel_id}",
+        json={"team_id": team_id},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 200, owner_response.text
+
+
+def test_invite_grant_can_point_channel_at_team_without_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Plain Team"}, headers=auth_headers
+    ).json()["id"]
+    channel_id = client.post(
+        "/api/v1/channels", json={"name": "guest-retarget-fine"}, headers=auth_headers
+    ).json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/channels/{channel_id}",
+        json={"team_id": team_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 200, response.text
