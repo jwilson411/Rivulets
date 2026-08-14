@@ -21,7 +21,7 @@ from rivulets.api.deps import CurrentHumanId, CurrentWorkspaceId, DbSession, Own
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import Agent, BudgetCap, BudgetCapState, Team
 from rivulets.dispatch.budgets import compute_spend
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
@@ -185,6 +185,7 @@ async def delete_budget_cap(
     cap = await _get_or_404(db, cap_id)
     await db.delete(cap)
     await db.commit()
+    await publish_tombstone(db, "budget_cap", cap_id)
 
 
 @router.get("/{cap_id}/status", response_model=BudgetStatusOut)

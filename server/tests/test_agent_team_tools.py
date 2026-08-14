@@ -17,6 +17,8 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
 from rivulets.dispatch.service import (
     _find_create_agent_call,  # pyright: ignore[reportPrivateUsage]
     _find_create_team_call,  # pyright: ignore[reportPrivateUsage]
@@ -583,6 +585,44 @@ def test_delete_agent_removes_it(
     assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).status_code == 404
 
 
+async def test_delete_agent_trigger_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#287: an agent-triggered delete (dispatch/service.py's
+    _handle_delete_agent_trigger) must tombstone the same as the HTTP
+    delete_agent route does -- the `client` fixture never actually starts
+    the sync engine, so a successful delete queues a tombstone retry
+    (SyncPendingOutbound.deleted=True) instead of the delete never
+    reaching any peer at all."""
+    controller_id = _create_controller_agent(client, auth_headers, "SyncDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_agent")
+    target_name = f"DoomedSync-{controller_id}"
+    target = client.post(
+        "/api/v1/agents",
+        json={
+            "name": target_name,
+            "description": "A target agent to delete.",
+            "instructions": "Do nothing.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    ).json()
+
+    _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("delete_agent", {"agent": target_name}),
+    )
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("agent", target["id"]))
+        assert pending is not None
+        assert pending.deleted is True
+
+
 def test_delete_agent_refuses_self_delete(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -910,6 +950,34 @@ def test_delete_team_removes_it(
     )
     assert "deleted team" in messages[2]["content"]
     assert client.get(f"/api/v1/teams/{team['id']}", headers=auth_headers).status_code == 404
+
+
+async def test_delete_team_trigger_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#287: an agent-triggered delete (dispatch/service.py's
+    _handle_delete_team_trigger) must tombstone the same as the HTTP
+    delete_team route does -- mirrors test_delete_agent_trigger_queues_
+    sync_tombstone above."""
+    controller_id = _create_controller_agent(client, auth_headers, "TeamSyncDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_team")
+    team = client.post(
+        "/api/v1/teams", json={"name": f"Doomed-Team-Sync-{controller_id}"}, headers=auth_headers
+    ).json()
+
+    _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("delete_team", {"team": team["id"]}),
+    )
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("team", team["id"]))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_list_teams_reports_members(

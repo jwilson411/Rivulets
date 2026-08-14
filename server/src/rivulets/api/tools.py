@@ -32,7 +32,7 @@ from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import Tool, ToolVersion
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.tools.builtin import code_exec
 from rivulets.validation import TOOL_NAME_RE
 
@@ -214,8 +214,15 @@ async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: Ow
     tool = await _get_or_404(db, tool_id)
     if tool.tool_type == "builtin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be deleted")
+    is_custom = tool.tool_type == "custom"
     await db.delete(tool)
     await db.commit()
+    # #287: only 'custom' tools are synced (module docstring) -- an 'mcp'
+    # tool row is a per-node discovery cache with an id no peer shares, so
+    # tombstoning it would be a harmless no-op there but is skipped anyway
+    # to keep this scoped to what's actually synced.
+    if is_custom:
+        await publish_tombstone(db, "tool", tool_id)
 
 
 @router.get("/{tool_id}/versions", response_model=list[ToolVersionOut])

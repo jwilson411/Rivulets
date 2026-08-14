@@ -81,7 +81,7 @@ from rivulets.db.models import (
 from rivulets.security import keys
 from rivulets.security.session import get_session_key_store
 from rivulets.security.webhook_secret_store import encrypt_webhook_secret
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.workflows.layout import auto_layout
 from rivulets.workflows.nodes import NODE_TYPES
 from rivulets.workflows.scheduler import compute_next_fire_at
@@ -499,6 +499,14 @@ async def delete_workflow(workflow_id: str, db: DbSession, _: CurrentWorkspaceId
     workflow = await _get_workflow_or_404(db, workflow_id)
     await db.delete(workflow)
     await db.commit()
+    # #287: same #238 failure mode publish_tombstone already closed for
+    # delete_agent/delete_team -- without it a peer that still has this
+    # workflow would recreate it on its next edit. Its nodes/connections
+    # don't need their own tombstones here: WorkflowNode/WorkflowConnection
+    # both have a real ondelete='CASCADE' FK to workflow.id (db/models.py),
+    # so a peer applying *this* tombstone (apply_remote_delete's db.delete)
+    # has its own copies of them cascade-deleted at the SQLite level too.
+    await publish_tombstone(db, "workflow", workflow_id)
 
 
 @router.post("/{workflow_id}/publish", response_model=WorkflowOut)
@@ -657,6 +665,10 @@ async def delete_node(workflow_id: str, node_id: str, db: DbSession, _: CurrentW
     node = await _get_node_or_404(db, workflow_id, node_id)
     await db.delete(node)
     await db.commit()
+    # #287: the workflow itself isn't being deleted here, so unlike
+    # delete_workflow above there's no parent tombstone that will cascade
+    # this node away on a peer -- it needs its own.
+    await publish_tombstone(db, "workflow_node", node_id)
 
 
 @router.post(
@@ -736,6 +748,9 @@ async def delete_connection(
     connection = await _get_connection_or_404(db, workflow_id, connection_id)
     await db.delete(connection)
     await db.commit()
+    # #287: same reasoning as delete_node above -- a lone connection delete
+    # has no parent-delete tombstone to ride along with.
+    await publish_tombstone(db, "workflow_connection", connection_id)
 
 
 @router.post(

@@ -114,7 +114,7 @@ from rivulets.streaming import publish
 from rivulets.sync import get_sync_engine
 from rivulets.sync.agent_dispatch import AgentDispatchRequest
 from rivulets.sync.capabilities import load_capabilities
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.tracing import TraceContext, finish_span, start_span
 
 logger = logging.getLogger(__name__)
@@ -2860,9 +2860,15 @@ async def _handle_delete_agent_trigger(
             )
         ]
     target_name = target.name
+    target_id = target.id
     await db.delete(target)
     await db.commit()
     await sync_agents(db)
+    # #287: mirrors api/agents.py's delete_agent -- without this, an
+    # agent-triggered delete (unlike the HTTP one) never told peers about
+    # it, so a peer that still had the row would recreate it on its next
+    # edit (#238's failure mode).
+    await publish_tombstone(db, "agent", target_id)
 
     message = _system_message(db, rivulet, f"@{agent.name} deleted agent @{target_name}.")
     publish(
@@ -3192,8 +3198,11 @@ async def _handle_delete_team_trigger(
         ]
     team = result
     team_name = team.name
+    team_id = team.id
     await db.delete(team)
     await db.commit()
+    # #287: mirrors api/teams.py's delete_team -- same #238 failure mode.
+    await publish_tombstone(db, "team", team_id)
 
     message = _system_message(db, rivulet, f"@{agent.name} deleted team {team_name!r}.")
     publish(
@@ -3440,6 +3449,9 @@ async def _handle_delete_mcp_server_trigger(
     await db.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
     await db.delete(server)
     await db.commit()
+    # #287: mirrors api/mcp_servers.py's unregister_mcp_server -- same #238
+    # failure mode.
+    await publish_tombstone(db, "mcp_server", server.id)
 
     message = _system_message(db, rivulet, f"@{agent.name} deleted MCP server {server_name!r}.")
     publish(
@@ -3628,8 +3640,13 @@ async def _handle_delete_workflow_trigger(
             )
         ]
     workflow_name = workflow.name
+    workflow_id = workflow.id
     await db.delete(workflow)
     await db.commit()
+    # #287: mirrors api/workflows.py's delete_workflow -- same #238 failure
+    # mode; nodes/connections cascade-delete on the applying peer too (see
+    # that handler's comment for why they don't need their own tombstone).
+    await publish_tombstone(db, "workflow", workflow_id)
 
     message = _system_message(db, rivulet, f"@{agent.name} deleted workflow {workflow_name!r}.")
     publish(

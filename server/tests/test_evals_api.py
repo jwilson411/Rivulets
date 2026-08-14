@@ -13,6 +13,9 @@ import pytest
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import SyncPendingOutbound
+from rivulets.db.session import session_scope
+
 
 def _create_agent(client: TestClient, headers: dict[str, str], name: str = "Grader") -> str:
     created = client.post(
@@ -142,6 +145,25 @@ def test_delete_suite(client: TestClient, auth_headers: dict[str, str]) -> None:
     )
 
 
+async def test_delete_suite_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: the `client` fixture never actually starts the sync engine, so
+    a successful delete queues a tombstone retry (SyncPendingOutbound.
+    deleted=True) instead of the delete never reaching any peer at all --
+    mirrors test_teams_api.py's equivalent for delete_team."""
+    agent_id = _create_agent(client, auth_headers)
+    suite = _create_suite(client, auth_headers, "deletable-sync", agent_id=agent_id)
+
+    resp = client.delete(f"/api/v1/evals/suites/{suite['id']}", headers=auth_headers)
+    assert resp.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("eval_suite", suite["id"]))
+        assert pending is not None
+        assert pending.deleted is True
+
+
 def test_create_exact_case_requires_expected_output(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
@@ -230,6 +252,33 @@ def test_list_and_delete_case(client: TestClient, auth_headers: dict[str, str]) 
         f"/api/v1/evals/suites/{suite['id']}/cases", headers=auth_headers
     ).json()
     assert listed_after == []
+
+
+async def test_delete_case_queues_sync_tombstone(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#287: a lone case delete (suite left in place) needs its own
+    tombstone -- unlike delete_suite's cascade, there's no parent
+    tombstone for a peer's apply to cascade this case away with."""
+    agent_id = _create_agent(client, auth_headers)
+    suite = _create_suite(client, auth_headers, "case-tombstone-suite", agent_id=agent_id)
+    created = client.post(
+        f"/api/v1/evals/suites/{suite['id']}/cases",
+        json={"name": "c1", "input_content": "hi", "judge_type": "exact", "expected_output": "hi"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    case_id = created.json()["id"]
+
+    resp = client.delete(
+        f"/api/v1/evals/suites/{suite['id']}/cases/{case_id}", headers=auth_headers
+    )
+    assert resp.status_code == 204
+
+    async with session_scope() as db:
+        pending = await db.get(SyncPendingOutbound, ("eval_case", case_id))
+        assert pending is not None
+        assert pending.deleted is True
 
 
 def test_run_suite_with_no_cases_returns_400(

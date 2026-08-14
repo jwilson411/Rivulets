@@ -27,7 +27,7 @@ from rivulets.db.models import (
 )
 from rivulets.knowledge_base.chunking import chunk_text
 from rivulets.knowledge_base.embeddings import NoEmbeddingProviderError, embed_texts
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 
@@ -171,6 +171,7 @@ async def delete_knowledge_base(kb_id: str, db: DbSession, _: CurrentWorkspaceId
     kb = await _get_kb_or_404(db, kb_id)
     await db.delete(kb)
     await db.commit()
+    await publish_tombstone(db, "knowledge_base", kb_id)
 
 
 @router.get("/{kb_id}/documents", response_model=list[KnowledgeBaseDocumentOut])
