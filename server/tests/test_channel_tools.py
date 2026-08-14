@@ -31,7 +31,7 @@ from rivulets.tools.builtin.channels import (
     unarchive_channel,
     update_channel,
 )
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:

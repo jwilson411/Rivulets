@@ -43,7 +43,7 @@ from rivulets.tools.builtin.agents_teams import (
     update_agent_routing_rules,
     update_team,
 )
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:

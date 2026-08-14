@@ -29,7 +29,7 @@ from rivulets.tools.builtin.mcp_servers import (
     reconnect_mcp_server,
     register_mcp_server,
 )
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -302,9 +302,7 @@ def test_reconnect_mcp_server_by_name(
     server_name = f"reconnect-target-{agent_id}"
     _register_server_via_api(client, auth_headers, monkeypatch, server_name)
 
-    _patch_dispatch_discover_tools(
-        monkeypatch, [DiscoveredTool(name="add", description="Adds.")]
-    )
+    _patch_dispatch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(_tool_execution("reconnect_mcp_server", {"server": server_name})),

@@ -1688,25 +1688,19 @@ async def _invoke_agent(
         new_messages.extend(await _handle_list_channels_trigger(db, rivulet, agent))
 
     create_agent_call = _find_create_agent_call(run_output)
-    if create_agent_call is not None and await _authorize_builtin_call(
-        db, agent, "create_agent"
-    ):
+    if create_agent_call is not None and await _authorize_builtin_call(db, agent, "create_agent"):
         new_messages.extend(
             await _handle_create_agent_trigger(db, rivulet, agent, create_agent_call)
         )
 
     update_agent_call = _find_update_agent_call(run_output)
-    if update_agent_call is not None and await _authorize_builtin_call(
-        db, agent, "update_agent"
-    ):
+    if update_agent_call is not None and await _authorize_builtin_call(db, agent, "update_agent"):
         new_messages.extend(
             await _handle_update_agent_trigger(db, rivulet, agent, update_agent_call)
         )
 
     delete_agent_call = _find_delete_agent_call(run_output)
-    if delete_agent_call is not None and await _authorize_builtin_call(
-        db, agent, "delete_agent"
-    ):
+    if delete_agent_call is not None and await _authorize_builtin_call(db, agent, "delete_agent"):
         new_messages.extend(
             await _handle_delete_agent_trigger(db, rivulet, agent, delete_agent_call)
         )
@@ -1847,9 +1841,7 @@ async def _invoke_agent(
         )
 
     create_invite_call = _find_create_invite_call(run_output)
-    if create_invite_call is not None and await _authorize_builtin_call(
-        db, agent, "create_invite"
-    ):
+    if create_invite_call is not None and await _authorize_builtin_call(db, agent, "create_invite"):
         new_messages.extend(
             await _handle_create_invite_trigger(db, rivulet, agent, create_invite_call)
         )
@@ -1860,9 +1852,7 @@ async def _invoke_agent(
         new_messages.extend(await _handle_list_invites_trigger(db, rivulet, agent))
 
     revoke_invite_call = _find_revoke_invite_call(run_output)
-    if revoke_invite_call is not None and await _authorize_builtin_call(
-        db, agent, "revoke_invite"
-    ):
+    if revoke_invite_call is not None and await _authorize_builtin_call(db, agent, "revoke_invite"):
         new_messages.extend(
             await _handle_revoke_invite_trigger(db, rivulet, agent, revoke_invite_call)
         )

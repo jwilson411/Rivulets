@@ -20,7 +20,7 @@ from rivulets.dispatch.service import (
     _find_revoke_invite_call,  # pyright: ignore[reportPrivateUsage]
 )
 from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
-from tests.conftest import authorize_agent_for_builtin_tool
+from tests.conftest import authorize_agent_for_builtin_tool  # pyright: ignore[reportMissingImports]
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:
@@ -66,9 +66,7 @@ def test_find_create_invite_call_extracts_args() -> None:
 
 
 def test_find_create_invite_call_defaults_missing_args() -> None:
-    run_output = RunOutput(
-        status=RunStatus.completed, tools=[_tool_execution("create_invite", {})]
-    )
+    run_output = RunOutput(status=RunStatus.completed, tools=[_tool_execution("create_invite", {})])
     call = _find_create_invite_call(run_output)
     assert call is not None
     assert call.display_name_hint is None
@@ -77,9 +75,7 @@ def test_find_create_invite_call_defaults_missing_args() -> None:
 
 
 def test_find_list_invites_call() -> None:
-    run_output = RunOutput(
-        status=RunStatus.completed, tools=[_tool_execution("list_invites", {})]
-    )
+    run_output = RunOutput(status=RunStatus.completed, tools=[_tool_execution("list_invites", {})])
     assert _find_list_invites_call(run_output) is True
     assert _find_list_invites_call(RunOutput(status=RunStatus.completed, tools=None)) is False
 
@@ -189,6 +185,7 @@ def test_create_invite_confirmation_message_never_contains_the_secret(
     _handle_create_invite_trigger)."""
     agent_id = _create_agent(client, auth_headers, "SecretlessInviter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "create_invite")
 
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
