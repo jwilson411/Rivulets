@@ -594,7 +594,7 @@ def test_set_agent_tool_scopes_requires_owner_grant(
 
 
 # #231: invite-grant escalation paths -- see api/agents.py's
-# _check_tool_assignment_authorized/_agent_holds_owner_scope docstrings.
+# _check_tool_assignment_authorized/agent_holds_owner_scope docstrings.
 
 
 def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:

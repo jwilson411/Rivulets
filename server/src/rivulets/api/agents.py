@@ -208,17 +208,16 @@ async def _get_or_404(db: DbSession, agent_id: str) -> Agent:
     return agent
 
 
-async def _check_tool_assignment_authorized(
-    db: DbSession, tool_ids: list[str], claims: SessionClaims
-) -> None:
-    """#231/#285: assigning a tool with real blast radius -- one of the
-    four SENSITIVE_BUILTIN_TOOL_NAMES, any tool whose required_scope is
-    set, or a custom/MCP tool -- is owner-only. Assignment alone doesn't
-    make a tool usable (resolve_agent_tools still requires a separate
-    AgentToolScope grant, itself owner-only via set_agent_tool_scopes
-    below), but an invite-grant session shouldn't be able to stage one of
-    these on an agent that already holds, or might later be granted, the
-    matching scope.
+async def find_unauthorized_tool_assignment(db: DbSession, tool_ids: list[str]) -> str | None:
+    """#231/#285/#310: the claims-independent half of tool-assignment
+    authorization -- returns the name of the first `tool_id` with real
+    blast radius (one of the four SENSITIVE_BUILTIN_TOOL_NAMES, any tool
+    whose required_scope is set, or a custom/MCP tool), or None if every
+    tool_id is safe to assign. Assignment alone doesn't make a tool usable
+    (resolve_agent_tools still requires a separate AgentToolScope grant,
+    itself owner-only via set_agent_tool_scopes below), but an invite-grant
+    session shouldn't be able to stage one of these on an agent that
+    already holds, or might later be granted, the matching scope.
 
     Custom and MCP tools have no required_scope (that field only exists
     for builtins, agentos/tool_scopes.py's BUILTIN_TOOL_SCOPES), so they'd
@@ -228,9 +227,14 @@ async def _check_tool_assignment_authorized(
     and an MCP tool resolves with the owner's stored headers/env
     (tool_resolution.py's get_server_headers/get_server_env). Both are
     real blast radius an invite-grant session shouldn't be able to hand a
-    self-authored agent."""
-    if claims.grant == "owner" or not tool_ids:
-        return
+    self-authored agent.
+
+    Split out from _check_tool_assignment_authorized below (#310) so
+    dispatch/service.py's agent-tool trigger handlers -- which have no
+    live SessionClaims to check the owner-grant bypass against -- can
+    reuse the same tool-danger classification instead of forking it."""
+    if not tool_ids:
+        return None
     result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
     for tool in result.scalars().all():
         if (
@@ -238,13 +242,28 @@ async def _check_tool_assignment_authorized(
             or tool.tool_type in ("custom", "mcp")
             or (tool.tool_type == "builtin" and tool.name in SENSITIVE_BUILTIN_TOOL_NAMES)
         ):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"Owner access required to assign tool {tool.name!r}",
-            )
+            return tool.name
+    return None
 
 
-async def _agent_holds_owner_scope(db: DbSession, agent_id: str) -> bool:
+async def _check_tool_assignment_authorized(
+    db: DbSession, tool_ids: list[str], claims: SessionClaims
+) -> None:
+    """#231/#285: assigning a tool with real blast radius is owner-only.
+    See find_unauthorized_tool_assignment above for what counts as
+    dangerous and why; this wrapper adds the claims.grant == "owner"
+    bypass that only makes sense with a live HTTP session to check."""
+    if claims.grant == "owner":
+        return
+    unauthorized = await find_unauthorized_tool_assignment(db, tool_ids)
+    if unauthorized is not None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Owner access required to assign tool {unauthorized!r}",
+        )
+
+
+async def agent_holds_owner_scope(db: DbSession, agent_id: str) -> bool:
     """True if `agent_id` currently holds any owner-granted capability
     scope (set_agent_tool_scopes below). Such an agent can reach owner-only
     HTTP routes via its already-assigned tools, so a non-owner session
@@ -333,7 +352,7 @@ async def update_agent(
         # is a confused-deputy risk for *any* edit (instructions, model,
         # tool_ids), not just tool reassignment -- block the whole PATCH
         # rather than trying to enumerate every field that could steer it.
-        if await _agent_holds_owner_scope(db, agent_id):
+        if await agent_holds_owner_scope(db, agent_id):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 "Owner access required to modify an agent that holds a capability scope",
@@ -396,11 +415,11 @@ async def delete_agent(
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> None:
     """#285: mirrors update_agent/rollback_agent_version's
-    _agent_holds_owner_scope gate -- an invite-grant session couldn't
+    agent_holds_owner_scope gate -- an invite-grant session couldn't
     rewrite a privileged agent's instructions/tools/routing, but could
     still delete it outright, which is at least as disruptive."""
     agent = await _get_or_404(db, agent_id)
-    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+    if claims.grant != "owner" and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to delete an agent that holds a capability scope",
@@ -464,7 +483,7 @@ async def rollback_agent_version(
     otherwise a reverted agent could keep routing rules generated for
     instructions it no longer has."""
     agent = await _get_or_404(db, agent_id)
-    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+    if claims.grant != "owner" and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to roll back an agent that holds a capability scope",
@@ -516,7 +535,7 @@ async def update_routing_rules(
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> list[AgentRoutingRule]:
     await _get_or_404(db, agent_id)
-    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+    if claims.grant != "owner" and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to modify routing rules for an agent holding a capability scope",
@@ -562,12 +581,12 @@ async def set_peer_preference(
     (not propagated to peers) -- same as Agent/Team deletion elsewhere in
     this API, sync's generic path has no delete-propagation mechanism.
 
-    #285: mirrors update_agent's _agent_holds_owner_scope gate -- steering
+    #285: mirrors update_agent's agent_holds_owner_scope gate -- steering
     which peer a privileged agent preferentially runs on is a subtler
     version of the same confused-deputy risk as rewriting its
     instructions."""
     await _get_or_404(db, agent_id)
-    if claims.grant != "owner" and await _agent_holds_owner_scope(db, agent_id):
+    if claims.grant != "owner" and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to set peer preference for an agent holding a capability scope",

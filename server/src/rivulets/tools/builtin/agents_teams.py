@@ -19,19 +19,27 @@ body flags it explicitly): update_agent's tool_ids lets an agent reassign
 any agent's tool assignments, including its own or a sibling's. #188's
 scope grant is still the human approval boundary -- none of these nine
 mutating tools resolve for an agent without an explicit
-"agents_teams:manage" grant -- and reassignment alone isn't eligibility:
-a tool whose own Tool.required_scope is set only actually works for
+"agents_teams:manage" grant.
+
+Reassignment alone is NOT always safe to leave ungated, though (#310
+corrected an earlier version of this docstring that claimed otherwise): a
+builtin tool whose own Tool.required_scope is set only actually works for
 whichever agent it ends up assigned to if *that* agent separately holds
-the matching AgentToolScope grant, which stays an owner-only surface
+the matching AgentToolScope grant, itself an owner-only surface
 (api/agents.py's set_agent_tool_scopes, gated by OwnerGrant) with no
-built-in tool anywhere in this library that can set it. So the worst an
-agent can do with update_agent's tool_ids is assign a sensitive tool to
-an agent that still can't use it -- true since #240 gave
-execute_python/http_request/write_file/query_workspace_db their own
-"sensitive_tools:manage" required_scope (agentos/tool_scopes.py); before
-that, those four had no required_scope at all, so this claim was false
-for exactly the tools where it mattered most. list_agents/list_teams are
-read-only and deliberately left unscoped, mirroring list_channels.
+built-in tool anywhere in this library that can set it -- so assigning
+one of those (or one of the four SENSITIVE_BUILTIN_TOOL_NAMES,
+agentos/tool_resolution.py) is inert without a second, still-owner-only
+step. Custom and MCP tools have no such second gate: a custom tool's
+code runs unsandboxed in the App Server process the moment it's called,
+and an MCP tool resolves with the owner's stored headers/env -- for
+those, assignment *is* eligibility. dispatch/service.py's
+_handle_update_agent_trigger therefore refuses to assign a custom/MCP/
+required_scope/SENSITIVE_BUILTIN_TOOL_NAMES tool via this tool's tool_ids
+outright (find_unauthorized_tool_assignment, reused from api/agents.py),
+the same way it refuses to touch an agent that already holds an
+AgentToolScope at all. list_agents/list_teams are read-only and
+deliberately left unscoped, mirroring list_channels.
 """
 
 from agno.tools import tool

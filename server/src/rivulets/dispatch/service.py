@@ -73,6 +73,7 @@ from rivulets.agentos.mcp import (
 )
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.agentos.tool_resolution import is_builtin_tool_authorized
+from rivulets.api.agents import agent_holds_owner_scope, find_unauthorized_tool_assignment
 from rivulets.config import get_settings
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
@@ -2703,7 +2704,15 @@ async def _handle_update_agent_trigger(
     regen when description/instructions change, #104 version snapshot
     when instructions/model change, AgentOS re-registration) plus
     proactive tool_ids/team_ids-existence checks the HTTP layer itself
-    leaves to the DB's FK constraints."""
+    leaves to the DB's FK constraints.
+
+    #310: mirrors api/agents.py's update_agent -- an agent already holding
+    an owner-granted capability scope is a confused-deputy risk for *any*
+    edit here too, and this trigger has no live session to compare a
+    claims.grant == "owner" bypass against (same "no live session to
+    check" reasoning as _mcp_server_requires_owner_to_mutate's docstring),
+    so it refuses outright rather than trying to enumerate every field
+    that could steer a scoped agent."""
     result = await _resolve_agent_ref(db, call.agent_ref)
     if result is None:
         return [
@@ -2715,6 +2724,16 @@ async def _handle_update_agent_trigger(
             )
         ]
     target = result
+
+    if await agent_holds_owner_scope(db, target.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update agent @{target.name}, but it holds a capability "
+                "scope -- that requires a live owner session in the UI, not just this chat.",
+            )
+        ]
 
     if (
         call.name is None
@@ -2777,6 +2796,22 @@ async def _handle_update_agent_trigger(
                         f"{tool_id!r} doesn't exist.",
                     )
                 ]
+        # #310: mirrors api/agents.py's update_agent -- assigning a custom/
+        # MCP tool or one requiring a scope is owner-only blast radius
+        # (find_unauthorized_tool_assignment's docstring); unconditional
+        # here for the same no-live-session reason as the owner-scope
+        # check above.
+        unauthorized_tool = await find_unauthorized_tool_assignment(db, call.tool_ids)
+        if unauthorized_tool is not None:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to assign tool {unauthorized_tool!r} to agent "
+                    f"@{target.name}, but that requires a live owner session in the UI, not "
+                    "just this chat.",
+                )
+            ]
 
     if call.team_ids is not None:
         for team_id in call.team_ids:
@@ -2839,7 +2874,11 @@ async def _handle_delete_agent_trigger(
     row out from under the rest of this function's still-in-flight
     _invoke_agent call (guard bookkeeping, the recursive re-dispatch
     below, a possible handoff) -- refused up front instead of leaving
-    that an untested edge case."""
+    that an untested edge case.
+
+    #310: also mirrors api/agents.py's delete_agent -- a scoped agent is
+    a confused-deputy risk, and this trigger has no live session to check
+    a claims.grant == "owner" bypass against, so it refuses outright."""
     result = await _resolve_agent_ref(db, agent_ref)
     if result is None:
         return [
@@ -2858,6 +2897,15 @@ async def _handle_delete_agent_trigger(
                 rivulet,
                 f"@{agent.name} tried to delete itself -- an agent can't delete itself while "
                 "running.",
+            )
+        ]
+    if await agent_holds_owner_scope(db, target.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete agent @{target.name}, but it holds a capability "
+                "scope -- that requires a live owner session in the UI, not just this chat.",
             )
         ]
     target_name = target.name
@@ -2887,7 +2935,13 @@ async def _handle_update_agent_routing_rules_trigger(
     api/agents.py's update_routing_rules handler (full replace, not a
     merge) plus proactive per-rule validation the HTTP layer leaves to
     Pydantic's RoutingRuleIn -- a rules list built by a model isn't
-    guaranteed well-typed the way a validated request body is."""
+    guaranteed well-typed the way a validated request body is.
+
+    #310: also mirrors update_routing_rules's agent_holds_owner_scope
+    gate -- steering how a scoped agent gets selected is the same
+    confused-deputy risk as rewriting its instructions, and this trigger
+    has no live session to check a claims.grant == "owner" bypass
+    against, so it refuses outright."""
     result = await _resolve_agent_ref(db, call.agent_ref)
     if result is None:
         return [
@@ -2899,6 +2953,17 @@ async def _handle_update_agent_routing_rules_trigger(
             )
         ]
     target = result
+
+    if await agent_holds_owner_scope(db, target.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to update routing rules for agent @{target.name}, but it "
+                "holds a capability scope -- that requires a live owner session in the UI, not "
+                "just this chat.",
+            )
+        ]
 
     parsed: list[tuple[str, str, int]] = []
     for item in call.rules:
@@ -2942,7 +3007,13 @@ async def _handle_update_agent_peer_preference_trigger(
     None clears the existing preference (local-only, not synced -- same
     as that handler's own docstring note); setting a tag creates/updates
     the row and publishes it (#10, sync/apply.py's
-    AGENT_PEER_PREFERENCE_SPEC)."""
+    AGENT_PEER_PREFERENCE_SPEC).
+
+    #310: also mirrors set_peer_preference's agent_holds_owner_scope
+    gate -- steering which peer a scoped agent preferentially runs on is
+    a subtler version of the same confused-deputy risk, and this trigger
+    has no live session to check a claims.grant == "owner" bypass
+    against, so it refuses outright."""
     result = await _resolve_agent_ref(db, call.agent_ref)
     if result is None:
         return [
@@ -2954,6 +3025,16 @@ async def _handle_update_agent_peer_preference_trigger(
             )
         ]
     target = result
+    if await agent_holds_owner_scope(db, target.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to set peer preference for agent @{target.name}, but it "
+                "holds a capability scope -- that requires a live owner session in the UI, not "
+                "just this chat.",
+            )
+        ]
     pref = await db.get(AgentPeerPreference, target.id)
 
     if call.capability_tag is None:
@@ -2993,7 +3074,13 @@ async def _handle_rollback_agent_version_trigger(
     """#190: an agent called the rollback_agent_version tool. Mirrors
     api/agents.py's rollback_agent_version handler (revert instructions/
     model to a prior version, record the rollback itself as a new
-    version, regenerate routing rules when instructions changed)."""
+    version, regenerate routing rules when instructions changed).
+
+    #310: also mirrors rollback_agent_version's agent_holds_owner_scope
+    gate -- reverting a scoped agent's instructions/model is the same
+    confused-deputy risk as editing them directly, and this trigger has
+    no live session to check a claims.grant == "owner" bypass against, so
+    it refuses outright."""
     result = await _resolve_agent_ref(db, call.agent_ref)
     if result is None:
         return [
@@ -3005,6 +3092,16 @@ async def _handle_rollback_agent_version_trigger(
             )
         ]
     target = result
+    if await agent_holds_owner_scope(db, target.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to roll back agent @{target.name}, but it holds a "
+                "capability scope -- that requires a live owner session in the UI, not just "
+                "this chat.",
+            )
+        ]
     version_row = await db.scalar(
         select(AgentVersion).where(
             AgentVersion.agent_id == target.id, AgentVersion.version == call.version
