@@ -94,3 +94,71 @@ def test_delete_provider_key_falls_back_when_no_keyring_backend(
     delete_provider_key(ref)  # must not raise
     with pytest.raises(CredentialStoreError, match="No credential stored for ref"):
         get_provider_key(ref)
+
+
+def test_get_finds_value_stored_via_fallback_once_keyring_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#323 split-brain: a store that lands in the fallback during a
+    transient keyring outage must still be found once the keyring is back
+    up and returns None for the ref — a live keyring saying "not found"
+    must not be treated as authoritative over a real fallback row."""
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.NoKeyringError("no backend")
+
+    monkeypatch.setattr("keyring.set_password", _boom)
+    ref = store_provider_key("provider-5", "sk-fallback-only")
+
+    monkeypatch.undo()  # keyring "recovers" -- get_password now works normally
+    assert get_provider_key(ref) == "sk-fallback-only"
+
+
+def test_delete_with_live_keyring_removes_stale_fallback_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#323 split-brain: a fallback row left over from an earlier outage
+    must be cleared by a delete made while the keyring is healthy, or it
+    will resurrect the "deleted" secret the next time the keyring goes
+    down."""
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.NoKeyringError("no backend")
+
+    monkeypatch.setattr("keyring.set_password", _boom)
+    ref = store_provider_key("provider-6", "sk-stale")
+    monkeypatch.undo()  # keyring recovers before the delete below
+
+    delete_provider_key(ref)  # live keyring has nothing to delete for ref
+
+    def _unavailable(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.KeyringError("backend unavailable")
+
+    monkeypatch.setattr("keyring.get_password", _unavailable)
+    with pytest.raises(CredentialStoreError, match="No credential stored for ref"):
+        get_provider_key(ref)
+
+
+def test_store_on_live_keyring_clears_stale_fallback_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#323 split-brain: an update stored on a recovered keyring must
+    clear out the old value left in the fallback from the earlier outage,
+    or a later keyring outage would resurrect the stale value instead of
+    reporting the ref as missing from the (unset) fallback."""
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.NoKeyringError("no backend")
+
+    monkeypatch.setattr("keyring.set_password", _boom)
+    ref = store_provider_key("provider-7", "sk-old")
+    monkeypatch.undo()  # keyring recovers
+
+    store_provider_key("provider-7", "sk-new")  # writes through the live keyring
+
+    def _unavailable(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.KeyringError("backend unavailable")
+
+    monkeypatch.setattr("keyring.get_password", _unavailable)
+    with pytest.raises(CredentialStoreError, match="No credential stored for ref"):
+        get_provider_key(ref)
