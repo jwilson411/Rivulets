@@ -21,6 +21,7 @@ from rivulets.backup import (
     MANUAL_PREFIX,
     BackupInfo,
     BackupIntegrityError,
+    RestoreIntegrityError,
     create_backup,
     list_backups,
     resolve_backup_path,
@@ -84,7 +85,10 @@ async def restore_backup(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Backup not found")
     if body.confirm_filename != filename:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Confirmation does not match filename")
-    await restore_from_backup(settings, backup_path)
+    try:
+        await restore_from_backup(settings, backup_path)
+    except RestoreIntegrityError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     # restore_from_backup wipes agentos.db but deliberately doesn't touch
     # the AgentOS singleton itself (its own docstring explains why) — do
     # that here so the registry is rebuilt from the just-restored DB

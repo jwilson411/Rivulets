@@ -61,10 +61,12 @@ backups_dir instead.
 
 import asyncio
 import logging
+import os
 import shutil
 import sqlite3
 import tarfile
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,6 +96,16 @@ _ARCHIVE_TOOLS_DIRNAME = "tools"
 
 class BackupIntegrityError(RuntimeError):
     """A freshly-written backup file failed its own `PRAGMA integrity_check`."""
+
+
+class RestoreIntegrityError(RuntimeError):
+    """The incoming archive's `rivulets.db` was missing or failed its
+    `PRAGMA integrity_check` (or its `credentials.db` did, if present).
+
+    Always raised *before* the live engine is disposed or any live file is
+    touched, so a bad archive leaves the running workspace exactly as it
+    was — see restore_from_backup's docstring.
+    """
 
 
 @dataclass(frozen=True)
@@ -293,6 +305,37 @@ def _unlink_with_sidecars(path: Path) -> None:
         path.with_name(path.name + suffix).unlink(missing_ok=True)
 
 
+def _unlink_sidecars(path: Path) -> None:
+    """Remove `path`'s `-wal`/`-shm` sidecars, but not `path` itself.
+
+    For use right after `_atomic_replace` has already swapped `path` in:
+    a stale WAL/SHM left over from the *previous* file's checkpoint state
+    must not stick around next to the new one.
+    """
+    for suffix in ("-wal", "-shm"):
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+
+
+def _atomic_replace(src: Path, dest: Path) -> None:
+    """Copy `src` into a staging file next to `dest`, then atomically
+    rename it over `dest` with `os.replace`.
+
+    Unlike unlink-then-copyfile, `dest` is never observably missing or
+    partially written — a crash or exception mid-copy leaves the staging
+    file orphaned and `dest` untouched. `os.replace` is only atomic within
+    a single filesystem, so the staging file must land in `dest`'s own
+    directory rather than wherever `tempfile.TemporaryDirectory()`
+    happened to place the extracted archive.
+    """
+    staging = dest.with_name(f".{dest.name}.restoring-{uuid.uuid4().hex}")
+    try:
+        shutil.copyfile(src, staging)
+        os.replace(staging, dest)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+
+
 async def restore_from_backup(settings: Settings, backup_path: Path) -> None:
     """Restore the workspace from a snapshot archive taken by create_backup.
 
@@ -331,6 +374,22 @@ async def restore_from_backup(settings: Settings, backup_path: Path) -> None:
     connection, which this can't do from inside the app process itself —
     there's no process supervisor here to ask for one.
 
+    The incoming archive's `rivulets.db` (and `credentials.db`, if present)
+    are extracted and `PRAGMA integrity_check`'d in a scratch directory
+    *before* the live engine is disposed or anything under `settings` is
+    touched — a missing or corrupt member raises RestoreIntegrityError
+    with the live workspace still fully intact and serving requests.
+    Once a file has proven good, it's swapped into place with
+    `_atomic_replace` (copy next to the destination, `os.replace` over
+    it) rather than unlink-then-copy, so `db_path` is never observably
+    missing on disk — it's always either the pre-restore file or the
+    fully-written restored one, never neither. Stale `-wal`/`-shm`
+    sidecars from the file that was just replaced are only removed
+    *after* the rename that replaced it, for the same reason. Whatever
+    happens, `override_engine(None)` always runs (see `finally` below) so
+    the next `get_engine()` call reopens against whatever ended up on
+    disk instead of continuing to reference the disposed engine.
+
     Restoring `sync/`'s node-identity file onto a *running* node doesn't
     retroactively change an already-started SyncEngine's in-memory peer
     ID (sync/identity.py's key is read once, at engine start) — it only
@@ -342,37 +401,61 @@ async def restore_from_backup(settings: Settings, backup_path: Path) -> None:
     except BackupIntegrityError:
         logger.exception("Pre-restore safety snapshot failed its integrity check")
 
-    await get_engine().dispose()
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         with tarfile.open(backup_path) as archive:
             archive.extractall(tmp_path, filter="data")
 
-        _unlink_with_sidecars(settings.db_path)
-        shutil.copyfile(tmp_path / _ARCHIVE_DB_NAME, settings.db_path)
+        db_src = tmp_path / _ARCHIVE_DB_NAME
+        if not db_src.is_file() or not await asyncio.to_thread(_integrity_check, db_src):
+            raise RestoreIntegrityError(
+                f"{backup_path} has no valid rivulets.db member (missing or failed "
+                "integrity_check) — restore aborted before touching the live workspace"
+            )
 
         creds_src = tmp_path / _ARCHIVE_CREDENTIALS_NAME
-        _unlink_with_sidecars(settings.credential_fallback_db_path)
-        if creds_src.is_file():
-            shutil.copyfile(creds_src, settings.credential_fallback_db_path)
+        if creds_src.is_file() and not await asyncio.to_thread(_integrity_check, creds_src):
+            raise RestoreIntegrityError(
+                f"{backup_path}'s credentials.db member failed integrity_check — restore "
+                "aborted before touching the live workspace"
+            )
 
-        sync_src = tmp_path / _ARCHIVE_SYNC_DIRNAME
-        if sync_src.is_dir():
-            settings.sync_dir.mkdir(parents=True, exist_ok=True)
-            for item in sync_src.iterdir():
-                if item.is_file():
-                    shutil.copyfile(item, settings.sync_dir / item.name)
+        # Both embedded SQLite files (if present) have now proven valid, so
+        # everything from here on is a filesystem-level operation, not an
+        # archive-content one — a failure here means disk-full or similar,
+        # not "the backup was bad."
+        await get_engine().dispose()
+        try:
+            _atomic_replace(db_src, settings.db_path)
+            _unlink_sidecars(settings.db_path)
 
-        tools_src = tmp_path / _ARCHIVE_TOOLS_DIRNAME
-        settings.tools_dir.mkdir(parents=True, exist_ok=True)
-        for existing in settings.tools_dir.iterdir():
-            if existing.is_file():
-                existing.unlink()
-        if tools_src.is_dir():
-            for item in tools_src.iterdir():
-                if item.is_file():
-                    shutil.copyfile(item, settings.tools_dir / item.name)
+            if creds_src.is_file():
+                _atomic_replace(creds_src, settings.credential_fallback_db_path)
+                _unlink_sidecars(settings.credential_fallback_db_path)
+            else:
+                _unlink_with_sidecars(settings.credential_fallback_db_path)
 
-    _unlink_with_sidecars(settings.agentos_db_path)
-    override_engine(None)
+            sync_src = tmp_path / _ARCHIVE_SYNC_DIRNAME
+            if sync_src.is_dir():
+                settings.sync_dir.mkdir(parents=True, exist_ok=True)
+                for item in sync_src.iterdir():
+                    if item.is_file():
+                        shutil.copyfile(item, settings.sync_dir / item.name)
+
+            tools_src = tmp_path / _ARCHIVE_TOOLS_DIRNAME
+            settings.tools_dir.mkdir(parents=True, exist_ok=True)
+            for existing in settings.tools_dir.iterdir():
+                if existing.is_file():
+                    existing.unlink()
+            if tools_src.is_dir():
+                for item in tools_src.iterdir():
+                    if item.is_file():
+                        shutil.copyfile(item, settings.tools_dir / item.name)
+        finally:
+            # Runs even if a step above raised, so a mid-restore failure
+            # still leaves the next get_engine() call able to open
+            # against whatever ended up on disk instead of silently
+            # continuing to reference the disposed engine (this function's
+            # own former bug).
+            _unlink_with_sidecars(settings.agentos_db_path)
+            override_engine(None)
