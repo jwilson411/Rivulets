@@ -27,10 +27,12 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
+from rivulets.db.base import uuid7
 from rivulets.db.models import Tool, ToolVersion
 from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.tools.builtin import code_exec
@@ -60,11 +62,12 @@ async def _publish_tool_change(db: DbSession, tool: Tool) -> None:
     await publish_current_state(db, "tool", tool.id)
 
 
-# body.name becomes both the Tool row's name and (via create_tool below)
-# a literal path segment in source_path -- restricted to a safe identifier
-# charset so it can never escape tools_dir (e.g. "../../etc/cron.d/x") or
-# collide with a dotfile/hidden path. sync/apply.py's apply_remote_tool_change
-# reuses this same regex (#239) rather than re-implementing the check.
+# body.name must also be a valid Python identifier -- it's the name of the
+# function _load_custom_tool (agentos/tool_resolution.py) looks up inside
+# the tool's source file. source_path itself is keyed off the Tool's id,
+# not this name (#289), so a name no longer needs to double as a safe path
+# segment -- but sync/apply.py's apply_remote_tool_change still reuses this
+# same regex to validate an incoming peer's name before trusting it.
 _TOOL_NAME_RE = TOOL_NAME_RE
 
 
@@ -152,6 +155,18 @@ async def list_tools(db: DbSession, _: CurrentWorkspaceId) -> list[ToolOut]:
     return [ToolOut.from_tool(t) for t in result.scalars().all()]
 
 
+async def _check_custom_name_available(db: DbSession, name: str) -> None:
+    """Mirrors api/agents.py's _check_name_available -- a lookup first so
+    the common case fails fast with a real 409 instead of the raw
+    IntegrityError idx_tool_custom_name would otherwise raise past the
+    flush()/commit() below (#289)."""
+    existing = await db.scalar(select(Tool).where(Tool.tool_type == "custom", Tool.name == name))
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"A custom tool named {name!r} already exists"
+        )
+
+
 @router.post("", response_model=ToolOut, status_code=status.HTTP_201_CREATED)
 async def create_tool(
     body: ToolCreate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
@@ -163,15 +178,33 @@ async def create_tool(
             status.HTTP_501_NOT_IMPLEMENTED, "Simple-mode tool codegen not yet wired up"
         )
 
-    source_path = str(get_settings().tools_dir / f"{body.name}.py")
+    await _check_custom_name_available(db, body.name)
+
+    # #289: source_path is keyed off the tool's own id, not its (mutable,
+    # collidable-in-flight-with-a-peer's) name -- generated up front so it
+    # can go straight into the Tool row's constructor rather than needing a
+    # flush first just to learn the id.
+    tool_id = uuid7()
+    source_path = str(get_settings().tools_dir / f"{tool_id}.py")
     tool = Tool(
+        id=tool_id,
         name=body.name,
         description=body.description,
         tool_type="custom",
         source_path=source_path,
     )
     db.add(tool)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # The pre-check above closes the common case; this closes the race
+        # window between it and the flush (two concurrent creates, or a
+        # concurrent sync apply, with the same name) -- same treatment
+        # api/agents.py's create_agent gives its own name race.
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"A custom tool named {body.name!r} already exists"
+        ) from exc
     db.add(ToolVersion(tool_id=tool.id, version=1, source_code=""))
     await db.commit()
     await db.refresh(tool)
@@ -200,10 +233,21 @@ async def update_tool(
     tool = await _get_or_404(db, tool_id)
     if tool.tool_type == "builtin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be modified")
+    if body.name is not None and body.name != tool.name and tool.tool_type == "custom":
+        await _check_custom_name_available(db, body.name)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(tool, field, value)
     tool.vector_clock += 1
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Same race-window close as create_tool's flush() above -- two
+        # concurrent renames (or a rename racing a sync apply) to the same
+        # name both pass the pre-check.
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"A custom tool named {body.name!r} already exists"
+        ) from exc
     await db.refresh(tool)
     await _publish_tool_change(db, tool)
     return tool

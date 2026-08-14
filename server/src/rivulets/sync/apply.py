@@ -511,9 +511,11 @@ async def apply_remote_tool_change(
 
     name = payload["name"]
     if not TOOL_NAME_RE.match(name):
-        # #239: payload['name'] becomes a literal path segment below --
-        # reject it here rather than let sync apply skip the identifier
-        # check the HTTP create path (api/tools.py's ToolCreate) enforces.
+        # #239: payload['name'] is exec'd against as a Python identifier by
+        # _load_custom_tool (agentos/tool_resolution.py's getattr(module,
+        # tool_row.name)) -- reject it here rather than let sync apply skip
+        # the identifier check the HTTP create path (api/tools.py's
+        # ToolCreate) enforces.
         logger.warning(
             "Rejecting tool sync for %s from %s: invalid name %r",
             entity_id,
@@ -522,8 +524,34 @@ async def apply_remote_tool_change(
         )
         return ApplyResult(applied=False, conflict=False)
 
+    # #289: reject a remote tool whose name collides with a *different*
+    # local custom tool id. Without this, a peer could publish an
+    # unrelated tool under the same name as one already assigned to a
+    # local agent (agent_tool isn't synced -- see module docstring), and
+    # apply_remote_tool_change would overwrite that assigned tool's source
+    # file on disk the moment it's re-derived from `name` below, hijacking
+    # an assignment the attacker never touched directly.
+    name_collision = await db.scalar(
+        select(Tool.id).where(Tool.tool_type == "custom", Tool.name == name, Tool.id != entity_id)
+    )
+    if name_collision is not None:
+        logger.warning(
+            "Rejecting tool sync for %s from %s: name %r already used by local tool %s",
+            entity_id,
+            remote_node_id,
+            name,
+            name_collision,
+        )
+        return ApplyResult(applied=False, conflict=False)
+
     tool = await db.get(Tool, entity_id)
-    source_path = str(get_settings().tools_dir / f"{name}.py")
+    # #289: keyed off the tool's own id (stable, unique, never synced by
+    # value) rather than its name -- two different tool ids sharing a name
+    # can no longer make this collide (the check above already refuses
+    # that), but deriving the path from id rather than name keeps a
+    # later legitimate rename from orphaning or colliding with the file on
+    # disk either.
+    source_path = str(get_settings().tools_dir / f"{entity_id}.py")
     if tool is None:
         tool = Tool(id=entity_id, tool_type="custom", source_path=source_path)
         db.add(tool)
@@ -547,8 +575,23 @@ async def apply_remote_tool_change(
             ToolVersion(tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code)
         )
 
-    await _store_vector_clock(db, "tool", entity_id, merged)
-    await db.commit()
+    try:
+        # The name_collision pre-check above closes the common case; this
+        # closes the race window between it and commit (two concurrent
+        # sync applies introducing the same name under different ids) --
+        # same treatment api/tools.py's create_tool gives its own race
+        # against idx_tool_custom_name.
+        await _store_vector_clock(db, "tool", entity_id, merged)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        logger.warning(
+            "Rejecting tool sync for %s from %s: name %r collided with a concurrently-applied tool",
+            entity_id,
+            remote_node_id,
+            name,
+        )
+        return ApplyResult(applied=False, conflict=False)
     return ApplyResult(applied=True, conflict=False)
 
 

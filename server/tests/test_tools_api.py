@@ -179,7 +179,11 @@ def test_save_tool_version_rejects_invalid_python(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     tool = _create_custom_tool(client, auth_headers)
-    original_source = Path(tool["source_path"]).read_text()
+    # create_tool doesn't write to disk until the first real save (module
+    # docstring / test_custom_tool_write_routes_require_owner_grant), so a
+    # freshly-created (id-keyed, #289) tool has no file yet to compare
+    # against here -- the assertion below is just "still doesn't exist".
+    assert not Path(tool["source_path"]).exists()
 
     response = client.post(
         f"/api/v1/tools/{tool['id']}/versions",
@@ -190,7 +194,7 @@ def test_save_tool_version_rejects_invalid_python(
     assert response.status_code == 400
     assert "Invalid Python" in response.json()["detail"]
     # Neither the file nor the version history changed.
-    assert Path(tool["source_path"]).read_text() == original_source
+    assert not Path(tool["source_path"]).exists()
     versions = client.get(f"/api/v1/tools/{tool['id']}/versions", headers=auth_headers).json()
     assert len(versions) == 1
 
@@ -416,6 +420,60 @@ def test_create_tool_rejects_names_that_would_escape_tools_dir(
         headers=auth_headers,
     )
     assert response.status_code == 422
+
+
+def test_create_tool_rejects_duplicate_custom_name(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#289: two custom tools with the same name would both resolve to
+    `{name}.py` under the old path scheme, so whichever was created second
+    would silently overwrite the first's source file the moment it was
+    ever saved."""
+    _create_custom_tool(client, auth_headers)
+    dup = client.post(
+        "/api/v1/tools",
+        json={"name": "my_tool", "description": "A different tool, same name."},
+        headers=auth_headers,
+    )
+    assert dup.status_code == 409
+
+
+def test_update_tool_rejects_rename_onto_an_existing_custom_name(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    _create_custom_tool(client, auth_headers)
+    other = client.post(
+        "/api/v1/tools",
+        json={"name": "other_tool", "description": "d"},
+        headers=auth_headers,
+    ).json()
+
+    renamed = client.patch(
+        f"/api/v1/tools/{other['id']}",
+        json={"name": "my_tool"},
+        headers=auth_headers,
+    )
+    assert renamed.status_code == 409
+
+
+def test_create_tool_two_different_ids_get_two_different_source_files(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#289: source_path is keyed off the tool's own id, not its name, so
+    renaming one custom tool to match another's original name (after the
+    other is deleted, freeing the name) can never collide with a still-
+    live tool's file on disk."""
+    first = _create_custom_tool(client, auth_headers)
+    assert client.delete(f"/api/v1/tools/{first['id']}", headers=auth_headers).status_code == 204
+
+    second = client.post(
+        "/api/v1/tools",
+        json={"name": "my_tool", "description": "Reuses the freed name."},
+        headers=auth_headers,
+    ).json()
+    assert second["id"] != first["id"]
+    assert second["source_path"] != first["source_path"]
+    assert Path(second["source_path"]).name == f"{second['id']}.py"
 
 
 def test_list_tools_exposes_required_scope(
