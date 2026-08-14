@@ -395,6 +395,7 @@ async def test_on_failure_workflow_id_triggers_remediation_run(
 
     rivulet = await _make_rivulet(db_session)
     fixer = await _make_workflow(db_session, name="fixer")
+    fixer.published = True
     fixer_node = _transform_node(fixer.id, "recover", "recovered: {input}")
     db_session.add(fixer_node)
     await db_session.flush()
@@ -469,6 +470,7 @@ async def test_on_failure_workflow_id_does_not_chain_past_one_remediation_attemp
     db_session.add(node)
     await db_session.flush()
     await _entry_connect(db_session, workflow.id, node.id)
+    workflow.published = True  # the remediation target (itself) must be published too, #292
     workflow.on_failure_workflow_id = workflow.id  # retries itself once on failure
     await db_session.commit()
 
@@ -493,6 +495,66 @@ async def test_on_failure_workflow_id_does_not_chain_past_one_remediation_attemp
     remediation_run = next(r for r in all_runs if r.triggered_by == "remediation")
     assert remediation_run.status == "failed"
     assert remediation_run.triggered_by_id == run.id
+
+
+async def test_on_failure_workflow_id_skips_an_unpublished_remediation_target(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#292: `_maybe_trigger_remediation` re-checks `published` on the
+    remediation target, the same gate #249 added to
+    `_execute_workflow_node`'s nested 'workflow' node -- an unpublished
+    draft configured as `on_failure_workflow_id` (e.g. synced from a peer
+    that had built but not yet published it) must not fire unattended."""
+    from rivulets.db.models import Agent
+
+    agent = Agent(
+        name="AlwaysFails4",
+        description="An agent whose fake run_agent always raises, for the unpublished test.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    rivulet = await _make_rivulet(db_session)
+    fixer = await _make_workflow(db_session, name="draft-fixer")  # published=False, default
+    fixer_node = _transform_node(fixer.id, "recover", "recovered: {input}")
+    db_session.add(fixer_node)
+    await db_session.flush()
+    await _entry_connect(db_session, fixer.id, fixer_node.id)
+
+    doomed = await _make_workflow(db_session, name="doomed-flow-3")
+    doomed.on_failure_workflow_id = fixer.id
+    doomed_node = WorkflowNode(
+        workflow_id=doomed.id, name="doomed", node_type="agent", agent_id=agent.id
+    )
+    db_session.add(doomed_node)
+    await db_session.flush()
+    await _entry_connect(db_session, doomed.id, doomed_node.id)
+    await db_session.commit()
+
+    async def always_fails(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", always_fails)
+
+    run = await run_workflow(
+        db_session, doomed, rivulet, "hi", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "failed"
+
+    result = await db_session.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == fixer.id)
+    )
+    assert result.scalars().all() == []
+
+    result = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    alerts = [m.content for m in result.scalars().all()]
+    assert not any("triggering remediation workflow" in a for a in alerts)
 
 
 async def test_on_call_agent_falls_back_to_workspace_default(

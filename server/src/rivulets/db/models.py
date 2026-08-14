@@ -566,9 +566,15 @@ class Workflow(Base):
     validation because `WorkflowRun.triggered_by == 'remediation'` never
     triggers further remediation (see that method's docstring) -- a
     structural, depth-1 cap that doesn't need the reference itself
-    forbidden. Not required to be `published` for the same reason
-    `child_workflow_id` isn't: a deliberate structural reference, not
-    something a stray message could hit by accident.
+    forbidden. Unlike `child_workflow_id`, this *is* required to be
+    `published` (#292, both at save time -- api/workflows.py's
+    `_validate_on_failure_workflow` -- and again at trigger time --
+    `_maybe_trigger_remediation`): a 'workflow' node's `child_workflow_id`
+    only ever runs as part of a live, human- or agent-triggered graph
+    walk, but this fires unattended off a failed run's finalize, so
+    there's no one in the loop to notice a stray draft reference the way
+    a slash command or agent tool call hitting an unpublished workflow
+    would be noticed immediately.
 
     `on_call_agent_id` (#94 layer 3): an optional agent to `@mention`
     automatically (workflows/engine.py's `_maybe_notify_on_call_agent`)
