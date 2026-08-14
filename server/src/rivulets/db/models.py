@@ -404,6 +404,25 @@ class AgentToolScope(Base):
 
 class Tool(Base):
     __tablename__ = "tool"
+    __table_args__ = (
+        # #289: only `tool_type='custom'` names need to be unique -- a
+        # `mcp`-type Tool row's name is whatever the remote MCP server
+        # calls it (api/mcp_servers.py's _connect_and_sync_tools), and two
+        # independent servers can legitimately expose a same-named tool
+        # (e.g. "search"); `builtin` names come from a fixed, already-non-
+        # colliding registry. Without this, a peer could sync in a
+        # different tool id under the same name as a locally-assigned
+        # custom tool, and both api/tools.py's create_tool and
+        # sync/apply.py's apply_remote_tool_change would happily write
+        # `{name}.py` for two different ids -- whichever write landed last
+        # would overwrite the source a victim's agent was already invoking
+        # under an unrelated, already-approved assignment. Partial index,
+        # same `sqlite_where` pattern Channel.name's idx_channel_name
+        # already uses.
+        Index(
+            "idx_tool_custom_name", "name", unique=True, sqlite_where=text("tool_type = 'custom'")
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str]
