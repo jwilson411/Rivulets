@@ -33,6 +33,15 @@ allowed to fire (#242). And the actual firing (`fire_webhook` ->
 being awaited inline, so this route's advertised 202 Accepted is no
 longer a lie: the response is sent as soon as the request is validated,
 not after the workflow finishes.
+
+The replay triple is recorded before that BackgroundTask runs (it has to
+be, to stop a duplicate delivery arriving before the first has finished
+firing from being dispatched twice) -- but the 202 that recording earns
+isn't a promise the workflow actually ran, only that it's been handed off.
+If the background fire then fails, `_fire_webhook_in_background` releases
+the triple it consumed (#322): the sender's own at-least-once retry of
+that exact signed delivery is what recovers, not this endpoint retrying
+anything itself.
 """
 
 import logging
@@ -72,7 +81,13 @@ class WebhookTriggerResponse(BaseModel):
 
 
 async def _fire_webhook_in_background(
-    db: AsyncSession, webhook: WorkflowWebhook, workflow: Workflow, raw_body: bytes, run_id: str
+    db: AsyncSession,
+    webhook: WorkflowWebhook,
+    workflow: Workflow,
+    raw_body: bytes,
+    run_id: str,
+    timestamp: str,
+    signature: str,
 ) -> None:
     """Runs as a BackgroundTask -- Starlette only starts this after the
     202 response above has already been sent, the same pattern
@@ -81,11 +96,18 @@ async def _fire_webhook_in_background(
     Accepted response as soon as the signature/replay checks pass, not
     after the workflow finishes running. Any failure here can only be
     logged, not turned into an HTTP error -- the sender's response is
-    long gone by the time this runs."""
+    long gone by the time this runs. (#322) So instead of leaving that
+    202 as the sender's only shot, a failure here releases the replay
+    triple `trigger_webhook` already recorded: the sender's at-least-once
+    retry of the exact same signed delivery is then treated as new
+    rather than hitting a 409 for a run that never happened."""
     try:
         await fire_webhook(db, webhook, workflow, raw_body, run_id=run_id)
-    except RuntimeError as exc:
-        logger.warning("Webhook %s failed to fire: %s", webhook.id, exc)
+    except Exception:
+        logger.warning(
+            "Webhook %s failed to fire, releasing delivery for retry", webhook.id, exc_info=True
+        )
+        get_webhook_replay_guard().release(webhook.id, timestamp, signature)
 
 
 @router.post(
@@ -140,6 +162,16 @@ async def trigger_webhook(
     if not verify(secret, timestamp, raw_body, signature):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
 
+    workflow = await db.get(Workflow, webhook.workflow_id)
+    if workflow is None or not workflow.published:
+        # Same gate every trigger path shares (workflows/trigger.py) --
+        # a 409, not a 404: the webhook itself is real and correctly
+        # authenticated, it's just not ready to fire yet. Checked before
+        # the replay guard below records anything (#322) -- this delivery
+        # was never going to fire, so it shouldn't burn the one shot a
+        # sender's retry gets once the workflow *is* published.
+        raise HTTPException(status.HTTP_409_CONFLICT, "This workflow isn't published")
+
     # #242: only reached once the signature's already verified, so an
     # unauthenticated caller can't fill this store with garbage triples --
     # a resend of the exact same signed delivery within the window (a
@@ -148,16 +180,11 @@ async def trigger_webhook(
     if not get_webhook_replay_guard().check_and_record(webhook_id, timestamp, signature):
         raise HTTPException(status.HTTP_409_CONFLICT, "This delivery has already been processed")
 
-    workflow = await db.get(Workflow, webhook.workflow_id)
-    if workflow is None or not workflow.published:
-        # Same gate every trigger path shares (workflows/trigger.py) --
-        # a 409, not a 404: the webhook itself is real and correctly
-        # authenticated, it's just not ready to fire yet.
-        raise HTTPException(status.HTTP_409_CONFLICT, "This workflow isn't published")
-
     # #242: the id is chosen here, before the run exists, so it can go in
     # the response below -- the run itself is created and executed by a
     # BackgroundTask (_fire_webhook_in_background), not on this request.
     run_id = uuid7()
-    background_tasks.add_task(_fire_webhook_in_background, db, webhook, workflow, raw_body, run_id)
+    background_tasks.add_task(
+        _fire_webhook_in_background, db, webhook, workflow, raw_body, run_id, timestamp, signature
+    )
     return WebhookTriggerResponse(run_id=run_id, status="running")

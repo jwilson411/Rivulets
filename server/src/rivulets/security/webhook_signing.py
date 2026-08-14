@@ -94,6 +94,17 @@ class ReplayGuard:
             self._seen[key] = now
             return True
 
+    def release(self, webhook_id: str, timestamp: str, signature: str) -> None:
+        """Un-records a triple `check_and_record` accepted, so a sender's
+        retry of the same signed delivery is treated as new again. The
+        caller (api/webhooks.py) is expected to call this when the fire
+        it gated turns out not to have happened -- otherwise the 202
+        already sent for that delivery would be the sender's only shot,
+        and every retry would hit a 409 for a run that never ran (#322)."""
+        key = (webhook_id, timestamp, signature)
+        with self._lock:
+            self._seen.pop(key, None)
+
     def reset_for_testing(self) -> None:
         with self._lock:
             self._seen.clear()

@@ -106,3 +106,24 @@ def test_replay_guard_expires_entries_past_max_age(monkeypatch: pytest.MonkeyPat
     assert guard.check_and_record("webhook-1", "1000", "sig") is True
     clock[0] += 301
     assert guard.check_and_record("webhook-1", "1000", "sig") is True
+
+
+def test_replay_guard_release_lets_the_same_triple_be_recorded_again() -> None:
+    """#322: a caller that recorded a triple and then found out the work
+    it gated never actually happened (a failed background fire) needs a
+    way to give that delivery back -- otherwise the sender's own
+    at-least-once retry of the identical signed request is rejected for a
+    run that never ran."""
+    guard = ReplayGuard()
+    assert guard.check_and_record("webhook-1", "1000", "sig") is True
+    guard.release("webhook-1", "1000", "sig")
+    assert guard.check_and_record("webhook-1", "1000", "sig") is True
+
+
+def test_replay_guard_release_of_unknown_triple_is_a_no_op() -> None:
+    """Releasing a triple that was never recorded (already expired, or a
+    release call racing a second check_and_record) must not raise or
+    otherwise disturb the guard's state."""
+    guard = ReplayGuard()
+    guard.release("webhook-1", "1000", "sig")
+    assert guard.check_and_record("webhook-1", "1000", "sig") is True

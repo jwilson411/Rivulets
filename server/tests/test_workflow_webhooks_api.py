@@ -7,6 +7,7 @@ for signature-verification logic in isolation.
 import time
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.security.webhook_signing import sign
@@ -445,6 +446,57 @@ def test_trigger_unpublished_workflow_returns_409(
         headers=_signed_headers(webhook["secret"], body),
     )
     assert resp.status_code == 409
+
+
+def test_trigger_unpublished_workflow_leaves_delivery_retryable(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#322: the workflow-not-published 409 must not burn the replay
+    triple -- nothing fired, so the exact same signed delivery has to
+    still be acceptable once the workflow *is* published, rather than the
+    sender's retry hitting a 409 "already processed" for a run that never
+    happened."""
+    workflow_id = _create_workflow(client, auth_headers, "publishes-later")
+    channel_id = _create_channel(client, auth_headers, "publishes-later-channel")
+    node_id = _add_transform_node(client, auth_headers, workflow_id)
+    _connect_entry(client, auth_headers, workflow_id, node_id)
+    webhook = _create_webhook(client, auth_headers, workflow_id, channel_id)
+    body = b'{"event": "push"}'
+    headers = _signed_headers(webhook["secret"], body)
+
+    first = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+    assert first.status_code == 409, first.text
+
+    _publish_workflow(client, auth_headers, workflow_id)
+    retry = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+    assert retry.status_code == 202, retry.text
+
+
+def test_trigger_background_fire_failure_releases_delivery_for_retry(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#322: `fire_webhook` fails inside the BackgroundTask, after the 202
+    has already been sent and the replay triple already recorded. That
+    failure must release the triple so the sender's at-least-once retry
+    of the exact same signed delivery can still fire the workflow --
+    otherwise every retry would just hit 409 "already processed" for a
+    run that never actually happened."""
+    webhook = _make_published_workflow_with_webhook(client, auth_headers, "background-failure")
+    body = b'{"event": "push"}'
+    headers = _signed_headers(webhook["secret"], body)
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("simulated failure mid-flight")
+
+    with monkeypatch.context() as m:
+        m.setattr("rivulets.api.webhooks.fire_webhook", _boom)
+        first = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+        assert first.status_code == 202, first.text
+
+    retry = client.post(f"/api/v1/webhooks/{webhook['id']}", content=body, headers=headers)
+    assert retry.status_code == 202, retry.text
+    run = _get_run(client, auth_headers, webhook["workflow_id"], retry.json()["run_id"])
+    assert run["status"] == "completed"
 
 
 def test_trigger_oversized_payload_returns_413(
