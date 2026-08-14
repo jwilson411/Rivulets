@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import LoginForm from './LoginForm.svelte';
 import { auth } from '$lib/api/auth.svelte';
+import { ApiError } from '$lib/api/client';
 
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
@@ -61,7 +62,7 @@ describe('LoginForm.svelte', () => {
 		await input.fill('  apple banana cherry  ');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined);
+		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
 		await expect.element(input).toHaveValue('');
 	});
 
@@ -74,7 +75,7 @@ describe('LoginForm.svelte', () => {
 		await passphraseInput.fill('extra word');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', 'extra word');
+		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', 'extra word', undefined);
 		await expect.element(passphraseInput).toHaveValue('');
 	});
 
@@ -144,7 +145,7 @@ describe('LoginForm.svelte', () => {
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined);
+			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined, undefined);
 		});
 
 		it('logs in with the entered passphrase alongside the generated phrase', async () => {
@@ -156,7 +157,7 @@ describe('LoginForm.svelte', () => {
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, 'extra word');
+			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, 'extra word', undefined);
 		});
 
 		it('copies the generated phrase to the clipboard', async () => {
@@ -196,6 +197,67 @@ describe('LoginForm.svelte', () => {
 				.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
 				.toBeInTheDocument();
 			expect(auth.login).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('bootstrap token gate (#291)', () => {
+		const bootstrapError = new ApiError(
+			401,
+			'This node requires RIVULETS_BOOTSTRAP_TOKEN to initialize a workspace while bound to 0.0.0.0'
+		);
+
+		it('does not show a bootstrap-token field until the server asks for one', async () => {
+			render(LoginForm);
+
+			await expect.element(page.getByLabelText('Bootstrap token')).not.toBeInTheDocument();
+		});
+
+		it('does not show a bootstrap-token field for an unrelated 401', async () => {
+			vi.mocked(auth.login).mockRejectedValueOnce(new ApiError(401, 'Incorrect recovery phrase'));
+			render(LoginForm);
+
+			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('wrong words here');
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
+			await expect.element(page.getByLabelText('Bootstrap token')).not.toBeInTheDocument();
+		});
+
+		it('reveals a bootstrap-token field once the server requires one, and sends it on retry', async () => {
+			vi.mocked(auth.login).mockRejectedValueOnce(bootstrapError).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			const tokenInput = page.getByLabelText('Bootstrap token');
+			await expect.element(tokenInput).toBeInTheDocument();
+
+			await tokenInput.fill('correct-token');
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.login).toHaveBeenLastCalledWith(
+				'apple banana cherry',
+				undefined,
+				'correct-token'
+			);
+		});
+
+		it('reveals a bootstrap-token field on the generated-phrase screen too', async () => {
+			vi.mocked(auth.login).mockRejectedValueOnce(bootstrapError).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			const tokenInput = page.getByLabelText('Bootstrap token');
+			await expect.element(tokenInput).toBeInTheDocument();
+
+			await tokenInput.fill('correct-token');
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.login).toHaveBeenLastCalledWith(STUB_PHRASE, undefined, 'correct-token');
 		});
 	});
 });

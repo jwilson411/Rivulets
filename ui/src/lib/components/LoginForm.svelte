@@ -7,6 +7,7 @@
 	// finally sends it over the wire, same as a manually-entered phrase.
 	import { generateMnemonic } from 'bip39';
 	import { auth } from '$lib/api/auth.svelte';
+	import { ApiError } from '$lib/api/client';
 
 	// Set by +layout.svelte's auth gate when it swaps back to LoginForm
 	// because a previously-valid session was torn down (401 / JWT expiry),
@@ -23,14 +24,30 @@
 	let acknowledged = $state(false);
 	let copied = $state(false);
 
+	// Only shown once a login attempt has actually hit the server's #247
+	// bootstrap-token gate (api/auth.py) -- there's no way to know in
+	// advance whether this node is bound to 0.0.0.0 and unclaimed, so the
+	// field stays hidden until the server's 401 says it's needed, rather
+	// than cluttering every login with an "advanced" field almost nobody
+	// on a loopback-bound node will ever use.
+	let bootstrapToken = $state('');
+	let needsBootstrapToken = $state(false);
+
 	async function performLogin(phrase: string, phrasePassphrase: string): Promise<boolean> {
 		loginError = null;
 		loggingIn = true;
 		try {
-			await auth.login(phrase.trim(), phrasePassphrase || undefined);
+			await auth.login(phrase.trim(), phrasePassphrase || undefined, bootstrapToken || undefined);
 			return true;
 		} catch (err) {
 			loginError = err instanceof Error ? err.message : 'Login failed';
+			if (
+				err instanceof ApiError &&
+				err.status === 401 &&
+				err.message.includes('RIVULETS_BOOTSTRAP_TOKEN')
+			) {
+				needsBootstrapToken = true;
+			}
 			return false;
 		} finally {
 			loggingIn = false;
@@ -42,6 +59,8 @@
 		if (await performLogin(mnemonic, passphrase)) {
 			mnemonic = '';
 			passphrase = '';
+			bootstrapToken = '';
+			needsBootstrapToken = false;
 		}
 	}
 
@@ -75,6 +94,8 @@
 			generatedWords = null;
 			generatedPassphrase = '';
 			acknowledged = false;
+			bootstrapToken = '';
+			needsBootstrapToken = false;
 		}
 	}
 </script>
@@ -143,6 +164,29 @@
 				</p>
 			</div>
 
+			{#if needsBootstrapToken}
+				<div class="flex flex-col gap-1.5">
+					<label
+						class="text-sm font-medium text-ink dark:text-ink-dark"
+						for="generated-bootstrap-token"
+					>
+						Bootstrap token
+					</label>
+					<input
+						id="generated-bootstrap-token"
+						type="password"
+						autocomplete="off"
+						bind:value={bootstrapToken}
+						placeholder="RIVULETS_BOOTSTRAP_TOKEN"
+						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					/>
+					<p class="text-xs text-neutral-500">
+						This node is reachable over the network and requires the operator-configured
+						RIVULETS_BOOTSTRAP_TOKEN to set up its workspace.
+					</p>
+				</div>
+			{/if}
+
 			<label class="flex items-start gap-2 text-sm text-ink dark:text-ink-dark">
 				<input type="checkbox" bind:checked={acknowledged} class="mt-0.5" />
 				I've saved this phrase somewhere safe
@@ -200,6 +244,23 @@
 				placeholder="Leave blank if this workspace doesn't use one"
 				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
 			/>
+			{#if needsBootstrapToken}
+				<label class="text-sm font-medium text-ink dark:text-ink-dark" for="bootstrap-token">
+					Bootstrap token
+				</label>
+				<input
+					id="bootstrap-token"
+					type="password"
+					autocomplete="off"
+					bind:value={bootstrapToken}
+					placeholder="RIVULETS_BOOTSTRAP_TOKEN"
+					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				/>
+				<p class="text-xs text-neutral-500">
+					This node is reachable over the network and requires the operator-configured
+					RIVULETS_BOOTSTRAP_TOKEN to set up its workspace.
+				</p>
+			{/if}
 			<button
 				type="submit"
 				disabled={loggingIn || !mnemonic.trim()}

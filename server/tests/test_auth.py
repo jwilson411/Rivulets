@@ -97,6 +97,28 @@ def test_bootstrap_over_0_0_0_0_succeeds_with_the_correct_bootstrap_token(
     assert response.json()["token"]
 
 
+def test_bootstrap_over_0_0_0_0_rejects_a_length_mismatched_token_with_401(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#291: hmac.compare_digest(supplied.encode(), configured.encode())
+    must not blow up into a 500 just because the two buffers are
+    different lengths -- an empty (or short) supplied token against a
+    configured one is exactly as run-of-the-mill wrong as any other
+    mismatch, and should fail closed the same documented 401 way."""
+    monkeypatch.setattr(
+        "rivulets.api.auth.get_settings",
+        lambda: _settings_bound_to(_ALL_INTERFACES, bootstrap_token=_TEST_BOOTSTRAP_TOKEN),
+    )
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"key": keys.generate_mnemonic(), "bootstrap_token": ""},
+    )
+
+    assert response.status_code == 401
+    assert "bootstrap" in response.json()["detail"].lower()
+
+
 def test_second_login_over_0_0_0_0_does_not_require_a_bootstrap_token(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
