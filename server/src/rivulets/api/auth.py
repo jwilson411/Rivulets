@@ -60,6 +60,7 @@ from rivulets.api.deps import (
 )
 from rivulets.config import get_settings
 from rivulets.db.models import Human, Workspace
+from rivulets.db.session import begin_immediate
 from rivulets.security import keys
 from rivulets.security.rate_limit import get_login_rate_limiter
 from rivulets.security.session import get_session_key_store
@@ -104,6 +105,21 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
 
     result = await db.execute(select(Workspace))
     workspace = result.scalar_one_or_none()
+
+    if workspace is None:
+        # #324: this request looks like it's about to bootstrap the
+        # workspace — but a concurrent first-login (two browser tabs on a
+        # fresh install) could be seeing the same `None` right now. BEGIN
+        # IMMEDIATE (db/session.py) takes SQLite's write lock up front, so
+        # a losing concurrent request blocks here instead of racing the
+        # INSERT below; once it acquires the lock it re-checks and finds
+        # the row the winner already committed, falling through to the
+        # verify branch instead of trying to create a second one. (The
+        # `singleton` UNIQUE constraint on Workspace, db/models.py, is the
+        # backstop if this ever races anyway.)
+        await begin_immediate(db)
+        result = await db.execute(select(Workspace))
+        workspace = result.scalar_one_or_none()
 
     if workspace is None:
         settings = get_settings()

@@ -1,14 +1,29 @@
+import asyncio
+import sqlite3
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import httpx
 import jwt as pyjwt
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.agentos.service import init_agentos, reset_agentos_for_testing
+from rivulets.app import create_app
 from rivulets.config import Settings, get_settings
+from rivulets.db.session import get_engine, init_db, make_engine, override_engine
 from rivulets.security import keys
-from rivulets.security.rate_limit import get_login_rate_limiter
+from rivulets.security.rate_limit import (
+    get_invite_accept_rate_limiter,
+    get_login_rate_limiter,
+    get_webhook_trigger_rate_limiter,
+)
 from rivulets.security.session import get_session_key_store
+from rivulets.security.webhook_signing import get_webhook_replay_guard
 from rivulets.sync import get_sync_engine
+from rivulets.sync.engine import SyncEngine, reset_sync_engine_for_testing
 
 _ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- exercising #318's gate, never actually bound
 _TEST_BOOTSTRAP_TOKEN = "correct-token"  # noqa: S105 -- test fixture value, not a real secret
@@ -392,3 +407,115 @@ def test_stream_ticket_cannot_be_used_as_a_bearer_session_token(
 
     response = client.get("/api/v1/channels", headers={"Authorization": f"Bearer {ticket}"})
     assert response.status_code == 401
+
+
+async def _noop_async(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+@pytest.fixture
+async def disk_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator[TestClient]:
+    """Same shape as conftest.py's `client` fixture, but wired to a real
+    on-disk SQLite file instead of the in-memory/StaticPool engine that
+    fixture hardcodes -- StaticPool hands every session in the process the
+    *same* literal sqlite3 connection, so two concurrent requests never
+    actually contend for SQLite's file lock there (see
+    test_concurrent_write_lock.py's module docstring, which needs this same
+    real-file setup for the identical reason)."""
+    monkeypatch.setattr(SyncEngine, "start", _noop_async)
+    monkeypatch.setattr(SyncEngine, "stop", _noop_async)
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.app.run_startup_backup_checks", _noop_async)
+    monkeypatch.setattr("rivulets.app.run_migrations", init_db)
+    monkeypatch.setattr("rivulets.app.run_scheduler_loop", _noop_async)
+    monkeypatch.setattr("rivulets.app.run_retention_loop", _noop_async)
+
+    settings = Settings(workspace_dir=tmp_path / "workspace")
+    settings.ensure_workspace_dirs()
+    engine = make_engine(settings)
+    override_engine(engine)
+    await init_db(engine)
+    reset_agentos_for_testing()
+    init_agentos()
+    get_login_rate_limiter().reset_for_testing()
+    get_invite_accept_rate_limiter().reset_for_testing()
+    get_webhook_trigger_rate_limiter().reset_for_testing()
+    get_webhook_replay_guard().reset_for_testing()
+
+    app = create_app()
+    with TestClient(app) as test_client:
+        yield test_client
+
+    get_session_key_store().clear()
+    await get_engine().dispose()
+    override_engine(None)
+    reset_agentos_for_testing()
+    reset_sync_engine_for_testing()
+    get_login_rate_limiter().reset_for_testing()
+    get_invite_accept_rate_limiter().reset_for_testing()
+    get_webhook_trigger_rate_limiter().reset_for_testing()
+    get_webhook_replay_guard().reset_for_testing()
+
+
+def test_two_overlapping_first_logins_produce_one_workspace_row(
+    disk_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#324: two concurrent first logins against an empty DB (two browser
+    tabs on a fresh install, or two clients racing an unauthenticated
+    bootstrap window) used to both see no `Workspace` row via
+    select(Workspace).scalar_one_or_none() and both insert one -- bricking
+    every later call to that same pattern (this route, and
+    api/invites.py's accept_invite) with an unhandled MultipleResultsFound.
+    login()'s begin_immediate serializes the two now, and Workspace.
+    singleton's UNIQUE constraint (db/models.py) is the backstop if it ever
+    races anyway -- either way, exactly one workspace row should exist
+    afterward, and neither request should ever see a raw 500.
+
+    Without an artificial delay, one coroutine's whole select-then-insert
+    (including the synchronous bcrypt hash in between, which blocks the
+    single shared event loop until it finishes) sails through to
+    completion before the other's `select(Workspace)` even runs, so the
+    two requests never land on the same `None` read to prove anything --
+    same reasoning as test_concurrent_write_lock.py's mocked LLM delay.
+    Delaying every commit (rather than the read) is what reliably forces
+    this: it stalls the winner's `await db.commit()` open long enough for
+    the loop to hand control to the second request's own read, which lands
+    on `None` too before the winner's delayed commit finally lands.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    _original_commit = AsyncSession.commit
+
+    async def _slow_commit(self: AsyncSession) -> object:
+        await asyncio.sleep(0.05)
+        return await _original_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", _slow_commit)
+
+    # Same mnemonic from both threads -- two tabs of the same fresh install
+    # entering the one recovery phrase the human was just given, not two
+    # different workspaces racing each other.
+    mnemonic = keys.generate_mnemonic()
+
+    def _post_login() -> httpx.Response:
+        return disk_client.post("/api/v1/auth/login", json={"key": mnemonic})
+
+    # Two real, concurrently-overlapping requests against the same on-disk
+    # database file -- see test_concurrent_write_lock.py's identical
+    # ThreadPoolExecutor pattern and its comment on why this needs real
+    # separate threads rather than sequential calls from one.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_post_login) for _ in range(2)]
+        responses = [f.result(timeout=10) for f in futures]
+
+    for response in responses:
+        assert response.status_code in (200, 409), response.text
+    assert sum(1 for r in responses if r.status_code == 200) >= 1
+
+    db_path = tmp_path / "workspace" / "rivulets.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        row_count = conn.execute("SELECT COUNT(*) FROM workspace").fetchone()[0]
+    finally:
+        conn.close()
+    assert row_count == 1

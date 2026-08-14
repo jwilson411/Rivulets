@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse, Response
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, MultipleResultsFound, OperationalError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from rivulets.agentos import init_agentos, sync_agents
@@ -188,6 +188,31 @@ async def _operational_error_handler(_request: Request, _exc: Exception) -> JSON
     )
 
 
+async def _multiple_results_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    # #324 safety net: a workspace bricked before Workspace.singleton's
+    # UNIQUE constraint existed (two `workspace` rows already committed,
+    # from two concurrent first-logins racing the old select-then-insert)
+    # makes every select(Workspace).scalar_one_or_none() call here (login,
+    # invite accept) raise this instead of returning cleanly. Unlike
+    # IntegrityError above, retrying this request can't help — the
+    # duplicate row already exists — so this is a 500 with a message an
+    # operator can act on, not a 409, replacing the raw SQLAlchemy
+    # traceback that would otherwise reach the client.
+    return JSONResponse(
+        {
+            "error": {
+                "code": "workspace_corrupted",
+                "message": (
+                    "This workspace has more than one workspace record, which should never "
+                    "happen. Restore from a backup or contact support — retrying this request "
+                    "will not fix it."
+                ),
+            }
+        },
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
+
+
 def create_app() -> FastAPI:
     # docs_url/redoc_url/openapi_url off: this API has no external
     # consumers to document for, and leaving Swagger/ReDoc/the schema
@@ -206,6 +231,7 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     app.add_exception_handler(IntegrityError, _integrity_error_handler)
     app.add_exception_handler(OperationalError, _operational_error_handler)
+    app.add_exception_handler(MultipleResultsFound, _multiple_results_handler)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_add_security_headers)
     # AgentOS is a Python-level agent registry here, not an HTTP mount —
     # see agentos/service.py's module docstring for why.
