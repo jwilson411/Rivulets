@@ -137,8 +137,10 @@ async def _run_agent_case(
     #320: also runs dispatch/budgets.py's check before calling
     `run_agent` -- an eval-suite agent case is a spend path same as any
     other agent invocation, and #246 only wired the check into channel
-    dispatch. No team_id: an eval suite isn't scoped to a team, so only
-    agent-scope and workspace-scope caps apply. A BudgetCapBlockedError
+    dispatch. No team_id to pass (an eval suite isn't scoped to a team),
+    but team-scope caps on any team the agent belongs to still apply:
+    _applicable_caps resolves them from the agent's own TeamAgent
+    memberships (#354). A BudgetCapBlockedError
     propagates to `_run_case`'s existing `except Exception` handling,
     which records it as this case's own 'error' result rather than
     aborting the whole suite -- same as any other case-execution failure.

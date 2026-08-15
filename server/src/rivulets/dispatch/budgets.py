@@ -19,7 +19,7 @@ against its own locally-computed spend).
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.base import utcnow_iso
@@ -125,7 +125,16 @@ async def _applicable_caps(
     spend to (knowledge_base ingest's workspace-only check below) -- same
     "can't be more specific than workspace" shape as AgentRun.agent_id's
     own null case, just skipping the agent-scope query entirely rather
-    than querying for a cap that could never match."""
+    than querying for a cap that could never match.
+
+    Team-scope caps match by the agent's own TeamAgent memberships as
+    well as the caller's explicit `team_id` (#354): a team cap's spend
+    (compute_spend) already aggregates every member agent's runs
+    regardless of which path invoked them, so its enforcement can't
+    depend on the invocation path happening to know a team -- before
+    this, an agent under a tripped team hard_stop was blocked in channel
+    dispatch (which passes channel.team_id) but ran freely from a
+    workflow node or eval case (which have no team context to pass)."""
     caps: list[BudgetCap] = []
     if agent is not None:
         caps.extend(
@@ -141,14 +150,21 @@ async def _applicable_caps(
             .scalars()
             .all()
         )
+    team_conditions: list[ColumnElement[bool]] = []
     if team_id is not None:
+        team_conditions.append(BudgetCap.team_id == team_id)
+    if agent is not None:
+        team_conditions.append(
+            BudgetCap.team_id.in_(select(TeamAgent.team_id).where(TeamAgent.agent_id == agent.id))
+        )
+    if team_conditions:
         caps.extend(
             (
                 await db.execute(
                     select(BudgetCap).where(
                         BudgetCap.enabled.is_(True),
                         BudgetCap.scope_type == "team",
-                        BudgetCap.team_id == team_id,
+                        or_(*team_conditions),
                     )
                 )
             )
@@ -172,8 +188,9 @@ async def _applicable_caps(
 async def check_budget_caps(
     db: AsyncSession, agent: Agent | None, team_id: str | None
 ) -> tuple[list[BudgetAlert], BudgetAlert | None]:
-    """Checks agent-scope, then team-scope (if team_id given), then
-    workspace-scope caps, most specific first. Returns (alerts, blocking):
+    """Checks agent-scope, then team-scope (if team_id given, or any team
+    the agent belongs to -- see _applicable_caps), then workspace-scope
+    caps, most specific first. Returns (alerts, blocking):
     `alerts` is every breached 'alert'-action cap not yet alerted this
     period (caller posts a system_alert for each, non-blocking); `blocking`
     is the first 'hard_stop' cap not currently overridden for this period

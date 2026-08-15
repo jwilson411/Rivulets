@@ -307,6 +307,164 @@ async def test_agent_node_is_blocked_by_a_tripped_hard_stop_budget_cap(
     assert "blocked" in (run.error_message or "").lower()
 
 
+async def test_agent_node_is_blocked_by_a_team_cap_on_a_team_containing_the_agent(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#354: a workflow has no team context to pass to the budget check,
+    but a team-scope hard_stop on a team the agent belongs to must still
+    block it -- before this, the same agent was blocked in channel
+    dispatch (which passes channel.team_id) yet ran freely from a
+    workflow node."""
+    from rivulets.db.models import Agent, AgentRun, BudgetCap, Team, TeamAgent
+
+    agent = Agent(
+        name="Spendy",
+        description="An agent whose team's prior spend already breaches its team budget cap.",
+        instructions="Say hi.",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    team = Team(name="Capped Team")
+    db_session.add_all([agent, team])
+    await db_session.flush()
+    db_session.add(TeamAgent(team_id=team.id, agent_id=agent.id))
+    db_session.add(
+        BudgetCap(
+            scope_type="team", team_id=team.id, period="day", limit_usd=0.5, action="hard_stop"
+        )
+    )
+    # Already over the team's $0.50 cap before this run ever starts.
+    db_session.add(AgentRun(agent_id=agent.id, model=agent.model, status="completed", cost_usd=1.0))
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="team-capped-flow")
+    node = WorkflowNode(workflow_id=workflow.id, name="greet", node_type="agent", agent_id=agent.id)
+    db_session.add(node)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id)
+    )
+    await db_session.commit()
+
+    calls: list[str] = []
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        calls.append("called")
+        return SimpleNamespace(get_content_as_string=lambda: "Hello there!")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "hi", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert calls == []  # the model was never invoked
+    assert run.status == "failed"
+    assert "budget cap" in (run.error_message or "").lower()
+
+
+async def _make_summarize_workflow(db_session: AsyncSession) -> tuple[Workflow, Rivulet]:
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="summarize-flow")
+    node = WorkflowNode(workflow_id=workflow.id, name="tldr", node_type="summarize")
+    db_session.add(node)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=node.id)
+    )
+    await db_session.commit()
+    return workflow, rivulet
+
+
+async def test_summarize_node_is_blocked_by_a_tripped_workspace_hard_stop_cap(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#354 (leftover of #320): a summarize node's LLM call is billed
+    spend with no Agent row behind it -- a tripped workspace hard_stop
+    must refuse it before the model is ever invoked, instead of failing
+    open the way it did before the check existed."""
+    from rivulets.db.models import AgentRun, BudgetCap
+
+    db_session.add(
+        BudgetCap(scope_type="workspace", period="day", limit_usd=0.5, action="hard_stop")
+    )
+    # Already over the $0.50 cap before this run ever starts.
+    db_session.add(
+        AgentRun(model="anthropic:claude-3-5-haiku-latest", status="completed", cost_usd=1.0)
+    )
+    workflow, rivulet = await _make_summarize_workflow(db_session)
+
+    calls: list[str] = []
+
+    async def fake_pick(*_args: object, **_kwargs: object) -> str:
+        return "anthropic:claude-3-5-haiku-latest"
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def counting_summarizer(*_args: object, **_kwargs: object) -> Any:
+        calls.append("called")
+        return SimpleNamespace(content="a summary")
+
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.pick_dispatcher_model", fake_pick)
+    monkeypatch.setattr("rivulets.workflows.nodes.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.workflows.nodes._run_summarizer", counting_summarizer)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "long text", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert calls == []  # the model was never invoked
+    assert run.status == "failed"
+    assert "budget cap" in (run.error_message or "").lower()
+    assert "blocked" in (run.error_message or "").lower()
+
+
+async def test_summarize_node_records_its_spend_as_an_agent_run(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#354: summarize spend must count toward budget-cap windows and the
+    usage dashboard -- recorded as an agent_id=None,
+    source='summarize_node' row via the same record_agent_run choke point
+    as every other billed call."""
+    from rivulets.db.models import AgentRun
+
+    workflow, rivulet = await _make_summarize_workflow(db_session)
+
+    async def fake_pick(*_args: object, **_kwargs: object) -> str:
+        return "anthropic:claude-3-5-haiku-latest"
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def fake_summarizer(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            content="a summary",
+            metrics=SimpleNamespace(input_tokens=100, output_tokens=50, total_tokens=150),
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.pick_dispatcher_model", fake_pick)
+    monkeypatch.setattr("rivulets.workflows.nodes.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.workflows.nodes._run_summarizer", fake_summarizer)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "long text", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    result = await db_session.execute(
+        select(Message).where(Message.rivulet_id == rivulet.id, Message.content_type == "text")
+    )
+    assert result.scalars().one().content == "a summary"
+
+    agent_run = (await db_session.scalars(select(AgentRun))).one()
+    assert agent_run.source == "summarize_node"
+    assert agent_run.agent_id is None
+    assert agent_run.model == "anthropic:claude-3-5-haiku-latest"
+    assert agent_run.total_tokens == 150
+    # Priced model -- this spend lands in spend_usd, so it can trip a cap.
+    assert agent_run.cost_usd is not None and agent_run.cost_usd > 0
+
+
 async def test_node_retries_on_failure_then_succeeds(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

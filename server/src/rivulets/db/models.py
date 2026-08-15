@@ -293,16 +293,20 @@ class AgentRun(Base):
     dashboard and budget caps (#31's dispatcher hit-rate tracking can use
     the same rows later).
 
-    `agent_id` is nullable for exactly one case: llm_fallback.py's routing
-    call runs before any agent has been matched, evaluating a whole team's
-    roster at once, so there's no single agent to attribute it to. Every
-    other AgentRun (including complexity_classifier.py's dispatcher_call
-    rows, which classify a specific agent's next reply) keeps a real
-    agent_id. A null-agent_id row only shows up in workspace-scope budget
-    caps (dispatch/budgets.py's compute_spend) and workspace usage totals
-    (api/usage.py) — agent/team-scope caps can't attribute it to anyone
-    more specific, which is an accepted v1 gap the same as BudgetCap's
-    documented no-cross-peer-aggregation limitation.
+    `agent_id` is nullable for the billed calls no single agent can be
+    attributed to: llm_fallback.py's routing call (runs before any agent
+    has been matched, evaluating a whole team's roster at once), KB
+    ingestion's embedding calls (#320, source='embedding'), workflow
+    summarize nodes (source='summarize_node') and eval LLM-judge calls
+    (source='eval_judge') (#354 — both are ad-hoc cheap-model calls with
+    no Agent row behind them). Every other AgentRun (including
+    complexity_classifier.py's dispatcher_call rows, which classify a
+    specific agent's next reply) keeps a real agent_id. A null-agent_id
+    row only shows up in workspace-scope budget caps (dispatch/budgets.py's
+    compute_spend) and workspace usage totals (api/usage.py) — agent/
+    team-scope caps can't attribute it to anyone more specific, which is
+    an accepted v1 gap the same as BudgetCap's documented
+    no-cross-peer-aggregation limitation.
     """
 
     __tablename__ = "agent_run"
@@ -312,7 +316,8 @@ class AgentRun(Base):
     agent_id: Mapped[str | None] = mapped_column(
         ForeignKey("agent.id", ondelete="CASCADE"), default=None
     )
-    source: Mapped[str] = mapped_column(default="agent_run")  # 'agent_run' | 'dispatcher_call'
+    # 'agent_run' | 'dispatcher_call' | 'embedding' | 'summarize_node' | 'eval_judge'
+    source: Mapped[str] = mapped_column(default="agent_run")
     model: Mapped[str]  # 'provider:model_name' — the concrete model that actually ran
     # Set only when a fallback chain (#103) served this run instead of the
     # originally-requested model -- `model` above then holds the model
