@@ -44,9 +44,7 @@ async def set_agent_tools(
     actually landed, rather than this function publishing rows that
     might still get rolled back by something the caller does next."""
     old_ids = set(
-        (
-            await db.scalars(select(AgentTool.tool_id).where(AgentTool.agent_id == agent_id))
-        ).all()
+        (await db.scalars(select(AgentTool.tool_id).where(AgentTool.agent_id == agent_id))).all()
     )
     await db.execute(delete(AgentTool).where(AgentTool.agent_id == agent_id))
     new_ids = set(dict.fromkeys(tool_ids))
@@ -74,9 +72,7 @@ async def set_agent_teams(
     key is the (team_id, agent_id) pair), same no-commit/returns-the-diff
     contract."""
     old_ids = set(
-        (
-            await db.scalars(select(TeamAgent.team_id).where(TeamAgent.agent_id == agent_id))
-        ).all()
+        (await db.scalars(select(TeamAgent.team_id).where(TeamAgent.agent_id == agent_id))).all()
     )
     await db.execute(delete(TeamAgent).where(TeamAgent.agent_id == agent_id))
     new_ids = set(dict.fromkeys(team_ids))

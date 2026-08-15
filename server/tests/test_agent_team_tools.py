@@ -1174,9 +1174,10 @@ def test_update_agent_tool_ids_with_custom_tool_is_refused(
         _tool_execution("update_agent", {"agent": target["name"], "tool_ids": [custom_tool["id"]]}),
     )
     assert "requires a live owner session" in messages[2]["content"]
-    assert client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).json()[
-        "instructions"
-    ] == "Do nothing."
+    assert (
+        client.get(f"/api/v1/agents/{target['id']}", headers=auth_headers).json()["instructions"]
+        == "Do nothing."
+    )
 
 
 async def test_update_agent_tool_ids_with_mcp_tool_is_refused(

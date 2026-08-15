@@ -190,9 +190,7 @@ def test_update_webhook_is_forbidden_for_an_invite_grant_session(
     )
     assert response.status_code == 403
 
-    unchanged = client.get(
-        f"/api/v1/workflows/{workflow_id}/webhooks", headers=auth_headers
-    ).json()
+    unchanged = client.get(f"/api/v1/workflows/{workflow_id}/webhooks", headers=auth_headers).json()
     assert unchanged[0]["enabled"] is True
 
 

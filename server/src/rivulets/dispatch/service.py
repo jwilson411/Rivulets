@@ -3263,9 +3263,7 @@ async def _handle_update_team_trigger(
         # IntegrityError on commit.
         deduped = list({member.id: member for member in resolved_agents}.values())
         old_member_ids = set(
-            (
-                await db.scalars(select(TeamAgent.agent_id).where(TeamAgent.team_id == team.id))
-            ).all()
+            (await db.scalars(select(TeamAgent.agent_id).where(TeamAgent.team_id == team.id))).all()
         )
         await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team.id))
         for position, member in enumerate(deduped):

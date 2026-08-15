@@ -2115,13 +2115,17 @@ async def test_resolve_conflict_keep_local_bumps_clock_and_republishes(
         # What an independent second node converges to on detecting the
         # identical conflict itself -- both sides merge to the same clock.
         rows = (
-            await db.execute(
-                select(VectorClockTracker).where(
-                    VectorClockTracker.entity_type == "channel",
-                    VectorClockTracker.entity_id == channel_id,
+            (
+                await db.execute(
+                    select(VectorClockTracker).where(
+                        VectorClockTracker.entity_type == "channel",
+                        VectorClockTracker.entity_id == channel_id,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         second_node_clock_before = {row.node_id: row.clock for row in rows}
     assert second_node_clock_before == {"node-a": 1, "node-b": 1}
 
