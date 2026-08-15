@@ -33,6 +33,28 @@
 	let bootstrapToken = $state('');
 	let needsBootstrapToken = $state(false);
 
+	// #350: an invite-redeemed browser holds a persisted resume credential
+	// and no mnemonic — after a sign-out or an expired session, this button
+	// is its way back in. auth.resumeDisplayName goes null (and the offer
+	// disappears) if the server rejects the credential as dead.
+	let resumeError = $state<string | null>(null);
+	let resumingInvite = $state(false);
+
+	async function handleResume() {
+		resumeError = null;
+		resumingInvite = true;
+		try {
+			if (!(await auth.resumeInviteSession())) {
+				resumeError =
+					'Your invite access is no longer valid — ask the workspace owner for a new invite link.';
+			}
+		} catch (err) {
+			resumeError = err instanceof Error ? err.message : 'Could not sign you back in';
+		} finally {
+			resumingInvite = false;
+		}
+	}
+
 	async function performLogin(phrase: string, phrasePassphrase: string): Promise<boolean> {
 		loginError = null;
 		loggingIn = true;
@@ -221,6 +243,26 @@
 			>
 				Session expired — sign in again.
 			</p>
+		{/if}
+		{#if auth.resumeDisplayName !== null || resumeError}
+			<div class="flex flex-col gap-2 rounded-md border border-ink/15 p-4 dark:border-white/15">
+				<p class="text-sm text-neutral-600 dark:text-neutral-400">
+					You joined this workspace through an invite — no recovery phrase needed.
+				</p>
+				{#if auth.resumeDisplayName !== null}
+					<button
+						type="button"
+						disabled={resumingInvite}
+						onclick={handleResume}
+						class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+					>
+						{resumingInvite ? 'Signing in…' : `Continue as ${auth.resumeDisplayName}`}
+					</button>
+				{/if}
+				{#if resumeError}
+					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{resumeError}</p>
+				{/if}
+			</div>
 		{/if}
 		<form onsubmit={handleLogin} class="flex flex-col gap-3">
 			<label class="text-sm font-medium text-ink dark:text-ink-dark" for="mnemonic">

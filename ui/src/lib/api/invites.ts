@@ -1,11 +1,12 @@
 // Workspace invites client (#15). accept() is the one call here that
 // doesn't carry a bearer token -- the invite secret itself is the
 // credential (see api/invites.py's module docstring) -- and on success
-// hands the resulting session straight to auth.applySession, the same
-// entry point POST /auth/identity uses (#14).
+// hands the resulting session to auth.rememberInviteSession, which both
+// applies it (same as POST /auth/identity's applySession path, #14) and
+// persists its resume credential for re-entry after a refresh (#350).
 
 import { api } from './client';
-import { auth, type SessionInfo } from './auth.svelte';
+import { auth, type InviteSessionInfo } from './auth.svelte';
 
 export interface Invite {
 	id: string;
@@ -41,10 +42,13 @@ export const invites = {
 		),
 	revoke: (id: string) => api.delete<void>(`/invites/${id}`, auth.token ?? undefined),
 	async accept(inviteToken: string, displayName?: string): Promise<void> {
-		const response = await api.post<SessionInfo>('/invites/accept', {
+		const response = await api.post<InviteSessionInfo>('/invites/accept', {
 			invite_token: inviteToken,
 			display_name: displayName
 		});
-		auth.applySession(response);
+		// rememberInviteSession, not bare applySession (#350): the response's
+		// resume_token is this browser's only way back in after a refresh or
+		// sign-out, since a spent single-use invite can't be re-redeemed.
+		auth.rememberInviteSession(response);
 	}
 };

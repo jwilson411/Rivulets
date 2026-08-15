@@ -11,10 +11,19 @@ import LoginForm from './LoginForm.svelte';
 import { auth } from '$lib/api/auth.svelte';
 import { ApiError } from '$lib/api/client';
 
+// #350: resumeDisplayName is behind a getter so individual tests can flip
+// the stored-invite-credential state on and off (same hoisted-state shape
+// as rootLayout.svelte.test.ts's auth mock).
+const authState = vi.hoisted(() => ({ resumeDisplayName: null as string | null }));
+
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		login: vi.fn(),
-		logout: vi.fn()
+		logout: vi.fn(),
+		resumeInviteSession: vi.fn(),
+		get resumeDisplayName() {
+			return authState.resumeDisplayName;
+		}
 	}
 }));
 
@@ -41,6 +50,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.resumeDisplayName = null;
 });
 
 describe('LoginForm.svelte', () => {
@@ -197,6 +207,75 @@ describe('LoginForm.svelte', () => {
 				.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
 				.toBeInTheDocument();
 			expect(auth.login).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('invite session resume (#350)', () => {
+		it('offers no invite re-entry when this browser holds no resume credential', async () => {
+			render(LoginForm);
+
+			await expect
+				.element(page.getByText('You joined this workspace through an invite', { exact: false }))
+				.not.toBeInTheDocument();
+		});
+
+		it('offers "Continue as …" when a resume credential is stored, and resumes on click', async () => {
+			authState.resumeDisplayName = 'Ada';
+			vi.mocked(auth.resumeInviteSession).mockResolvedValueOnce(true);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Continue as Ada' }).click();
+
+			expect(auth.resumeInviteSession).toHaveBeenCalledOnce();
+		});
+
+		it('explains when the stored credential has been rejected as no longer valid', async () => {
+			authState.resumeDisplayName = 'Ada';
+			// resumeInviteSession resolving false means the server 401/403'd
+			// and the credential was discarded (auth.svelte.ts) — mirror the
+			// discard here so the button disappears along with it.
+			vi.mocked(auth.resumeInviteSession).mockImplementationOnce(async () => {
+				authState.resumeDisplayName = null;
+				return false;
+			});
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Continue as Ada' }).click();
+
+			await expect
+				.element(page.getByText('Your invite access is no longer valid', { exact: false }))
+				.toBeInTheDocument();
+			await expect
+				.element(page.getByRole('button', { name: 'Continue as Ada' }))
+				.not.toBeInTheDocument();
+		});
+
+		it('shows a transient failure without dropping the button, so the user can retry', async () => {
+			authState.resumeDisplayName = 'Ada';
+			vi.mocked(auth.resumeInviteSession).mockRejectedValueOnce(
+				new ApiError(503, "This workspace isn't currently unlocked on this node")
+			);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Continue as Ada' }).click();
+
+			await expect
+				.element(page.getByText("isn't currently unlocked", { exact: false }))
+				.toBeInTheDocument();
+			await expect
+				.element(page.getByRole('button', { name: 'Continue as Ada' }))
+				.toBeInTheDocument();
+		});
+
+		it('still lets an owner sign in with a mnemonic alongside the invite offer', async () => {
+			authState.resumeDisplayName = 'Ada';
+			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
 		});
 	});
 

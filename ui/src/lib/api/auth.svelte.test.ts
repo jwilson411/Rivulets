@@ -7,9 +7,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { auth } from './auth.svelte';
 
+const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
+
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
+	localStorage.removeItem(RESUME_STORAGE_KEY);
 });
 
 describe('auth', () => {
@@ -283,6 +286,129 @@ describe('auth', () => {
 		await expect(auth.login('wrong words')).rejects.toThrow('bad key');
 
 		expect(auth.sessionExpired).toBe(false);
+	});
+
+	it('rememberInviteSession() applies the session and persists the resume credential (#350)', async () => {
+		auth.rememberInviteSession({
+			token: 'tok-invite',
+			expires_at: 'x',
+			human_id: 'human-9',
+			display_name: 'Ada',
+			grant: 'invite',
+			resume_token: 'sess-1.resume-secret'
+		});
+
+		expect(auth.token).toBe('tok-invite');
+		expect(auth.grant).toBe('invite');
+		expect(auth.resumeDisplayName).toBe('Ada');
+		expect(JSON.parse(localStorage.getItem(RESUME_STORAGE_KEY)!)).toEqual({
+			token: 'sess-1.resume-secret',
+			displayName: 'Ada'
+		});
+	});
+
+	it('resumeInviteSession() exchanges the stored credential for a fresh session', async () => {
+		localStorage.setItem(
+			RESUME_STORAGE_KEY,
+			JSON.stringify({ token: 'sess-1.resume-secret', displayName: 'Ada' })
+		);
+		const fetchMock = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					token: 'tok-resumed',
+					expires_at: 'x',
+					human_id: 'human-9',
+					display_name: 'Ada',
+					grant: 'invite',
+					resume_token: 'sess-1.resume-secret'
+				}),
+				{ status: 200 }
+			)
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(auth.resumeInviteSession()).resolves.toBe(true);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/invites/resume');
+		expect(init.body).toBe(JSON.stringify({ resume_token: 'sess-1.resume-secret' }));
+		expect(auth.token).toBe('tok-resumed');
+		expect(auth.grant).toBe('invite');
+		expect(auth.humanId).toBe('human-9');
+	});
+
+	it('resumeInviteSession() resolves false without a request when nothing is stored', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(auth.resumeInviteSession()).resolves.toBe(false);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('resumeInviteSession() discards a credential the server rejects as dead (403)', async () => {
+		auth.rememberInviteSession({
+			token: 'tok-invite',
+			expires_at: 'x',
+			human_id: 'human-9',
+			display_name: 'Ada',
+			grant: 'invite',
+			resume_token: 'sess-1.resume-secret'
+		});
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response('{"detail":"This invite has been revoked"}', { status: 403 })
+				)
+		);
+
+		await expect(auth.resumeInviteSession()).resolves.toBe(false);
+
+		expect(localStorage.getItem(RESUME_STORAGE_KEY)).toBeNull();
+		expect(auth.resumeDisplayName).toBeNull();
+	});
+
+	it('resumeInviteSession() keeps the credential and rethrows on a transient failure (503)', async () => {
+		localStorage.setItem(
+			RESUME_STORAGE_KEY,
+			JSON.stringify({ token: 'sess-1.resume-secret', displayName: 'Ada' })
+		);
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response('{"detail":"This workspace is not unlocked"}', { status: 503 })
+				)
+		);
+
+		await expect(auth.resumeInviteSession()).rejects.toThrow('not unlocked');
+
+		expect(JSON.parse(localStorage.getItem(RESUME_STORAGE_KEY)!).token).toBe(
+			'sess-1.resume-secret'
+		);
+	});
+
+	it('logout() leaves the persisted resume credential in place (#350)', async () => {
+		auth.rememberInviteSession({
+			token: 'tok-invite',
+			expires_at: 'x',
+			human_id: 'human-9',
+			display_name: 'Ada',
+			grant: 'invite',
+			resume_token: 'sess-1.resume-secret'
+		});
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+		await auth.logout();
+
+		expect(auth.token).toBeNull();
+		expect(auth.resumeDisplayName).toBe('Ada');
+		expect(JSON.parse(localStorage.getItem(RESUME_STORAGE_KEY)!).token).toBe(
+			'sess-1.resume-secret'
+		);
 	});
 
 	it('login() clears a stale sessionExpired flag on success', async () => {

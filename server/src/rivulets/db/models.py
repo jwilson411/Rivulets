@@ -89,6 +89,39 @@ class Invite(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
 
+class InviteSession(Base):
+    """A persistent re-entry credential for an invite-redeemed human (#350).
+
+    Accepting an invite consumes a use and, until this table existed, that
+    was the invited human's *only* way in: the session JWT lives in browser
+    memory (NFR-3.4), so a refresh, new tab, or sign-out dumped them on the
+    mnemonic-only LoginForm with a spent single-use invite. Each accept now
+    also mints one of these — a per-redemption bearer secret the invited
+    browser holds onto and exchanges at POST /invites/resume for a fresh
+    grant="invite" JWT bound to the same Human, no mnemonic involved.
+
+    Same secret discipline as Invite above: only the bcrypt hash is stored,
+    the raw secret is returned exactly once, and the table is never synced
+    (excluded by omission from sync/apply.py's spec table) — like an invite,
+    it's only redeemable against the node that issued it. `invite_id` is the
+    revocation link, deliberately checked on every resume: the owner
+    revoking an invite (DELETE /invites/{id}) also cuts off re-entry for
+    everyone who redeemed it, which keeps "revoke" meaning what an owner
+    expects even after the invite's uses are spent. `expires_at` is this
+    credential's own sliding idle window (bumped on each successful
+    resume), independent of the parent invite's expiry — that expiry gates
+    *new* redemptions, not re-entry by someone already in."""
+
+    __tablename__ = "invite_session"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    secret_hash: Mapped[str]
+    invite_id: Mapped[str]
+    human_id: Mapped[str]
+    expires_at: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class ProviderConfig(Base):
     """LLM provider credentials. NOT synced between nodes (FR-1.5)."""
 
