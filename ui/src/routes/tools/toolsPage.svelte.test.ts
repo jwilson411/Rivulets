@@ -110,6 +110,29 @@ describe('tools/+page.svelte', () => {
 			.not.toBeInTheDocument();
 	});
 
+	it('hides the create form and Delete button for a non-owner (invite-grant) session (#351)', async () => {
+		// POST and DELETE /tools are OwnerGrant-only server-side, so the
+		// controls that could only 403 aren't offered at all.
+		authState.grant = 'invite';
+		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
+
+		render(ToolsPage);
+
+		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await expect.element(page.getByText('New custom tool')).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Create tool' })).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+	});
+
+	it('shows a non-owner empty state without the "add one above" hint (#351)', async () => {
+		authState.grant = 'invite';
+		vi.mocked(tools.list).mockResolvedValue([]);
+
+		render(ToolsPage);
+
+		await expect.element(page.getByText('No tools yet.')).toBeInTheDocument();
+	});
+
 	it('creates a tool in advanced mode without a prompt field', async () => {
 		vi.mocked(tools.list).mockResolvedValueOnce([]).mockResolvedValueOnce([customTool]);
 		vi.mocked(tools.listVersions).mockResolvedValue([]);

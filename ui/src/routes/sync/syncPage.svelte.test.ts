@@ -9,6 +9,19 @@ import SyncPage from './+page.svelte';
 import { sync, type CoordinatorStatus, type SyncStatus, type SyncConflict } from '$lib/api/sync';
 import { ApiError } from '$lib/api/client';
 
+// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
+// follows -- defaults to 'owner' so the existing (pre-#351) tests below
+// don't have to know about grants at all.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
 vi.mock('$lib/api/sync', () => ({
 	sync: {
 		status: vi.fn(),
@@ -75,9 +88,24 @@ const conflict: SyncConflict = {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('sync/+page.svelte', () => {
+	it('shows an owner-only empty state to a non-owner session without calling the API (#351)', async () => {
+		authState.grant = 'invite';
+
+		render(SyncPage);
+
+		await expect
+			.element(page.getByText('only available to the workspace owner', { exact: false }))
+			.toBeInTheDocument();
+		expect(sync.status).not.toHaveBeenCalled();
+		expect(sync.coordinator).not.toHaveBeenCalled();
+		expect(sync.conflicts).not.toHaveBeenCalled();
+		expect(sync.getCapabilities).not.toHaveBeenCalled();
+	});
+
 	it('shows running status and connected peers', async () => {
 		vi.mocked(sync.status).mockResolvedValue(runningStatus);
 		vi.mocked(sync.conflicts).mockResolvedValue([]);
