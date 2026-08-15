@@ -1034,6 +1034,95 @@ async def test_handle_incoming_agent_change_resyncs_agentos_registry(
     assert len(calls) == 1
 
 
+async def test_handle_incoming_tool_change_resyncs_agentos_registry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#362 (P1 leftover of #317): custom tool source is loaded at agent
+    *build* time (agentos/tool_resolution.py), so a synced source edit
+    that doesn't trigger sync_agents() leaves every already-registered
+    agent on this node executing the old function from memory. Same
+    call-counting shape as the agent test above."""
+    calls: list[AsyncSession] = []
+
+    async def fake_sync_agents(db: AsyncSession) -> None:
+        calls.append(db)
+
+    monkeypatch.setattr("rivulets.sync.apply.sync_agents", fake_sync_agents)
+
+    await handle_incoming_state_change(
+        "tool",
+        "tool-remote-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "name": "add_numbers",
+            "description": "Adds two numbers.",
+            "source_code": "def add_numbers(a, b):\n    return a + b\n",
+        },
+    )
+
+    assert len(calls) == 1
+
+
+async def test_handle_incoming_tool_tombstone_resyncs_agentos_registry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#362's delete half of the same gap: a tool tombstone used to remove
+    only the DB row, leaving the agent's cached in-memory function (and
+    the .py on disk -- covered by the apply_remote_delete test below)."""
+    calls: list[AsyncSession] = []
+
+    async def fake_sync_agents(db: AsyncSession) -> None:
+        calls.append(db)
+
+    monkeypatch.setattr("rivulets.sync.apply.sync_agents", fake_sync_agents)
+
+    db_session.add(
+        Tool(
+            id="tool-1",
+            name="add_numbers",
+            description="Doomed.",
+            tool_type="custom",
+            source_path=str(get_settings().tools_dir / "tool-1.py"),
+        )
+    )
+    await db_session.commit()
+
+    await handle_incoming_state_change(
+        "tool", "tool-1", {"node-b": 1}, "node-b", {TOMBSTONE_FIELD: True}
+    )
+
+    assert await db_session.get(Tool, "tool-1") is None
+    assert len(calls) == 1
+
+
+async def test_apply_remote_delete_of_custom_tool_unlinks_source_file(
+    db_session: AsyncSession,
+) -> None:
+    """#362: the executable source (which is exactly where operators bake
+    integration secrets -- see api/tools.py's list_tool_versions) must not
+    outlive the Tool row on a synced delete."""
+    source_path = get_settings().tools_dir / "tool-1.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("def add_numbers(a, b):\n    return a + b\n")
+    db_session.add(
+        Tool(
+            id="tool-1",
+            name="add_numbers",
+            description="Doomed.",
+            tool_type="custom",
+            source_path=str(source_path),
+        )
+    )
+    await db_session.commit()
+
+    result = await apply_remote_delete(db_session, "tool", "tool-1", {"node-b": 1}, "node-b")
+
+    assert result.applied is True
+    assert await db_session.get(Tool, "tool-1") is None
+    assert not source_path.exists()
+
+
 async def test_apply_remote_rivulet_change_creates_rivulet(db_session: AsyncSession) -> None:
     db_session.add(Channel(id="chan-1", name="general"))
     await db_session.commit()

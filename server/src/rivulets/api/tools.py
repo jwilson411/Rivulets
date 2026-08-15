@@ -29,6 +29,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from rivulets.agentos import sync_agents
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
@@ -259,8 +260,19 @@ async def delete_tool(tool_id: str, db: DbSession, _: CurrentWorkspaceId, _o: Ow
     if tool.tool_type == "builtin":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Builtin tools cannot be deleted")
     is_custom = tool.tool_type == "custom"
+    # #362: captured before commit (the ORM expires attributes on
+    # committed-deleted instances), unlinked only after the delete actually
+    # commits -- the source file is where operators bake integration
+    # secrets (see list_tool_versions), so it must not outlive the row.
+    source_path = tool.source_path if is_custom else None
     await db.delete(tool)
     await db.commit()
+    if source_path:
+        Path(source_path).unlink(missing_ok=True)
+    # #362: custom tools are loaded at agent *build* time, so an agent this
+    # tool was assigned to keeps the deleted function in memory until its
+    # next rebuild -- same reason set_agent_tools resyncs.
+    await sync_agents(db)
     # #287: only 'custom' tools are synced (module docstring) -- an 'mcp'
     # tool row is a per-node discovery cache with an id no peer shares, so
     # tombstoning it would be a harmless no-op there but is skipped anyway
@@ -331,6 +343,11 @@ async def save_tool_version(
     tool.vector_clock += 1
     await db.commit()
     await db.refresh(version_row)
+    # #362: custom tool source is loaded at agent *build* time
+    # (agentos/tool_resolution.py), so without a rebuild every agent this
+    # tool is already assigned to keeps executing the previous version
+    # from memory until some unrelated change happens to rebuild it.
+    await sync_agents(db)
     await _publish_tool_change(db, tool)
     return version_row
 
@@ -350,6 +367,8 @@ async def rollback_tool_version(
     tool.vector_clock += 1
     await db.commit()
     await db.refresh(tool)
+    # #362: same rebuild-after-source-change as save_tool_version above.
+    await sync_agents(db)
     await _publish_tool_change(db, tool)
     return tool
 
