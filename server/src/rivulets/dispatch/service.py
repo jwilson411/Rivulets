@@ -111,7 +111,7 @@ from rivulets.dispatch.guards import (
     reset_guard_state,
 )
 from rivulets.dispatch.llm_fallback import build_llm_fallback
-from rivulets.dispatch.rules import Rule, RuleType
+from rivulets.dispatch.rules import Rule, RuleType, is_valid_regex
 from rivulets.security import keys
 from rivulets.security.credentials import delete_secret
 from rivulets.security.network import BlockedHostError, check_host_is_public, detect_lan_address
@@ -2608,11 +2608,7 @@ def _parse_routing_rule(item: dict[str, object]) -> tuple[str, str, int] | None:
         else:
             return None
     elif rule_type == RuleType.REGEX.value:
-        if not isinstance(raw_pattern, str):
-            return None
-        try:
-            re.compile(raw_pattern)
-        except re.error:
+        if not isinstance(raw_pattern, str) or not is_valid_regex(raw_pattern):
             return None
         pattern = raw_pattern
     else:

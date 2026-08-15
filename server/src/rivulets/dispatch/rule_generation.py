@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import resolve_default_provider, resolve_model
 from rivulets.db.models import WorkspaceSetting
+from rivulets.dispatch.rules import is_valid_regex
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,15 @@ class GeneratedRoutingRules(BaseModel):
 StoredRule = tuple[str, str, int]  # (rule_type, pattern, priority) — AgentRoutingRule shape
 
 
-def _to_stored_rule(generated: GeneratedRule) -> StoredRule:
+def _to_stored_rule(generated: GeneratedRule) -> StoredRule | None:
+    """Returns None for a regex rule the model produced that doesn't
+    actually compile (#366) -- same re.compile check service.py's
+    _parse_routing_rule already applies to the update_agent_routing_rules
+    tool path, applied here so a landmine pattern never reaches the DB in
+    the first place and bricks every future dispatch on this agent."""
     if generated.rule_type == "regex":
+        if not is_valid_regex(generated.regex):
+            return None
         return "regex", generated.regex, generated.priority
     return generated.rule_type, json.dumps(generated.keywords), generated.priority
 
@@ -121,4 +129,11 @@ async def generate_routing_rules(
 
     if generated is None:
         return []
-    return [_to_stored_rule(r) for r in generated.rules]
+    stored: list[StoredRule] = []
+    for r in generated.rules:
+        rule = _to_stored_rule(r)
+        if rule is None:
+            logger.warning("Dropping invalid generated regex rule for agent %r: %r", name, r.regex)
+            continue
+        stored.append(rule)
+    return stored

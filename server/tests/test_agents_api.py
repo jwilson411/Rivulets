@@ -923,6 +923,25 @@ def test_update_routing_rules_on_agent_holding_owner_scope_requires_owner_grant(
     assert response.status_code == 403
 
 
+def test_update_routing_rules_rejects_invalid_regex(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#366: an invalid regex pattern must 400 here rather than being
+    stored and 500ing every future dispatch on the channel."""
+    agent = _create_agent(client, auth_headers)
+    bad_regex = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"
+
+    response = client.patch(
+        f"/api/v1/agents/{agent['id']}/routing-rules",
+        json={"rules": [{"rule_type": "regex", "pattern": bad_regex, "priority": 1}]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400, response.text
+
+    rules = client.get(f"/api/v1/agents/{agent['id']}/routing-rules", headers=auth_headers).json()
+    assert rules == []
+
+
 def test_rollback_agent_version_on_agent_holding_owner_scope_requires_owner_grant(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

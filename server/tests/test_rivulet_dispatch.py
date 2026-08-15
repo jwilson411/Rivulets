@@ -10,9 +10,11 @@ from typing import Any
 import pytest
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.db.models import Agent, AgentPeerPreference
+from rivulets.db.models import Agent, AgentPeerPreference, AgentRoutingRule
+from rivulets.db.session import session_scope
 from rivulets.dispatch.service import _resolve_remote_peer  # pyright: ignore[reportPrivateUsage]
 
 
@@ -168,6 +170,42 @@ def test_agent_with_no_rules_does_not_respond(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human"]
+
+
+async def test_invalid_regex_rule_does_not_500_dispatch_for_the_whole_team(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#366: a landmine regex rule (e.g. written before validation existed,
+    or directly to the DB) on one team member must not turn every post in
+    the channel into a 500 -- the bad rule is skipped as a no-match and
+    the rest of the team still dispatches normally."""
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("OK, doing that."))
+    landmine_agent_id = _create_agent_with_always_rule(client, auth_headers, "Landmine Agent")
+
+    async with session_scope() as db:
+        rule = (
+            await db.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == landmine_agent_id)
+            )
+        ).scalar_one()
+        rule.rule_type = "regex"
+        rule.pattern = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"
+        await db.commit()
+
+    channel_id = _create_channel_with_team(client, auth_headers, [landmine_agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "hello"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    # The human message always lands; the landmine rule doesn't match, so
+    # no agent responds -- but critically, nothing 500s.
     assert [m["sender_type"] for m in messages] == ["human"]
 
 

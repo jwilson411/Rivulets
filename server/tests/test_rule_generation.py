@@ -15,21 +15,33 @@ from rivulets.dispatch.rule_generation import (
 
 
 def test_to_stored_rule_keyword_encodes_json_array() -> None:
-    rule_type, pattern, priority = _to_stored_rule(
+    stored = _to_stored_rule(
         GeneratedRule(rule_type="keyword", keywords=["postgres", "schema"], priority=8)
     )
+    assert stored is not None
+    rule_type, pattern, priority = stored
     assert rule_type == "keyword"
     assert json.loads(pattern) == ["postgres", "schema"]
     assert priority == 8
 
 
 def test_to_stored_rule_regex_stores_raw_string() -> None:
-    rule_type, pattern, priority = _to_stored_rule(
+    stored = _to_stored_rule(
         GeneratedRule(rule_type="regex", regex=r"(?i)\bpostgres\b", priority=6)
     )
+    assert stored is not None
+    rule_type, pattern, priority = stored
     assert rule_type == "regex"
     assert pattern == r"(?i)\bpostgres\b"
     assert priority == 6
+
+
+def test_to_stored_rule_rejects_invalid_regex() -> None:
+    """#366: the generator can produce a regex that doesn't compile
+    (e.g. a bad character range) -- it must be dropped, not persisted."""
+    bad = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"
+    stored = _to_stored_rule(GeneratedRule(rule_type="regex", regex=bad, priority=6))
+    assert stored is None
 
 
 async def test_pick_dispatcher_model_returns_none_with_no_providers(
@@ -122,6 +134,38 @@ async def test_generate_routing_rules_converts_generator_output(
     assert len(rules) == 2
     assert rules[0] == ("keyword", json.dumps(["database", "SQL"]), 10)
     assert rules[1][0] == "semantic"
+
+
+async def test_generate_routing_rules_drops_invalid_regex_rule(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#366: a landmine regex from the generator must never reach
+    replace_routing_rules — it's silently dropped, the rest of the
+    generated rules still land."""
+    db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
+    await db_session.commit()
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    bad_regex = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"
+
+    async def fake_run_generator(*_args: object, **_kwargs: object) -> GeneratedRoutingRules:
+        return GeneratedRoutingRules(
+            rules=[
+                GeneratedRule(rule_type="regex", regex=bad_regex, priority=5),
+                GeneratedRule(rule_type="keyword", keywords=["docs"], priority=3),
+            ]
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation._run_generator", fake_run_generator)
+
+    rules = await generate_routing_rules(
+        db_session, "Researcher", "Finds things", "You research things."
+    )
+    assert len(rules) == 1
+    assert rules[0][0] == "keyword"
 
 
 def test_agent_creation_stores_generated_rules_end_to_end(
