@@ -2994,10 +2994,24 @@ def test_bound_port_raises_when_host_has_no_tcp_port() -> None:
     [
         ("/ip4/192.168.1.5/tcp/4001", True),
         ("/ip4/10.0.0.7/tcp/4001", True),
+        ("/ip4/172.16.0.1/tcp/4001", True),
         ("/ip4/127.0.0.1/tcp/4001", True),
+        ("/ip4/169.254.10.1/tcp/4001", True),  # IPv4 link-local
         ("/ip6/fc00::1/tcp/4001", True),
+        ("/ip6/fe80::1/tcp/4001", True),  # IPv6 link-local
+        ("/ip6/::1/tcp/4001", True),
         ("/ip4/8.8.8.8/tcp/4001", False),
         ("/ip4/1.1.1.1/tcp/4001", False),
+        # issue #361: CGNAT / Tailscale overlay space is WAN, not LAN --
+        # ipaddress.is_private called it private on Python < 3.12.4
+        ("/ip4/100.64.0.1/tcp/4001", False),
+        ("/ip4/100.100.83.98/tcp/4001", False),  # typical Tailscale address
+        ("/ip4/100.127.255.254/tcp/4001", False),
+        # is_private=True ranges that were never a real local network
+        ("/ip4/192.0.2.10/tcp/4001", False),  # TEST-NET-1
+        ("/ip4/198.18.0.1/tcp/4001", False),  # benchmarking
+        ("/ip6/2001:db8::1/tcp/4001", False),  # IPv6 documentation range
+        ("/ip6/::ffff:192.168.1.5/tcp/4001", True),  # IPv4-mapped RFC1918
         ("", False),  # no address recorded (best-effort gap, see notifee docstring)
         ("not-a-multiaddr", False),
     ],

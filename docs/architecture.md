@@ -112,7 +112,7 @@ Multiple humans can share a workspace: each browser session claims a display ide
 |---|---|---|
 | **Transport** | libp2p (noise handshake + gossipsub) | mDNS for LAN discovery; noise protocol for encrypted transport using the workspace key as a pre-shared key; gossipsub for pub/sub state-change events. |
 | **NAT traversal** | Tailscale / WireGuard | Handles cross-network NAT scenarios and adds an additional encryption layer. Same-LAN sync works without it. |
-| **File transfer** | Full-content request/response over a dedicated libp2p stream | Content-hash comparison means a peer that already has a given hash never re-requests it; no byte-level delta transfer. Fetch timing is configurable — eager on LAN by default, lazy (on-demand) elsewhere. |
+| **File transfer** | Full-content request/response over a dedicated libp2p stream | Content-hash comparison means a peer that already has a given hash never re-requests it; no byte-level delta transfer. Fetch timing is configurable — eager on LAN by default (`sync.eager_files_lan`), lazy (on-demand) elsewhere (`sync.eager_files_wan`). "LAN" means the peer's address is in RFC1918, loopback, link-local, or IPv6 ULA space — the ranges mDNS discovery can land in. Overlay/VPN addresses, including Tailscale's CGNAT range `100.64.0.0/10`, count as **WAN**: Tailscale/WireGuard is the cross-network path, so eager transfer over it is opt-in via `sync.eager_files_wan`. |
 
 ### Tools
 
