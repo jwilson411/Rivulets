@@ -1,11 +1,16 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from rivulets.api.invites import _reserve_redemption_slot  # pyright: ignore[reportPrivateUsage]
+from rivulets.db.models import Invite, InviteSession
 from rivulets.db.session import session_scope
-from rivulets.security.rate_limit import get_invite_accept_rate_limiter
+from rivulets.security.rate_limit import (
+    get_invite_accept_rate_limiter,
+    get_invite_resume_rate_limiter,
+)
 from rivulets.security.session import get_session_key_store
 
 
@@ -254,6 +259,218 @@ def test_invite_accept_rate_limit_is_scoped_independently_per_ip() -> None:
         assert limiter.check("1.2.3.4") is True
     assert limiter.check("1.2.3.4") is False
     assert limiter.check("5.6.7.8") is True
+
+
+# --- POST /invites/resume (#350): re-entry after refresh/sign-out ---
+
+
+def _accept(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    """Creates a default (single-use) invite and redeems it, returning the
+    accept response body."""
+    created = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": _extract_token(created["url"]), "display_name": "Guest One"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    return accepted.json()
+
+
+def test_accept_returns_a_resume_token(client: TestClient, auth_headers: dict[str, str]) -> None:
+    body = _accept(client, auth_headers)
+    assert body["resume_token"]
+    session_id, _, secret = body["resume_token"].partition(".")
+    assert session_id and secret
+
+
+def test_resume_reenters_a_spent_single_use_invite_as_the_same_human(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The core #350 regression: after redeeming a max_uses=1 invite, the
+    invite link itself is dead (403), but the resume token still gets the
+    same human back into a working invite-grant session."""
+    accepted = _accept(client, auth_headers)
+
+    resumed = client.post("/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]})
+    assert resumed.status_code == 200, resumed.text
+    body = resumed.json()
+    assert body["grant"] == "invite"
+    assert body["human_id"] == accepted["human_id"]
+    assert body["display_name"] == "Guest One"
+    assert body["resume_token"] == accepted["resume_token"]
+
+    channels = client.get("/api/v1/channels", headers={"Authorization": f"Bearer {body['token']}"})
+    assert channels.status_code == 200
+
+
+def test_resume_works_repeatedly_and_never_consumes_an_invite_use(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    accepted = _accept(client, auth_headers)
+
+    for _ in range(3):
+        resumed = client.post(
+            "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+        )
+        assert resumed.status_code == 200
+
+    invites = client.get("/api/v1/invites", headers=auth_headers).json()
+    assert invites[0]["use_count"] == 1
+
+
+def test_resumed_session_is_still_invite_scoped(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    accepted = _accept(client, auth_headers)
+    resumed = client.post(
+        "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+    ).json()
+
+    response = client.post(
+        "/api/v1/invites", json={}, headers={"Authorization": f"Bearer {resumed['token']}"}
+    )
+    assert response.status_code == 403
+
+
+def test_resume_with_a_malformed_or_unknown_token_is_401(client: TestClient) -> None:
+    assert client.post("/api/v1/invites/resume", json={"resume_token": "no-dot"}).status_code == 401
+    assert (
+        client.post(
+            "/api/v1/invites/resume", json={"resume_token": "unknown-id.some-secret"}
+        ).status_code
+        == 401
+    )
+
+
+def test_resume_with_a_wrong_secret_is_401(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    accepted = _accept(client, auth_headers)
+    session_id = accepted["resume_token"].partition(".")[0]
+
+    response = client.post(
+        "/api/v1/invites/resume", json={"resume_token": f"{session_id}.wrong-secret"}
+    )
+    assert response.status_code == 401
+
+
+def test_resume_after_the_invite_is_revoked_is_403(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Revoking the invite is the owner's lever over an already-redeemed
+    guest -- it must cut off re-entry, not just new redemptions."""
+    created = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    accepted = client.post(
+        "/api/v1/invites/accept", json={"invite_token": _extract_token(created["url"])}
+    ).json()
+    assert (
+        client.delete(f"/api/v1/invites/{created['invite_id']}", headers=auth_headers).status_code
+        == 204
+    )
+
+    response = client.post(
+        "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+    )
+    assert response.status_code == 403
+    assert "revoked" in response.json()["detail"]
+
+
+async def test_resume_after_the_idle_window_expires_is_403(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    accepted = _accept(client, auth_headers)
+    session_id = accepted["resume_token"].partition(".")[0]
+
+    async with session_scope() as session:
+        invite_session = await session.get(InviteSession, session_id)
+        assert invite_session is not None
+        invite_session.expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        await session.commit()
+
+    response = client.post(
+        "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+    )
+    assert response.status_code == 403
+    assert "expired" in response.json()["detail"]
+
+
+async def test_resume_still_works_after_the_parent_invite_itself_expires(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Invite expiry gates *new* redemptions only -- someone already in
+    shouldn't be silently evicted when the link they long since used
+    passes its expiry date."""
+    accepted = _accept(client, auth_headers)
+
+    async with session_scope() as session:
+        result = await session.get(InviteSession, accepted["resume_token"].partition(".")[0])
+        assert result is not None
+        invite = await session.get(Invite, result.invite_id)
+        assert invite is not None
+        invite.expires_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        await session.commit()
+
+    response = client.post(
+        "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+    )
+    assert response.status_code == 200
+
+
+async def test_resume_slides_the_idle_window_forward(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    accepted = _accept(client, auth_headers)
+    session_id = accepted["resume_token"].partition(".")[0]
+
+    nearly_expired = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    async with session_scope() as session:
+        invite_session = await session.get(InviteSession, session_id)
+        assert invite_session is not None
+        invite_session.expires_at = nearly_expired
+        await session.commit()
+
+    assert (
+        client.post(
+            "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+        ).status_code
+        == 200
+    )
+
+    async with session_scope() as session:
+        invite_session = await session.get(InviteSession, session_id)
+        assert invite_session is not None
+        assert invite_session.expires_at > nearly_expired
+
+
+def test_resume_when_no_owner_session_is_active_is_503_not_a_credential_failure(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The status-code contract the UI relies on (see resume's docstring):
+    401/403 tell the browser to discard the stored resume token, so a
+    locked node -- where the credential may be perfectly fine -- must
+    surface as a retryable 503 instead."""
+    accepted = _accept(client, auth_headers)
+    get_session_key_store().clear()
+
+    response = client.post(
+        "/api/v1/invites/resume", json={"resume_token": accepted["resume_token"]}
+    )
+    assert response.status_code == 503
+    assert "unlocked" in response.json()["detail"]
+
+
+def test_resume_is_rate_limited_with_its_own_wider_flood_budget(client: TestClient) -> None:
+    for _ in range(30):
+        response = client.post("/api/v1/invites/resume", json={"resume_token": "bogus.bogus"})
+        assert response.status_code == 401
+
+    throttled = client.post("/api/v1/invites/resume", json={"resume_token": "bogus.bogus"})
+    assert throttled.status_code == 429
+
+    # ...and it's a separate counter from accept's 5/minute credential-
+    # guessing budget -- exhausting resume must not lock out accepts.
+    assert get_invite_accept_rate_limiter().check("resume-vs-accept-ip") is True
+    assert get_invite_resume_rate_limiter().check("5.6.7.8") is True
 
 
 def test_list_invites_is_owner_only(client: TestClient, auth_headers: dict[str, str]) -> None:

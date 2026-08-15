@@ -4,15 +4,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { invites } from './invites';
 
-const applySessionMock = vi.hoisted(() => vi.fn());
+const rememberInviteSessionMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./auth.svelte', () => ({
-	auth: { token: 'test-token', applySession: applySessionMock }
+	auth: { token: 'test-token', rememberInviteSession: rememberInviteSessionMock }
 }));
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	applySessionMock.mockClear();
+	rememberInviteSessionMock.mockClear();
 });
 
 function mockFetch(body: unknown, status = 200) {
@@ -57,13 +57,14 @@ describe('invites', () => {
 		expect(init.method).toBe('DELETE');
 	});
 
-	it('accept() POSTs the invite token without a bearer token and applies the returned session', async () => {
+	it('accept() POSTs the invite token without a bearer token and remembers the returned session', async () => {
 		const fetchMock = mockFetch({
 			token: 'tok-1',
 			expires_at: 'x',
 			human_id: 'human-1',
 			display_name: 'Ada',
-			grant: 'invite'
+			grant: 'invite',
+			resume_token: 'sess-1.resume-secret'
 		});
 
 		await invites.accept('inv-1.secret', 'Ada');
@@ -72,12 +73,15 @@ describe('invites', () => {
 		expect(url).toBe('/api/v1/invites/accept');
 		expect(init.body).toBe(JSON.stringify({ invite_token: 'inv-1.secret', display_name: 'Ada' }));
 		expect((init.headers as Headers).has('Authorization')).toBe(false);
-		expect(applySessionMock).toHaveBeenCalledWith({
+		// rememberInviteSession, not applySession (#350) -- the resume_token
+		// must be persisted, or a refresh permanently locks the guest out.
+		expect(rememberInviteSessionMock).toHaveBeenCalledWith({
 			token: 'tok-1',
 			expires_at: 'x',
 			human_id: 'human-1',
 			display_name: 'Ada',
-			grant: 'invite'
+			grant: 'invite',
+			resume_token: 'sess-1.resume-secret'
 		});
 	});
 
@@ -87,7 +91,8 @@ describe('invites', () => {
 			expires_at: 'x',
 			human_id: 'human-2',
 			display_name: 'Guest',
-			grant: 'invite'
+			grant: 'invite',
+			resume_token: 'sess-2.resume-secret'
 		});
 
 		await invites.accept('inv-1.secret');

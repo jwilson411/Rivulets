@@ -69,6 +69,20 @@ def get_invite_accept_rate_limiter() -> LoginRateLimiter:
     return _invite_accept_limiter
 
 
+# Another separate counter (#350's POST /invites/resume), with the wider
+# webhook-style budget rather than the 5/minute credential-guessing one:
+# a resume token's secret is 256 bits of entropy (keys.generate_invite_secret)
+# that can't be brute-forced at any request rate, so this is flood
+# protection for the bcrypt verify — and a legitimate invited browser
+# auto-resumes on every page load, so a handful of quick refreshes must
+# not lock them out the way five bad mnemonic guesses should.
+_invite_resume_limiter = LoginRateLimiter(window_seconds=60.0, max_attempts=30)
+
+
+def get_invite_resume_rate_limiter() -> LoginRateLimiter:
+    return _invite_resume_limiter
+
+
 # A separate counter again (#99's webhook trigger endpoint), but a wider
 # budget than the 5/minute above: unlike a login or invite secret, a
 # webhook's HMAC secret is 256 bits of entropy an attacker can't

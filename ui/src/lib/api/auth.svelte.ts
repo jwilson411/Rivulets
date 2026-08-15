@@ -5,8 +5,19 @@
 // wiring up the documented "re-derive from mnemonic in session storage"
 // refresh path is a deliberate product decision, not scaffolding — left as
 // a TODO here rather than silently choosing a weaker storage mode.
+//
+// #350: invite-grant sessions are the one deliberate exception to
+// "nothing in localStorage" — not for the JWT itself (still memory-only),
+// but for the invite *resume token* (api/invites.py's POST
+// /invites/resume). An invited human has no mnemonic to re-login with and
+// can't re-redeem a spent single-use invite, so without a persisted
+// re-entry credential a refresh or sign-out locks them out permanently.
+// The stored token is scoped (can only ever mint grant="invite" sessions),
+// revocable by the owner (revoking the invite kills it), idle-expiring
+// server-side, and lower-value than what an invited browser already
+// persists anyway — the original invite URL sitting in its history.
 
-import { api, onUnauthorized } from './client';
+import { api, ApiError, onUnauthorized } from './client';
 
 interface LoginResponse {
 	token: string;
@@ -26,9 +37,51 @@ export interface SessionInfo {
 	grant: string;
 }
 
+// POST /invites/accept and POST /invites/resume both return this (#350):
+// a claimed-identity session plus the persistent re-entry credential.
+export interface InviteSessionInfo extends SessionInfo {
+	resume_token: string;
+}
+
 interface StreamTicketResponse {
 	ticket: string;
 	expires_at: string;
+}
+
+const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
+
+interface StoredResume {
+	token: string;
+	displayName: string;
+}
+
+// Same `typeof localStorage` guard as theme.svelte.ts's readStored — the
+// UI never server-renders (+layout.ts's `ssr = false`), but node-env unit
+// tests import this module without a DOM.
+function readStoredResume(): StoredResume | null {
+	if (typeof localStorage === 'undefined') return null;
+	const raw = localStorage.getItem(RESUME_STORAGE_KEY);
+	if (!raw) return null;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			parsed &&
+			typeof parsed === 'object' &&
+			typeof (parsed as StoredResume).token === 'string' &&
+			typeof (parsed as StoredResume).displayName === 'string'
+		) {
+			return parsed as StoredResume;
+		}
+	} catch {
+		// fall through — a corrupt entry is treated as absent
+	}
+	return null;
+}
+
+function writeStoredResume(value: StoredResume | null): void {
+	if (typeof localStorage === 'undefined') return;
+	if (value === null) localStorage.removeItem(RESUME_STORAGE_KEY);
+	else localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(value));
 }
 
 let token = $state<string | null>(null);
@@ -36,6 +89,11 @@ let humanId = $state<string | null>(null);
 let displayName = $state<string | null>(null);
 let grant = $state<string | null>(null);
 let expiresAt = $state<string | null>(null);
+// The display name attached to the persisted invite resume credential
+// (#350) — non-null exactly when localStorage holds one, mirrored into
+// reactive state so LoginForm's "Continue as …" offer appears/disappears
+// without a reload when the credential is stored or discarded.
+let resumeDisplayName = $state<string | null>(readStoredResume()?.displayName ?? null);
 // True only when a previously-valid session was torn down out from under
 // the user (a 401 mid-session, or the JWT's own expiry) -- distinct from
 // simply being logged out, so LoginForm can say *why* it's showing again
@@ -104,6 +162,11 @@ export const auth = {
 	get sessionExpired() {
 		return sessionExpired;
 	},
+	// Non-null when this browser holds a persisted invite re-entry
+	// credential (#350) — the name to show on LoginForm's "Continue as …".
+	get resumeDisplayName() {
+		return resumeDisplayName;
+	},
 	// bootstrapToken (server/api/auth.py's LoginRequest.bootstrap_token,
 	// #247/#291) is only consulted server-side when this login is about to
 	// create the workspace row while app_server_host is 0.0.0.0 -- fine to
@@ -131,6 +194,41 @@ export const auth = {
 		expiresAt = info.expires_at;
 		sessionExpired = false;
 		scheduleExpiry(info.expires_at);
+	},
+	// Applies an invite-accept session AND persists its resume credential
+	// (#350) so this browser can get back in after a refresh or sign-out —
+	// the module docstring covers why this one credential is allowed into
+	// localStorage when the JWT itself never is.
+	rememberInviteSession(info: InviteSessionInfo): void {
+		auth.applySession(info);
+		writeStoredResume({ token: info.resume_token, displayName: info.display_name });
+		resumeDisplayName = info.display_name;
+	},
+	// Exchanges the persisted resume credential for a fresh invite-grant
+	// session (#350). Resolves false when there's nothing stored or the
+	// server said the credential is dead (401/403 — expired idle window,
+	// revoked invite), in which case it's discarded so LoginForm stops
+	// offering it. Transient failures (429, a locked node's 503, network
+	// errors) rethrow WITHOUT discarding — the credential may be fine, per
+	// resume_invite_session's documented status-code contract.
+	async resumeInviteSession(): Promise<boolean> {
+		const stored = readStoredResume();
+		if (stored === null) return false;
+		let response: InviteSessionInfo;
+		try {
+			response = await api.post<InviteSessionInfo>('/invites/resume', {
+				resume_token: stored.token
+			});
+		} catch (err) {
+			if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+				writeStoredResume(null);
+				resumeDisplayName = null;
+				return false;
+			}
+			throw err;
+		}
+		auth.rememberInviteSession(response);
+		return true;
 	},
 	// Claims a Human identity for the current workspace session (#14's
 	// IdentityPicker) -- pass an existing human_id to "continue as" them,
@@ -164,6 +262,10 @@ export const auth = {
 		);
 		return response.ticket;
 	},
+	// Deliberately leaves any persisted invite resume credential in place
+	// (#350): sign-out ends the session, but an invited human has no other
+	// way back in — LoginForm's "Continue as …" is their re-entry, the way
+	// re-entering the mnemonic is the owner's.
 	async logout(): Promise<void> {
 		const activeToken = token;
 		clearSession(false);

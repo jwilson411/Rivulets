@@ -19,8 +19,11 @@ const authState = vi.hoisted(() => ({
 	isAuthenticated: false,
 	humanId: null as string | null,
 	displayName: null as string | null,
-	grant: null as string | null
+	grant: null as string | null,
+	resumeDisplayName: null as string | null
 }));
+
+const resumeInviteSessionMock = vi.hoisted(() => vi.fn());
 
 const routeState = vi.hoisted(() => ({ pathname: '/' }));
 
@@ -50,6 +53,10 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		get grant() {
 			return authState.grant;
 		},
+		get resumeDisplayName() {
+			return authState.resumeDisplayName;
+		},
+		resumeInviteSession: resumeInviteSessionMock,
 		logout: vi.fn(),
 		claimIdentity: vi.fn(),
 		clearIdentity: vi.fn()
@@ -80,6 +87,7 @@ afterEach(() => {
 	authState.humanId = null;
 	authState.displayName = null;
 	authState.grant = null;
+	authState.resumeDisplayName = null;
 	routeState.pathname = '/';
 });
 
@@ -139,6 +147,55 @@ describe('routes/+layout.svelte', () => {
 		await expect
 			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
 			.not.toBeInTheDocument();
+	});
+
+	it('silently resumes a stored invite session on load instead of showing the login form (#350)', async () => {
+		authState.isAuthenticated = false;
+		authState.resumeDisplayName = 'Ada';
+		// Keep the resume in flight so the interim state is observable.
+		let finishResume!: (value: boolean) => void;
+		resumeInviteSessionMock.mockReturnValue(
+			new Promise<boolean>((resolve) => {
+				finishResume = resolve;
+			})
+		);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await expect.element(page.getByText('Signing you back in…')).toBeInTheDocument();
+		await expect
+			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.not.toBeInTheDocument();
+		expect(resumeInviteSessionMock).toHaveBeenCalledOnce();
+
+		finishResume(true);
+	});
+
+	it('falls back to the login form when the silent resume fails', async () => {
+		authState.isAuthenticated = false;
+		authState.resumeDisplayName = 'Ada';
+		resumeInviteSessionMock.mockImplementation(async () => {
+			authState.resumeDisplayName = null;
+			return false;
+		});
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await expect
+			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.toBeInTheDocument();
+	});
+
+	it('does not attempt a resume when no invite credential is stored', async () => {
+		authState.isAuthenticated = false;
+		authState.resumeDisplayName = null;
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await expect
+			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.toBeInTheDocument();
+		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
 	});
 
 	it('renders routed children directly on an /invite/ route, bypassing auth entirely', async () => {

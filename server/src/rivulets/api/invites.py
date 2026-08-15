@@ -23,9 +23,14 @@ Owner-only: POST/GET/DELETE here (create/list/revoke) require
 providers.py, backups.py, sync.py, settings.py, update.py, and
 auth.py's /auth/identity. An invite-redeemed session must never be able
 to mint further invites or reach those other owner-only surfaces.
-POST /invites/accept itself is the one route in this module that's
-*not* owner-gated -- it's how an invite-holder becomes a session in the
-first place.
+POST /invites/accept and POST /invites/resume are the two routes in this
+module that are *not* owner-gated -- accept is how an invite-holder
+becomes a session in the first place, and resume (#350) is how that
+session gets back in after a refresh or sign-out, since an invited human
+has no mnemonic to re-login with and can't re-redeem a spent single-use
+invite. Both present their own bearer secret instead of a session token;
+resume's is the per-redemption InviteSession credential minted by accept
+(see InviteSession's docstring, db/models.py).
 """
 
 import logging
@@ -39,10 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
-from rivulets.db.models import Human, Invite, Workspace
+from rivulets.db.models import Human, Invite, InviteSession, Workspace
 from rivulets.security import keys
 from rivulets.security.network import detect_lan_address, is_loopback_host
-from rivulets.security.rate_limit import get_invite_accept_rate_limiter
+from rivulets.security.rate_limit import (
+    get_invite_accept_rate_limiter,
+    get_invite_resume_rate_limiter,
+)
 from rivulets.security.session import get_session_key_store
 from rivulets.sync.publish import publish_current_state
 
@@ -52,6 +60,11 @@ router = APIRouter(prefix="/invites", tags=["invites"])
 
 _JWT_TTL = timedelta(hours=24)  # same session lifetime as a normal login (api/auth.py)
 _DEFAULT_EXPIRES_IN_HOURS = 168  # 7 days
+# How long an invited human can stay away and still resume (#350) -- a
+# sliding idle window, bumped on every successful resume, so a regularly
+# returning guest never falls off while a token whose holder has moved on
+# eventually dies on its own even if the owner never revokes the invite.
+_RESUME_TTL = timedelta(days=30)
 
 
 class InviteCreate(BaseModel):
@@ -94,6 +107,16 @@ class InviteAcceptResponse(BaseModel):
     human_id: str
     display_name: str
     grant: str
+    # #350: "<invite_session_id>.<secret>", the re-entry credential for
+    # POST /invites/resume. Returned by accept (freshly minted) and echoed
+    # back unchanged by resume -- deliberately not rotated there, since a
+    # second tab or a restored browser session resuming concurrently would
+    # race a rotation and strand whichever tab held the stale value.
+    resume_token: str
+
+
+class InviteResume(BaseModel):
+    resume_token: str  # "<invite_session_id>.<secret>"
 
 
 async def _reserve_redemption_slot(db: AsyncSession, invite_id: str) -> bool:
@@ -226,8 +249,24 @@ async def accept_invite(
 
     human = Human(display_name=body.display_name or invite.display_name_hint or "Guest")
     db.add(human)
+    # Flush so human.id (a Python-side uuid7 default applied at INSERT)
+    # exists before the InviteSession row below references it.
+    await db.flush()
+    # #350: the JWT below lives only in browser memory, so this per-
+    # redemption credential is what lets this human back in after a
+    # refresh/sign-out (POST /invites/resume) -- same shown-once,
+    # hash-at-rest treatment as the invite secret itself.
+    resume_secret = keys.generate_invite_secret()
+    invite_session = InviteSession(
+        secret_hash=keys.hash_invite_secret(resume_secret),
+        invite_id=invite.id,
+        human_id=human.id,
+        expires_at=(datetime.now(UTC) + _RESUME_TTL).isoformat(),
+    )
+    db.add(invite_session)
     await db.commit()
     await db.refresh(human)
+    await db.refresh(invite_session)
     await publish_current_state(db, "human", human.id)
 
     expires_at = datetime.now(UTC) + _JWT_TTL
@@ -248,4 +287,98 @@ async def accept_invite(
         human_id=human.id,
         display_name=human.display_name,
         grant="invite",
+        resume_token=f"{invite_session.id}.{resume_secret}",
+    )
+
+
+@router.post("/resume", response_model=InviteAcceptResponse)
+async def resume_invite_session(
+    body: InviteResume, request: Request, db: DbSession
+) -> InviteAcceptResponse:
+    """Re-mints a grant="invite" session from the per-redemption credential
+    accept_invite handed out (#350) -- the invited human's only way back in
+    after a refresh or sign-out, since they have no mnemonic and a spent
+    single-use invite can't be re-redeemed. Not session-gated for the same
+    reason accept isn't: the resume secret itself is the credential.
+
+    Status codes are part of the contract with the UI here: 401/403 mean
+    "this credential is dead, discard it" (bad secret, expired window,
+    revoked invite), while 429/503 mean "the credential may be fine, try
+    again later" -- the browser holds the token across the latter but
+    forgets it on the former. That's why the locked-node case is a 503
+    here, unlike accept's 401 for the same condition.
+
+    Deliberately NOT checked: the parent invite's own expiry and use count.
+    Those gate *new* redemptions; this human already redeemed. The owner's
+    lever over an already-redeemed guest is revoking the invite, which is
+    checked on every resume."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not get_invite_resume_rate_limiter().check(client_ip):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts — try again shortly"
+        )
+
+    session_id, _, secret = body.resume_token.partition(".")
+    if not session_id or not secret:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid resume token")
+
+    invite_session = await db.get(InviteSession, session_id)
+    if invite_session is None or not keys.verify_invite_secret(secret, invite_session.secret_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid resume token")
+    if invite_session.expires_at < datetime.now(UTC).isoformat():
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This invite session has expired — ask the workspace owner for a new invite",
+        )
+
+    invite = await db.get(Invite, invite_session.invite_id)
+    if invite is None or invite.revoked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This invite has been revoked")
+
+    # Humans aren't currently deletable via the API, but a resume must
+    # never resurrect an identity the DB no longer has a row for.
+    human = await db.get(Human, invite_session.human_id)
+    if human is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "This identity no longer exists on this workspace"
+        )
+
+    result = await db.execute(select(Workspace))
+    workspace = result.scalar_one_or_none()
+    if workspace is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No workspace to join yet")
+
+    try:
+        jwt_signing_key = get_session_key_store().get_key()
+    except RuntimeError as exc:
+        # 503, not accept's 401 -- see the docstring's status-code contract.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "This workspace isn't currently unlocked on this node — ask the owner to open "
+            "Rivulets here first",
+        ) from exc
+
+    # Slide the idle window forward -- see _RESUME_TTL's comment.
+    invite_session.expires_at = (datetime.now(UTC) + _RESUME_TTL).isoformat()
+    await db.commit()
+
+    expires_at = datetime.now(UTC) + _JWT_TTL
+    token = jwt.encode(
+        {
+            "sub": workspace.id,
+            "iat": datetime.now(UTC),
+            "exp": expires_at,
+            "grant": "invite",
+            "human_id": human.id,
+        },
+        jwt_signing_key,
+        algorithm="HS256",
+    )
+    return InviteAcceptResponse(
+        token=token,
+        expires_at=expires_at.isoformat(),
+        human_id=human.id,
+        display_name=human.display_name,
+        grant="invite",
+        resume_token=body.resume_token,
     )

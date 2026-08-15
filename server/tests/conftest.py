@@ -61,6 +61,7 @@ from rivulets.db.session import (  # noqa: E402
 from rivulets.security import keys  # noqa: E402
 from rivulets.security.rate_limit import (  # noqa: E402
     get_invite_accept_rate_limiter,
+    get_invite_resume_rate_limiter,
     get_login_rate_limiter,
     get_webhook_trigger_rate_limiter,
 )
@@ -135,6 +136,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # cap well before the suite finishes.
     get_login_rate_limiter().reset_for_testing()
     get_invite_accept_rate_limiter().reset_for_testing()
+    get_invite_resume_rate_limiter().reset_for_testing()
     get_webhook_trigger_rate_limiter().reset_for_testing()
     get_webhook_replay_guard().reset_for_testing()
 
@@ -156,6 +158,7 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     reset_sync_engine_for_testing()
     get_login_rate_limiter().reset_for_testing()
     get_invite_accept_rate_limiter().reset_for_testing()
+    get_invite_resume_rate_limiter().reset_for_testing()
     get_webhook_trigger_rate_limiter().reset_for_testing()
     get_webhook_replay_guard().reset_for_testing()
 
