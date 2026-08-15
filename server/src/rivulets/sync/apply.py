@@ -912,8 +912,13 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
     download_file calls this when local_path is missing (either lazy sync
     deferred the fetch, or an eager fetch failed transiently) rather than
     serving a 404 for content a peer already has. Tries every node
-    recorded by _remember_known_source until one has the bytes. Returns
-    whether local_path exists afterwards.
+    recorded by _remember_known_source, then falls back to every other
+    currently-connected peer (#363): synced_to_nodes only ever records
+    gossip origins, so a peer that eager-fetched the bytes from the
+    publisher is never in it -- if the publisher has since gone offline,
+    such a holder may be the only reachable copy. request_file answers a
+    clean MISS when a peer doesn't have the hash, so asking peers
+    speculatively is safe. Returns whether local_path exists afterwards.
 
     Re-derives the path from files_dir + content_hash rather than trusting
     the stored `File.local_path` column (#239) -- the same reasoning as
@@ -922,12 +927,16 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
     local_path = local_path_for_content_hash(file_row.content_hash)
     if local_path.exists():
         return True
-    if not file_row.synced_to_nodes:
-        return False
     engine = get_sync_engine()
     if not engine.running:
         return False
-    for node_id in json.loads(file_row.synced_to_nodes):
+    known: list[str] = json.loads(file_row.synced_to_nodes) if file_row.synced_to_nodes else []
+    connected = [peer.peer_id for peer in await engine.list_peers()]
+    tried: set[str] = set()
+    for node_id in [*known, *connected]:
+        if node_id in tried:
+            continue
+        tried.add(node_id)
         data = await engine.request_file(node_id, file_row.content_hash)
         if data is None:
             continue
