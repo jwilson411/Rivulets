@@ -132,7 +132,8 @@ def test_on_failure_workflow_id_allows_self_reference(
     workflow_id = _create_workflow(client, auth_headers, "self-retry")
     node_id = _add_transform_node(client, auth_headers, workflow_id, "step", "{input}")
     _connect(client, auth_headers, workflow_id, None, node_id)
-    _publish_workflow(client, auth_headers, workflow_id)  # #292: remediation target must be published
+    # #292: remediation target must be published
+    _publish_workflow(client, auth_headers, workflow_id)
     resp = client.patch(
         f"/api/v1/workflows/{workflow_id}",
         json={"on_failure_workflow_id": workflow_id},

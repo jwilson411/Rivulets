@@ -376,11 +376,11 @@
 	>
 		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Backups</h2>
 		<p class="text-xs text-neutral-600 dark:text-neutral-400">
-			Node-local snapshots (#243) of the app database, the provider-key fallback store, this
-			node's sync identity, and custom tool source. One is taken automatically once a day, and
-			another right before any restore below, so a restore is itself always undoable. File
-			attachments in <code class="font-mono">files/</code> aren't included — cover those with your
-			own filesystem backups.
+			Node-local snapshots (#243) of the app database, the provider-key fallback store, this node's
+			sync identity, and custom tool source. One is taken automatically once a day, and another
+			right before any restore below, so a restore is itself always undoable. File attachments in <code
+				class="font-mono">files/</code
+			> aren't included — cover those with your own filesystem backups.
 		</p>
 
 		{#if backupsError}
