@@ -6,7 +6,8 @@ specific peer is a targeted request/response, not a broadcast, and
 gossipsub has no peer-targeting or response semantics at all.
 
 Wire protocol: 4-byte big-endian length prefix + UTF-8 JSON, both
-directions:
+directions (declared lengths above MAX_DISPATCH_FRAME_BYTES are rejected
+before the body is read -- see the constant's comment):
 
     client -> server: AgentDispatchRequest fields as JSON
     client: half-closes its write side (close_write())
@@ -44,6 +45,16 @@ AGENT_DISPATCH_PROTOCOL = TProtocol("/rivulets/agent-dispatch/1.0.0")
 
 _LENGTH_PREFIX_BYTES = 4
 
+# #364: same frame-length discipline file_transfer.py applies via
+# MAX_FILE_BYTES -- the length prefix is peer-declared, and the PSK is the
+# only gate on who can open this protocol, so a peer advertising ~4GB must
+# be rejected before read_exactly() tries to buffer that much. Dispatch
+# frames are small JSON (a handful of IDs plus one message body, which the
+# HTTP API caps at 100k characters -- api/rivulets.py); 1 MiB leaves room
+# for worst-case JSON escaping of that content without ever letting a peer
+# demand meaningful memory.
+MAX_DISPATCH_FRAME_BYTES = 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class AgentDispatchRequest:
@@ -69,4 +80,9 @@ async def write_framed(stream: INetStream, data: bytes) -> None:
 
 async def read_framed(stream: INetStream) -> bytes:
     length = int.from_bytes(await read_exactly(stream, _LENGTH_PREFIX_BYTES), "big")
+    if length > MAX_DISPATCH_FRAME_BYTES:
+        raise ValueError(
+            f"Peer declared dispatch frame length {length} exceeds "
+            f"{MAX_DISPATCH_FRAME_BYTES} byte limit"
+        )
     return await read_exactly(stream, length)
