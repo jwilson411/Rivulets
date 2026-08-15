@@ -185,6 +185,54 @@ async def test_run_eval_suite_case_is_blocked_by_a_tripped_hard_stop_budget_cap(
     assert "blocked" in (result.error_message or "").lower()
 
 
+async def test_run_eval_suite_case_is_blocked_by_a_team_cap_on_a_team_containing_the_agent(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#354: an eval suite has no team context to pass to the budget
+    check, but a team-scope hard_stop on a team the agent belongs to must
+    still block it -- before this, the same agent was blocked in channel
+    dispatch (which passes channel.team_id) yet ran freely from an eval
+    case."""
+    from rivulets.db.models import AgentRun, BudgetCap, Team, TeamAgent
+
+    agent = await _make_agent(db_session, name="Spendy")
+    team = Team(name="Capped Team")
+    db_session.add(team)
+    await db_session.flush()
+    db_session.add(TeamAgent(team_id=team.id, agent_id=agent.id))
+    db_session.add(
+        BudgetCap(
+            scope_type="team", team_id=team.id, period="day", limit_usd=0.5, action="hard_stop"
+        )
+    )
+    # Already over the team's $0.50 cap before this run ever starts.
+    db_session.add(AgentRun(agent_id=agent.id, model=agent.model, status="completed", cost_usd=1.0))
+    suite = EvalSuite(name="s-team-budget", agent_id=agent.id)
+    db_session.add(suite)
+    await db_session.flush()
+    db_session.add(_exact_case(suite.id, "greets", "hi", "hello"))
+    await db_session.commit()
+
+    calls: list[str] = []
+
+    async def counting_fake(*_args: object, **_kwargs: object) -> Any:
+        calls.append("called")
+        return await _fake_run_agent("hello")()
+
+    monkeypatch.setattr("rivulets.evals.runner.run_agent", counting_fake)
+
+    run = await run_eval_suite(db_session, suite, human_id=None)
+
+    assert calls == []  # the model was never invoked
+    assert run.error_count == 1
+
+    result = (
+        await db_session.scalars(select(EvalCaseResult).where(EvalCaseResult.run_id == run.id))
+    ).one()
+    assert result.status == "error"
+    assert "budget cap" in (result.error_message or "").lower()
+
+
 async def test_run_eval_suite_structural_case_collects_tool_calls(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

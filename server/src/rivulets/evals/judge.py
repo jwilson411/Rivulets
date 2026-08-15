@@ -24,9 +24,11 @@ from typing import Literal, TypedDict
 
 from agno.agent import Agent as AgnoAgent
 from agno.models.base import Model
+from agno.run.agent import RunOutput
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model, resolve_tier_model
 
 logger = logging.getLogger(__name__)
@@ -121,16 +123,16 @@ def _build_judge_prompt(case_input: str, rubric: str, actual_output: str) -> str
     )
 
 
-async def _run_judge_generator(model: Model, prompt: str) -> JudgeVerdictSchema | None:
+async def _run_judge_generator(model: Model, prompt: str) -> RunOutput:
     """Isolated seam for tests to monkeypatch — same idiom as
     rule_generation.py's `_run_generator` / llm_fallback.py's
-    `_run_decision`."""
+    `_run_decision`. Returns the raw RunOutput (not just the parsed
+    verdict) so the caller can record its token/cost accounting (#354),
+    same reasoning as `_run_decision`'s own docstring."""
     judge = AgnoAgent(model=model, instructions=_JUDGE_INSTRUCTIONS)
-    run_output = await judge.arun(  # pyright: ignore[reportUnknownMemberType]
+    return await judge.arun(  # pyright: ignore[reportUnknownMemberType]
         prompt, output_schema=JudgeVerdictSchema, stream=False
     )
-    content = run_output.content
-    return content if isinstance(content, JudgeVerdictSchema) else None
 
 
 async def judge_llm(
@@ -138,7 +140,31 @@ async def judge_llm(
 ) -> JudgeVerdict:
     """NFR-2.4-style graceful degradation, matching rule_generation.py/
     llm_fallback.py: no provider configured, or the call failing for any
-    reason, becomes an 'error' verdict rather than raising."""
+    reason, becomes an 'error' verdict rather than raising.
+
+    #354 (leftover of #320): this call burns a provider key same as any
+    agent run, but never checked budget caps or recorded its spend. Now
+    enforces caps first (workspace scope only: the judge grades on the
+    suite's behalf, not as any Agent, so there's nothing more specific to
+    attribute to -- same shape as the summarize node's check) and records
+    the call via record_agent_run with agent_id=None, source='eval_judge'
+    (#246's dispatcher_call precedent). A tripped hard_stop becomes an
+    'error' verdict like every other way this judge can't run -- the
+    call is refused (fails closed), and this function's never-raise
+    contract keeps one blocked judge from aborting the whole suite run.
+
+    Lazy import of dispatch.budgets: rivulets.dispatch's package init
+    pulls in rivulets.api (via dispatch.service -> api.agents), whose own
+    init imports this package back via api.evals -- same circular-import
+    hazard evals/runner.py's _run_agent_case already works around the
+    same way."""
+    from rivulets.dispatch.budgets import BudgetCapBlockedError, enforce_budget_caps
+
+    try:
+        await enforce_budget_caps(db, None, None)
+    except BudgetCapBlockedError as exc:
+        return JudgeVerdict(status="error", error_message=str(exc))
+
     provider_model = await resolve_tier_model(db, "cheap")
     if provider_model is None:
         return JudgeVerdict(
@@ -147,13 +173,22 @@ async def judge_llm(
 
     try:
         model = await resolve_model(db, provider_model)
-        verdict = await _run_judge_generator(
+        run_output = await _run_judge_generator(
             model, _build_judge_prompt(case_input, rubric, actual_output)
         )
     except Exception as exc:
         logger.warning("LLM-judge call failed", exc_info=True)
         return JudgeVerdict(status="error", error_message=str(exc))
 
+    # Recorded before the content is parsed -- the tokens were spent
+    # whether or not the model produced usable structured output, same
+    # ordering as llm_fallback.py's recording.
+    await record_agent_run(
+        db, None, provider_model, None, "completed", run_output, source="eval_judge"
+    )
+
+    content = run_output.content
+    verdict = content if isinstance(content, JudgeVerdictSchema) else None
     if verdict is None:
         return JudgeVerdict(
             status="error", error_message="Judge model returned no structured output"

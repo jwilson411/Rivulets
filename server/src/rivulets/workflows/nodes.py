@@ -33,6 +33,8 @@ through) this module's executors.
 import json
 
 from agno.agent import Agent as AgnoAgent
+from agno.models.base import Model
+from agno.run.agent import RunOutput
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent
@@ -101,9 +103,11 @@ async def execute_agent_node(
     #320: also runs dispatch/budgets.py's check before ever calling
     `run_agent` -- a workflow agent node is a spend path same as a
     channel-dispatched one, and #246 only wired the check into channel
-    dispatch. No team_id here (unlike dispatch/service.py's
-    channel.team_id): a workflow isn't scoped to a team, so only
-    agent-scope and workspace-scope caps apply. A BudgetCapBlockedError
+    dispatch. No team_id to pass here (unlike dispatch/service.py's
+    channel.team_id -- a workflow isn't scoped to a team), but team-scope
+    caps on any team the agent belongs to still apply: _applicable_caps
+    resolves them from the agent's own TeamAgent memberships (#354).
+    A BudgetCapBlockedError
     propagates like any other node failure (see this function's
     docstring above and _run_node_with_retries' uniform handling) --
     there's no rivulet/channel context here to post a system_alert
@@ -164,6 +168,17 @@ def execute_transform_node(node: WorkflowNode, input_content: str) -> str:
     return template.replace("{input}", input_content)
 
 
+async def _run_summarizer(model: Model, input_content: str) -> RunOutput:
+    """Isolated seam for tests to monkeypatch — same idiom as
+    rule_generation.py's `_run_generator` / llm_fallback.py's
+    `_run_decision`. Returns the raw RunOutput (not just its content) so
+    the caller can record its token/cost accounting (#354)."""
+    summarizer = AgnoAgent(model=model, instructions=_SUMMARIZE_INSTRUCTIONS)
+    return await summarizer.arun(  # pyright: ignore[reportUnknownMemberType]
+        input_content, stream=False
+    )
+
+
 async def execute_summarize_node(db: AsyncSession, node: WorkflowNode, input_content: str) -> str:
     """No dedicated Agent DB row needed — reuses the same "pick a cheap
     dispatcher-tier model" policy as dispatch/llm_fallback.py and
@@ -172,16 +187,32 @@ async def execute_summarize_node(db: AsyncSession, node: WorkflowNode, input_con
     (dispatch/service.py's _handle_run_workflow_trigger, #24) to run the
     run_workflow tool, so a module-level import of a dispatch submodule
     here would risk a circular import depending on which package happens
-    to load first at app startup."""
+    to load first at app startup.
+
+    #354 (leftover of #320): this call burns a provider key same as any
+    agent run, but never checked budget caps or recorded its spend --
+    a tripped workspace hard_stop didn't stop it, and its cost never
+    counted toward any cap's window. Now enforces caps first (workspace
+    scope only: there's no Agent row and no team to attribute to, same
+    shape as knowledge_base ingest's workspace-only check) and records
+    the run via record_agent_run with agent_id=None,
+    source='summarize_node' -- the same "unattributable billed call"
+    precedent as #246's dispatcher_call and #320's embedding rows. A
+    BudgetCapBlockedError propagates like any other node failure (same
+    handling as execute_agent_node's -- the block becomes the node/run's
+    own error_message)."""
+    from rivulets.dispatch.budgets import enforce_budget_caps
     from rivulets.dispatch.rule_generation import pick_dispatcher_model
+
+    await enforce_budget_caps(db, None, None)
 
     provider_model = await pick_dispatcher_model(db)
     if provider_model is None:
         raise NoProviderConfiguredError("No provider configured for the summarize node")
     model = await resolve_model(db, provider_model)
-    summarizer = AgnoAgent(model=model, instructions=_SUMMARIZE_INSTRUCTIONS)
-    run_output = await summarizer.arun(  # pyright: ignore[reportUnknownMemberType]
-        input_content, stream=False
+    run_output = await _run_summarizer(model, input_content)
+    await record_agent_run(
+        db, None, provider_model, None, "completed", run_output, source="summarize_node"
     )
     content = run_output.content
     return content if isinstance(content, str) else str(content)
