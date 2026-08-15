@@ -615,11 +615,23 @@ async def apply_remote_delete(
         return ApplyResult(applied=False, conflict=True)
 
     # REMOTE_NEWER: a clean, non-conflicting delete -- apply it.
+    source_path_to_unlink: str | None = None
     if instance is not None:
+        if entity_type == "tool" and isinstance(instance, Tool) and instance.tool_type == "custom":
+            # #362: the row is what the DB delete removes; the executable
+            # source at tool.source_path is this node's own artifact
+            # (written by apply_remote_tool_change or the local editor) and
+            # would otherwise outlive the tool -- including any secrets the
+            # operator baked into it. Captured before commit (the ORM
+            # expires attributes on committed-deleted instances), unlinked
+            # only after the delete actually commits.
+            source_path_to_unlink = instance.source_path
         await clear_delete_blockers(db, entity_type, entity_id)
         await db.delete(instance)
     await _store_vector_clock(db, entity_type, entity_id, merged)
     await db.commit()
+    if source_path_to_unlink:
+        Path(source_path_to_unlink).unlink(missing_ok=True)
     return ApplyResult(applied=True, conflict=False)
 
 
@@ -958,8 +970,13 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
 # (rebuild AgentOS's in-process registry) -- anything that changes what
 # _build_agno_agent (agentos/service.py) would resolve for an agent's
 # tools, not just live-queried-per-request state like TeamAgent/
-# AgentRoutingRule (see handle_incoming_state_change below).
-_AGENTOS_RESYNC_ENTITY_TYPES = frozenset({"agent", "agent_tool", "agent_tool_scope"})
+# AgentRoutingRule (see handle_incoming_state_change below). #362: `tool`
+# belongs here too -- a custom tool's source is loaded at agent *build*
+# time (agentos/tool_resolution.py), so a synced source edit (or a tool
+# tombstone) that doesn't rebuild leaves already-registered agents
+# running the stale in-memory function until something else happens to
+# rebuild them.
+_AGENTOS_RESYNC_ENTITY_TYPES = frozenset({"agent", "agent_tool", "agent_tool_scope", "tool"})
 
 _DISPATCH: dict[str, EntitySpec] = {
     "agent": AGENT_SPEC,

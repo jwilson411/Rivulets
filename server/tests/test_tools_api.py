@@ -86,6 +86,61 @@ async def test_delete_custom_tool_queues_sync_tombstone(
         assert pending.deleted is True
 
 
+def test_delete_custom_tool_unlinks_source_file(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#362: the source file is where operators bake integration secrets
+    (see list_tool_versions' docstring) -- deleting the tool must remove
+    it, not leave executable source orphaned on disk."""
+    tool = _create_custom_tool(client, auth_headers)
+    save = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "SECRET = 'hunter2'\n"},
+        headers=auth_headers,
+    )
+    assert save.status_code == 201, save.text
+    assert Path(tool["source_path"]).exists()
+
+    deleted = client.delete(f"/api/v1/tools/{tool['id']}", headers=auth_headers)
+
+    assert deleted.status_code == 204
+    assert not Path(tool["source_path"]).exists()
+
+
+def test_save_and_rollback_and_delete_resync_agentos(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#362: custom tool source is loaded at agent *build* time
+    (agentos/tool_resolution.py), so every route that changes what's on
+    disk (save/rollback) or removes the tool outright (delete) must
+    rebuild the registry, or agents keep executing the previous source
+    from memory. Counts calls to the module-global sync_agents the routes
+    resolve at call time."""
+    calls: list[None] = []
+
+    async def fake_sync_agents(db: object) -> None:
+        calls.append(None)
+
+    monkeypatch.setattr(tools_api, "sync_agents", fake_sync_agents)
+    tool = _create_custom_tool(client, auth_headers)
+
+    save = client.post(
+        f"/api/v1/tools/{tool['id']}/versions",
+        json={"source_code": "def my_tool() -> str:\n    return 'v2'\n"},
+        headers=auth_headers,
+    )
+    assert save.status_code == 201, save.text
+    assert len(calls) == 1
+
+    rollback = client.post(f"/api/v1/tools/{tool['id']}/versions/1/rollback", headers=auth_headers)
+    assert rollback.status_code == 200, rollback.text
+    assert len(calls) == 2
+
+    deleted = client.delete(f"/api/v1/tools/{tool['id']}", headers=auth_headers)
+    assert deleted.status_code == 204
+    assert len(calls) == 3
+
+
 async def test_delete_builtin_tool_does_not_queue_a_tombstone(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
