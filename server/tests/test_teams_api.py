@@ -272,3 +272,93 @@ def test_invite_grant_can_keep_already_member_scoped_agent(
     )
     assert response.status_code == 200, response.text
     assert response.json()["agent_ids"] == [other_agent, scoped_agent]
+
+
+# #353: invite-grant escalation via team deletion / membership removal --
+# see api/teams.py's delete_team/update_team docstrings.
+
+
+def _team_with_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str], team_name: str, agent_name: str
+) -> tuple[str, str]:
+    scoped_agent = _create_agent(client, auth_headers, agent_name)
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    team_id = client.post("/api/v1/teams", json={"name": team_name}, headers=auth_headers).json()[
+        "id"
+    ]
+    assigned = client.patch(
+        f"/api/v1/teams/{team_id}", json={"agent_ids": [scoped_agent]}, headers=auth_headers
+    )
+    assert assigned.status_code == 200, assigned.text
+    return team_id, scoped_agent
+
+
+def test_invite_grant_cannot_delete_team_holding_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    team_id, _ = _team_with_scoped_agent(client, auth_headers, "Scoped Roster", "Scoped Delete")
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(f"/api/v1/teams/{team_id}", headers=invite_headers)
+    assert response.status_code == 403
+    assert client.get(f"/api/v1/teams/{team_id}", headers=auth_headers).status_code == 200
+
+    # An owner session can, same request otherwise.
+    owner_response = client.delete(f"/api/v1/teams/{team_id}", headers=auth_headers)
+    assert owner_response.status_code == 204, owner_response.text
+
+
+def test_invite_grant_can_delete_team_without_scoped_agents(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    unscoped_agent = _create_agent(client, auth_headers, "Unscoped Delete")
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Unscoped Roster"}, headers=auth_headers
+    ).json()["id"]
+    client.patch(
+        f"/api/v1/teams/{team_id}", json={"agent_ids": [unscoped_agent]}, headers=auth_headers
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.delete(f"/api/v1/teams/{team_id}", headers=invite_headers)
+    assert response.status_code == 204, response.text
+
+
+def test_invite_grant_cannot_drop_scoped_member_via_patch(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#353 leftover of #326: `agent_ids` that *omit* an already-member
+    scoped agent severs the @mention path the owner set up -- blocked for
+    guests, unlike keeping/reordering (test above)."""
+    team_id, scoped_agent = _team_with_scoped_agent(
+        client, auth_headers, "Drop Target", "Scoped Dropped"
+    )
+    other_agent = _create_agent(client, auth_headers, "Kept Member")
+    client.patch(
+        f"/api/v1/teams/{team_id}",
+        json={"agent_ids": [scoped_agent, other_agent]},
+        headers=auth_headers,
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.patch(
+        f"/api/v1/teams/{team_id}",
+        json={"agent_ids": [other_agent]},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+    fetched = client.get(f"/api/v1/teams/{team_id}", headers=auth_headers)
+    assert fetched.json()["agent_ids"] == [scoped_agent, other_agent]
+
+    # An owner session can, same request otherwise.
+    owner_response = client.patch(
+        f"/api/v1/teams/{team_id}",
+        json={"agent_ids": [other_agent]},
+        headers=auth_headers,
+    )
+    assert owner_response.status_code == 200, owner_response.text
+    assert owner_response.json()["agent_ids"] == [other_agent]

@@ -136,6 +136,17 @@ async def update_team(
                         "Owner access required to add an agent that holds a capability "
                         "scope to a team",
                     )
+            # #353: dropping a scoped member is the other half -- it severs
+            # the @mention/dispatch path the owner set up, same standing as
+            # deleting the team (delete_team below). Keeping/reordering an
+            # existing member stays allowed.
+            for agent_id in old_agent_ids - new_agent_ids:
+                if await agent_holds_owner_scope(db, agent_id):
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        "Owner access required to remove an agent that holds a capability "
+                        "scope from a team",
+                    )
         await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team_id))
         for position, agent_id in enumerate(body.agent_ids):
             db.add(TeamAgent(team_id=team_id, agent_id=agent_id, position=position))
@@ -158,8 +169,23 @@ async def update_team(
 
 
 @router.delete("/{team_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_team(team_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_team(
+    team_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
     team = await _get_or_404(db, team_id)
+    # #353: mirrors agents.py's delete_agent gate (#285) -- an invite-grant
+    # session can't retarget a channel at a team holding a scoped agent
+    # (#326) or edit that agent, but could still delete the whole team,
+    # which unassigns its channels and tombstones the delete to every peer.
+    # At least as disruptive, so same owner-only standing.
+    if claims.grant != "owner" and await team_holds_owner_scoped_agent(db, team_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to delete a team that holds an agent with a capability scope",
+        )
     # Channel.team_id has no ondelete (SQLite defaults an unset FK to
     # RESTRICT), so a channel still pointing at this team would otherwise
     # turn the delete below into an unhandled IntegrityError (#250). Mirror
