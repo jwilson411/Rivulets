@@ -484,7 +484,7 @@ async def apply_remote_change(
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
 
     if comparison is ClockComparison.CONCURRENT:
-        local_instance = await db.get(spec.model, entity_id)
+        local_instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
         db.add(
             SyncConflict(
                 entity_type=spec.entity_type,
