@@ -39,6 +39,19 @@ vi.mock('$lib/api/workflows', () => ({
 	workflows: { list: vi.fn() }
 }));
 
+// #355: the page filters draft workflows out of the subject picker for
+// invite-grant sessions (the server 403s a guest suite create/run against
+// an unpublished workflow). Same hoisted-getter mock as Sidebar's tests.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
 const researcher: Agent = {
 	id: 'agent-1',
 	name: 'Researcher',
@@ -86,8 +99,16 @@ const exactCase: EvalCase = {
 	expected_tool_args: null
 };
 
+const draftWorkflow: Workflow = {
+	...digestWorkflow,
+	id: 'wf-2',
+	name: 'scratchpad',
+	published: false
+};
+
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 function stubLists() {
@@ -764,5 +785,34 @@ describe('evals/+page.svelte', () => {
 			.element(page.getByRole('button', { name: 'Create suite' }))
 			.not.toBeInTheDocument();
 		expect(evals.createSuite).not.toHaveBeenCalled();
+	});
+
+	it('offers draft workflows to an owner, labeled as drafts', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(workflows.list).mockResolvedValue([digestWorkflow, draftWorkflow]);
+		vi.mocked(evals.listSuites).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: '+ New suite' }).click();
+		await page.getByRole('radio', { name: 'Workflow' }).click();
+
+		await expect.element(page.getByRole('option', { name: '/digest' })).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('option', { name: '/scratchpad (draft)' }))
+			.toBeInTheDocument();
+	});
+
+	it('hides draft workflows from the subject picker for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(workflows.list).mockResolvedValue([digestWorkflow, draftWorkflow]);
+		vi.mocked(evals.listSuites).mockResolvedValue([]);
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: '+ New suite' }).click();
+		await page.getByRole('radio', { name: 'Workflow' }).click();
+
+		await expect.element(page.getByRole('option', { name: '/digest' })).toBeInTheDocument();
+		await expect.element(page.getByRole('option', { name: /scratchpad/ })).not.toBeInTheDocument();
 	});
 });

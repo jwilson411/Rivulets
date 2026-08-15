@@ -202,7 +202,15 @@ async def _run_workflow_case(
     """Workflow execution requires a real Rivulet (workflows/engine.py's
     run_workflow posts Messages to it and reads its channel_id) -- a fresh
     one is created per case on a shared scratch channel, same isolation
-    reasoning as _run_agent_case's fresh session_id."""
+    reasoning as _run_agent_case's fresh session_id.
+
+    `Workflow.published` is deliberately not checked here: running a
+    draft is how an owner exercises a workflow before publishing it (and
+    what this module's tests do throughout). The invite-grant side of
+    that path -- the only caller who shouldn't fire a draft -- is gated
+    at the API layer instead (#355, api/evals.py's
+    _require_owner_for_draft_workflow, checked at both suite create and
+    run), matching how every other trigger enforces the published gate."""
     workflow = await db.get(Workflow, workflow_id)
     if workflow is None:
         raise RuntimeError("Workflow no longer exists")

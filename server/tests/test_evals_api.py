@@ -529,3 +529,132 @@ def test_invite_grant_cannot_run_suite_scoped_after_creation(
 
     response = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=invite_headers)
     assert response.status_code == 403
+
+
+# #355 (leftover of #249/#292): the eval runner executes its workflow
+# subject by id, skipping the find_workflow_by_name published gate that
+# every other trigger (slash command, run_workflow tool, schedule, webhook,
+# nested child, remediation) enforces. Owner draft runs stay allowed on
+# purpose -- evals are how a draft gets exercised before publishing -- but
+# an invite-grant session is held to published-only, same as every other
+# trigger. See api/evals.py's _require_owner_for_draft_workflow.
+
+
+def _publish_workflow(client: TestClient, headers: dict[str, str], workflow_id: str) -> None:
+    """Publishing enforces graph readiness (#292), so wire the minimal
+    valid graph first: one transform node as the entry point."""
+    node = client.post(
+        f"/api/v1/workflows/{workflow_id}/nodes",
+        json={"name": "echo", "node_type": "transform", "config": {"template": "{input}"}},
+        headers=headers,
+    )
+    assert node.status_code == 201, node.text
+    connected = client.post(
+        f"/api/v1/workflows/{workflow_id}/connections",
+        json={"from_node_id": None, "to_node_id": node.json()["id"]},
+        headers=headers,
+    )
+    assert connected.status_code == 201, connected.text
+    resp = client.post(f"/api/v1/workflows/{workflow_id}/publish", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+
+def _stub_workflow_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same seam as the fake_run_agent tests above, one layer over:
+    rivulets.evals.runner imports run_workflow at module level."""
+
+    async def fake_run_workflow(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(status="completed", final_output="hi", error_message=None)
+
+    monkeypatch.setattr("rivulets.evals.runner.run_workflow", fake_run_workflow)
+
+
+def _add_substring_case(client: TestClient, headers: dict[str, str], suite_id: str) -> None:
+    resp = client.post(
+        f"/api/v1/evals/suites/{suite_id}/cases",
+        json={
+            "name": "greets",
+            "input_content": "hi",
+            "judge_type": "substring",
+            "expected_output": "hi",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+def test_invite_grant_cannot_create_suite_against_draft_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    workflow_id = _create_workflow(client, auth_headers, "draft-only-flow")
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-draft-suite", "workflow_id": workflow_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
+
+    # Publishing the workflow lifts the gate, same request otherwise.
+    _publish_workflow(client, auth_headers, workflow_id)
+    published_response = client.post(
+        "/api/v1/evals/suites",
+        json={"name": "guest-draft-suite", "workflow_id": workflow_id},
+        headers=invite_headers,
+    )
+    assert published_response.status_code == 201, published_response.text
+
+
+def test_invite_grant_can_run_suite_against_published_workflow(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_workflow_run(monkeypatch)
+    workflow_id = _create_workflow(client, auth_headers, "published-flow")
+    _publish_workflow(client, auth_headers, workflow_id)
+    invite_headers = _invite_headers(client, auth_headers)
+
+    suite = _create_suite(client, invite_headers, "guest-published-suite", workflow_id=workflow_id)
+    _add_substring_case(client, invite_headers, suite["id"])
+
+    run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=invite_headers)
+    assert run_resp.status_code == 200, run_resp.text
+    assert run_resp.json()["pass_count"] == 1
+
+
+def test_invite_grant_cannot_run_suite_unpublished_after_creation(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """The published gate runs again at execution time, not just at create
+    -- the owner can unpublish a workflow after a guest already created a
+    suite against it, same re-check reasoning as the later-scoped test
+    above."""
+    workflow_id = _create_workflow(client, auth_headers, "later-unpublished-flow")
+    _publish_workflow(client, auth_headers, workflow_id)
+    invite_headers = _invite_headers(client, auth_headers)
+    suite = _create_suite(
+        client, invite_headers, "later-unpublished-suite", workflow_id=workflow_id
+    )
+    _add_substring_case(client, invite_headers, suite["id"])
+
+    unpublished = client.post(f"/api/v1/workflows/{workflow_id}/unpublish", headers=auth_headers)
+    assert unpublished.status_code == 200, unpublished.text
+
+    response = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=invite_headers)
+    assert response.status_code == 403
+
+
+def test_owner_can_create_and_run_suite_against_draft_workflow(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner draft runs are the point of keeping the gate grant-based
+    rather than requiring `published` outright: an eval suite is how a
+    draft gets exercised before it's published."""
+    _stub_workflow_run(monkeypatch)
+    workflow_id = _create_workflow(client, auth_headers, "owner-draft-flow")
+    suite = _create_suite(client, auth_headers, "owner-draft-suite", workflow_id=workflow_id)
+    _add_substring_case(client, auth_headers, suite["id"])
+
+    run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=auth_headers)
+    assert run_resp.status_code == 200, run_resp.text
+    assert run_resp.json()["pass_count"] == 1

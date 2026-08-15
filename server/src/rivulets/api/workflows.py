@@ -499,10 +499,12 @@ async def _require_owner_for_scoped_agent_node(
     """#326: attaching a capability-scoped agent to a workflow node is
     gated regardless of `workflow.published` -- only an owner can publish
     (_o: OwnerGrant on publish_workflow below), but a *draft* workflow can
-    still be run directly by an eval suite (evals/runner.py's
+    still be run directly by an *owner's* eval suite (evals/runner.py's
     _run_workflow_case loads by id, skipping find_workflow_by_name's
-    published check), so draft status alone doesn't block invocation the
-    way it does for a schedule/webhook/slash-command trigger."""
+    published check; #355 closed the invite-grant side of that path but
+    owner draft runs remain), so draft status alone doesn't block
+    invocation the way it does for a schedule/webhook/slash-command
+    trigger."""
     if agent_id is None or claims.grant == "owner":
         return
     if await agent_holds_owner_scope(db, agent_id):
