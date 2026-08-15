@@ -4,7 +4,29 @@ nothing creates a MENTION_ONLY or SEMANTIC rule and calls rule_matches on it
 directly (mention-only agents are only ever invoked through the separate
 @mention path, never through rule matching itself)."""
 
-from rivulets.dispatch.rules import Rule, RuleType, rule_matches
+from rivulets.dispatch.rules import Rule, RuleType, is_valid_regex, rule_matches
+
+_BAD_REGEX = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"  # #366: bad char range \w-
+
+
+def test_regex_rule_matches() -> None:
+    rule = Rule(RuleType.REGEX, r"ORD-\d+")
+    assert rule_matches(rule, "status of ORD-4821?") is True
+    assert rule_matches(rule, "no order number here") is False
+
+
+def test_invalid_regex_rule_never_raises_and_treated_as_no_match() -> None:
+    """#366: one bad regex rule on any agent must not 500 dispatch for the
+    whole channel -- rule_matches degrades to "no match" instead of
+    propagating re.error."""
+    rule = Rule(RuleType.REGEX, _BAD_REGEX)
+    assert rule_matches(rule, "check out https://example.com/path") is False
+    assert rule_matches(rule, "hello") is False
+
+
+def test_is_valid_regex() -> None:
+    assert is_valid_regex(r"ORD-\d+") is True
+    assert is_valid_regex(_BAD_REGEX) is False
 
 
 def test_mention_only_rule_never_matches_via_rule_matching() -> None:

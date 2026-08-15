@@ -571,12 +571,25 @@ async def update_routing_rules(
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> list[AgentRoutingRule]:
+    # Lazy import (#366): dispatch/__init__.py eagerly imports dispatch.service,
+    # which imports from this module (agent_holds_owner_scope) -- an
+    # unconditional module-level import of dispatch.rules here would trigger
+    # that cycle mid-init. See agent_lifecycle.py's generate_and_store_routing_rules
+    # for the same pattern.
+    from rivulets.dispatch.rules import RuleType, is_valid_regex
+
     await _get_or_404(db, agent_id)
     if claims.grant != "owner" and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to modify routing rules for an agent holding a capability scope",
         )
+    for rule in body.rules:
+        if rule.rule_type == RuleType.REGEX.value and not is_valid_regex(rule.pattern):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Invalid regex routing rule pattern: {rule.pattern!r}",
+            )
     await replace_routing_rules(
         db, agent_id, [(r.rule_type, r.pattern, r.priority) for r in body.rules]
     )
