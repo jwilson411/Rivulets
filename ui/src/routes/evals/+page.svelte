@@ -9,6 +9,7 @@
 		type EvalSuite,
 		type JudgeType
 	} from '$lib/api/evals';
+	import { auth } from '$lib/api/auth.svelte';
 	import { timeAgo } from '$lib/format';
 	import Icon from '$lib/components/Icon.svelte';
 
@@ -23,6 +24,13 @@
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
 	let loadError = $state<string | null>(null);
+
+	// #355: the server 403s an invite-grant suite create/run against an
+	// unpublished workflow (owner-only draft runs), so don't offer drafts
+	// a guest can't actually fire. Owners still see them, marked as drafts.
+	const selectableWorkflows = $derived(
+		auth.grant === 'owner' ? workflowList : workflowList.filter((workflow) => workflow.published)
+	);
 
 	async function refresh() {
 		loadError = null;
@@ -328,8 +336,10 @@
 						<option value={agent.id}>{agent.name}</option>
 					{/each}
 				{:else}
-					{#each workflowList as workflow (workflow.id)}
-						<option value={workflow.id}>/{workflow.name}</option>
+					{#each selectableWorkflows as workflow (workflow.id)}
+						<option value={workflow.id}>
+							/{workflow.name}{workflow.published ? '' : ' (draft)'}
+						</option>
 					{/each}
 				{/if}
 			</select>

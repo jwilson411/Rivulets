@@ -209,6 +209,33 @@ async def _require_owner_for_scoped_subject(
         )
 
 
+async def _require_owner_for_draft_workflow(
+    db: DbSession, claims: SessionClaims, workflow_id: str | None
+) -> None:
+    """#355 (leftover of #249/#292): every other trigger path -- slash
+    command, run_workflow tool, schedule, webhook, nested child,
+    remediation -- requires Workflow.published, but an eval suite executes
+    its workflow subject by id (evals/runner.py's _run_workflow_case),
+    never passing through find_workflow_by_name's published gate. Owner
+    draft runs stay allowed on purpose -- evals are how a draft gets
+    exercised before publishing -- but an invite-grant session is held to
+    the same published-only rule as every other trigger, since a draft is
+    exactly the graph the owner hasn't signed off on yet. Checked on both
+    create (fail fast) and run (the authoritative check -- a workflow can
+    be unpublished again after the suite was created, same re-check
+    reasoning as _require_owner_for_scoped_subject). A missing workflow
+    row is not this gate's problem: run keeps recording it as a per-case
+    'error' result (evals/runner.py)."""
+    if workflow_id is None or claims.grant == "owner":
+        return
+    workflow = await db.get(Workflow, workflow_id)
+    if workflow is not None and not workflow.published:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to run an eval suite against an unpublished workflow",
+        )
+
+
 async def _get_suite_or_404(db: DbSession, suite_id: str) -> EvalSuite:
     suite = await db.get(EvalSuite, suite_id)
     if suite is None:
@@ -283,6 +310,7 @@ async def create_suite(
     await _require_owner_for_scoped_subject(
         db, claims, agent_id=body.agent_id, workflow_id=body.workflow_id
     )
+    await _require_owner_for_draft_workflow(db, claims, body.workflow_id)
 
     suite = EvalSuite(
         name=body.name,
@@ -441,6 +469,9 @@ async def run_suite(
     await _require_owner_for_scoped_subject(
         db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
     )
+    # #355: likewise re-checked here -- publish state can change between
+    # suite creation and this run.
+    await _require_owner_for_draft_workflow(db, claims, suite.workflow_id)
     case_count = await db.scalar(
         select(func.count()).select_from(EvalCase).where(EvalCase.suite_id == suite_id)
     )
