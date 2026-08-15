@@ -192,20 +192,24 @@ async def _require_owner_for_scoped_subject(
     (teams.py) or a workflow node (workflows.py), just via a third
     invocation path. Checked on both create (fail fast) and run (the
     authoritative check -- dispatch honors a scope grant made *after* the
-    suite was created, same as agent_holds_owner_scope's own docstring)."""
+    suite was created, same as agent_holds_owner_scope's own docstring),
+    and on every other suite/case write (#352): the definition a guest
+    edits is exactly what the owner's next run executes against the
+    privileged subject, same definition-vs-invocation split #315 closed
+    for workflow graphs."""
     if claims.grant == "owner":
         return
     if agent_id is not None and await agent_holds_owner_scope(db, agent_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "Owner access required to run an eval suite against an agent that holds a "
-            "capability scope",
+            "Owner access required to modify or run an eval suite against an agent that "
+            "holds a capability scope",
         )
     if workflow_id is not None and await workflow_holds_owner_scoped_agent(db, workflow_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "Owner access required to run an eval suite against a workflow with a "
-            "capability-scoped agent node",
+            "Owner access required to modify or run an eval suite against a workflow "
+            "with a capability-scoped agent node",
         )
 
 
@@ -339,9 +343,16 @@ async def get_suite(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> Eval
 
 @router.patch("/suites/{suite_id}", response_model=EvalSuiteOut)
 async def update_suite(
-    suite_id: str, body: EvalSuiteUpdate, db: DbSession, _: CurrentWorkspaceId
+    suite_id: str,
+    body: EvalSuiteUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> EvalSuiteOut:
     suite = await _get_suite_or_404(db, suite_id)
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     if body.name is not None:
         suite.name = body.name
     if body.description is not None:
@@ -353,8 +364,16 @@ async def update_suite(
 
 
 @router.delete("/suites/{suite_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_suite(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_suite(
+    suite_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
     suite = await _get_suite_or_404(db, suite_id)
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     await db.delete(suite)
     await db.commit()
     await publish_tombstone(db, "eval_suite", suite_id)
@@ -364,9 +383,16 @@ async def delete_suite(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> N
     "/suites/{suite_id}/cases", response_model=EvalCaseOut, status_code=status.HTTP_201_CREATED
 )
 async def create_case(
-    suite_id: str, body: EvalCaseCreate, db: DbSession, _: CurrentWorkspaceId
+    suite_id: str,
+    body: EvalCaseCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> EvalCaseOut:
     suite = await _get_suite_or_404(db, suite_id)
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     _validate_case_fields(
         body.judge_type, body.expected_output, body.rubric, body.expected_tool_name
     )
@@ -406,9 +432,17 @@ async def list_cases(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> lis
 
 @router.patch("/suites/{suite_id}/cases/{case_id}", response_model=EvalCaseOut)
 async def update_case(
-    suite_id: str, case_id: str, body: EvalCaseUpdate, db: DbSession, _: CurrentWorkspaceId
+    suite_id: str,
+    case_id: str,
+    body: EvalCaseUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> EvalCaseOut:
     suite = await _get_suite_or_404(db, suite_id)
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     case = await _get_case_or_404(db, suite_id, case_id)
 
     judge_type = body.judge_type if body.judge_type is not None else case.judge_type
@@ -444,7 +478,17 @@ async def update_case(
 
 
 @router.delete("/suites/{suite_id}/cases/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_case(suite_id: str, case_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+async def delete_case(
+    suite_id: str,
+    case_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> None:
+    suite = await _get_suite_or_404(db, suite_id)
+    await _require_owner_for_scoped_subject(
+        db, claims, agent_id=suite.agent_id, workflow_id=suite.workflow_id
+    )
     case = await _get_case_or_404(db, suite_id, case_id)
     await db.delete(case)
     await db.commit()
