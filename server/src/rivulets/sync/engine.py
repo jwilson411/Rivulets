@@ -168,20 +168,45 @@ def _peer_ip(address: str) -> str | None:
     return None
 
 
+# The ranges _is_lan_address counts as LAN. An explicit allowlist rather
+# than ipaddress's is_private (issue #361): is_private also matches
+# 100.64.0.0/10 — CGNAT shared address space, which is what Tailscale
+# assigns — on Python < 3.11.9 / < 3.12.4 (gh-113171), plus ranges like
+# 192.0.2.0/24 (TEST-NET) and 198.18.0.0/15 (benchmarking) that are never
+# a real local network. docs/architecture.md positions Tailscale/WireGuard
+# as the *cross-network* path, so overlay addresses must classify as WAN
+# and fall under sync.eager_files_wan's opt-in default.
+_LAN_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC1918
+    ipaddress.ip_network("127.0.0.0/8"),  # loopback
+    ipaddress.ip_network("169.254.0.0/16"),  # IPv4 link-local
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),  # RFC4193 IPv6 ULA
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
+)
+
+
 def _is_lan_address(address: str) -> bool:
     """LAN vs WAN classification for issue #123's eager-sync settings:
-    private/loopback/link-local ranges (RFC1918, RFC4193 IPv6 ULA, mDNS-
-    discovered peers are always in one of these) count as LAN; anything
-    else — including an address we couldn't parse at all — is treated as
-    WAN, matching sync.eager_files_wan's more conservative default
-    (False) rather than silently eager-pushing to an unknown network."""
+    only _LAN_NETWORKS (RFC1918, loopback, link-local, RFC4193 IPv6 ULA —
+    mDNS-discovered peers are always in one of these) count as LAN.
+    Anything else — overlay/VPN ranges like Tailscale's 100.64.0.0/10
+    (issue #361), genuinely public addresses, or an address we couldn't
+    parse at all — is treated as WAN, matching sync.eager_files_wan's
+    more conservative default (False) rather than silently eager-fetching
+    over an unknown or metered network."""
     ip = _peer_ip(address)
     if ip is None:
         return False
     try:
-        return ipaddress.ip_address(ip).is_private
+        parsed = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        parsed = parsed.ipv4_mapped
+    return any(parsed in network for network in _LAN_NETWORKS)
 
 
 def _bound_port(host: IHost) -> int:

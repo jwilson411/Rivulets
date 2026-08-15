@@ -37,6 +37,11 @@ _DEFAULTS: dict[str, object] = {
     "rivulet.summarization_enabled": True,
     "rivulet.context_threshold_pct": 80,
     "rivulet.recent_messages_kept": 20,
+    # LAN vs WAN is decided per-peer by sync/engine.py's _is_lan_address:
+    # RFC1918 / loopback / link-local / IPv6 ULA addresses are LAN; anything
+    # else — including Tailscale's CGNAT range 100.64.0.0/10 and other
+    # overlay/VPN prefixes — is WAN (issue #361), so cross-network meshes
+    # only eager-fetch file bytes if the operator opts in here.
     "sync.eager_files_lan": True,
     "sync.eager_files_wan": False,
     "ui.port": 8484,
