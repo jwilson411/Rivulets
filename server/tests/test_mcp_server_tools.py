@@ -332,12 +332,16 @@ def test_register_mcp_server_at_a_private_address_is_refused(
 
 
 def _register_server_via_api(
-    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    url: str = "http://127.0.0.1:9999/mcp",
 ) -> str:
     _patch_api_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
     created = client.post(
         "/api/v1/mcp-servers",
-        json={"name": name, "url": "http://127.0.0.1:9999/mcp"},
+        json={"name": name, "url": url},
         headers=auth_headers,
     )
     assert created.status_code == 201, created.text
@@ -352,9 +356,14 @@ def test_reconnect_mcp_server_by_name(
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reconnect_mcp_server")
     server_name = f"reconnect-target-{agent_id}"
-    _register_server_via_api(client, auth_headers, monkeypatch, server_name)
+    # #365: the reconnect trigger now re-runs check_host_is_public on the
+    # stored url, so the happy path needs a public-resolving one.
+    _register_server_via_api(
+        client, auth_headers, monkeypatch, server_name, url="http://mcp.example.com/mcp"
+    )
 
     _patch_dispatch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    _patch_getaddrinfo_public(monkeypatch)
     monkeypatch.setattr(
         "rivulets.dispatch.service.run_agent",
         _fake_run_agent(_tool_execution("reconnect_mcp_server", {"server": server_name})),
@@ -424,6 +433,36 @@ async def test_reconnect_mcp_server_with_stored_headers_is_refused(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert "requires a live owner session" in messages[2]["content"]
+
+
+def test_reconnect_mcp_server_at_a_private_address_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#365: _handle_reconnect_mcp_server_trigger re-runs the stored url
+    through check_host_is_public before dialing it again, unconditionally
+    (same "no live session to grant an owner exception" reasoning as the
+    register trigger). A url that resolved public at registration and was
+    then DNS-rebound to loopback -- or, as here, one the owner registered
+    at a private address via the API -- is refused instead of dialed."""
+    agent_id = _create_agent(client, auth_headers, "SSRFReconnector")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "reconnect_mcp_server")
+    server_name = f"private-reconnect-target-{agent_id}"
+    _register_server_via_api(client, auth_headers, monkeypatch, server_name)
+
+    _patch_dispatch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(_tool_execution("reconnect_mcp_server", {"server": server_name})),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go reconnect it"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "internal/private network address" in messages[2]["content"]
 
 
 def test_delete_mcp_server_removes_server_and_tools(

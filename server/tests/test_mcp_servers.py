@@ -518,16 +518,30 @@ def test_reconnect_mcp_server_with_headers_requires_owner_grant(
     assert response.status_code == 403
 
 
+def _patch_getaddrinfo(monkeypatch: pytest.MonkeyPatch, ip: str) -> None:
+    """Makes every hostname resolve to `ip`, so tests control what
+    security/network.py's check_host_is_public sees."""
+
+    def fake_getaddrinfo(_host: str, _port: object) -> list[tuple[object, ...]]:
+        return [(None, None, None, None, (ip, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+
 def test_unregister_plain_streamable_http_mcp_server_stays_open_to_invite_grant(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A server with no stdio transport and no stored headers/env carries
     nothing sensitive to protect -- unregistering/reconnecting it stays
-    open to any grant, unchanged from before #231."""
+    open to any grant, unchanged from before #231. Since #365 an
+    invite-grant reconnect re-runs the SSRF check on the stored url, so
+    this uses a public-resolving hostname; the private-resolving case is
+    test_reconnect_mcp_server_at_a_private_address_requires_owner_grant."""
     _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
     created = client.post(
         "/api/v1/mcp-servers",
-        json={"name": "Plain server", "url": "http://127.0.0.1:9999/mcp"},
+        json={"name": "Plain server", "url": "http://mcp.example.com/mcp"},
         headers=auth_headers,
     )
     server_id = created.json()["id"]
@@ -538,6 +552,59 @@ def test_unregister_plain_streamable_http_mcp_server_stays_open_to_invite_grant(
 
     deleted = client.delete(f"/api/v1/mcp-servers/{server_id}", headers=invite_headers)
     assert deleted.status_code == 204
+
+
+def test_reconnect_mcp_server_at_a_private_address_requires_owner_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#365: reconnect re-runs check_host_is_public on the stored url for
+    a non-owner session, keyed off the *caller* -- rows don't record who
+    registered a server, so an invite-grant can't reconnect any server
+    whose url currently resolves private, even one the owner deliberately
+    registered. The owner keeps reconnecting it, unchanged (the supported
+    self-hosted local MCP server case)."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Local server", "url": "http://127.0.0.1:9999/mcp"},
+        headers=auth_headers,
+    )
+    server_id = created.json()["id"]
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=invite_headers)
+    assert response.status_code == 403
+
+    owner_response = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=auth_headers)
+    assert owner_response.status_code == 200, owner_response.text
+
+
+def test_reconnect_mcp_server_after_dns_rebind_is_blocked_for_invite_grant(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#365's exact repro: an invite-grant registers a headerless
+    streamable-http server on a hostname that resolves public (so the
+    register-time SSRF check passes), the name's DNS is then re-pointed
+    at loopback, and the same grant POSTs /reconnect. Before the fix,
+    _connect_and_sync_tools dialed whatever the name resolves to *now*;
+    reconnect must re-resolve and re-check instead."""
+    _patch_discover_tools(monkeypatch, [DiscoveredTool(name="add", description="Adds.")])
+    invite_headers = _invite_headers(client, auth_headers)
+
+    _patch_getaddrinfo(monkeypatch, "93.184.216.34")
+    created = client.post(
+        "/api/v1/mcp-servers",
+        json={"name": "Rebinder", "url": "http://rebind.example.com/mcp"},
+        headers=invite_headers,
+    )
+    assert created.status_code == 201, created.text
+    server_id = created.json()["id"]
+
+    # The attacker flips the name's A record to loopback.
+    _patch_getaddrinfo(monkeypatch, "127.0.0.1")
+    response = client.post(f"/api/v1/mcp-servers/{server_id}/reconnect", headers=invite_headers)
+    assert response.status_code == 403
+    assert "internal/private network address" in response.json()["detail"]
 
 
 def test_register_mcp_server_with_headers_stores_names_not_values(

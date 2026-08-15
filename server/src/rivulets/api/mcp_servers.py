@@ -37,7 +37,10 @@ case -- see test_register_mcp_server_with_headers_requires_owner_grant's
 are never run through this check; an invite-grant session picking the
 target is the same untrusted-input-driven risk as any other outbound
 fetch it shouldn't be able to aim at this node's own localhost services
-or LAN.
+or LAN. The same check re-runs on every non-owner /reconnect (#365) --
+a register-time-only check is defeated by re-pointing the stored
+hostname's DNS at a private address afterwards (see
+_ensure_url_host_is_public).
 
 Stdio transport (#187): a `transport="stdio"` server has Rivulets spawn
 and run `command`/`args` as a local subprocess, rather than making an
@@ -164,6 +167,24 @@ async def _get_or_404(db: DbSession, server_id: str) -> MCPServer:
     if server is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP server not found")
     return server
+
+
+def _ensure_url_host_is_public(url: str) -> None:
+    """403 unless every address `url`'s host *currently* resolves to is
+    public (security/network.py's check_host_is_public). Shared by
+    register_mcp_server and reconnect_mcp_server for non-owner sessions:
+    checking only at registration isn't enough, because the stored
+    hostname's DNS can change afterwards -- a name that resolved public
+    at register time can be re-pointed at loopback/LAN and then
+    "reconnected" into an SSRF (#365), so every outbound driven by a
+    non-owner session re-resolves and re-checks at connect time."""
+    host = urlsplit(url).hostname
+    if host is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Could not determine URL host")
+    try:
+        check_host_is_public(host)
+    except BlockedHostError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
 
 
 def _requires_owner_to_mutate(server: MCPServer) -> bool:
@@ -326,13 +347,7 @@ async def register_mcp_server(
             # below: MCPServerCreate's own validator already requires
             # a non-empty url for streamable-http.
             assert body.url is not None
-            host = urlsplit(body.url).hostname
-            if host is None:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "Could not determine URL host")
-            try:
-                check_host_is_public(host)
-            except BlockedHostError as exc:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+            _ensure_url_host_is_public(body.url)
 
     server = MCPServer(
         name=body.name,
@@ -447,6 +462,17 @@ async def reconnect_mcp_server(
     server = await _get_or_404(db, server_id)
     if _requires_owner_to_mutate(server) and claims.grant != "owner":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner access required")
+    if claims.grant != "owner" and server.url is not None:
+        # #365 (leftover of #285): register_mcp_server checks the url's
+        # host for a non-owner session, but DNS for the stored name can
+        # change between then and now -- register a public name, re-point
+        # it at loopback, POST /reconnect, and _connect_and_sync_tools
+        # would dial whatever it resolves to today. So reconnect
+        # re-resolves and re-checks for non-owner sessions, regardless of
+        # who registered the server (rows don't record that). Owners stay
+        # exempt, same as at registration -- an owner reconnecting a
+        # local/LAN MCP server is the supported self-hosted use case.
+        _ensure_url_host_is_public(server.url)
     await _connect_and_sync_tools(db, server)
     await db.commit()
     await db.refresh(server)
