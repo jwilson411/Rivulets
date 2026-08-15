@@ -29,6 +29,7 @@ vi.mock('$lib/api/auth.svelte', () => ({
 vi.mock('$lib/api/tools', () => ({
 	tools: {
 		list: vi.fn(),
+		listScopes: vi.fn(),
 		get: vi.fn(),
 		create: vi.fn(),
 		update: vi.fn(),
@@ -47,6 +48,7 @@ const builtinTool: Tool = {
 	tool_type: 'builtin',
 	source_path: null,
 	sensitive: false,
+	required_scope: null,
 	available: true
 };
 
@@ -57,6 +59,7 @@ const customTool: Tool = {
 	tool_type: 'custom',
 	source_path: '/tools/my_tool.py',
 	sensitive: false,
+	required_scope: null,
 	available: true
 };
 

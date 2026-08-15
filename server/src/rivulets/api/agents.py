@@ -52,6 +52,7 @@ from rivulets.db.models import (
     AgentPeerPreference,
     AgentRoutingRule,
     AgentRun,
+    AgentTool,
     AgentToolScope,
     AgentVersion,
     TeamAgent,
@@ -191,6 +192,10 @@ class PeerPreferenceOut(BaseModel):
 
 class PeerPreferenceIn(BaseModel):
     capability_tag: str | None = None
+
+
+class AgentToolIdsOut(BaseModel):
+    tool_ids: list[str]
 
 
 class AgentToolScopesOut(BaseModel):
@@ -635,6 +640,22 @@ async def set_peer_preference(
     await db.commit()
     await publish_current_state(db, "agent_peer_preference", agent_id)
     return PeerPreferenceOut(capability_tag=pref.capability_tag)
+
+
+@router.get("/{agent_id}/tools", response_model=AgentToolIdsOut)
+async def get_agent_tool_ids(
+    agent_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> AgentToolIdsOut:
+    """#344: the read counterpart to tool_ids on AgentCreate/AgentUpdate --
+    those accept an agent's tool assignment on write, but nothing ever
+    returned it, so the UI (or any other client) had no way to know what's
+    currently assigned in order to render a picker. Mirrors
+    get_agent_tool_scopes below rather than adding tool_ids to AgentOut
+    itself -- same reverse-fetch-per-agent shape this router already uses
+    for routing rules, peer preference, and version history."""
+    await _get_or_404(db, agent_id)
+    result = await db.execute(select(AgentTool.tool_id).where(AgentTool.agent_id == agent_id))
+    return AgentToolIdsOut(tool_ids=list(result.scalars().all()))
 
 
 @router.get("/{agent_id}/tool-scopes", response_model=AgentToolScopesOut)

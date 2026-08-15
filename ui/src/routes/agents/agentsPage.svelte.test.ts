@@ -9,6 +9,7 @@ import AgentsPage from './+page.svelte';
 import { agents, type Agent } from '$lib/api/agents';
 import { providers } from '$lib/api/providers';
 import { teams, type TeamDetail } from '$lib/api/teams';
+import { tools, type Tool } from '$lib/api/tools';
 
 vi.mock('$lib/api/agents', () => ({
 	agents: {
@@ -21,7 +22,10 @@ vi.mock('$lib/api/agents', () => ({
 		getPeerPreference: vi.fn(),
 		setPeerPreference: vi.fn(),
 		listVersions: vi.fn(),
-		rollback: vi.fn()
+		rollback: vi.fn(),
+		getToolIds: vi.fn(),
+		getToolScopes: vi.fn(),
+		setToolScopes: vi.fn()
 	}
 }));
 
@@ -31,6 +35,10 @@ vi.mock('$lib/api/providers', () => ({
 
 vi.mock('$lib/api/teams', () => ({
 	teams: { list: vi.fn(), get: vi.fn() }
+}));
+
+vi.mock('$lib/api/tools', () => ({
+	tools: { list: vi.fn(), listScopes: vi.fn() }
 }));
 
 const researcher: Agent = {
@@ -76,6 +84,17 @@ const editorial: TeamDetail = {
 	agent_ids: ['agent-2']
 };
 
+const executePythonTool: Tool = {
+	id: 'tool-1',
+	name: 'execute_python',
+	description: 'Runs Python.',
+	tool_type: 'builtin',
+	source_path: null,
+	sensitive: true,
+	required_scope: 'sensitive_tools:manage',
+	available: true
+};
+
 afterEach(() => {
 	vi.clearAllMocks();
 });
@@ -85,6 +104,12 @@ beforeEach(() => {
 	// Most tests don't care about version history -- default to none so
 	// they don't all need to stub it just to get past refresh().
 	vi.mocked(agents.listVersions).mockResolvedValue([]);
+	// Most tests don't care about assigned tools/granted scopes -- default
+	// to none so they don't all need to stub it just to get past refresh().
+	vi.mocked(agents.getToolIds).mockResolvedValue({ tool_ids: [] });
+	vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: [] });
+	vi.mocked(tools.list).mockResolvedValue([]);
+	vi.mocked(tools.listScopes).mockResolvedValue([]);
 	// Most tests don't care about team membership -- default to no teams so
 	// the "on a team" filter has nothing to match unless a test opts in.
 	vi.mocked(teams.list).mockResolvedValue([]);
@@ -129,7 +154,8 @@ describe('agents/+page.svelte', () => {
 			instructions: 'Be thorough',
 			model: 'anthropic:claude-haiku-4-5-20251001',
 			fallback_models: [],
-			output_schema: null
+			output_schema: null,
+			tool_ids: []
 		});
 		await expect
 			.element(page.getByRole('button', { name: 'Save changes' }))
@@ -195,7 +221,8 @@ describe('agents/+page.svelte', () => {
 			instructions: 'Be thorough',
 			model: 'anthropic:claude-haiku-4-5-20251001',
 			fallback_models: [],
-			output_schema: null
+			output_schema: null,
+			tool_ids: []
 		});
 		await expect
 			.element(page.getByRole('heading', { level: 1, name: 'Agents' }))
@@ -561,5 +588,70 @@ describe('agents/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Roll back' }).click();
 
 		await expect.element(page.getByText('Failed to roll back agent')).toBeInTheDocument();
+	});
+
+	it('assigns a tool via the New-agent form checklist and creates the agent with it (#344)', async () => {
+		vi.mocked(agents.list).mockResolvedValueOnce([]).mockResolvedValueOnce([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(tools.list).mockResolvedValue([executePythonTool]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(agents.create).mockResolvedValueOnce(researcher);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('New agent')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Name').fill('Coder');
+		await page.getByPlaceholder('Description').fill('Writes code');
+		await page.getByPlaceholder('Instructions').fill('Write code');
+		await page.getByRole('combobox').selectOptions('anthropic:claude-haiku-4-5-20251001');
+		await page.getByRole('checkbox', { name: /execute_python/ }).click();
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(agents.create).toHaveBeenCalledWith({
+			name: 'Coder',
+			description: 'Writes code',
+			instructions: 'Write code',
+			model: 'anthropic:claude-haiku-4-5-20251001',
+			fallback_models: [],
+			output_schema: null,
+			tool_ids: ['tool-1']
+		});
+	});
+
+	it('grants a capability scope via the Advanced: capability scopes section (#344)', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(tools.listScopes).mockResolvedValue(['sensitive_tools:manage']);
+		vi.mocked(agents.setToolScopes).mockResolvedValueOnce({ scopes: ['sensitive_tools:manage'] });
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByText('Advanced: capability scopes').click();
+		const scopeCheckbox = page.getByRole('checkbox', { name: 'sensitive_tools:manage' });
+		await expect.element(scopeCheckbox).not.toBeChecked();
+		await scopeCheckbox.click();
+
+		expect(agents.setToolScopes).toHaveBeenCalledWith('agent-1', ['sensitive_tools:manage']);
+		await expect.element(scopeCheckbox).toBeChecked();
+	});
+
+	it('shows an error when granting a capability scope fails', async () => {
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+		vi.mocked(tools.listScopes).mockResolvedValue(['sensitive_tools:manage']);
+		vi.mocked(agents.setToolScopes).mockRejectedValueOnce(
+			new Error('Failed to update capability scopes')
+		);
+
+		render(AgentsPage);
+		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
+
+		await page.getByText('Advanced: capability scopes').click();
+		await page.getByRole('checkbox', { name: 'sensitive_tools:manage' }).click();
+
+		await expect.element(page.getByText('Failed to update capability scopes')).toBeInTheDocument();
 	});
 });

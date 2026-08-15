@@ -145,6 +145,38 @@ describe('agents', () => {
 		expect(result).toEqual({ id: 'a1', model: 'rolled-back-model' });
 	});
 
+	it('getToolIds() GETs /agents/:id/tools', async () => {
+		const fetchMock = mockFetch({ tool_ids: ['t1', 't2'] });
+
+		const result = await agents.getToolIds('a1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/tools');
+		expect(init.method).toBe('GET');
+		expect(result).toEqual({ tool_ids: ['t1', 't2'] });
+	});
+
+	it('getToolScopes() GETs /agents/:id/tool-scopes', async () => {
+		const fetchMock = mockFetch({ scopes: ['sensitive_tools:manage'] });
+
+		const result = await agents.getToolScopes('a1');
+
+		const [url] = fetchMock.mock.calls[0] as [string];
+		expect(url).toBe('/api/v1/agents/a1/tool-scopes');
+		expect(result).toEqual({ scopes: ['sensitive_tools:manage'] });
+	});
+
+	it('setToolScopes() PUTs /agents/:id/tool-scopes with { scopes }', async () => {
+		const fetchMock = mockFetch({ scopes: ['sensitive_tools:manage'] });
+
+		await agents.setToolScopes('a1', ['sensitive_tools:manage']);
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/agents/a1/tool-scopes');
+		expect(init.method).toBe('PUT');
+		expect(init.body).toBe(JSON.stringify({ scopes: ['sensitive_tools:manage'] }));
+	});
+
 	it('sends the Authorization header derived from auth.token', async () => {
 		const fetchMock = mockFetch([]);
 

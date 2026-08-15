@@ -20,6 +20,13 @@ provider is configured. Until then these agents sit in the same
 "provider unresolved" state a manually created agent would (see
 agentos/models.py's UnknownProviderError, swallowed per-agent by
 sync_agents()), which is expected and fine.
+
+#344: seed_starter_agents also grants each starter the AgentToolScope(s)
+its assigned tools need (BUILTIN_TOOL_SCOPES, #188) -- without this,
+Coder's execute_python/write_file and Researcher's http_request are
+assigned via AgentTool but never actually resolve (tool_resolution.py's
+resolve_agent_tools), despite both the README and the roster itself
+advertising them as working out of the box.
 """
 
 from dataclasses import dataclass
@@ -28,7 +35,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
-from rivulets.db.models import Agent, AgentTool, Team, TeamAgent, Tool
+from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
+from rivulets.db.models import Agent, AgentTool, AgentToolScope, Team, TeamAgent, Tool
 
 
 @dataclass(frozen=True)
@@ -119,10 +127,27 @@ async def seed_starter_agents(db: AsyncSession) -> None:
         )
         db.add(agent)
         await db.flush()  # populate agent.id before referencing it in AgentTool rows
+        required_scopes: set[str] = set()
         for tool_name in starter.tool_names:
             tool_id = tool_ids_by_name.get(tool_name)
             if tool_id is not None:
                 db.add(AgentTool(agent_id=agent.id, tool_id=tool_id))
+            scope = BUILTIN_TOOL_SCOPES.get(tool_name)
+            if scope is not None:
+                required_scopes.add(scope)
+        # #344: assignment (AgentTool above) isn't eligibility -- a tool
+        # whose Tool.required_scope is set (BUILTIN_TOOL_SCOPES, #188) only
+        # resolves once the agent also holds a matching AgentToolScope. A
+        # fresh workspace has no owner-UI grant surface to reach yet at
+        # this point in the flow, so creating the workspace (the one event
+        # this function runs on) doubles as the owner's implicit approval
+        # of the starter roster it's about to ship with -- otherwise
+        # Coder's execute_python/write_file and Researcher's http_request
+        # would silently never resolve (tool_resolution.py's
+        # resolve_agent_tools), even though the roster and README both
+        # advertise them working out of the box.
+        for scope in required_scopes:
+            db.add(AgentToolScope(agent_id=agent.id, scope=scope))
 
     await db.commit()
 

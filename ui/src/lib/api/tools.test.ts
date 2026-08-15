@@ -34,6 +34,17 @@ describe('tools', () => {
 		expect(result).toEqual([{ id: 'x1' }]);
 	});
 
+	it('listScopes() GETs /tools/scopes', async () => {
+		const fetchMock = mockFetch(['channels:manage', 'sensitive_tools:manage']);
+
+		const result = await tools.listScopes();
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/tools/scopes');
+		expect(init.method).toBe('GET');
+		expect(result).toEqual(['channels:manage', 'sensitive_tools:manage']);
+	});
+
 	it('get() GETs /tools/:id', async () => {
 		const fetchMock = mockFetch({ id: 'x1' });
 
