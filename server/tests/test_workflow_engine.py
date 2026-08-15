@@ -13,19 +13,26 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import (
+    Agent,
+    AgentTool,
+    AgentToolScope,
     Channel,
     Message,
     Rivulet,
+    Tool,
     Workflow,
     WorkflowConnection,
     WorkflowNode,
     WorkflowNodeRun,
     WorkflowRun,
+    WorkflowSchedule,
 )
 from rivulets.workflows.engine import (
     MAX_NODE_VISITS_PER_RUN,
@@ -1526,3 +1533,265 @@ async def test_workflow_node_rejects_nesting_deeper_than_the_cap(
 
     assert run.status == "failed"
     assert "nest workflows" in (run.error_message or "")
+
+
+# --- #360: builtin side-effect tools called from a workflow agent node --
+
+
+def _tool_call_output(reply: str, tool_name: str, tool_args: dict[str, Any]) -> RunOutput:
+    """A real RunOutput (not a SimpleNamespace double) because #360's
+    trigger path inspects `.tools` the same way dispatch/service.py's
+    channel path does -- mirrors test_channel_tools.py's fixtures."""
+    return RunOutput(
+        status=RunStatus.completed,
+        content=reply,
+        tools=[ToolExecution(tool_name=tool_name, tool_args=tool_args)],
+    )
+
+
+async def _make_agent(db: AsyncSession, name: str) -> Agent:
+    agent = Agent(
+        name=name,
+        description="A workflow-node agent double for the #360 side-effect trigger tests.",
+        instructions="Do the thing.",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db.add(agent)
+    await db.flush()
+    return agent
+
+
+async def _make_agent_node_workflow(db: AsyncSession, name: str, agent: Agent) -> Workflow:
+    """One published workflow whose single node is an agent node -- the
+    minimal graph every #360 test drives."""
+    workflow = await _make_workflow(db, name=name)
+    workflow.published = True
+    node = WorkflowNode(workflow_id=workflow.id, name="act", node_type="agent", agent_id=agent.id)
+    db.add(node)
+    await db.flush()
+    await _entry_connect(db, workflow.id, node.id)
+    return workflow
+
+
+async def test_agent_node_run_workflow_tool_call_starts_a_child_run(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#360: before this, the run_workflow stub's "Requested..." reply was
+    the only thing that happened -- the agent could *say* it ran another
+    workflow while no child WorkflowRun was ever created."""
+    agent = await _make_agent(db_session, "Launcher")
+    rivulet = await _make_rivulet(db_session)
+
+    child = await _make_workflow(db_session, name="child-flow")
+    child.published = True
+    echo = _transform_node(child.id, "echo", "child saw: {input}")
+    db_session.add(echo)
+    await db_session.flush()
+    await _entry_connect(db_session, child.id, echo.id)
+
+    parent = await _make_agent_node_workflow(db_session, "parent-flow", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output(
+            "Kicking it off.",
+            "run_workflow",
+            {"workflow_name": "child-flow", "workflow_input": "ping"},
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    child_run = await db_session.scalar(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == child.id)
+    )
+    assert child_run is not None
+    assert child_run.status == "completed"
+    assert child_run.triggered_by == "agent"
+    assert child_run.triggered_by_id == agent.id
+    assert child_run.final_output == "child saw: ping"
+
+
+async def test_agent_node_triggered_child_run_inherits_unattendedness(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#360: a run_workflow trigger from inside a scheduled (unattended)
+    run must stay unattended -- same inheritance _execute_workflow_node
+    gives a nested 'workflow' node (#100) -- rather than re-deriving False
+    from the child's literal 'agent' trigger."""
+    agent = await _make_agent(db_session, "NightLauncher")
+    rivulet = await _make_rivulet(db_session)
+
+    child = await _make_workflow(db_session, name="night-child")
+    child.published = True
+    echo = _transform_node(child.id, "echo", "ok: {input}")
+    db_session.add(echo)
+    await db_session.flush()
+    await _entry_connect(db_session, child.id, echo.id)
+
+    parent = await _make_agent_node_workflow(db_session, "night-parent", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output(
+            "Going.", "run_workflow", {"workflow_name": "night-child", "workflow_input": "x"}
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "go", triggered_by="schedule", triggered_by_id="sched-1"
+    )
+
+    assert run.status == "completed"
+    assert run.unattended is True
+    child_run = await db_session.scalar(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == child.id)
+    )
+    assert child_run is not None
+    assert child_run.unattended is True
+
+
+async def test_agent_node_run_workflow_self_trigger_is_cycle_guarded(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#360: an agent node calling run_workflow on the workflow it's
+    running inside must not recurse -- engine.py's ancestry guard only
+    covered the 'workflow' node path, so the agent-trigger path threads
+    the same ancestry into _handle_run_workflow_trigger."""
+    agent = await _make_agent(db_session, "Ouroboros")
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_agent_node_workflow(db_session, "loopy", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output(
+            "Again!", "run_workflow", {"workflow_name": "loopy", "workflow_input": "again"}
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    runs = (
+        await db_session.scalars(select(WorkflowRun).where(WorkflowRun.workflow_id == workflow.id))
+    ).all()
+    assert len(runs) == 1
+
+
+async def test_agent_node_schedule_workflow_tool_call_creates_a_schedule(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = await _make_agent(db_session, "Planner")
+    rivulet = await _make_rivulet(db_session)
+
+    target = await _make_workflow(db_session, name="nightly")
+    target.published = True
+
+    parent = await _make_agent_node_workflow(db_session, "scheduler-flow", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output(
+            "Scheduled.",
+            "schedule_workflow",
+            {"workflow_name": "nightly", "cron_expression": "0 9 * * *", "input_content": "go"},
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, parent, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    schedule = await db_session.scalar(
+        select(WorkflowSchedule).where(WorkflowSchedule.created_by == agent.id)
+    )
+    assert schedule is not None
+    assert schedule.workflow_id == target.id
+    assert schedule.cron_expression == "0 9 * * *"
+
+    # The handler's confirmation message lands in the run's own rivulet,
+    # committed/published by execute_agent_node itself (the engine has no
+    # outer request handler to do it, unlike channel dispatch).
+    result = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    alerts = [m.content for m in result.scalars().all()]
+    assert any("schedul" in content.lower() for content in alerts)
+
+
+async def test_agent_node_create_channel_requires_tool_assignment(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#360 keeps #240's invocation-time authorization: a create_channel
+    call from an agent that was never assigned the builtin tool (or its
+    channels:manage scope) stays a no-op on the workflow path too."""
+    agent = await _make_agent(db_session, "Unauthorized")
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_agent_node_workflow(db_session, "channel-flow", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output("Made it.", "create_channel", {"name": "roadmap"})
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    created = await db_session.scalar(select(Channel).where(Channel.name == "roadmap"))
+    assert created is None
+
+
+async def test_agent_node_create_channel_with_assignment_creates_the_channel(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = await _make_agent(db_session, "ChannelMaker")
+    tool = Tool(
+        name="create_channel",
+        description="Creates channels.",
+        tool_type="builtin",
+        required_scope="channels:manage",
+    )
+    db_session.add(tool)
+    await db_session.flush()
+    db_session.add(AgentTool(agent_id=agent.id, tool_id=tool.id))
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="channels:manage"))
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_agent_node_workflow(db_session, "channel-flow-authed", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output("Made it.", "create_channel", {"name": "roadmap"})
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "completed"
+    created = await db_session.scalar(select(Channel).where(Channel.name == "roadmap"))
+    assert created is not None
+
+    result = await db_session.execute(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    alerts = [m.content for m in result.scalars().all()]
+    assert any("created channel /roadmap" in content for content in alerts)
