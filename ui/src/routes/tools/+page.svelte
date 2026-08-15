@@ -155,97 +155,103 @@
 		</p>
 	</header>
 
-	<form
-		onsubmit={handleCreate}
-		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New custom tool</h2>
-		<div
-			role="group"
-			aria-label="Creation mode"
-			class="flex w-fit rounded-md border border-ink/15 p-0.5 dark:border-white/15"
+	{#if auth.grant === 'owner'}
+		<!-- #351: POST /tools is OwnerGrant-only server-side (like DELETE and the
+	     version endpoints, #321) -- showing the form to an invite-grant
+	     session just hands it a guaranteed "Owner access required" error. -->
+		<form
+			onsubmit={handleCreate}
+			class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
 		>
-			<button
-				type="button"
-				aria-pressed={createMode === 'simple'}
-				onclick={() => selectMode('simple')}
-				class="rounded-[3px] px-3 py-1 text-xs {createMode === 'simple'
-					? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-					: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
+			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New custom tool</h2>
+			<div
+				role="group"
+				aria-label="Creation mode"
+				class="flex w-fit rounded-md border border-ink/15 p-0.5 dark:border-white/15"
 			>
-				Simple mode
-			</button>
-			<button
-				type="button"
-				aria-pressed={createMode === 'advanced'}
-				onclick={() => selectMode('advanced')}
-				class="rounded-[3px] px-3 py-1 text-xs {createMode === 'advanced'
-					? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-					: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
-			>
-				Advanced mode
-			</button>
-		</div>
+				<button
+					type="button"
+					aria-pressed={createMode === 'simple'}
+					onclick={() => selectMode('simple')}
+					class="rounded-[3px] px-3 py-1 text-xs {createMode === 'simple'
+						? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+						: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
+				>
+					Simple mode
+				</button>
+				<button
+					type="button"
+					aria-pressed={createMode === 'advanced'}
+					onclick={() => selectMode('advanced')}
+					class="rounded-[3px] px-3 py-1 text-xs {createMode === 'advanced'
+						? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
+						: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
+				>
+					Advanced mode
+				</button>
+			</div>
 
-		<input
-			type="text"
-			bind:value={name}
-			placeholder="Name"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<input
-			type="text"
-			bind:value={description}
-			placeholder="Description"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-
-		{#if createMode === 'simple'}
-			<textarea
-				bind:value={prompt}
-				placeholder="Describe what the tool should do — an LLM will generate the Agno SDK code for you to review before it's registered."
-				rows="3"
+			<input
+				type="text"
+				bind:value={name}
+				placeholder="Name"
 				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			></textarea>
-			<p class="text-xs text-neutral-500">
-				Code generation isn't available on every server. If it isn't here, you'll be able to switch
-				to Advanced mode without losing your name and description, then write the code yourself or
-				ask an agent in a channel chat to write it for you.
-			</p>
-		{:else}
-			<p class="text-xs text-neutral-500">
-				Creates an empty tool file you write by hand — use "Open in editor" below once it's created.
-			</p>
-		{/if}
+			/>
+			<input
+				type="text"
+				bind:value={description}
+				placeholder="Description"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
 
-		<button
-			type="submit"
-			disabled={creating}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creating ? 'Creating…' : 'Create tool'}
-		</button>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-			{#if simpleModeUnavailable}
-				<div class="flex flex-wrap gap-2">
-					<button
-						type="button"
-						onclick={() => selectMode('advanced')}
-						class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
-					>
-						Switch to Advanced mode
-					</button>
-					<a
-						href={resolve('/channels')}
-						class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
-					>
-						Ask an agent in a channel
-					</a>
-				</div>
+			{#if createMode === 'simple'}
+				<textarea
+					bind:value={prompt}
+					placeholder="Describe what the tool should do — an LLM will generate the Agno SDK code for you to review before it's registered."
+					rows="3"
+					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				></textarea>
+				<p class="text-xs text-neutral-500">
+					Code generation isn't available on every server. If it isn't here, you'll be able to
+					switch to Advanced mode without losing your name and description, then write the code
+					yourself or ask an agent in a channel chat to write it for you.
+				</p>
+			{:else}
+				<p class="text-xs text-neutral-500">
+					Creates an empty tool file you write by hand — use "Open in editor" below once it's
+					created.
+				</p>
 			{/if}
-		{/if}
-	</form>
+
+			<button
+				type="submit"
+				disabled={creating}
+				class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			>
+				{creating ? 'Creating…' : 'Create tool'}
+			</button>
+			{#if createError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
+				{#if simpleModeUnavailable}
+					<div class="flex flex-wrap gap-2">
+						<button
+							type="button"
+							onclick={() => selectMode('advanced')}
+							class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+						>
+							Switch to Advanced mode
+						</button>
+						<a
+							href={resolve('/channels')}
+							class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
+						>
+							Ask an agent in a channel
+						</a>
+					</div>
+				{/if}
+			{/if}
+		</form>
+	{/if}
 
 	{#if loadError}
 		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
@@ -256,7 +262,7 @@
 			searchPlaceholder="Search tools…"
 			searchPredicate={(tool, q) => tool.name.toLowerCase().includes(q.toLowerCase())}
 			filters={toolFilters}
-			emptyMessage="No tools yet — add one above."
+			emptyMessage={auth.grant === 'owner' ? 'No tools yet — add one above.' : 'No tools yet.'}
 			noMatchMessage="No tools match your search or filter."
 		>
 			{#snippet item(tool)}
@@ -288,7 +294,9 @@
 							</p>
 							<p class="text-sm text-neutral-600 dark:text-neutral-400">{tool.description}</p>
 						</div>
-						{#if tool.tool_type === 'custom'}
+						{#if tool.tool_type === 'custom' && auth.grant === 'owner'}
+							<!-- DELETE /tools is OwnerGrant-only server-side (#351),
+							     same as the version/source panel below. -->
 							<button
 								onclick={() => handleDelete(tool.id)}
 								class="shrink-0 text-xs text-neutral-500 hover:text-agent-magenta-600"

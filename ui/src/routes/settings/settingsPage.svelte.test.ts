@@ -839,14 +839,16 @@ describe('settings/+page.svelte', () => {
 
 	// #232: budgets.list (unlike create/delete/override) isn't OwnerGrant-only
 	// server-side, so an invite-grant session can still see the cap list --
-	// but the mutating controls that would 403 must not be offered.
+	// but the mutating controls that would 403 must not be offered. #351
+	// finished the job: the owner-only sections (Updates, Backups, and the
+	// settings form) are hidden outright and their OwnerGrant-only GETs are
+	// never fired, instead of each surfacing a "Failed to load …" error.
 	describe('invite-grant (non-owner) session', () => {
 		beforeEach(() => {
 			authState.grant = 'invite';
 		});
 
 		it('hides the Add cap form for a non-owner session', async () => {
-			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
 			vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap]);
 
 			render(SettingsPage);
@@ -861,7 +863,6 @@ describe('settings/+page.svelte', () => {
 		});
 
 		it('hides the Override and Delete buttons for a non-owner session', async () => {
-			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
 			vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap, blockedAgentCap]);
 			vi.mocked(agentsApi.list).mockResolvedValue([oneAgent]);
 
@@ -875,16 +876,34 @@ describe('settings/+page.svelte', () => {
 			await expect.element(section.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
 		});
 
-		it('hides the Back up now button for a non-owner session', async () => {
-			vi.mocked(settings.get).mockRejectedValue(new Error('Owner access required'));
-			vi.mocked(backupsApi.list).mockRejectedValue(new Error('Owner access required'));
+		it('hides the owner-only sections and never fires their owner-only GETs (#351)', async () => {
+			vi.mocked(budgetsApi.list).mockResolvedValue([workspaceCap]);
 
 			render(SettingsPage);
 
-			const section = await backupsSection();
+			// The invite-safe subset (Budgets) is still there, with a note
+			// explaining why it's alone...
+			await budgetsSection();
 			await expect
-				.element(section.getByRole('button', { name: 'Back up now' }))
+				.element(page.getByText('the rest of Settings is owner-only', { exact: false }))
+				.toBeInTheDocument();
+
+			// ...but the owner-only sections are gone entirely, error-free.
+			await expect.element(page.getByRole('heading', { name: 'Updates' })).not.toBeInTheDocument();
+			await expect.element(page.getByRole('heading', { name: 'Backups' })).not.toBeInTheDocument();
+			await expect
+				.element(page.getByRole('heading', { name: 'Guardrails' }))
 				.not.toBeInTheDocument();
+			await expect
+				.element(page.getByRole('heading', { name: 'Dispatcher' }))
+				.not.toBeInTheDocument();
+			await expect.element(page.getByText(/Failed to load/)).not.toBeInTheDocument();
+
+			// The OwnerGrant-only endpoints were never even called.
+			expect(settings.get).not.toHaveBeenCalled();
+			expect(update.status).not.toHaveBeenCalled();
+			expect(backupsApi.list).not.toHaveBeenCalled();
+			expect(providersApi.list).not.toHaveBeenCalled();
 		});
 	});
 });

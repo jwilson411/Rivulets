@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { ApiError } from '$lib/api/client';
+	import { auth } from '$lib/api/auth.svelte';
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+	import OwnerOnly from '$lib/components/OwnerOnly.svelte';
 
 	// Hosted providers run the model for you and just need an API key;
 	// self-hosted/local ones need a base URL pointing at wherever you're
@@ -54,15 +56,20 @@
 		}
 	}
 
-	refresh();
-	providers
-		.credentialStorage()
-		.then((res) => (credentialBackend = res.backend))
-		.catch(() => {
-			// Leave credentialBackend null -- silently defaulting to
-			// "keychain" here would hide the exact disclosure this
-			// endpoint exists to surface.
-		});
+	// #351: every endpoint this page talks to is OwnerGrant-only server-side,
+	// so a non-owner session skips the fetches and renders <OwnerOnly> below
+	// instead of a wall of 403 load errors.
+	if (auth.grant === 'owner') {
+		refresh();
+		providers
+			.credentialStorage()
+			.then((res) => (credentialBackend = res.backend))
+			.catch(() => {
+				// Leave credentialBackend null -- silently defaulting to
+				// "keychain" here would hide the exact disclosure this
+				// endpoint exists to surface.
+			});
+	}
 
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
@@ -107,138 +114,142 @@
 	}
 </script>
 
-<div class="mx-auto flex max-w-2xl flex-col gap-8 px-6 py-8">
-	<header class="flex flex-col gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Providers</h1>
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				A provider is the company or service that runs the AI model your agents use — for example
-				Anthropic or OpenAI, or a model you run yourself with Ollama. Add one here, then pick a
-				model from it when you set up an agent.
-			</p>
-			<p class="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-				Provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
-				once saved.
-			</p>
-		</div>
-		{#if credentialBackend === 'fallback'}
-			<p
-				class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
-			>
-				No OS keychain backend was found on this install (common under Docker), so provider keys
-				here are instead encrypted with a key derived from your workspace recovery phrase — not a
-				separate credential. This means anyone with your recovery phrase can also read these
-				provider keys, not just sync into your workspace. Keep it just as secret either way.
-			</p>
-		{/if}
-	</header>
-
-	<form
-		onsubmit={handleCreate}
-		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Add provider</h2>
-		<select
-			bind:value={kind}
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink dark:border-white/15 dark:text-ink-dark"
-		>
-			<optgroup label="Hosted">
-				{#each HOSTED_PROVIDER_KINDS as k (k)}
-					<option value={k}>{k}</option>
-				{/each}
-			</optgroup>
-			<optgroup label="Self-hosted / local">
-				{#each SELF_HOSTED_PROVIDER_KINDS as k (k)}
-					<option value={k}>{k}</option>
-				{/each}
-			</optgroup>
-		</select>
-		<input
-			type="text"
-			bind:value={label}
-			placeholder="Label (e.g. Anthropic)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<input
-			type="password"
-			bind:value={apiKey}
-			placeholder={kind === 'ollama' ? 'API key (optional)' : 'API key'}
-			autocomplete="off"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<input
-			type="text"
-			bind:value={baseUrl}
-			placeholder={kind === 'ollama'
-				? 'Base URL (e.g. http://localhost:11434)'
-				: kind === 'openai_compatible'
-					? 'Base URL (required)'
-					: 'Base URL (optional override)'}
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		{#if kind === 'ollama'}
-			<p class="text-xs text-neutral-500">
-				New to Ollama? See
-				<a
-					href="https://ollama.com"
-					target="_blank"
-					rel="noopener noreferrer"
-					class="underline hover:text-agent-cyan-600">ollama.com</a
-				> for setup — once it's running, its base URL is usually http://localhost:11434.
-			</p>
-		{/if}
-		<button
-			type="submit"
-			disabled={creating}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creating ? 'Adding…' : 'Add provider'}
-		</button>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-		{/if}
-	</form>
-
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else}
-		{#if deleteError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{deleteError}</p>
-		{/if}
-		<FilterableList
-			items={providerList}
-			getKey={(provider) => provider.id}
-			searchPlaceholder="Search providers…"
-			searchPredicate={(provider, q) => provider.label.toLowerCase().includes(q.toLowerCase())}
-			filters={providerFilters}
-			emptyMessage="No providers configured yet — add one above."
-			noMatchMessage="No providers match your search or filter."
-		>
-			{#snippet item(provider)}
-				<li
-					class="flex items-center justify-between rounded-lg border border-ink/12 px-4 py-3 dark:border-white/10"
+{#if auth.grant !== 'owner'}
+	<OwnerOnly title="Providers" />
+{:else}
+	<div class="mx-auto flex max-w-2xl flex-col gap-8 px-6 py-8">
+		<header class="flex flex-col gap-3">
+			<div>
+				<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Providers</h1>
+				<p class="text-sm text-neutral-600 dark:text-neutral-400">
+					A provider is the company or service that runs the AI model your agents use — for example
+					Anthropic or OpenAI, or a model you run yourself with Ollama. Add one here, then pick a
+					model from it when you set up an agent.
+				</p>
+				<p class="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+					Provider keys are stored in your OS keychain (NFR-3.3) — never synced, never shown again
+					once saved.
+				</p>
+			</div>
+			{#if credentialBackend === 'fallback'}
+				<p
+					class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
 				>
-					<div>
-						<p class="font-medium text-ink dark:text-ink-dark">
-							{provider.label}
-							<span
-								class="ml-2 rounded-sm bg-neutral-200 px-2 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400"
-							>
-								{provider.provider}
-							</span>
-						</p>
-						{#if provider.base_url}
-							<p class="text-xs text-neutral-500">{provider.base_url}</p>
-						{/if}
-					</div>
-					<button
-						onclick={() => handleDelete(provider.id)}
-						class="text-xs text-neutral-500 hover:text-agent-magenta-600"
+					No OS keychain backend was found on this install (common under Docker), so provider keys
+					here are instead encrypted with a key derived from your workspace recovery phrase — not a
+					separate credential. This means anyone with your recovery phrase can also read these
+					provider keys, not just sync into your workspace. Keep it just as secret either way.
+				</p>
+			{/if}
+		</header>
+
+		<form
+			onsubmit={handleCreate}
+			class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+		>
+			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Add provider</h2>
+			<select
+				bind:value={kind}
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink dark:border-white/15 dark:text-ink-dark"
+			>
+				<optgroup label="Hosted">
+					{#each HOSTED_PROVIDER_KINDS as k (k)}
+						<option value={k}>{k}</option>
+					{/each}
+				</optgroup>
+				<optgroup label="Self-hosted / local">
+					{#each SELF_HOSTED_PROVIDER_KINDS as k (k)}
+						<option value={k}>{k}</option>
+					{/each}
+				</optgroup>
+			</select>
+			<input
+				type="text"
+				bind:value={label}
+				placeholder="Label (e.g. Anthropic)"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			<input
+				type="password"
+				bind:value={apiKey}
+				placeholder={kind === 'ollama' ? 'API key (optional)' : 'API key'}
+				autocomplete="off"
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			<input
+				type="text"
+				bind:value={baseUrl}
+				placeholder={kind === 'ollama'
+					? 'Base URL (e.g. http://localhost:11434)'
+					: kind === 'openai_compatible'
+						? 'Base URL (required)'
+						: 'Base URL (optional override)'}
+				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			/>
+			{#if kind === 'ollama'}
+				<p class="text-xs text-neutral-500">
+					New to Ollama? See
+					<a
+						href="https://ollama.com"
+						target="_blank"
+						rel="noopener noreferrer"
+						class="underline hover:text-agent-cyan-600">ollama.com</a
+					> for setup — once it's running, its base URL is usually http://localhost:11434.
+				</p>
+			{/if}
+			<button
+				type="submit"
+				disabled={creating}
+				class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			>
+				{creating ? 'Adding…' : 'Add provider'}
+			</button>
+			{#if createError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
+			{/if}
+		</form>
+
+		{#if loadError}
+			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+		{:else}
+			{#if deleteError}
+				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{deleteError}</p>
+			{/if}
+			<FilterableList
+				items={providerList}
+				getKey={(provider) => provider.id}
+				searchPlaceholder="Search providers…"
+				searchPredicate={(provider, q) => provider.label.toLowerCase().includes(q.toLowerCase())}
+				filters={providerFilters}
+				emptyMessage="No providers configured yet — add one above."
+				noMatchMessage="No providers match your search or filter."
+			>
+				{#snippet item(provider)}
+					<li
+						class="flex items-center justify-between rounded-lg border border-ink/12 px-4 py-3 dark:border-white/10"
 					>
-						Remove
-					</button>
-				</li>
-			{/snippet}
-		</FilterableList>
-	{/if}
-</div>
+						<div>
+							<p class="font-medium text-ink dark:text-ink-dark">
+								{provider.label}
+								<span
+									class="ml-2 rounded-sm bg-neutral-200 px-2 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400"
+								>
+									{provider.provider}
+								</span>
+							</p>
+							{#if provider.base_url}
+								<p class="text-xs text-neutral-500">{provider.base_url}</p>
+							{/if}
+						</div>
+						<button
+							onclick={() => handleDelete(provider.id)}
+							class="text-xs text-neutral-500 hover:text-agent-magenta-600"
+						>
+							Remove
+						</button>
+					</li>
+				{/snippet}
+			</FilterableList>
+		{/if}
+	</div>
+{/if}

@@ -10,6 +10,19 @@ import ProvidersPage from './+page.svelte';
 import { providers, type Provider } from '$lib/api/providers';
 import { ApiError } from '$lib/api/client';
 
+// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
+// follows -- defaults to 'owner' so the existing (pre-#351) tests below
+// don't have to know about grants at all.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
 vi.mock('$lib/api/providers', () => ({
 	providers: {
 		list: vi.fn(),
@@ -30,6 +43,7 @@ const anthropicProvider: Provider = {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('providers/+page.svelte', () => {
@@ -38,6 +52,18 @@ describe('providers/+page.svelte', () => {
 		// default to the common (non-Docker) case so it stays hidden and
 		// existing assertions aren't affected by it.
 		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
+	});
+
+	it('shows an owner-only empty state to a non-owner session without calling the API (#351)', async () => {
+		authState.grant = 'invite';
+
+		render(ProvidersPage);
+
+		await expect
+			.element(page.getByText('only available to the workspace owner', { exact: false }))
+			.toBeInTheDocument();
+		expect(providers.list).not.toHaveBeenCalled();
+		expect(providers.credentialStorage).not.toHaveBeenCalled();
 	});
 
 	it('lists configured providers with their kind badge', async () => {
