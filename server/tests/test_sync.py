@@ -303,6 +303,43 @@ async def test_apply_remote_delete_removes_team_agent_membership(db_session: Asy
     assert await db_session.get(TeamAgent, ("team-1", "agent-1")) is None
 
 
+async def test_apply_remote_team_agent_change_detects_conflict_with_local_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    """#349: the CONCURRENT branch passed the wire entity_id
+    ("team-1:agent-1") straight to db.get(), which is wrong for a
+    composite-key mapper like TeamAgent -- the local snapshot came back
+    empty (or the handler died) for the exact join entities #317 started
+    syncing. It must decode through entity_pk_value like REMOTE_NEWER."""
+    db_session.add(Team(id="team-1", name="Support"))
+    db_session.add(Agent(id="agent-1", name="Rex", **_AGENT_FIELDS))
+    db_session.add(TeamAgent(team_id="team-1", agent_id="agent-1", position=3))
+    await db_session.commit()
+    entity_id = encode_entity_id(TEAM_AGENT_SPEC, ("team-1", "agent-1"))
+    await record_local_change(db_session, "team_agent", entity_id, "node-a")
+
+    result = await apply_remote_change(
+        db_session,
+        TEAM_AGENT_SPEC,
+        entity_id,
+        {"node-b": 1},  # concurrent with local's {node-a: 1} -- neither dominates
+        "node-b",
+        {"position": 7},
+    )
+    assert result.applied is False
+    assert result.conflict is True
+
+    membership = await db_session.get(TeamAgent, ("team-1", "agent-1"))
+    assert membership is not None
+    assert membership.position == 3  # untouched
+
+    conflicts = list((await db_session.execute(select(SyncConflict))).scalars().all())
+    assert len(conflicts) == 1
+    assert conflicts[0].entity_id == entity_id
+    assert json.loads(conflicts[0].local_snapshot) == {"position": 3}
+    assert json.loads(conflicts[0].remote_snapshot) == {"position": 7}
+
+
 async def test_apply_remote_agent_tool_change_creates_assignment(db_session: AsyncSession) -> None:
     """#317: tool assignment (agent_tool) is a synced fact independent of
     Tool itself -- an agent's tools existing on a peer without this join
