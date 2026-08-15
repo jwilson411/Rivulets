@@ -8,14 +8,22 @@
 	} from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
+	import { tools as toolsApi, type Tool } from '$lib/api/tools';
 	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
 	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 
 	let agentList = $state<Agent[]>([]);
 	let providerList = $state<Provider[]>([]);
 	let teamList = $state<TeamDetail[]>([]);
+	let toolList = $state<Tool[]>([]);
+	let scopeCatalog = $state<string[]>([]);
 	let rulesByAgent = $state<Record<string, RoutingRule[]>>({});
 	let versionsByAgent = $state<Record<string, AgentVersion[]>>({});
+	// #344: what's currently assigned/granted -- fetched per-agent the same
+	// way routing rules/peer preference/versions are, since neither
+	// AgentOut nor Tool carries the reverse mapping.
+	let toolIdsByAgent = $state<Record<string, string[]>>({});
+	let scopesByAgent = $state<Record<string, string[]>>({});
 	let loadError = $state<string | null>(null);
 
 	// Team detail (not just the summary teams.list() returns) is the only
@@ -75,13 +83,18 @@
 			// grant gets a 403 here even though agent CRUD itself isn't
 			// owner-gated. Treat that as "no provider catalog" rather than
 			// letting it fail the whole Promise.all and blank the agent list.
-			const [loadedAgents, loadedProviders, teamSummaries] = await Promise.all([
-				agents.list(),
-				providersApi.list().catch(() => []),
-				teamsApi.list()
-			]);
+			const [loadedAgents, loadedProviders, teamSummaries, loadedTools, loadedScopes] =
+				await Promise.all([
+					agents.list(),
+					providersApi.list().catch(() => []),
+					teamsApi.list(),
+					toolsApi.list(),
+					toolsApi.listScopes()
+				]);
 			agentList = loadedAgents;
 			providerList = loadedProviders;
+			toolList = loadedTools;
+			scopeCatalog = loadedScopes;
 			teamList = await Promise.all(teamSummaries.map((t) => teamsApi.get(t.id)));
 			const entries = await Promise.all(
 				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
@@ -109,6 +122,14 @@
 				agentList.map(async (a) => [a.id, await agents.listVersions(a.id)] as const)
 			);
 			versionsByAgent = Object.fromEntries(versionEntries);
+			const toolIdEntries = await Promise.all(
+				agentList.map(async (a) => [a.id, (await agents.getToolIds(a.id)).tool_ids] as const)
+			);
+			toolIdsByAgent = Object.fromEntries(toolIdEntries);
+			const scopeEntries = await Promise.all(
+				agentList.map(async (a) => [a.id, (await agents.getToolScopes(a.id)).scopes] as const)
+			);
+			scopesByAgent = Object.fromEntries(scopeEntries);
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load agents';
 		}
@@ -208,6 +229,29 @@
 		}
 	}
 
+	// #188/#344: toggled directly and PUT immediately, same as
+	// toggleUnattendedApproval above -- PUT /tool-scopes replaces the whole
+	// granted set, so a checkbox flip just recomputes that set from what's
+	// already known to be granted. Owner-only server-side; a non-owner
+	// session sees the resulting 403 via actionError rather than the
+	// control being hidden, matching this file's existing convention.
+	async function toggleScope(agentId: string, scope: string) {
+		actionError = null;
+		const current = scopesByAgent[agentId] ?? [];
+		const next = current.includes(scope) ? current.filter((s) => s !== scope) : [...current, scope];
+		try {
+			scopesByAgent[agentId] = (await agents.setToolScopes(agentId, next)).scopes;
+		} catch (err) {
+			actionError = err instanceof Error ? err.message : 'Failed to update capability scopes';
+		}
+	}
+
+	function toolSummary(toolIds: string[] | undefined): string {
+		if (!toolIds || toolIds.length === 0) return '';
+		const names = toolIds.map((id) => toolList.find((t) => t.id === id)?.name ?? id);
+		return names.join(', ');
+	}
+
 	function ruleSummary(rules: RoutingRule[] | undefined): string {
 		if (!rules || rules.length === 0) return 'No routing rules — only @mention triggers this agent';
 		return rules
@@ -253,6 +297,7 @@
 		{#key createFormKey}
 			<AgentForm
 				providers={providerList}
+				tools={toolList}
 				submitLabel="Create agent"
 				busyLabel="Creating…"
 				busy={creating}
@@ -282,13 +327,15 @@
 					{#if editingAgentId === agent.id}
 						<AgentForm
 							providers={providerList}
+							tools={toolList}
 							initial={{
 								name: agent.name,
 								description: agent.description,
 								instructions: agent.instructions,
 								model: agent.model,
 								fallback_models: agent.fallback_models,
-								output_schema: agent.output_schema ?? null
+								output_schema: agent.output_schema ?? null,
+								tool_ids: toolIdsByAgent[agent.id] ?? []
 							}}
 							submitLabel="Save changes"
 							busyLabel="Saving…"
@@ -310,6 +357,11 @@
 								{/if}
 								{#if agent.output_schema}
 									<p class="text-xs text-neutral-400">structured output configured</p>
+								{/if}
+								{#if toolSummary(toolIdsByAgent[agent.id])}
+									<p class="text-xs text-neutral-400">
+										Tools: {toolSummary(toolIdsByAgent[agent.id])}
+									</p>
 								{/if}
 							</div>
 							<div class="flex items-center gap-2">
@@ -457,6 +509,39 @@
 									/>
 									Approve this agent's sensitive tools for unattended use
 								</label>
+							</div>
+						</details>
+						<details class="mt-2">
+							<summary
+								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+							>
+								Advanced: capability scopes
+							</summary>
+							<div class="mt-2 flex flex-col gap-2">
+								<p class="text-xs text-neutral-500">
+									Some assigned tools only actually run once this agent holds the matching
+									capability scope below — e.g. an agent needs "sensitive_tools:manage" granted
+									before execute_python/write_file/http_request will resolve, even though they're
+									already assigned. Granting a scope is owner-only.
+								</p>
+								{#if scopeCatalog.length === 0}
+									<p class="text-xs text-neutral-500">No capability scopes defined.</p>
+								{:else}
+									<ul class="flex flex-col gap-1">
+										{#each scopeCatalog as scope (scope)}
+											<li>
+												<label class="flex items-center gap-2 text-xs text-ink dark:text-ink-dark">
+													<input
+														type="checkbox"
+														checked={(scopesByAgent[agent.id] ?? []).includes(scope)}
+														onchange={() => toggleScope(agent.id, scope)}
+													/>
+													<span class="font-mono">{scope}</span>
+												</label>
+											</li>
+										{/each}
+									</ul>
+								{/if}
 							</div>
 						</details>
 						<details class="mt-2">

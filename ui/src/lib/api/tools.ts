@@ -17,6 +17,11 @@ export interface Tool {
 	// approved_for_unattended_tools flag. Read-only; v1 only marks the
 	// fixed builtin set, not user-created custom/mcp tools.
 	sensitive: boolean;
+	// #188/#344: the capability scope (if any) an agent must hold via
+	// PUT /agents/{id}/tool-scopes before this tool actually resolves for
+	// it, even once assigned -- null means assignment alone is enough,
+	// same as every tool before #188.
+	required_scope: string | null;
 	available: boolean;
 }
 
@@ -40,6 +45,10 @@ export interface ToolUpdateInput {
 
 export const tools = {
 	list: () => api.get<Tool[]>('/tools', auth.token ?? undefined),
+	// #188/#344: the fixed catalog of capability scopes an owner can grant
+	// to an agent (PUT /agents/{id}/tool-scopes) -- drives the "Advanced:
+	// capability scopes" picker on the agents page.
+	listScopes: () => api.get<string[]>('/tools/scopes', auth.token ?? undefined),
 	get: (id: string) => api.get<Tool>(`/tools/${id}`, auth.token ?? undefined),
 	// Simple mode (FR-8.3) currently always rejects with 501 — the codegen
 	// path isn't wired up server-side yet. Advanced mode creates an empty

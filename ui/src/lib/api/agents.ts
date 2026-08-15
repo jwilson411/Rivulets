@@ -97,5 +97,16 @@ export const agents = {
 			`/agents/${id}/versions/${version}/rollback`,
 			undefined,
 			auth.token ?? undefined
-		)
+		),
+	// #344: the read counterpart to tool_ids on create/update -- lets a
+	// picker (AgentForm's Tools section) show what's currently assigned.
+	getToolIds: (id: string) =>
+		api.get<{ tool_ids: string[] }>(`/agents/${id}/tools`, auth.token ?? undefined),
+	// #188/#344: capability-scope grant/revoke (PUT is owner-only
+	// server-side -- api/agents.py's set_agent_tool_scopes) -- previously
+	// unreachable from the UI at all despite the HTTP endpoint existing.
+	getToolScopes: (id: string) =>
+		api.get<{ scopes: string[] }>(`/agents/${id}/tool-scopes`, auth.token ?? undefined),
+	setToolScopes: (id: string, scopes: string[]) =>
+		api.put<{ scopes: string[] }>(`/agents/${id}/tool-scopes`, { scopes }, auth.token ?? undefined)
 };

@@ -10,8 +10,8 @@ from rivulets.agentos.starter_content import (
     seed_starter_agents,
     seed_starter_teams,
 )
-from rivulets.agentos.tool_resolution import seed_builtin_tools
-from rivulets.db.models import Agent, AgentTool, Team, TeamAgent, Tool
+from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
+from rivulets.db.models import Agent, AgentTool, AgentToolScope, Team, TeamAgent, Tool
 
 _STARTER_AGENT_NAMES = {starter.name for starter in _STARTER_AGENTS}
 
@@ -64,6 +64,72 @@ async def test_seed_starter_agents_assigns_expected_tools(db_session: AsyncSessi
     ).scalar_one()
     result = await db_session.execute(select(AgentTool).where(AgentTool.agent_id == assistant.id))
     assert result.scalars().all() == []
+
+
+async def test_seed_starter_agents_grants_sensitive_tools_scope(db_session: AsyncSession) -> None:
+    """#344: Coder (execute_python, write_file) and Researcher (http_request)
+    are seeded with sensitive builtin tools assigned, but assignment alone
+    isn't eligibility (#188/#240) -- without a matching AgentToolScope grant
+    those tools silently never resolve. Assistant/Writer have no tool
+    assignments at all, so they get no scope grant either."""
+    await seed_builtin_tools(db_session)
+    await seed_starter_agents(db_session)
+
+    coder = (await db_session.execute(select(Agent).where(Agent.name == "Coder"))).scalar_one()
+    researcher = (
+        await db_session.execute(select(Agent).where(Agent.name == "Researcher"))
+    ).scalar_one()
+    assistant = (
+        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
+    ).scalar_one()
+
+    coder_scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == coder.id)
+            )
+        ).scalars()
+    )
+    researcher_scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == researcher.id)
+            )
+        ).scalars()
+    )
+    assistant_scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == assistant.id)
+            )
+        ).scalars()
+    )
+
+    assert coder_scopes == {"sensitive_tools:manage"}
+    assert researcher_scopes == {"sensitive_tools:manage"}
+    assert assistant_scopes == set()
+
+
+async def test_seed_starter_agents_sensitive_tools_actually_resolve(
+    db_session: AsyncSession,
+) -> None:
+    """The end-to-end version of the test above: resolve_agent_tools (the
+    function that actually gates what an agent can call) returns Coder's
+    and Researcher's sensitive builtins post-seed, not just skips them with
+    a warning."""
+    await seed_builtin_tools(db_session)
+    await seed_starter_agents(db_session)
+
+    coder = (await db_session.execute(select(Agent).where(Agent.name == "Coder"))).scalar_one()
+    researcher = (
+        await db_session.execute(select(Agent).where(Agent.name == "Researcher"))
+    ).scalar_one()
+
+    coder_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, coder)}
+    researcher_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, researcher)}
+
+    assert {"read_file", "write_file", "list_files", "execute_python"} <= coder_tool_names
+    assert {"web_search", "http_request"} <= researcher_tool_names
 
 
 async def test_seed_starter_agents_without_builtin_tools_still_creates_agents(

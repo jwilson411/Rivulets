@@ -554,6 +554,35 @@ def test_rollback_agent_not_found(client: TestClient, auth_headers: dict[str, st
     assert response.status_code == 404
 
 
+def test_get_agent_tool_ids_empty_by_default(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _create_agent(client, auth_headers)
+    response = client.get(f"/api/v1/agents/{agent['id']}/tools", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"tool_ids": []}
+
+
+def test_get_agent_tool_ids_reflects_assignment(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    tool = client.post(
+        "/api/v1/tools",
+        json={"name": "custom_tool", "description": "Does a thing."},
+        headers=auth_headers,
+    ).json()
+    agent = _create_agent(client, auth_headers, tool_ids=[tool["id"]])
+
+    response = client.get(f"/api/v1/agents/{agent['id']}/tools", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"tool_ids": [tool["id"]]}
+
+
+def test_get_agent_tool_ids_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/agents/nonexistent/tools", headers=auth_headers)
+    assert response.status_code == 404
+
+
 def test_get_agent_tool_scopes_empty_by_default(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

@@ -1218,7 +1218,8 @@ describe('workflows/[id]/+page.svelte', () => {
 			instructions: 'Be brief',
 			model: 'anthropic:claude-haiku-4-5-20251001',
 			fallback_models: [],
-			output_schema: null
+			output_schema: null,
+			tool_ids: []
 		});
 		await expect.element(page.getByText('New agent', { exact: true })).not.toBeInTheDocument();
 		// The name typed before creating the agent survived the round trip.

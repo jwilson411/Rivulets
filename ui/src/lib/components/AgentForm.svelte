@@ -8,23 +8,34 @@
 		// #107: a raw JSON Schema object constraining this agent's reply,
 		// or null for free-form text.
 		output_schema: Record<string, unknown> | null;
+		// #344: builtin/custom/mcp tool ids assigned to this agent. Empty
+		// array (not omitted) is the "no tools" state, same convention as
+		// fallback_models -- assigning one with real blast radius (sensitive
+		// builtin, custom, mcp, or anything with a required_scope) is
+		// owner-gated server-side (api/agents.py's
+		// _check_tool_assignment_authorized), so a non-owner session can
+		// still select one here and see the resulting error on submit.
+		tool_ids: string[];
 	}
 </script>
 
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { Provider } from '$lib/api/providers';
+	import type { Tool } from '$lib/api/tools';
 	import ModelPicker from './ModelPicker.svelte';
 
 	let {
 		providers,
+		tools = [],
 		initial = {
 			name: '',
 			description: '',
 			instructions: '',
 			model: '',
 			fallback_models: [],
-			output_schema: null
+			output_schema: null,
+			tool_ids: []
 		},
 		submitLabel,
 		busyLabel,
@@ -34,6 +45,7 @@
 		oncancel
 	}: {
 		providers: Provider[];
+		tools?: Tool[];
 		initial?: AgentFormValues;
 		submitLabel: string;
 		busyLabel: string;
@@ -64,6 +76,16 @@
 		untrack(() => (initial.output_schema ? JSON.stringify(initial.output_schema, null, 2) : ''))
 	);
 	let outputSchemaError = $state<string | null>(null);
+	// #344: the assignable-tools picker -- a plain array of selected ids,
+	// same one-time snapshot-from-`initial` convention as every other
+	// field above.
+	let selectedToolIds = $state<string[]>(untrack(() => [...initial.tool_ids]));
+
+	function toggleTool(toolId: string) {
+		selectedToolIds = selectedToolIds.includes(toolId)
+			? selectedToolIds.filter((id) => id !== toolId)
+			: [...selectedToolIds, toolId];
+	}
 
 	function addFallback() {
 		fallbackModels.push({ id: crypto.randomUUID(), value: '' });
@@ -101,7 +123,8 @@
 			instructions: instructions.trim(),
 			model: model.trim(),
 			fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== ''),
-			output_schema
+			output_schema,
+			tool_ids: selectedToolIds
 		});
 	}
 </script>
@@ -167,6 +190,48 @@
 			</div>
 		{/each}
 	</div>
+
+	{#if tools.length > 0}
+		<div class="flex flex-col gap-1">
+			<span class="text-xs font-medium text-neutral-600 dark:text-neutral-400">Tools</span>
+			<ul class="flex flex-col gap-1">
+				{#each tools as tool (tool.id)}
+					<li>
+						<label class="flex items-start gap-2 text-sm text-ink dark:text-ink-dark">
+							<input
+								type="checkbox"
+								checked={selectedToolIds.includes(tool.id)}
+								onchange={() => toggleTool(tool.id)}
+								class="mt-0.5"
+							/>
+							<span>
+								<span class="font-mono">{tool.name}</span>
+								<span class="text-xs text-neutral-500">({tool.tool_type})</span>
+								{#if tool.sensitive}
+									<span
+										class="ml-1 rounded-sm bg-agent-magenta-100 px-1.5 py-0.5 text-xs text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400"
+									>
+										sensitive
+									</span>
+								{/if}
+								{#if tool.required_scope}
+									<span
+										class="ml-1 rounded-sm bg-agent-cyan-100 px-1.5 py-0.5 text-xs text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400"
+									>
+										requires {tool.required_scope}
+									</span>
+								{/if}
+							</span>
+						</label>
+					</li>
+				{/each}
+			</ul>
+			<p class="text-xs text-neutral-500">
+				Assigning a sensitive or scoped tool requires owner access, and a "requires ..." tool only
+				actually runs once an owner grants that capability scope below.
+			</p>
+		</div>
+	{/if}
 
 	<details class="mt-1">
 		<summary
