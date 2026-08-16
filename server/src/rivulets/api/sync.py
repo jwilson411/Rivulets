@@ -3,12 +3,13 @@
 conflicts are real SyncConflict rows detected by sync/apply.py's
 vector-clock comparison during gossipsub message handling.
 
-`pending_changes` on /status is honestly always 0 right now: there's no
-offline outbox yet (FR-9.5's "changes sync automatically when
-connectivity resumes" implies queuing something to resend) — publishing
-while the engine isn't running just logs and drops
-(engine.py:publish_state_change), it doesn't queue. That's a real gap in
-FR-9.5's coverage, not a stub answer for something otherwise built.
+`pending_changes` on /status is the real backlog (#347): outbound
+entities queued because a publish couldn't be made or failed
+(SyncPendingOutbound, drained on engine start / peer connect) plus
+inbound messages queued on an FK-ordering miss (SyncPendingInbound,
+retried after every successful apply). Reported whether or not the
+engine is running — a backlog accumulated while logged out is exactly
+when the number matters.
 """
 
 import json
@@ -17,11 +18,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
-from rivulets.db.models import SyncConflict
+from rivulets.db.models import SyncConflict, SyncPendingInbound, SyncPendingOutbound
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import (
     clear_delete_blockers,
@@ -108,18 +109,25 @@ def _peer_out(peer: EnginePeerInfo, capabilities: list[str]) -> PeerOut:
     )
 
 
+async def _count_pending_changes(db: DbSession) -> int:
+    outbound = await db.scalar(select(func.count()).select_from(SyncPendingOutbound))
+    inbound = await db.scalar(select(func.count()).select_from(SyncPendingInbound))
+    return (outbound or 0) + (inbound or 0)
+
+
 @router.get("/status", response_model=SyncStatus)
-async def sync_status(_: CurrentWorkspaceId, _o: OwnerGrant) -> SyncStatus:
+async def sync_status(db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant) -> SyncStatus:
     engine = get_sync_engine()
+    pending_changes = await _count_pending_changes(db)
     if not engine.running:
-        return SyncStatus(running=False, node_id=None, peers=[], pending_changes=0)
+        return SyncStatus(running=False, node_id=None, peers=[], pending_changes=pending_changes)
     peers = await engine.list_peers()
     peer_capabilities = await engine.list_peer_capabilities()
     return SyncStatus(
         running=True,
         node_id=engine.node_id,
         peers=[_peer_out(p, peer_capabilities.get(p.peer_id, [])) for p in peers],
-        pending_changes=0,
+        pending_changes=pending_changes,
         own_addresses=engine.own_addresses,
     )
 

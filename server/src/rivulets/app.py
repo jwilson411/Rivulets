@@ -32,6 +32,7 @@ from rivulets.dispatch import invoke_agent_remotely
 from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
+from rivulets.sync.catchup import push_snapshot_to_peer, run_catchup_loop
 from rivulets.sync.publish import drain_pending_outbound
 from rivulets.tracing import run_retention_loop
 from rivulets.version import APP_VERSION
@@ -135,13 +136,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # docstring) — traces accumulate continuously, unlike backup.py's
     # startup-only snapshot pruning above.
     retention_task = asyncio.create_task(run_retention_loop())
+    # #347: periodic anti-entropy — re-offers this node's full synced state
+    # to every connected peer (sync/catchup.py), bounding how long a gossip
+    # message dropped mid-connection can stay missing. The connect-time
+    # push in _on_peer_connected below covers the reconnect/join cases.
+    catchup_task = asyncio.create_task(run_catchup_loop())
     yield
     scheduler_task.cancel()
     retention_task.cancel()
+    catchup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await scheduler_task
     with contextlib.suppress(asyncio.CancelledError):
         await retention_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await catchup_task
     # The sync engine only actually starts on login (api/auth.py — it
     # needs the workspace PSK, not available until then), so stopping here
     # is a no-op if nobody ever logged in; otherwise it cleanly joins the
@@ -271,15 +280,21 @@ def _mount_ui(app: FastAPI, static_dir: Path) -> None:
     app.add_api_route("/{full_path:path}", spa_fallback, methods=["GET"])
 
 
-async def _on_peer_connected() -> None:
+async def _on_peer_connected(peer_id: str) -> None:
     async with session_scope() as db:
         await drain_pending_outbound(db)
+        # #347: "resync everything on connect" — push this node's full
+        # synced state (live entities + durable tombstones) to the peer
+        # that just connected. Fires on both sides of the connection, so a
+        # brand-new node joining with the same recovery phrase receives
+        # everything the established node published before it existed, and
+        # a peer that was offline during a delete receives the tombstone.
+        await push_snapshot_to_peer(db, peer_id)
     # Issue #10: re-announce this node's own capability tags to every newly
-    # connected peer -- there's no "resync everything on connect" mechanism
-    # in this codebase (see set_peer_connected_handler's own docstring for
-    # why drain_pending_outbound needs the same delayed-retry treatment),
-    # so a fresh broadcast per connection is how a peer that joined after
-    # tags were set still learns about them.
+    # connected peer -- capability tags are live broadcast state, not a
+    # DB-backed entity (engine.py's _peer_capabilities), so they ride the
+    # gossip topic rather than the snapshot above and need their own
+    # fresh broadcast per connection.
     await get_sync_engine().publish_capabilities(load_capabilities(get_settings().sync_dir))
 
 
