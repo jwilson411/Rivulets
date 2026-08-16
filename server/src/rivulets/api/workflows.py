@@ -44,7 +44,10 @@ graph in place (retarget an agent node, an edge's condition, a
 one that could republish after editing, just without the extra click.
 A draft (unpublished) workflow's graph is unaffected -- this is only
 about the *live*, already-trusted graph a schedule/webhook/slash-command
-can fire against.
+can fire against. Renaming a published workflow is gated the same way
+(#356): the name is the `/{name}` trigger surface itself, so a guest
+rename detaches the owner's live slash command just like a graph rewrite
+would change what it does. Description edits stay open to any grant.
 
 A node_type='workflow' node's `child_workflow_id` (#85) only gets the
 cheap, always-correct check at save time -- rejecting a direct
@@ -598,6 +601,17 @@ async def update_workflow(
         if "on_call_agent_id" in body.model_fields_set:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "Owner access required to change on_call_agent_id"
+            )
+        # #356 (#315 leftover): a published workflow's name *is* its trigger
+        # surface -- `/{name}` resolves through find_workflow_by_name, so a
+        # guest rename silently detaches the slash command the owner
+        # published, same class of live-surface rewrite as the graph edits
+        # _require_owner_if_published refuses. Draft renames and description
+        # edits (published or not) stay open to any grant.
+        if workflow.published and body.name is not None and body.name != workflow.name:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Owner access required to rename a published workflow — unpublish it first",
             )
     if body.name is not None and body.name != workflow.name:
         existing = await db.scalar(select(Workflow).where(Workflow.name == body.name))

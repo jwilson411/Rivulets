@@ -1127,6 +1127,55 @@ def test_invite_grant_cannot_set_on_failure_workflow_id_or_on_call_agent_id(
     assert renamed.json()["description"] == "guest-edited"
 
 
+def test_invite_grant_cannot_rename_published_workflow(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#356 (#315 leftover): a published workflow's name is its `/{name}`
+    trigger surface, so renaming it is owner-only. Draft renames and
+    description edits on a published workflow stay open to an invite grant."""
+    invite_headers = _invite_headers(client, auth_headers)
+    workflow_id = _create_workflow(client, auth_headers, "guest-rename-flow")
+    node_id = _add_transform_node(client, auth_headers, workflow_id, "step", "{input}")
+    _connect(client, auth_headers, workflow_id, None, node_id)
+
+    # Draft: an invite grant can still rename freely.
+    renamed = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"name": "guest-rename-draft"},
+        headers=invite_headers,
+    )
+    assert renamed.status_code == 200, renamed.text
+
+    _publish_workflow(client, auth_headers, workflow_id)
+
+    resp = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"name": "guest-rename-squatted"},
+        headers=invite_headers,
+    )
+    assert resp.status_code == 403
+    assert "rename a published workflow" in resp.text
+
+    # Sending the unchanged name is a no-op, not a rename -- still allowed,
+    # as are description-only edits on the published workflow.
+    unchanged = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"name": "guest-rename-draft", "description": "guest-edited"},
+        headers=invite_headers,
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["description"] == "guest-edited"
+
+    # The owner can still rename the published workflow directly.
+    owner_renamed = client.patch(
+        f"/api/v1/workflows/{workflow_id}",
+        json={"name": "guest-rename-owner"},
+        headers=auth_headers,
+    )
+    assert owner_renamed.status_code == 200, owner_renamed.text
+    assert owner_renamed.json()["name"] == "guest-rename-owner"
+
+
 def test_invite_grant_cannot_rewrite_published_workflow_graph(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
