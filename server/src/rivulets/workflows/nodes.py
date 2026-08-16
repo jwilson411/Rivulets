@@ -41,7 +41,8 @@ from rivulets.agentos import run_agent
 from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model
 from rivulets.agentos.tool_audit import ensure_unattended_tools_allowed
-from rivulets.db.models import Agent, WorkflowNode
+from rivulets.db.models import Agent, Rivulet, WorkflowNode
+from rivulets.sync.publish import publish_current_state
 from rivulets.tracing import TraceContext, finish_span, start_span
 
 NODE_TYPES = (
@@ -81,6 +82,8 @@ async def execute_agent_node(
     input_content: str,
     trace_ctx: TraceContext | None = None,
     unattended: bool = False,
+    rivulet_id: str | None = None,
+    ancestry: frozenset[str] = frozenset(),
 ) -> str:
     """#96: also records an AgentRun row (agentos/accounting.py's
     record_agent_run, the same helper dispatch/service.py uses) and an
@@ -112,7 +115,20 @@ async def execute_agent_node(
     docstring above and _run_node_with_retries' uniform handling) --
     there's no rivulet/channel context here to post a system_alert
     Message into the way channel dispatch does, so the block surfaces as
-    the node/run's own error_message instead."""
+    the node/run's own error_message instead.
+
+    #360: after the run completes, its tool calls are fed through the
+    same builtin side-effect executor channel dispatch uses
+    (dispatch/service.py's apply_builtin_tool_triggers) — before this, an
+    agent node could call run_workflow/create_channel/etc. and the stub
+    tool's "Requested..." reply was the *only* thing that happened; the
+    side effects only ever ran on the channel-dispatch path. `rivulet_id`
+    (the run's own rivulet, from the engine) is what the trigger handlers
+    post their confirmation/rejection messages into; `ancestry` (the
+    engine's _RunContext.ancestry) makes an agent-triggered run_workflow
+    a properly-guarded nested run instead of an unguarded recursion
+    vector. Both default to "skip trigger processing" so direct callers
+    (evals) keep the old run-only behavior."""
     if node.agent_id is None:
         raise ValueError(f"Node {node.name!r} has no agent assigned")
     agent = await db.get(Agent, node.agent_id)
@@ -153,6 +169,41 @@ async def execute_agent_node(
         cost_usd=run.cost_usd,
         total_tokens=run.total_tokens,
     )
+
+    # #360 (see docstring above). getattr, not run_output.tools: same
+    # tolerance for the test suite's SimpleNamespace run_agent doubles as
+    # tool_audit.py's log_tool_calls — and a run that made no tool calls
+    # (the common case) skips the rivulet fetch and dispatch import
+    # entirely.
+    if rivulet_id is not None and getattr(run_output, "tools", None):
+        # Lazy import for the same circular-import reason as
+        # dispatch.budgets above.
+        from rivulets.dispatch.service import apply_builtin_tool_triggers
+
+        rivulet = await db.get(Rivulet, rivulet_id)
+        assert rivulet is not None
+        messages = await apply_builtin_tool_triggers(
+            db,
+            rivulet,
+            agent,
+            run_output,
+            # Nest anything a trigger starts (e.g. a child workflow_run
+            # span) under this node's agent_run span, the same way
+            # _invoke_agent's child_trace_ctx nests triggers under the
+            # dispatching agent's own span.
+            trace_ctx=TraceContext(trace_ctx.trace_id, span_id) if trace_ctx is not None else None,
+            workflow_ancestry=ancestry,
+            unattended=unattended,
+        )
+        # The handlers staged their confirmation/rejection Messages on
+        # `db`; channel dispatch returns those up to api/rivulets.py to
+        # commit/publish, but this engine has no such outer handler —
+        # same self-contained commit/publish as engine.py's _post_message.
+        await db.commit()
+        for message in messages:
+            await db.refresh(message)
+            await publish_current_state(db, "message", message.id)
+
     return run_output.get_content_as_string() or ""  # pyright: ignore[reportUnknownMemberType]
 
 

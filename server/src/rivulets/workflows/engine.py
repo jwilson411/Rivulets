@@ -540,7 +540,17 @@ async def _execute_node(
 ) -> str:
     if node.node_type == "agent":
         return await execute_agent_node(
-            db, node, session_id, input_content, node_trace_ctx, unattended=ctx.unattended
+            db,
+            node,
+            session_id,
+            input_content,
+            node_trace_ctx,
+            unattended=ctx.unattended,
+            # #360: lets the node act on any builtin side-effect tools the
+            # agent called (rivulet_id for the handlers' messages, ancestry
+            # so an agent-triggered run_workflow is a guarded nested run).
+            rivulet_id=rivulet_id,
+            ancestry=ctx.ancestry,
         )
     if node.node_type == "transform":
         return execute_transform_node(node, input_content)

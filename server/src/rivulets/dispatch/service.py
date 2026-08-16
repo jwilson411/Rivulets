@@ -1632,11 +1632,74 @@ async def _invoke_agent(
             )
         )
 
+    new_messages.extend(
+        await apply_builtin_tool_triggers(db, rivulet, agent, run_output, trace_ctx=child_trace_ctx)
+    )
+
+    # FR-5.6/AC-014: this agent's own message can itself trigger a
+    # teammate (e.g. an @mention in its reply) — recurse.
+    recursive_messages = await dispatch_and_respond(
+        db,
+        rivulet,
+        channel,
+        content,
+        from_agent_id=agent.id,
+        from_agent_name=agent.name,
+        trace_ctx=child_trace_ctx,
+    )
+    new_messages.extend(recursive_messages)
+    return new_messages
+
+
+async def apply_builtin_tool_triggers(
+    db: AsyncSession,
+    rivulet: Rivulet,
+    agent: Agent,
+    run_output: RunOutput,
+    *,
+    trace_ctx: TraceContext | None = None,
+    workflow_ancestry: frozenset[str] = frozenset(),
+    unattended: bool | None = None,
+) -> list[Message]:
+    """Inspect a completed run's tool calls and actually perform every
+    builtin side-effect tool the agent invoked (the tools/builtin/ stubs
+    themselves are deliberately side-effect-free — see run_workflow.py's
+    module docstring). Extracted from _invoke_agent for #360 so
+    workflows/nodes.py's execute_agent_node can reuse it: before that, an
+    agent used as a workflow 'agent' node could *say* it ran another
+    workflow (or created a channel, published a workflow, ...) while
+    nothing actually happened — the trigger handlers below only ever ran
+    on the channel-dispatch path. Handoff is NOT handled here: it needs
+    channel/guard/team context a workflow agent node doesn't have, so it
+    stays in _invoke_agent.
+
+    Returns the Messages the handlers staged on `db` (confirmations,
+    rejections, listings). The channel-dispatch caller returns them up to
+    api/rivulets.py, which commits/publishes the whole batch;
+    execute_agent_node owns its own commit/publish instead (the engine's
+    self-contained _post_message pattern).
+
+    `workflow_ancestry`/`unattended` are only passed by the workflow-node
+    caller: ancestry feeds _handle_run_workflow_trigger's cycle/depth
+    guard (an agent node triggering run_workflow is a nested run, same as
+    a 'workflow' node, and needs the same #85/#249 protection), and
+    unattended is inherited by the triggered child run rather than being
+    re-derived from its literal 'agent' trigger (the same reasoning as
+    _execute_workflow_node's explicit pass-through, #100)."""
+    new_messages: list[Message] = []
+
     run_workflow_call = _find_run_workflow_call(run_output)
     if run_workflow_call is not None:
         workflow_name, workflow_input = run_workflow_call
         await _handle_run_workflow_trigger(
-            db, rivulet, agent, workflow_name, workflow_input, trace_ctx=child_trace_ctx
+            db,
+            rivulet,
+            agent,
+            workflow_name,
+            workflow_input,
+            trace_ctx=trace_ctx,
+            ancestry=workflow_ancestry,
+            unattended=unattended,
         )
 
     schedule_workflow_call = _find_schedule_workflow_call(run_output)
@@ -1867,18 +1930,6 @@ async def _invoke_agent(
             await _handle_revoke_invite_trigger(db, rivulet, agent, revoke_invite_call)
         )
 
-    # FR-5.6/AC-014: this agent's own message can itself trigger a
-    # teammate (e.g. an @mention in its reply) — recurse.
-    recursive_messages = await dispatch_and_respond(
-        db,
-        rivulet,
-        channel,
-        content,
-        from_agent_id=agent.id,
-        from_agent_name=agent.name,
-        trace_ctx=child_trace_ctx,
-    )
-    new_messages.extend(recursive_messages)
     return new_messages
 
 
@@ -1952,6 +2003,8 @@ async def _handle_run_workflow_trigger(
     workflow_input: str,
     *,
     trace_ctx: TraceContext | None = None,
+    ancestry: frozenset[str] = frozenset(),
+    unattended: bool | None = None,
 ) -> None:
     """#24: an agent called the run_workflow tool — look up the named
     workflow and actually execute it (workflows/engine.py). Imports
@@ -1964,8 +2017,19 @@ async def _handle_run_workflow_trigger(
     Doesn't return anything for the caller to persist: run_workflow is
     self-contained the same way invoke_agent_remotely is, committing and
     publishing each message it produces as it goes (see engine.py's
-    _post_message)."""
+    _post_message).
+
+    `ancestry`/`unattended` (#360) are only ever non-default when this
+    trigger fired from a workflow 'agent' node (apply_builtin_tool_triggers'
+    docstring): the triggered run is then a *nested* run, so it gets the
+    same cycle and nesting-depth guards _execute_workflow_node applies to
+    a 'workflow' node — without them, a workflow whose agent node
+    run_workflow's the workflow itself would recurse unboundedly, since
+    engine.py's guards only cover the 'workflow' node path. Rejections
+    stay log-only, matching this handler's existing silent treatment of
+    an unknown workflow name."""
     from rivulets.workflows import find_workflow_by_name, run_workflow
+    from rivulets.workflows.engine import MAX_WORKFLOW_NESTING_DEPTH
 
     workflow = await find_workflow_by_name(db, workflow_name)
     if workflow is None:
@@ -1976,6 +2040,25 @@ async def _handle_run_workflow_trigger(
             rivulet.id,
         )
         return
+    if workflow.id in ancestry:
+        logger.warning(
+            "Agent %r tried to run workflow %r from inside that same workflow "
+            "(cycle) in rivulet %r — skipping",
+            agent.name,
+            workflow_name,
+            rivulet.id,
+        )
+        return
+    if len(ancestry) >= MAX_WORKFLOW_NESTING_DEPTH:
+        logger.warning(
+            "Agent %r tried to run workflow %r more than %d workflow levels deep "
+            "in rivulet %r — skipping",
+            agent.name,
+            workflow_name,
+            MAX_WORKFLOW_NESTING_DEPTH,
+            rivulet.id,
+        )
+        return
     await run_workflow(
         db,
         workflow,
@@ -1983,7 +2066,9 @@ async def _handle_run_workflow_trigger(
         workflow_input,
         triggered_by="agent",
         triggered_by_id=agent.id,
+        ancestry=ancestry,
         trace_ctx=trace_ctx,
+        unattended=unattended,
     )
 
 
