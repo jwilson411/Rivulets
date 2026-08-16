@@ -3,19 +3,34 @@
 	import { knowledgeBases, type KnowledgeBase } from '$lib/api/knowledgeBases';
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
 	import { teams as teamsApi, type Team } from '$lib/api/teams';
-	import FilterableList from '$lib/components/FilterableList.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+
+	// Knowledge bases (06-screens.md → Knowledge bases): name, who it
+	// belongs to, document count. Creation happens in a sheet.
 
 	let kbList = $state<KnowledgeBase[]>([]);
 	let agentList = $state<Agent[]>([]);
 	let teamList = $state<Team[]>([]);
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 
-	let newName = $state('');
-	let newScopeType = $state<'agent' | 'team'>('agent');
-	let newSubjectId = $state('');
 	let creating = $state(false);
+	let newName = $state('');
+	let newScopeType = $state<'agent' | 'team'>('team');
+	let newSubjectId = $state('');
+	let createBusy = $state(false);
 	let createError = $state<string | null>(null);
-	let actionError = $state<string | null>(null);
+
+	let deletingKb = $state<KnowledgeBase | null>(null);
+	let deleteBusy = $state(false);
+	let deleteError = $state<string | null>(null);
+
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark';
 
 	async function refresh() {
 		loadError = null;
@@ -28,8 +43,10 @@
 			kbList = kbs;
 			agentList = agents;
 			teamList = teams;
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load knowledge bases';
+		} catch {
+			loadError = "Couldn't load knowledge bases.";
+		} finally {
+			loading = false;
 		}
 	}
 
@@ -37,15 +54,15 @@
 
 	function subjectName(kb: KnowledgeBase): string {
 		if (kb.scope_type === 'agent') {
-			return agentList.find((a) => a.id === kb.agent_id)?.name ?? 'Unknown agent';
+			return agentList.find((a) => a.id === kb.agent_id)?.name ?? 'an agent';
 		}
-		return teamList.find((t) => t.id === kb.team_id)?.name ?? 'Unknown team';
+		return teamList.find((t) => t.id === kb.team_id)?.name ?? 'a team';
 	}
 
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		if (!newName.trim() || !newSubjectId) return;
-		creating = true;
+		createBusy = true;
 		createError = null;
 		try {
 			await knowledgeBases.create({
@@ -54,118 +71,162 @@
 				agent_id: newScopeType === 'agent' ? newSubjectId : undefined,
 				team_id: newScopeType === 'team' ? newSubjectId : undefined
 			});
+			creating = false;
 			newName = '';
 			newSubjectId = '';
 			await refresh();
 		} catch (err) {
-			createError = err instanceof Error ? err.message : 'Failed to create knowledge base';
+			createError = err instanceof Error ? err.message : "Couldn't create the knowledge base.";
 		} finally {
-			creating = false;
+			createBusy = false;
 		}
 	}
 
-	async function handleDelete(id: string) {
-		actionError = null;
+	async function handleDelete() {
+		if (!deletingKb) return;
+		deleteBusy = true;
+		deleteError = null;
 		try {
-			await knowledgeBases.remove(id);
+			await knowledgeBases.remove(deletingKb.id);
+			deletingKb = null;
 			await refresh();
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to delete knowledge base';
+		} catch {
+			deleteError = "Couldn't delete this knowledge base. Try again.";
+		} finally {
+			deleteBusy = false;
 		}
 	}
 </script>
 
-<div class="mx-auto flex max-w-2xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Knowledge Bases</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			A knowledge base is a set of ingested documents an agent or team can search mid-conversation
-			via the search_knowledge_base tool (#98). Requires an OpenAI provider configured under
-			Providers, used to generate embeddings.
+<div class="mx-auto max-w-[820px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-6 flex items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Bases</h1>
+		<Button onclick={() => (creating = true)}>
+			<Icon name="plus" class="h-[18px] w-[18px]" />
+			New knowledge base
+		</Button>
+	</div>
+
+	{#if loading}
+		<SkeletonCards count={2} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if kbList.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">
+			No knowledge bases yet.
 		</p>
-	</header>
-
-	<form
-		onsubmit={handleCreate}
-		class="flex flex-col gap-2 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<div class="flex gap-2">
-			<input
-				type="text"
-				bind:value={newName}
-				placeholder="Knowledge base name"
-				class="flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			/>
-			<select
-				aria-label="Scope"
-				bind:value={newScopeType}
-				onchange={() => (newSubjectId = '')}
-				class="rounded-md border border-ink/15 bg-transparent px-2 py-2 text-sm text-ink dark:border-white/15 dark:text-ink-dark"
-			>
-				<option value="agent">Agent</option>
-				<option value="team">Team</option>
-			</select>
-			<select
-				aria-label="Subject"
-				bind:value={newSubjectId}
-				class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-2 py-2 text-sm text-ink dark:border-white/15 dark:text-ink-dark"
-			>
-				<option value="">
-					{newScopeType === 'agent' ? 'Choose an agent…' : 'Choose a team…'}
-				</option>
-				{#each newScopeType === 'agent' ? agentList : teamList as subject (subject.id)}
-					<option value={subject.id}>{subject.name}</option>
-				{/each}
-			</select>
-			<button
-				type="submit"
-				disabled={creating}
-				class="rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-			>
-				Create
-			</button>
-		</div>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-		{/if}
-	</form>
-
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
 	{:else}
-		{#if actionError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
-		{/if}
-		<FilterableList
-			items={kbList}
-			getKey={(kb) => kb.id}
-			searchPlaceholder="Search knowledge bases…"
-			searchPredicate={(kb, q) => kb.name.toLowerCase().includes(q.toLowerCase())}
-			emptyMessage="No knowledge bases yet — create one above."
-			noMatchMessage="No knowledge bases match your search."
-		>
-			{#snippet item(kb)}
-				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					<div class="flex items-center justify-between">
-						<a
-							href={resolve('/knowledge-bases/[id]', { id: kb.id })}
-							class="font-medium text-ink hover:underline dark:text-ink-dark"
-						>
-							{kb.name}
-						</a>
-						<button
-							onclick={() => handleDelete(kb.id)}
-							class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-						>
-							Delete
-						</button>
-					</div>
-					<p class="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
-						{kb.scope_type === 'agent' ? 'Agent' : 'Team'}: {subjectName(kb)} · {kb.document_count}
-						document{kb.document_count === 1 ? '' : 's'}
-					</p>
-				</li>
-			{/snippet}
-		</FilterableList>
+		<div class="flex flex-col gap-3">
+			{#each kbList as kb (kb.id)}
+				<div
+					class="flex min-h-16 items-center gap-3.5 rounded-2xl border border-line bg-surface px-6 py-5 hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
+				>
+					<a href={resolve('/knowledge-bases/[id]', { id: kb.id })} class="min-w-0 flex-1">
+						<span class="block text-base font-semibold text-ink dark:text-ink-dark">{kb.name}</span>
+						<span class="block text-sm text-muted dark:text-muted-dark">
+							Belongs to {subjectName(kb)} · {kb.document_count} document{kb.document_count === 1
+								? ''
+								: 's'}
+						</span>
+					</a>
+					<button
+						type="button"
+						onclick={() => (deletingKb = kb)}
+						class="flex-none text-sm font-medium text-muted hover:text-danger dark:text-muted-dark"
+					>
+						Delete
+					</button>
+				</div>
+			{/each}
+		</div>
 	{/if}
 </div>
+
+{#if creating}
+	<Sheet title="New knowledge base" onClose={() => (creating = false)} width={480}>
+		<form id="new-kb-form" onsubmit={handleCreate} class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-kb-name">
+					Name
+				</label>
+				<input
+					id="new-kb-name"
+					type="text"
+					bind:value={newName}
+					placeholder="Launch notes"
+					class={inputClass}
+				/>
+			</div>
+			<div class="flex flex-col gap-2">
+				<span class="text-sm font-semibold text-ink dark:text-ink-dark">Belongs to</span>
+				<div class="flex gap-2">
+					<button
+						type="button"
+						onclick={() => {
+							newScopeType = 'team';
+							newSubjectId = '';
+						}}
+						aria-pressed={newScopeType === 'team'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {newScopeType ===
+						'team'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						A team
+					</button>
+					<button
+						type="button"
+						onclick={() => {
+							newScopeType = 'agent';
+							newSubjectId = '';
+						}}
+						aria-pressed={newScopeType === 'agent'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {newScopeType ===
+						'agent'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						One agent
+					</button>
+				</div>
+				<select bind:value={newSubjectId} aria-label="Who it belongs to" class={inputClass}>
+					<option value="">
+						{newScopeType === 'agent' ? 'Choose an agent…' : 'Choose a team…'}
+					</option>
+					{#each newScopeType === 'agent' ? agentList : teamList as subject (subject.id)}
+						<option value={subject.id}>{subject.name}</option>
+					{/each}
+				</select>
+			</div>
+			{#if createError}
+				<p class="text-sm text-danger">{createError}</p>
+			{/if}
+		</form>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
+			<Button
+				disabled={createBusy || !newName.trim() || !newSubjectId}
+				onclick={() => (document.getElementById('new-kb-form') as HTMLFormElement).requestSubmit()}
+			>
+				Create knowledge base
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if deletingKb}
+	<Sheet title="Delete {deletingKb.name}?" onClose={() => (deletingKb = null)} width={480}>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Its documents are removed and agents stop searching it.
+		</p>
+		{#if deleteError}
+			<p class="text-sm text-danger">{deleteError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (deletingKb = null)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleDelete} disabled={deleteBusy}>
+				{deleteBusy ? 'Deleting…' : 'Delete knowledge base'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}

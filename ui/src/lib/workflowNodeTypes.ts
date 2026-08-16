@@ -1,12 +1,14 @@
 import type { WorkflowNodeType } from './api/workflows';
 
+// Plain-language step names (09-copy-deck.md): "If", never "Conditional";
+// "Wait for a person", never "Human input".
 export const NODE_TYPE_LABELS: Record<WorkflowNodeType, string> = {
 	agent: 'Agent',
 	transform: 'Transform',
 	summarize: 'Summarize',
-	conditional: 'Conditional',
+	conditional: 'If',
 	merge: 'Merge',
-	human_input: 'Human input',
+	human_input: 'Wait for a person',
 	workflow: 'Workflow'
 };
 

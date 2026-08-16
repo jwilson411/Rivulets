@@ -1,26 +1,37 @@
 <script lang="ts">
-	// #136: offers to generate a fresh BIP-39 phrase client-side, rather than
-	// adding a server endpoint for it -- the phrase is the workspace's only
-	// credential (security/keys.py's generate_mnemonic, otherwise only
-	// exercised by tests), so it should exist in the browser and nowhere
-	// else until the user has seen and acknowledged it. auth.login is what
-	// finally sends it over the wire, same as a manually-entered phrase.
+	// Unlock screen (06-screens.md → Unlock, mockups 1a/1b). #136: offers to
+	// generate a fresh BIP-39 phrase client-side, rather than adding a
+	// server endpoint for it -- the phrase is the workspace's only
+	// credential (security/keys.py's generate_mnemonic), so it should exist
+	// in the browser and nowhere else until the user has seen and
+	// acknowledged it. auth.login is what finally sends it over the wire,
+	// same as a manually-entered phrase.
+	//
+	// The generated-phrase warning card is deliberately the ONE loud
+	// severity moment in the whole app (HANDOFF.md invariant 6).
 	import { generateMnemonic } from 'bip39';
 	import { auth } from '$lib/api/auth.svelte';
 	import { ApiError } from '$lib/api/client';
+	import { initials } from '$lib/ink';
+	import Icon from '$lib/ui/Icon.svelte';
 
 	// Set by +layout.svelte's auth gate when it swaps back to LoginForm
 	// because a previously-valid session was torn down (401 / JWT expiry),
 	// rather than the user simply never having logged in.
 	let { sessionExpired = false }: { sessionExpired?: boolean } = $props();
 
+	type View = 'landing' | 'enter' | 'generated';
+	let view = $state<View>('landing');
+
 	let mnemonic = $state('');
 	let passphrase = $state('');
+	let showPassphrase = $state(false);
 	let loginError = $state<string | null>(null);
 	let loggingIn = $state(false);
 
 	let generatedWords = $state<string[] | null>(null);
 	let generatedPassphrase = $state('');
+	let showGeneratedPassphrase = $state(false);
 	let acknowledged = $state(false);
 	let copied = $state(false);
 
@@ -91,17 +102,20 @@
 		// _MNEMONIC_STRENGTH_BITS (security/keys.py).
 		generatedWords = generateMnemonic(128).split(' ');
 		generatedPassphrase = '';
+		showGeneratedPassphrase = false;
 		acknowledged = false;
 		copied = false;
 		loginError = null;
+		view = 'generated';
 	}
 
-	function useExistingPhraseInstead() {
+	function backToLanding() {
 		generatedWords = null;
 		generatedPassphrase = '';
 		acknowledged = false;
 		copied = false;
 		loginError = null;
+		view = 'landing';
 	}
 
 	async function copyGeneratedPhrase() {
@@ -120,210 +134,265 @@
 			needsBootstrapToken = false;
 		}
 	}
+
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
 </script>
 
-<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-8 px-6">
-	<header>
-		<h1
-			class="flex items-center gap-2 text-3xl font-semibold tracking-tight text-ink dark:text-ink-dark"
+{#snippet bootstrapField(id: string)}
+	{#if needsBootstrapToken}
+		<div class="flex flex-col gap-2">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for={id}>
+				Setup token
+			</label>
+			<input
+				{id}
+				type="password"
+				autocomplete="off"
+				bind:value={bootstrapToken}
+				class={inputClass}
+			/>
+			<p class="text-[13px] text-muted dark:text-muted-dark">
+				This machine is reachable on the network. Paste the setup token from the person who
+				installed it.
+			</p>
+		</div>
+	{/if}
+{/snippet}
+
+<main class="mx-auto flex min-h-screen w-full max-w-[480px] flex-col justify-center px-6 py-12">
+	<div class="mb-10 flex items-center gap-3">
+		<span
+			class="flex h-9 w-9 items-center justify-center rounded-[12px] bg-accent text-white dark:bg-accent-dark dark:text-paper-dark"
 		>
-			<img src="/logo.png" alt="" class="h-9 w-9" />
-			Rivulets<span class="text-agent-cyan-600 dark:text-agent-cyan-400">.</span>
-		</h1>
-		<p class="mt-1 text-neutral-600 dark:text-neutral-400">
-			A local-first workspace where conversations run like small streams — humans and AI agent
-			teams, side by side.
+			<Icon name="logo" class="h-5 w-5" />
+		</span>
+		<span class="font-display text-[19px] font-semibold text-ink dark:text-ink-dark">Rivulets</span>
+	</div>
+
+	{#if sessionExpired}
+		<p class="mb-6 text-[15px] text-muted dark:text-muted-dark">
+			Your session ended — unlock again.
 		</p>
-	</header>
+	{/if}
 
-	{#if generatedWords}
-		<div class="flex flex-col gap-4">
-			<div
-				class="rounded-md border border-agent-magenta-700 bg-agent-magenta-100 p-4 text-sm text-agent-magenta-900 dark:border-agent-magenta-400 dark:bg-agent-magenta-900/40 dark:text-agent-magenta-100"
-			>
-				<p class="font-semibold">This phrase is the only way into this workspace.</p>
-				<p class="mt-1">
-					There's no password reset and no server-side recovery. Anyone who has it can open this
-					workspace and everything in it — and if you lose it, everything in it is gone for good.
-					Write it down or save it in a password manager before you continue.
-				</p>
-			</div>
+	{#if view === 'generated' && generatedWords}
+		<div
+			class="mb-7 rounded-2xl border border-danger-line bg-danger-soft px-6 py-5 dark:border-danger-line-dark dark:bg-danger-soft-dark"
+		>
+			<p class="mb-1.5 text-base font-semibold text-danger">This phrase is the only way back in.</p>
+			<p class="text-sm leading-normal text-danger-ink dark:text-danger-ink-dark">
+				There is no password reset. Anyone with this phrase can open the workspace. If you lose it,
+				the workspace is gone. Write it down or save it in a password manager before you continue.
+			</p>
+		</div>
 
-			<div
-				class="grid grid-cols-3 gap-x-3 gap-y-2 rounded-md border border-ink/15 p-4 dark:border-white/15"
-			>
-				{#each generatedWords as word, i (i)}
-					<div class="flex items-baseline gap-1.5 text-sm">
-						<span class="w-4 text-right text-xs text-neutral-500 tabular-nums">{i + 1}.</span>
-						<span class="font-mono text-ink dark:text-ink-dark">{word}</span>
-					</div>
-				{/each}
-			</div>
+		<div class="mb-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+			{#each generatedWords as word, i (i)}
+				<div
+					class="flex items-baseline gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 dark:border-line-dark dark:bg-surface-dark"
+				>
+					<span class="font-mono text-[11px] text-muted dark:text-muted-dark">
+						{String(i + 1).padStart(2, '0')}
+					</span>
+					<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">{word}</span>
+				</div>
+			{/each}
+		</div>
 
-			<button
-				type="button"
-				onclick={copyGeneratedPhrase}
-				class="self-start text-sm font-medium text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
-			>
-				{copied ? 'Copied' : 'Copy phrase'}
-			</button>
+		<button
+			type="button"
+			onclick={copyGeneratedPhrase}
+			class="mb-6 flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-line bg-surface text-base font-medium text-ink hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:hover:border-accent-dark"
+		>
+			<Icon name="copy" class="h-[18px] w-[18px]" />
+			{copied ? 'Copied' : 'Copy phrase'}
+		</button>
 
-			<div class="flex flex-col gap-1.5">
-				<label class="text-sm font-medium text-ink dark:text-ink-dark" for="generated-passphrase">
-					Passphrase (optional)
+		{#if showGeneratedPassphrase}
+			<div class="mb-6 flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="generated-passphrase">
+					Passphrase
 				</label>
 				<input
 					id="generated-passphrase"
 					type="password"
 					autocomplete="off"
 					bind:value={generatedPassphrase}
-					placeholder="Leave blank for none"
-					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+					class={inputClass}
 				/>
-				<p class="text-xs text-neutral-500">
-					An extra word or phrase on top of the recovery phrase above. There's no reset for this
-					either — if you set one, you'll need it every time, along with the phrase.
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					Optional. You'll need this every time, along with the phrase. There is no reset.
 				</p>
 			</div>
+		{/if}
 
-			{#if needsBootstrapToken}
-				<div class="flex flex-col gap-1.5">
-					<label
-						class="text-sm font-medium text-ink dark:text-ink-dark"
-						for="generated-bootstrap-token"
-					>
-						Bootstrap token
-					</label>
-					<input
-						id="generated-bootstrap-token"
-						type="password"
-						autocomplete="off"
-						bind:value={bootstrapToken}
-						placeholder="RIVULETS_BOOTSTRAP_TOKEN"
-						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					/>
-					<p class="text-xs text-neutral-500">
-						This node is reachable over the network and requires the operator-configured
-						RIVULETS_BOOTSTRAP_TOKEN to set up its workspace.
-					</p>
-				</div>
-			{/if}
+		{@render bootstrapField('generated-bootstrap-token')}
 
-			<label class="flex items-start gap-2 text-sm text-ink dark:text-ink-dark">
-				<input type="checkbox" bind:checked={acknowledged} class="mt-0.5" />
+		<label class="mb-6 flex cursor-pointer items-center gap-3">
+			<input type="checkbox" bind:checked={acknowledged} class="peer sr-only" />
+			<span
+				class="flex h-6 w-6 flex-none items-center justify-center rounded-[8px] border border-line bg-surface text-transparent peer-checked:border-accent peer-checked:bg-accent peer-checked:text-white peer-focus-visible:outline-2 peer-focus-visible:outline-accent dark:border-line-dark dark:bg-surface-dark dark:peer-checked:border-accent-dark dark:peer-checked:bg-accent-dark dark:peer-checked:text-paper-dark"
+				aria-hidden="true"
+			>
+				<Icon name="check" class="h-3.5 w-3.5" />
+			</span>
+			<span class="text-[15px] text-ink dark:text-ink-dark">
 				I've saved this phrase somewhere safe
-			</label>
+			</span>
+		</label>
 
-			<div class="flex items-center gap-4">
+		<button
+			type="button"
+			disabled={loggingIn || !acknowledged}
+			onclick={confirmGeneratedPhrase}
+			class="flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
+		>
+			{loggingIn ? 'Unlocking…' : 'Enter workspace'}
+		</button>
+
+		{#if loginError}
+			<p class="mt-4 text-sm text-danger">{loginError}</p>
+		{/if}
+
+		<div class="mt-4 flex items-center justify-center gap-6">
+			{#if !showGeneratedPassphrase}
 				<button
 					type="button"
-					disabled={loggingIn || !acknowledged}
-					onclick={confirmGeneratedPhrase}
-					class="rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+					onclick={() => (showGeneratedPassphrase = true)}
+					class="text-sm font-medium text-accent hover:underline dark:text-accent-dark"
 				>
-					{loggingIn ? 'Signing in…' : 'Enter workspace'}
+					Add a passphrase
 				</button>
-				<button
-					type="button"
-					onclick={useExistingPhraseInstead}
-					class="text-sm text-neutral-600 hover:underline dark:text-neutral-400"
-				>
-					Use a phrase I already have
-				</button>
-			</div>
-
-			{#if loginError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loginError}</p>
-			{/if}
-		</div>
-	{:else}
-		{#if sessionExpired}
-			<p
-				class="rounded-md border border-amber-600/40 bg-amber-100 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/40 dark:bg-amber-900/30 dark:text-amber-100"
-			>
-				Session expired — sign in again.
-			</p>
-		{/if}
-		{#if auth.resumeDisplayName !== null || resumeError}
-			<div class="flex flex-col gap-2 rounded-md border border-ink/15 p-4 dark:border-white/15">
-				<p class="text-sm text-neutral-600 dark:text-neutral-400">
-					You joined this workspace through an invite — no recovery phrase needed.
-				</p>
-				{#if auth.resumeDisplayName !== null}
-					<button
-						type="button"
-						disabled={resumingInvite}
-						onclick={handleResume}
-						class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-					>
-						{resumingInvite ? 'Signing in…' : `Continue as ${auth.resumeDisplayName}`}
-					</button>
-				{/if}
-				{#if resumeError}
-					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{resumeError}</p>
-				{/if}
-			</div>
-		{/if}
-		<form onsubmit={handleLogin} class="flex flex-col gap-3">
-			<label class="text-sm font-medium text-ink dark:text-ink-dark" for="mnemonic">
-				Workspace recovery phrase (12 words)
-			</label>
-			<input
-				id="mnemonic"
-				type="text"
-				bind:value={mnemonic}
-				placeholder="apple banana cherry ..."
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			/>
-			<label class="text-sm font-medium text-ink dark:text-ink-dark" for="passphrase">
-				Passphrase (optional)
-			</label>
-			<input
-				id="passphrase"
-				type="password"
-				autocomplete="off"
-				bind:value={passphrase}
-				placeholder="Leave blank if this workspace doesn't use one"
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			/>
-			{#if needsBootstrapToken}
-				<label class="text-sm font-medium text-ink dark:text-ink-dark" for="bootstrap-token">
-					Bootstrap token
-				</label>
-				<input
-					id="bootstrap-token"
-					type="password"
-					autocomplete="off"
-					bind:value={bootstrapToken}
-					placeholder="RIVULETS_BOOTSTRAP_TOKEN"
-					class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				/>
-				<p class="text-xs text-neutral-500">
-					This node is reachable over the network and requires the operator-configured
-					RIVULETS_BOOTSTRAP_TOKEN to set up its workspace.
-				</p>
-			{/if}
-			<button
-				type="submit"
-				disabled={loggingIn || !mnemonic.trim()}
-				class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-			>
-				{loggingIn ? 'Signing in…' : 'Enter workspace'}
-			</button>
-			{#if loginError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loginError}</p>
 			{/if}
 			<button
 				type="button"
-				onclick={generatePhrase}
-				class="self-start rounded-md border border-ink/15 px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-agent-cyan-600 dark:border-white/15 dark:text-ink-dark"
+				onclick={backToLanding}
+				class="text-sm text-muted hover:underline dark:text-muted-dark"
 			>
-				Generate a recovery phrase for me
+				Back
 			</button>
-			<p class="text-xs text-neutral-500">
-				New here? Generating a phrase sets up your workspace on first login — no account or email
-				required, just the phrase.
-			</p>
+		</div>
+	{:else if view === 'enter'}
+		<h1
+			class="mb-3 font-display text-[32px] leading-tight font-semibold text-ink dark:text-ink-dark"
+		>
+			Your workspace lives on this machine.
+		</h1>
+		<p class="mb-8 text-base text-muted dark:text-muted-dark">
+			No account. A 12-word phrase is the only key.
+		</p>
+		<form onsubmit={handleLogin} class="flex flex-col gap-5">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="mnemonic">
+					Workspace recovery phrase
+				</label>
+				<textarea
+					id="mnemonic"
+					rows="3"
+					bind:value={mnemonic}
+					placeholder="twelve words, separated by spaces"
+					class="rounded-lg border border-line bg-surface px-4 py-3 font-mono text-[15px] leading-relaxed text-ink placeholder:font-sans placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark"
+				></textarea>
+			</div>
+			{#if showPassphrase}
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="passphrase">
+						Passphrase
+					</label>
+					<input
+						id="passphrase"
+						type="password"
+						autocomplete="off"
+						bind:value={passphrase}
+						class={inputClass}
+					/>
+					<p class="text-[13px] text-muted dark:text-muted-dark">
+						Optional. You'll need this every time, along with the phrase. There is no reset.
+					</p>
+				</div>
+			{/if}
+			{@render bootstrapField('bootstrap-token')}
+			<button
+				type="submit"
+				disabled={loggingIn || !mnemonic.trim()}
+				class="flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
+			>
+				{loggingIn ? 'Unlocking…' : 'Enter workspace'}
+			</button>
+			{#if loginError}
+				<p class="text-sm text-danger">{loginError}</p>
+			{/if}
+			<div class="flex items-center justify-center gap-6">
+				{#if !showPassphrase}
+					<button
+						type="button"
+						onclick={() => (showPassphrase = true)}
+						class="text-sm font-medium text-accent hover:underline dark:text-accent-dark"
+					>
+						Add a passphrase
+					</button>
+				{/if}
+				<button
+					type="button"
+					onclick={() => (view = 'landing')}
+					class="text-sm text-muted hover:underline dark:text-muted-dark"
+				>
+					Back
+				</button>
+			</div>
 		</form>
+	{:else}
+		<h1
+			class="mb-3 font-display text-[32px] leading-tight font-semibold text-ink dark:text-ink-dark"
+		>
+			Your workspace lives on this machine.
+		</h1>
+		<p class="mb-9 text-base text-muted dark:text-muted-dark">
+			No account. A 12-word phrase is the only key.
+		</p>
+
+		<button
+			type="button"
+			onclick={generatePhrase}
+			class="mb-4 flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep dark:bg-accent-dark dark:text-paper-dark"
+		>
+			Generate a recovery phrase
+		</button>
+		<button
+			type="button"
+			onclick={() => (view = 'enter')}
+			class="flex h-12 w-full items-center justify-center rounded-xl border border-line bg-surface text-base font-medium text-ink hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:hover:border-accent-dark"
+		>
+			I already have a phrase
+		</button>
+
+		{#if auth.resumeDisplayName !== null || resumeError}
+			<div class="mt-7 mb-5 flex items-center gap-3">
+				<span class="h-px flex-1 bg-line dark:bg-line-dark"></span>
+				<span class="text-[13px] text-muted dark:text-muted-dark">or</span>
+				<span class="h-px flex-1 bg-line dark:bg-line-dark"></span>
+			</div>
+			{#if auth.resumeDisplayName !== null}
+				<button
+					type="button"
+					disabled={resumingInvite}
+					onclick={handleResume}
+					class="flex h-12 w-full items-center gap-3 rounded-xl border border-line bg-surface px-4 hover:border-accent disabled:opacity-50 dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
+				>
+					<span
+						class="flex h-7 w-7 flex-none items-center justify-center rounded-[10px] bg-ink text-[13px] font-semibold text-paper dark:bg-ink-dark dark:text-paper-dark"
+					>
+						{initials(auth.resumeDisplayName)}
+					</span>
+					<span class="text-base font-medium text-ink dark:text-ink-dark">
+						{resumingInvite ? 'Unlocking…' : `Continue as ${auth.resumeDisplayName}`}
+					</span>
+				</button>
+			{/if}
+			{#if resumeError}
+				<p class="mt-3 text-sm text-danger">{resumeError}</p>
+			{/if}
+		{/if}
 	{/if}
 </main>

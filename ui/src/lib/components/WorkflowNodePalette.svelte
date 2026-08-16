@@ -19,15 +19,15 @@
 	}
 </script>
 
-<div class="flex flex-wrap gap-2 border-b border-ink/12 p-2 dark:border-white/10">
+<div class="flex flex-wrap gap-2 border-b border-line p-3 dark:border-line-dark">
 	{#each nodeTypes as nodeType (nodeType)}
 		<div
 			data-testid={`palette-node-${nodeType}`}
 			draggable="true"
 			ondragstart={(e) => handleDragStart(e, nodeType)}
-			class="flex cursor-grab items-center gap-1.5 rounded-md border border-ink/15 bg-surface px-2 py-1 text-xs text-ink select-none active:cursor-grabbing dark:border-white/15 dark:bg-surface-dark dark:text-ink-dark"
+			class="flex h-9 cursor-grab items-center gap-1.5 rounded-md border border-line bg-surface px-3.5 text-sm font-medium text-ink select-none active:cursor-grabbing dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
 		>
-			<Icon name={NODE_TYPE_ICONS[nodeType]} class="h-3.5 w-3.5" />
+			<Icon name={NODE_TYPE_ICONS[nodeType]} class="h-3.5 w-3.5 text-muted dark:text-muted-dark" />
 			{NODE_TYPE_LABELS[nodeType]}
 		</div>
 	{/each}

@@ -1,12 +1,8 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts and
-// Sidebar.svelte.test.ts). +layout.svelte is mostly a thin shell around
-// `{@render children()}`, but it does gate the entire app behind
-// `auth.isAuthenticated` (LoginForm vs. the real app chrome) -- that
-// conditional is real logic worth covering, so this isn't skipped.
-//
-// Rendering the authenticated branch pulls in the real Sidebar component,
-// which has its own API dependencies -- those are mocked here the same way
-// Sidebar.svelte.test.ts mocks them, since +layout.svelte doesn't abstract
+// Browser-mode component test. +layout.svelte gates the entire app behind
+// `auth.isAuthenticated` (Unlock vs. Name vs. the app shell) -- that
+// conditional is real logic worth covering. Rendering the authenticated
+// branch pulls in the real shell (icon rail + context panel + tabs), whose
+// API dependencies are mocked here since +layout.svelte doesn't abstract
 // them away itself.
 
 import { createRawSnippet } from 'svelte';
@@ -39,6 +35,8 @@ vi.mock('$app/paths', () => ({
 	resolve: (path: string) => path
 }));
 
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		get isAuthenticated() {
@@ -67,13 +65,7 @@ vi.mock('$lib/api/humans', () => ({ humans: { list: vi.fn() } }));
 vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
-vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn() } }));
-vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
-vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
-vi.mock('$lib/api/mcpServers', () => ({ mcpServers: { list: vi.fn() } }));
-vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn() } }));
-vi.mock('$lib/api/sync', () => ({ sync: { status: vi.fn() } }));
-vi.mock('$lib/api/update', () => ({ update: { status: vi.fn() } }));
+vi.mock('$lib/api/approvals', () => ({ approvals: { list: vi.fn() } }));
 
 function childrenSnippet(text: string) {
 	return createRawSnippet(() => ({
@@ -92,18 +84,18 @@ afterEach(() => {
 });
 
 describe('routes/+layout.svelte', () => {
-	it('shows the login form and not the app chrome when unauthenticated', async () => {
+	it('shows the Unlock screen and not the app chrome when unauthenticated', async () => {
 		authState.isAuthenticated = false;
 
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 		await expect.element(page.getByText('channel content')).not.toBeInTheDocument();
 	});
 
-	it('shows the identity picker once authenticated but before an identity is claimed', async () => {
+	it('shows the Name screen once authenticated but before an identity is claimed', async () => {
 		authState.isAuthenticated = true;
 		authState.humanId = null;
 		const { humans } = await import('$lib/api/humans');
@@ -111,45 +103,52 @@ describe('routes/+layout.svelte', () => {
 
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
-		await expect.element(page.getByText("Who's this?")).toBeInTheDocument();
+		await expect.element(page.getByText('What should we call you?')).toBeInTheDocument();
 		await expect.element(page.getByText('channel content')).not.toBeInTheDocument();
 	});
 
-	it('renders the sidebar and routed children once an identity is claimed', async () => {
+	it('renders the icon rail and routed children once an identity is claimed', async () => {
 		authState.isAuthenticated = true;
 		authState.humanId = 'human-1';
-		authState.displayName = 'Test User';
+		authState.displayName = 'Riley';
 		authState.grant = 'owner';
 		const { channels } = await import('$lib/api/channels');
-		const { agents } = await import('$lib/api/agents');
-		const { teams } = await import('$lib/api/teams');
-		const { providers } = await import('$lib/api/providers');
-		const { mcpServers } = await import('$lib/api/mcpServers');
-		const { tools } = await import('$lib/api/tools');
-		const { sync } = await import('$lib/api/sync');
+		const { approvals } = await import('$lib/api/approvals');
 		vi.mocked(channels.list).mockResolvedValue([]);
-		vi.mocked(agents.list).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(providers.list).mockResolvedValue([]);
-		vi.mocked(mcpServers.list).mockResolvedValue([]);
-		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(sync.status).mockResolvedValue({
-			running: false,
-			node_id: null,
-			peers: [],
-			pending_changes: 0,
-			own_addresses: []
-		});
+		vi.mocked(approvals.list).mockResolvedValue([]);
 
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
 		await expect.element(page.getByText('channel content')).toBeInTheDocument();
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('navigation', { name: 'Main' }).first())
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.not.toBeInTheDocument();
 	});
 
-	it('silently resumes a stored invite session on load instead of showing the login form (#350)', async () => {
+	it('shows the pending-approvals badge count on the rail (#102)', async () => {
+		authState.isAuthenticated = true;
+		authState.humanId = 'human-1';
+		authState.displayName = 'Riley';
+		authState.grant = 'owner';
+		const { channels } = await import('$lib/api/channels');
+		const { approvals } = await import('$lib/api/approvals');
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(approvals.list).mockResolvedValue([
+			{ status: 'pending' },
+			{ status: 'pending' },
+			{ status: 'approved' }
+		] as never);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		const approvalsLink = page.getByRole('link', { name: 'Approvals' }).first();
+		await expect.element(approvalsLink.getByText('2', { exact: true })).toBeInTheDocument();
+	});
+
+	it('silently resumes a stored invite session on load instead of showing Unlock (#350)', async () => {
 		authState.isAuthenticated = false;
 		authState.resumeDisplayName = 'Ada';
 		// Keep the resume in flight so the interim state is observable.
@@ -164,14 +163,14 @@ describe('routes/+layout.svelte', () => {
 
 		await expect.element(page.getByText('Signing you back in…')).toBeInTheDocument();
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.not.toBeInTheDocument();
 		expect(resumeInviteSessionMock).toHaveBeenCalledOnce();
 
 		finishResume(true);
 	});
 
-	it('falls back to the login form when the silent resume fails', async () => {
+	it('falls back to the Unlock screen when the silent resume fails', async () => {
 		authState.isAuthenticated = false;
 		authState.resumeDisplayName = 'Ada';
 		resumeInviteSessionMock.mockImplementation(async () => {
@@ -182,7 +181,7 @@ describe('routes/+layout.svelte', () => {
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 	});
 
@@ -193,7 +192,7 @@ describe('routes/+layout.svelte', () => {
 		render(RootLayout, { children: childrenSnippet('channel content') });
 
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
 	});
@@ -206,7 +205,7 @@ describe('routes/+layout.svelte', () => {
 
 		await expect.element(page.getByText('accept invite form')).toBeInTheDocument();
 		await expect
-			.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.not.toBeInTheDocument();
 	});
 });

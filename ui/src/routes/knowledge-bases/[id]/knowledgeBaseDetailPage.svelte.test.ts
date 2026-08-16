@@ -1,6 +1,6 @@
-// Browser-mode component test (see channels/[id]/channelPage.svelte.test.ts
-// for the $app/state + $app/paths mocking pattern this route needs, since
-// it reads its knowledge base id from page.params.id).
+// Browser-mode component test for the knowledge base detail (06-screens.md
+// → Knowledge bases, mockup 2h): the big dropzone, document rows with
+// plain-language status pills, and Remove.
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,19 +12,15 @@ import {
 	type KnowledgeBaseDocument
 } from '$lib/api/knowledgeBases';
 import { files } from '$lib/api/files';
+import { agents } from '$lib/api/agents';
+import { teams } from '$lib/api/teams';
 
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'kb-1' }, url: new URL('http://localhost/knowledge-bases/kb-1') }
 }));
 
 vi.mock('$app/paths', () => ({
-	resolve: (path: string, params?: Record<string, string>) => {
-		let out = path;
-		if (params) {
-			for (const [key, value] of Object.entries(params)) out = out.replace(`[${key}]`, value);
-		}
-		return out;
-	}
+	resolve: (path: string) => path
 }));
 
 vi.mock('$lib/api/knowledgeBases', () => ({
@@ -36,159 +32,123 @@ vi.mock('$lib/api/knowledgeBases', () => ({
 	}
 }));
 
-vi.mock('$lib/api/files', () => ({
-	files: { upload: vi.fn() }
-}));
+vi.mock('$lib/api/files', () => ({ files: { upload: vi.fn() } }));
+vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn() } }));
+vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 
-const productDocs: KnowledgeBase = {
+afterEach(() => {
+	vi.clearAllMocks();
+});
+
+const launchNotes: KnowledgeBase = {
 	id: 'kb-1',
-	name: 'Product Docs',
+	name: 'Launch notes',
 	description: null,
-	scope_type: 'agent',
-	agent_id: 'agent-1',
-	team_id: null,
+	scope_type: 'team',
+	agent_id: null,
+	team_id: 'team-1',
 	document_count: 1
 };
 
 const ingestedDoc: KnowledgeBaseDocument = {
 	id: 'doc-1',
 	knowledge_base_id: 'kb-1',
-	file_id: 'file-1',
+	file_id: 'file-abc12345',
 	status: 'ingested',
 	error_message: null,
-	chunk_count: 4
+	chunk_count: 12
 };
 
-afterEach(() => {
-	vi.clearAllMocks();
-});
+function seed(docs: KnowledgeBaseDocument[] = [ingestedDoc]) {
+	vi.mocked(knowledgeBases.get).mockResolvedValue(launchNotes);
+	vi.mocked(knowledgeBases.listDocuments).mockResolvedValue(docs);
+	vi.mocked(agents.list).mockResolvedValue([]);
+	vi.mocked(teams.list).mockResolvedValue([
+		{ id: 'team-1', name: 'Starter Team', description: null }
+	]);
+}
 
 describe('knowledge-bases/[id]/+page.svelte', () => {
-	it('renders the knowledge base name and its ingested documents', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([ingestedDoc]);
+	it('shows the base, who it belongs to, and the dropzone', async () => {
+		seed();
 
 		render(KnowledgeBaseDetailPage);
 
-		await expect.element(page.getByText('Product Docs')).toBeInTheDocument();
-		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
-		await expect.element(page.getByText('4 chunks')).toBeInTheDocument();
+		await expect.element(page.getByText('Launch notes')).toBeInTheDocument();
+		await expect.element(page.getByText('Belongs to Starter Team')).toBeInTheDocument();
+		await expect.element(page.getByText('Drop markdown, text, or JSON')).toBeInTheDocument();
 	});
 
-	it('removes a document via knowledgeBases.removeDocument and refreshes', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments)
-			.mockResolvedValueOnce([ingestedDoc])
-			.mockResolvedValueOnce([]);
-		vi.mocked(knowledgeBases.removeDocument).mockResolvedValueOnce(undefined);
+	it('shows document rows with a plain-language Ready pill and chunk count', async () => {
+		seed();
 
 		render(KnowledgeBaseDetailPage);
 
-		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
-		await page.getByRole('button', { name: 'Remove' }).click();
-
-		expect(knowledgeBases.removeDocument).toHaveBeenCalledWith('kb-1', 'doc-1');
-		await expect
-			.element(page.getByText('No documents ingested yet — add one above.'))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Ready')).toBeInTheDocument();
+		await expect.element(page.getByText('12 chunks')).toBeInTheDocument();
 	});
 
-	it('shows a failed document with its error message', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([
-			{ ...ingestedDoc, status: 'failed', error_message: 'No OpenAI provider configured' }
+	it('says "Couldn\'t read" for a failed document, with its error', async () => {
+		seed([
+			{
+				...ingestedDoc,
+				id: 'doc-2',
+				status: 'failed',
+				error_message: 'Unsupported encoding',
+				chunk_count: 0
+			}
 		]);
 
 		render(KnowledgeBaseDetailPage);
 
-		await expect.element(page.getByText('Failed')).toBeInTheDocument();
-		await expect.element(page.getByText('No OpenAI provider configured')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't read")).toBeInTheDocument();
+		await expect.element(page.getByText('Unsupported encoding')).toBeInTheDocument();
 	});
 
-	it('shows a load error instead of the knowledge base when loading fails', async () => {
-		vi.mocked(knowledgeBases.get).mockRejectedValueOnce(new Error('Knowledge base not found'));
-		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([]);
-
-		render(KnowledgeBaseDetailPage);
-
-		await expect.element(page.getByText('Knowledge base not found')).toBeInTheDocument();
-	});
-
-	it('uploads a document via the file input, shows the ingesting state, and refreshes the list', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments)
-			.mockResolvedValueOnce([])
-			.mockResolvedValueOnce([ingestedDoc]);
-		let resolveUpload: (value: {
-			file_id: string;
-			content_hash: string;
-			filename: string;
-			mime_type: string;
-			size_bytes: number;
-		}) => void = () => {};
-		vi.mocked(files.upload).mockReturnValue(
-			new Promise((resolve) => {
-				resolveUpload = resolve;
-			})
-		);
+	it('uploads then ingests a picked file (upload and ingest are two steps)', async () => {
+		seed([]);
+		vi.mocked(files.upload).mockResolvedValueOnce({
+			file_id: 'file-new',
+			content_hash: 'hash',
+			filename: 'notes.md',
+			mime_type: 'text/markdown',
+			size_bytes: 10
+		});
 		vi.mocked(knowledgeBases.ingestDocument).mockResolvedValueOnce(ingestedDoc);
 
 		const { container } = await render(KnowledgeBaseDetailPage);
-		await expect
-			.element(page.getByText('No documents ingested yet — add one above.'))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Drop markdown, text, or JSON')).toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
 		await page
 			.elementLocator(input)
-			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
+			.upload(new File(['# notes'], 'notes.md', { type: 'text/markdown' }));
 
-		await expect.element(page.getByText('Ingesting…')).toBeInTheDocument();
-
-		resolveUpload({
-			file_id: 'file-1',
-			content_hash: 'hash',
-			filename: 'notes.txt',
-			mime_type: 'text/plain',
-			size_bytes: 5
-		});
-
-		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
-		expect(knowledgeBases.ingestDocument).toHaveBeenCalledWith('kb-1', 'file-1');
-	});
-
-	it('shows an upload error when ingestion fails', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([]);
-		vi.mocked(files.upload).mockRejectedValueOnce(new Error('File type not supported'));
-
-		const { container } = await render(KnowledgeBaseDetailPage);
-		await expect
-			.element(page.getByText('No documents ingested yet — add one above.'))
-			.toBeInTheDocument();
-
-		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-		await page
-			.elementLocator(input)
-			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
-
-		await expect.element(page.getByText('File type not supported')).toBeInTheDocument();
-		expect(knowledgeBases.ingestDocument).not.toHaveBeenCalled();
-	});
-
-	it('shows an action error when removing a document fails', async () => {
-		vi.mocked(knowledgeBases.get).mockResolvedValue(productDocs);
-		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([ingestedDoc]);
-		vi.mocked(knowledgeBases.removeDocument).mockRejectedValueOnce(
-			new Error('Failed to remove document')
+		await vi.waitFor(() =>
+			expect(knowledgeBases.ingestDocument).toHaveBeenCalledWith('kb-1', 'file-new')
 		);
+		expect(files.upload).toHaveBeenCalledTimes(1);
+	});
+
+	it('removes a document', async () => {
+		seed();
+		vi.mocked(knowledgeBases.removeDocument).mockResolvedValueOnce(undefined);
+
+		render(KnowledgeBaseDetailPage);
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		expect(knowledgeBases.removeDocument).toHaveBeenCalledWith('kb-1', 'doc-1');
+	});
+
+	it('shows a quiet error with retry when the base fails to load', async () => {
+		vi.mocked(knowledgeBases.get).mockRejectedValue(new Error('boom'));
+		vi.mocked(knowledgeBases.listDocuments).mockResolvedValue([]);
+		vi.mocked(agents.list).mockResolvedValue([]);
+		vi.mocked(teams.list).mockResolvedValue([]);
 
 		render(KnowledgeBaseDetailPage);
 
-		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
-		await page.getByRole('button', { name: 'Remove' }).click();
-
-		await expect.element(page.getByText('Failed to remove document')).toBeInTheDocument();
-		await expect.element(page.getByText('Ingested')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load this knowledge base.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 });

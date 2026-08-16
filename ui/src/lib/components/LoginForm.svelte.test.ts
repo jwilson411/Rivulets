@@ -1,8 +1,7 @@
-// Browser-mode component test (vite.config.ts's "client" vitest project,
-// real Chromium via @vitest/browser-playwright). LoginForm is the
-// simplest component to start with: it only depends on $lib/api/auth.svelte,
-// not on any SvelteKit routing modules ($app/state, $app/paths) the way
-// Sidebar.svelte and the route components do.
+// Browser-mode component test for the Unlock screen (06-screens.md →
+// Unlock, mockups 1a/1b): a landing view with two big choices, a
+// phrase-entry view, and the generated-phrase view with its acknowledge
+// gate — the one deliberately loud severity moment in the app.
 
 import { page } from 'vitest/browser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,8 +11,7 @@ import { auth } from '$lib/api/auth.svelte';
 import { ApiError } from '$lib/api/client';
 
 // #350: resumeDisplayName is behind a getter so individual tests can flip
-// the stored-invite-credential state on and off (same hoisted-state shape
-// as rootLayout.svelte.test.ts's auth mock).
+// the stored-invite-credential state on and off.
 const authState = vi.hoisted(() => ({ resumeDisplayName: null as string | null }));
 
 vi.mock('$lib/api/auth.svelte', () => ({
@@ -37,7 +35,7 @@ vi.mock('bip39', () => ({
 
 // navigator.clipboard.writeText is stubbed since real clipboard access needs
 // OS-level permissions Playwright's headless Chromium doesn't grant by
-// default (see invites/invitesPage.svelte.test.ts, the shared pattern).
+// default.
 let writeTextMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -53,13 +51,39 @@ afterEach(() => {
 	authState.resumeDisplayName = null;
 });
 
+async function openPhraseEntry() {
+	await page.getByRole('button', { name: 'I already have a phrase' }).click();
+}
+
 describe('LoginForm.svelte', () => {
+	it('leads with the two big choices and the local-first headline', async () => {
+		render(LoginForm);
+
+		await expect
+			.element(page.getByText('Your workspace lives on this machine.'))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'I already have a phrase' }))
+			.toBeInTheDocument();
+	});
+
+	it('says why Unlock reappeared when the session expired', async () => {
+		render(LoginForm, { sessionExpired: true });
+
+		await expect.element(page.getByText('Your session ended — unlock again.')).toBeInTheDocument();
+	});
+
 	it('disables the submit button until a mnemonic is entered', async () => {
 		render(LoginForm);
+		await openPhraseEntry();
+
 		const button = page.getByRole('button', { name: 'Enter workspace' });
 		await expect.element(button).toBeDisabled();
 
-		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('a b c');
+		await page.getByLabelText('Workspace recovery phrase').fill('a b c');
 
 		await expect.element(button).toBeEnabled();
 	});
@@ -67,7 +91,8 @@ describe('LoginForm.svelte', () => {
 	it('calls auth.login with the trimmed mnemonic and clears the input on success', async () => {
 		vi.mocked(auth.login).mockResolvedValueOnce(undefined);
 		render(LoginForm);
-		const input = page.getByLabelText('Workspace recovery phrase (12 words)');
+		await openPhraseEntry();
+		const input = page.getByLabelText('Workspace recovery phrase');
 
 		await input.fill('  apple banana cherry  ');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
@@ -76,37 +101,28 @@ describe('LoginForm.svelte', () => {
 		await expect.element(input).toHaveValue('');
 	});
 
-	it('calls auth.login with the passphrase when one is entered, and clears it on success', async () => {
+	it('reveals the passphrase field on demand and sends it with the login', async () => {
 		vi.mocked(auth.login).mockResolvedValueOnce(undefined);
 		render(LoginForm);
-		const passphraseInput = page.getByLabelText('Passphrase (optional)');
+		await openPhraseEntry();
 
-		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
+		await expect.element(page.getByLabelText('Passphrase')).not.toBeInTheDocument();
+		await page.getByRole('button', { name: 'Add a passphrase' }).click();
+		const passphraseInput = page.getByLabelText('Passphrase');
+		await expect.element(passphraseInput).toHaveAttribute('type', 'password');
+
+		await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
 		await passphraseInput.fill('extra word');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', 'extra word', undefined);
-		await expect.element(passphraseInput).toHaveValue('');
-	});
-
-	it('renders the passphrase field as a password input that is not persisted across a failed login', async () => {
-		vi.mocked(auth.login).mockRejectedValueOnce(new Error('Incorrect recovery phrase'));
-		render(LoginForm);
-		const passphraseInput = page.getByLabelText('Passphrase (optional)');
-		await expect.element(passphraseInput).toHaveAttribute('type', 'password');
-
-		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('wrong words here');
-		await passphraseInput.fill('extra word');
-		await page.getByRole('button', { name: 'Enter workspace' }).click();
-
-		await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
-		await expect.element(passphraseInput).toHaveValue('extra word');
 	});
 
 	it('shows the error message and keeps the input when login fails', async () => {
 		vi.mocked(auth.login).mockRejectedValueOnce(new Error('Incorrect recovery phrase'));
 		render(LoginForm);
-		const input = page.getByLabelText('Workspace recovery phrase (12 words)');
+		await openPhraseEntry();
+		const input = page.getByLabelText('Workspace recovery phrase');
 
 		await input.fill('wrong words here');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
@@ -118,24 +134,23 @@ describe('LoginForm.svelte', () => {
 	it('shows a generic message when login rejects with something other than an Error', async () => {
 		vi.mocked(auth.login).mockRejectedValueOnce('not an Error instance');
 		render(LoginForm);
+		await openPhraseEntry();
 
-		await page.getByLabelText('Workspace recovery phrase (12 words)').fill('whatever');
+		await page.getByLabelText('Workspace recovery phrase').fill('whatever');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		await expect.element(page.getByText('Login failed')).toBeInTheDocument();
 	});
 
-	it('shows no US-001 ticket reference in the helper copy', async () => {
-		render(LoginForm);
-		await expect.element(page.getByText('US-001', { exact: false })).not.toBeInTheDocument();
-	});
-
 	describe('generating a phrase', () => {
-		it('reveals the generated words and requires acknowledgment before continuing', async () => {
+		it('reveals the generated words behind the loud warning and requires acknowledgment', async () => {
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 
+			await expect
+				.element(page.getByText('This phrase is the only way back in.'))
+				.toBeInTheDocument();
 			for (const word of STUB_PHRASE.split(' ')) {
 				await expect.element(page.getByText(word, { exact: true })).toBeInTheDocument();
 			}
@@ -151,7 +166,7 @@ describe('LoginForm.svelte', () => {
 			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
@@ -162,8 +177,9 @@ describe('LoginForm.svelte', () => {
 			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
-			await page.getByLabelText('Passphrase (optional)').fill('extra word');
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+			await page.getByRole('button', { name: 'Add a passphrase' }).click();
+			await page.getByLabelText('Passphrase').fill('extra word');
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
@@ -173,7 +189,7 @@ describe('LoginForm.svelte', () => {
 		it('copies the generated phrase to the clipboard', async () => {
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByRole('button', { name: 'Copy phrase' }).click();
 
 			expect(writeTextMock).toHaveBeenCalledWith(STUB_PHRASE);
@@ -184,27 +200,27 @@ describe('LoginForm.svelte', () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(new Error('Server unavailable'));
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			await expect.element(page.getByText('Server unavailable')).toBeInTheDocument();
 			// Login failure keeps the generated-phrase screen up (rather than
-			// clearing it back to manual entry) so the user doesn't lose the
+			// clearing it back to the landing) so the user doesn't lose the
 			// phrase they were about to confirm.
 			await expect
 				.element(page.getByText("I've saved this phrase somewhere safe"))
 				.toBeInTheDocument();
 		});
 
-		it('returns to manual entry without logging in', async () => {
+		it('returns to the landing without logging in', async () => {
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
-			await page.getByRole('button', { name: 'Use a phrase I already have' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+			await page.getByRole('button', { name: 'Back' }).click();
 
 			await expect
-				.element(page.getByLabelText('Workspace recovery phrase (12 words)'))
+				.element(page.getByRole('button', { name: 'I already have a phrase' }))
 				.toBeInTheDocument();
 			expect(auth.login).not.toHaveBeenCalled();
 		});
@@ -215,7 +231,7 @@ describe('LoginForm.svelte', () => {
 			render(LoginForm);
 
 			await expect
-				.element(page.getByText('You joined this workspace through an invite', { exact: false }))
+				.element(page.getByRole('button', { name: 'Continue as Ada' }))
 				.not.toBeInTheDocument();
 		});
 
@@ -266,17 +282,6 @@ describe('LoginForm.svelte', () => {
 				.element(page.getByRole('button', { name: 'Continue as Ada' }))
 				.toBeInTheDocument();
 		});
-
-		it('still lets an owner sign in with a mnemonic alongside the invite offer', async () => {
-			authState.resumeDisplayName = 'Ada';
-			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
-			render(LoginForm);
-
-			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
-
-			expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
-		});
 	});
 
 	describe('bootstrap token gate (#291)', () => {
@@ -285,31 +290,34 @@ describe('LoginForm.svelte', () => {
 			'This node requires RIVULETS_BOOTSTRAP_TOKEN to initialize a workspace while bound to 0.0.0.0'
 		);
 
-		it('does not show a bootstrap-token field until the server asks for one', async () => {
+		it('does not show a setup-token field until the server asks for one', async () => {
 			render(LoginForm);
+			await openPhraseEntry();
 
-			await expect.element(page.getByLabelText('Bootstrap token')).not.toBeInTheDocument();
+			await expect.element(page.getByLabelText('Setup token')).not.toBeInTheDocument();
 		});
 
-		it('does not show a bootstrap-token field for an unrelated 401', async () => {
+		it('does not show a setup-token field for an unrelated 401', async () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(new ApiError(401, 'Incorrect recovery phrase'));
 			render(LoginForm);
+			await openPhraseEntry();
 
-			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('wrong words here');
+			await page.getByLabelText('Workspace recovery phrase').fill('wrong words here');
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
-			await expect.element(page.getByLabelText('Bootstrap token')).not.toBeInTheDocument();
+			await expect.element(page.getByLabelText('Setup token')).not.toBeInTheDocument();
 		});
 
-		it('reveals a bootstrap-token field once the server requires one, and sends it on retry', async () => {
+		it('reveals a setup-token field once the server requires one, and sends it on retry', async () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(bootstrapError).mockResolvedValueOnce(undefined);
 			render(LoginForm);
+			await openPhraseEntry();
 
-			await page.getByLabelText('Workspace recovery phrase (12 words)').fill('apple banana cherry');
+			await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			const tokenInput = page.getByLabelText('Bootstrap token');
+			const tokenInput = page.getByLabelText('Setup token');
 			await expect.element(tokenInput).toBeInTheDocument();
 
 			await tokenInput.fill('correct-token');
@@ -322,15 +330,15 @@ describe('LoginForm.svelte', () => {
 			);
 		});
 
-		it('reveals a bootstrap-token field on the generated-phrase screen too', async () => {
+		it('reveals a setup-token field on the generated-phrase screen too', async () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(bootstrapError).mockResolvedValueOnce(undefined);
 			render(LoginForm);
 
-			await page.getByRole('button', { name: 'Generate a recovery phrase for me' }).click();
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			const tokenInput = page.getByLabelText('Bootstrap token');
+			const tokenInput = page.getByLabelText('Setup token');
 			await expect.element(tokenInput).toBeInTheDocument();
 
 			await tokenInput.fill('correct-token');

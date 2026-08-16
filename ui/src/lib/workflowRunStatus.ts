@@ -28,10 +28,10 @@ export const NODE_RUN_STATUS_ICONS: Record<NodeRunStatus, string> = {
 // that panel never needed per-node-type nuance beyond "failed" -- green and
 // neutral are the natural reads for those two.
 export const NODE_RUN_STATUS_COLOR_CLASS: Record<NodeRunStatus, string> = {
-	pending: 'text-neutral-500 dark:text-neutral-400',
-	running: 'text-agent-cyan-600 dark:text-agent-cyan-400',
-	succeeded: 'text-green-600 dark:text-green-400',
-	failed: 'text-agent-magenta-700 dark:text-agent-magenta-400',
-	skipped: 'text-neutral-400 dark:text-neutral-500',
-	awaiting_human: 'text-amber-600 dark:text-amber-400'
+	pending: 'text-muted dark:text-muted-dark',
+	running: 'text-accent dark:text-accent-dark',
+	succeeded: 'text-accent dark:text-accent-dark',
+	failed: 'text-danger',
+	skipped: 'text-muted dark:text-muted-dark',
+	awaiting_human: 'text-warn'
 };

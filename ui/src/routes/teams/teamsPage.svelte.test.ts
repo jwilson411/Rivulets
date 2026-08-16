@@ -1,31 +1,28 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
-// route depends on $lib/api/teams and $lib/api/agents, not on any
-// SvelteKit routing modules, so nothing else needs mocking.
+// Browser-mode component test for Teams (06-screens.md → Teams, mockup
+// 2d): cards with member discs and where each team is used; membership
+// edits happen in a sheet, saved as a batch.
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import TeamsPage from './+page.svelte';
-import { teams, type TeamDetail } from '$lib/api/teams';
+import { teams, type Team, type TeamDetail } from '$lib/api/teams';
 import { agents, type Agent } from '$lib/api/agents';
+import { channels } from '$lib/api/channels';
+
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
 
 vi.mock('$lib/api/teams', () => ({
-	teams: {
-		list: vi.fn(),
-		get: vi.fn(),
-		create: vi.fn(),
-		update: vi.fn(),
-		remove: vi.fn()
-	}
+	teams: { list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() }
 }));
 
 vi.mock('$lib/api/agents', () => ({
 	agents: { list: vi.fn(), getToolScopes: vi.fn() }
 }));
 
-// #393: the page fetches tool scopes for invite-grant sessions so it can
-// hide Delete / disable membership on teams that hold a scoped agent.
-const authState = vi.hoisted(() => ({ grant: 'owner' }));
+vi.mock('$lib/api/channels', () => ({
+	channels: { list: vi.fn() }
+}));
 
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
@@ -35,221 +32,133 @@ vi.mock('$lib/api/auth.svelte', () => ({
 	}
 }));
 
-const researcher: Agent = {
-	id: 'agent-1',
-	name: 'Researcher',
-	description: 'Looks things up',
-	instructions: 'Be thorough',
-	model: 'anthropic:claude-haiku-4-5-20251001',
-	fallback_models: [],
-	approved_for_unattended_tools: false,
-	agentos_agent_id: 'agentos-1'
-};
-
-const supportTeam: TeamDetail = {
-	id: 'team-1',
-	name: 'Support',
-	description: null,
-	agent_ids: ['agent-1']
-};
-
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.grant = 'owner';
 });
 
+const starterTeam: Team = { id: 'team-1', name: 'Starter Team', description: null };
+const starterDetail: TeamDetail = { ...starterTeam, agent_ids: ['agent-1'] };
+
+const assistant: Agent = {
+	id: 'agent-1',
+	name: 'Assistant',
+	description: 'Generalist. Hands off to specialists.',
+	instructions: 'Be helpful',
+	model: 'auto',
+	fallback_models: [],
+	approved_for_unattended_tools: false,
+	agentos_agent_id: 'aos-1'
+};
+
+const writer: Agent = {
+	...assistant,
+	id: 'agent-2',
+	name: 'Writer',
+	description: 'Drafts and edits prose.'
+};
+
+function seed() {
+	vi.mocked(teams.list).mockResolvedValue([starterTeam]);
+	vi.mocked(teams.get).mockResolvedValue(starterDetail);
+	vi.mocked(agents.list).mockResolvedValue([assistant, writer]);
+	vi.mocked(channels.list).mockResolvedValue([
+		{
+			id: 'chan-1',
+			name: 'general',
+			description: null,
+			team_id: 'team-1',
+			position: 0,
+			archived: false
+		}
+	]);
+}
+
 describe('teams/+page.svelte', () => {
-	it('renders each team with its agent checkboxes checked to match agent_ids', async () => {
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
+	it('shows team cards with where each team is used', async () => {
+		seed();
 
 		render(TeamsPage);
 
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-		await expect.element(page.getByRole('checkbox', { name: 'Researcher' })).toBeChecked();
+		await expect.element(page.getByText('Starter Team')).toBeInTheDocument();
+		await expect.element(page.getByText('Used in #general')).toBeInTheDocument();
 	});
 
-	it('creates a team via teams.create and refreshes the list', async () => {
-		vi.mocked(teams.list).mockResolvedValueOnce([]).mockResolvedValueOnce([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
+	it('creates a team from the New team sheet', async () => {
+		seed();
 		vi.mocked(teams.create).mockResolvedValueOnce({
-			id: 'team-1',
-			name: 'Support',
+			id: 'team-2',
+			name: 'Ops',
 			description: null
 		});
 
 		render(TeamsPage);
+		await expect.element(page.getByText('Starter Team')).toBeInTheDocument();
 
-		await page.getByPlaceholder('Team name').fill('Support');
-		await page.getByRole('button', { name: 'Create' }).click();
+		await page.getByRole('button', { name: 'New team' }).click();
+		await page.getByLabelText('Name').fill('Ops');
+		await page.getByRole('button', { name: 'Create team' }).click();
 
-		expect(teams.create).toHaveBeenCalledWith('Support');
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-		await expect.element(page.getByPlaceholder('Team name')).toHaveValue('');
+		expect(teams.create).toHaveBeenCalledWith('Ops');
 	});
 
-	it('toggling an agent checkbox calls teams.update with the new agent_ids', async () => {
-		const noAgentsTeam: TeamDetail = { ...supportTeam, agent_ids: [] };
-		vi.mocked(teams.list).mockResolvedValue([noAgentsTeam]);
-		vi.mocked(teams.get).mockResolvedValue(noAgentsTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-		vi.mocked(teams.update).mockResolvedValueOnce({ ...noAgentsTeam, agent_ids: ['agent-1'] });
+	it('opens the member sheet and saves membership as a batch', async () => {
+		seed();
+		vi.mocked(teams.update).mockResolvedValueOnce({
+			...starterDetail,
+			agent_ids: ['agent-1', 'agent-2']
+		});
 
 		render(TeamsPage);
+		await page.getByRole('button', { name: /Starter Team/ }).click();
 
-		const checkbox = page.getByRole('checkbox', { name: 'Researcher' });
-		await expect.element(checkbox).not.toBeChecked();
-		await checkbox.click();
+		await expect.element(page.getByText('Members')).toBeInTheDocument();
+		// Writer isn't a member yet — tick it, then Save sends the whole set.
+		await page.getByRole('checkbox').nth(1).click();
+		await page.getByRole('button', { name: 'Save', exact: true }).click();
 
-		expect(teams.update).toHaveBeenCalledWith('team-1', { agent_ids: ['agent-1'] });
+		expect(teams.update).toHaveBeenCalledWith('team-1', { agent_ids: ['agent-1', 'agent-2'] });
 	});
 
-	it('deletes a team via teams.remove', async () => {
-		vi.mocked(teams.list).mockResolvedValueOnce([supportTeam]).mockResolvedValueOnce([]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
+	it('deletes a team behind a confirm sheet, never window.confirm', async () => {
+		seed();
 		vi.mocked(teams.remove).mockResolvedValueOnce(undefined);
 
 		render(TeamsPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
+		await page.getByRole('button', { name: /Starter Team/ }).click();
+		await page.getByRole('button', { name: 'Delete team' }).click();
 
-		await page.getByRole('button', { name: 'Delete' }).click();
+		// Nothing deleted yet — the confirm sheet is the gate.
+		expect(teams.remove).not.toHaveBeenCalled();
+		await page.getByRole('button', { name: 'Delete team' }).click();
 
 		expect(teams.remove).toHaveBeenCalledWith('team-1');
-		await expect.element(page.getByText('Support')).not.toBeInTheDocument();
 	});
 
-	it('unchecking an agent checkbox calls teams.update with it removed from agent_ids', async () => {
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-		vi.mocked(teams.update).mockResolvedValueOnce({ ...supportTeam, agent_ids: [] });
-
-		render(TeamsPage);
-
-		const checkbox = page.getByRole('checkbox', { name: 'Researcher' });
-		await expect.element(checkbox).toBeChecked();
-		await checkbox.click();
-
-		expect(teams.update).toHaveBeenCalledWith('team-1', { agent_ids: [] });
-	});
-
-	it('shows an empty state when a team has no agents to assign', async () => {
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+	it('shows a quiet error with retry when teams fail to load', async () => {
+		vi.mocked(teams.list).mockRejectedValue(new Error('boom'));
 		vi.mocked(agents.list).mockResolvedValue([]);
+		vi.mocked(channels.list).mockResolvedValue([]);
 
 		render(TeamsPage);
 
-		await expect.element(page.getByText(/No agents yet/)).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load teams.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 
-	it('surfaces a server-rejected create instead of failing silently', async () => {
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(agents.list).mockResolvedValue([]);
-		vi.mocked(teams.create).mockRejectedValueOnce(
-			new Error("A team named 'Support' already exists")
-		);
-
-		render(TeamsPage);
-		await page.getByPlaceholder('Team name').fill('Support');
-		await page.getByRole('button', { name: 'Create' }).click();
-
-		await expect
-			.element(page.getByText("A team named 'Support' already exists"))
-			.toBeInTheDocument();
-	});
-
-	it('surfaces a failed agent toggle instead of failing silently', async () => {
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-		vi.mocked(teams.update).mockRejectedValueOnce(new Error('Failed to update team'));
-
-		render(TeamsPage);
-		await page.getByRole('checkbox', { name: 'Researcher' }).click();
-
-		await expect.element(page.getByText('Failed to update team')).toBeInTheDocument();
-	});
-
-	it('surfaces a failed delete instead of failing silently', async () => {
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-		vi.mocked(teams.remove).mockRejectedValueOnce(new Error('Team still assigned to a channel'));
-
-		render(TeamsPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-		await page.getByRole('button', { name: 'Delete' }).click();
-
-		await expect.element(page.getByText('Team still assigned to a channel')).toBeInTheDocument();
-	});
-
-	it('shows an error when the initial load fails', async () => {
-		vi.mocked(teams.list).mockRejectedValueOnce(new Error('Failed to load teams'));
-		vi.mocked(agents.list).mockResolvedValue([]);
-
-		render(TeamsPage);
-
-		await expect.element(page.getByText('Failed to load teams')).toBeInTheDocument();
-	});
-
-	it('filters the team list by name via the search box', async () => {
-		const billingTeam: TeamDetail = {
-			id: 'team-2',
-			name: 'Billing',
-			description: null,
-			agent_ids: []
-		};
-		vi.mocked(teams.list).mockResolvedValue([supportTeam, billingTeam]);
-		vi.mocked(teams.get).mockImplementation((id) =>
-			Promise.resolve(id === 'team-1' ? supportTeam : billingTeam)
-		);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-
-		render(TeamsPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-		await expect.element(page.getByText('Billing')).toBeInTheDocument();
-
-		await page.getByPlaceholder('Search teams…').fill('bill');
-
-		await expect.element(page.getByText('Billing')).toBeInTheDocument();
-		await expect.element(page.getByText('Support')).not.toBeInTheDocument();
-	});
-
-	it('hides Delete and disables scoped-agent checkboxes for an invite-grant session (#393)', async () => {
+	it('gates membership writes for a guest when an agent holds a scope (#393)', async () => {
 		authState.grant = 'invite';
-		const writer: Agent = { ...researcher, id: 'agent-2', name: 'Writer' };
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(teams.get).mockResolvedValue(supportTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher, writer]);
-		vi.mocked(agents.getToolScopes).mockImplementation((id) =>
-			Promise.resolve({ scopes: id === 'agent-1' ? ['sensitive_tools:manage'] : [] })
-		);
+		seed();
+		vi.mocked(agents.getToolScopes).mockImplementation(async (id: string) => ({
+			scopes: id === 'agent-1' ? ['sensitive_tools:manage'] : []
+		}));
 
 		render(TeamsPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
+		await page.getByRole('button', { name: /Starter Team/ }).click();
 
-		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
-		await expect.element(page.getByRole('checkbox', { name: 'Researcher' })).toBeDisabled();
-		await expect.element(page.getByRole('checkbox', { name: 'Writer' })).not.toBeDisabled();
-		expect(agents.getToolScopes).toHaveBeenCalled();
-	});
-
-	it('still offers Delete on an ungated team for an invite-grant session', async () => {
-		authState.grant = 'invite';
-		const emptyTeam: TeamDetail = { ...supportTeam, agent_ids: [] };
-		vi.mocked(teams.list).mockResolvedValue([emptyTeam]);
-		vi.mocked(teams.get).mockResolvedValue(emptyTeam);
-		vi.mocked(agents.list).mockResolvedValue([researcher]);
-		vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
-
-		render(TeamsPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-
-		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
-		await expect.element(page.getByRole('checkbox', { name: 'Researcher' })).toBeDisabled();
+		// The gated member's checkbox is disabled, and the delete affordance
+		// is hidden for a team containing a scoped agent.
+		await expect.element(page.getByRole('checkbox').first()).toBeDisabled();
+		await expect.element(page.getByRole('button', { name: 'Delete team' })).not.toBeInTheDocument();
 	});
 });

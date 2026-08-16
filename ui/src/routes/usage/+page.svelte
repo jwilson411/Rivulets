@@ -1,11 +1,11 @@
 <script lang="ts">
-	import {
-		usage,
-		type Usage,
-		type UsageByAgent,
-		type UsageByModel,
-		type UsageRange
-	} from '$lib/api/usage';
+	import { usage, type Usage, type UsageRange } from '$lib/api/usage';
+	import { agentInk, INK_SWATCH } from '$lib/ink';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+
+	// Usage (06-screens.md → Usage, mockup 2l): three large stats, a 48px
+	// Day/Week/Month segmented control, and bars by agent and model.
 
 	const RANGE_OPTIONS: { value: UsageRange; label: string }[] = [
 		{ value: 'day', label: 'Day' },
@@ -23,8 +23,8 @@
 		loadError = null;
 		try {
 			data = await usage.get(range);
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load usage';
+		} catch {
+			loadError = "Couldn't load usage.";
 		} finally {
 			loading = false;
 		}
@@ -32,7 +32,9 @@
 
 	refresh();
 
-	function formatTokens(n: number): string {
+	function compactTokens(n: number): string {
+		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+		if (n >= 10_000) return `${(n / 1_000).toFixed(1)}k`;
 		return n.toLocaleString();
 	}
 
@@ -41,28 +43,24 @@
 		return cost < 1 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
 	}
 
-	function barWidthPct(value: number, max: number): number {
-		if (max <= 0) return 0;
-		return Math.max((value / max) * 100, 2);
+	function pct(value: number, total: number): number {
+		if (total <= 0) return 0;
+		return Math.round((value / total) * 100);
 	}
 
-	function maxTokens<T extends { total_tokens: number }>(rows: T[]): number {
-		return rows.reduce((m, r) => Math.max(m, r.total_tokens), 0);
+	function barWidth(value: number, total: number): number {
+		if (total <= 0) return 0;
+		return Math.max((value / total) * 100, 2);
 	}
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header class="flex items-start justify-between gap-4">
-		<div>
-			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Usage</h1>
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				Token consumption and estimated cost, aggregated across every agent's runs.
-			</p>
-		</div>
+<div class="mx-auto max-w-[720px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-7 flex flex-wrap items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Usage</h1>
 		<div
 			role="group"
 			aria-label="Time window"
-			class="flex shrink-0 rounded-md border border-ink/15 p-0.5 dark:border-white/15"
+			class="flex h-12 overflow-hidden rounded-xl border border-line bg-surface dark:border-line-dark dark:bg-surface-dark"
 		>
 			{#each RANGE_OPTIONS as option (option.value)}
 				<button
@@ -72,112 +70,102 @@
 						range = option.value;
 						refresh();
 					}}
-					class="rounded-[3px] px-3 py-1 text-xs {range === option.value
-						? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-						: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-400 dark:hover:bg-white/5'}"
+					class="flex items-center px-5 text-[15px] {range === option.value
+						? 'bg-ink font-semibold text-paper dark:bg-ink-dark dark:text-paper-dark'
+						: 'font-medium text-muted dark:text-muted-dark'}"
 				>
 					{option.label}
 				</button>
 			{/each}
 		</div>
-	</header>
+	</div>
 
 	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+		<ErrorBanner message={loadError} onRetry={refresh} />
 	{:else if !data}
-		<p class="text-sm text-neutral-500 italic">Loading…</p>
+		<SkeletonCards count={2} />
 	{:else}
-		<div class="grid grid-cols-3 gap-3" class:opacity-60={loading}>
+		<div class="mb-7 grid grid-cols-1 gap-4 sm:grid-cols-3" class:opacity-60={loading}>
 			<div
-				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+				class="rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
 			>
-				<p class="text-xs text-neutral-600 dark:text-neutral-400">Total tokens</p>
-				<p class="mt-1 text-xl font-semibold text-ink dark:text-ink-dark">
-					{formatTokens(data.total_tokens)}
-				</p>
+				<div class="mb-1.5 text-sm text-muted dark:text-muted-dark">Tokens</div>
+				<div class="font-display text-[26px] font-semibold text-ink dark:text-ink-dark">
+					{compactTokens(data.total_tokens)}
+				</div>
 			</div>
 			<div
-				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+				class="rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
 			>
-				<p class="text-xs text-neutral-600 dark:text-neutral-400">Estimated cost</p>
-				<p class="mt-1 text-xl font-semibold text-ink dark:text-ink-dark">
+				<div class="mb-1.5 text-sm text-muted dark:text-muted-dark">Estimated cost</div>
+				<div class="font-display text-[26px] font-semibold text-ink dark:text-ink-dark">
 					{formatCost(data.total_cost_usd)}{data.cost_incomplete ? '+' : ''}
-				</p>
+				</div>
 			</div>
 			<div
-				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+				class="rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
 			>
-				<p class="text-xs text-neutral-600 dark:text-neutral-400">Runs</p>
-				<p class="mt-1 text-xl font-semibold text-ink dark:text-ink-dark">{data.run_count}</p>
+				<div class="mb-1.5 text-sm text-muted dark:text-muted-dark">Runs</div>
+				<div class="font-display text-[26px] font-semibold text-ink dark:text-ink-dark">
+					{data.run_count}
+				</div>
 			</div>
 		</div>
 
-		<p class="text-xs text-neutral-500">
-			Cost is a best-effort estimate from a static per-model price table.
-			{#if data.cost_incomplete}
-				One or more models in this window aren't in that table — the total above is a floor, not the
-				real spend (marked with "+").
-			{/if}
-			Dispatcher-side calls (classification, routing-rule generation, LLM fallback) aren't broken out
-			separately yet.
-		</p>
+		{#if data.cost_incomplete}
+			<p class="mb-6 text-[13px] text-muted dark:text-muted-dark">
+				One or more models in this window have no price on file — the cost above is a floor, marked
+				with "+".
+			</p>
+		{/if}
 
 		{#if data.run_count === 0}
-			<p class="text-sm text-neutral-500 italic">No agent runs recorded in this window.</p>
+			<p class="py-6 text-center text-base text-muted dark:text-muted-dark">
+				Nothing has run in this window.
+			</p>
 		{:else}
-			{@const agentMax = maxTokens(data.by_agent)}
-			<section class="flex flex-col gap-3">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">By agent</h2>
-				<ul class="flex flex-col gap-2">
-					{#each data.by_agent as row (row.agent_id)}
-						{@render usageRow(row.agent_name, row, agentMax)}
-					{/each}
-				</ul>
-			</section>
+			<div class="mb-3 text-sm font-semibold text-ink dark:text-ink-dark">By agent</div>
+			<div class="mb-8 flex flex-col gap-2.5">
+				{#each data.by_agent as row, i (row.agent_id)}
+					<div class="flex items-center gap-3">
+						<span class="w-24 flex-none truncate text-[15px] text-ink dark:text-ink-dark">
+							{row.agent_name}
+						</span>
+						<div class="h-3 flex-1 overflow-hidden rounded-full bg-line dark:bg-line-dark">
+							<div
+								class="h-full rounded-full {INK_SWATCH[agentInk(i)]}"
+								style="width: {barWidth(row.total_tokens, data.total_tokens)}%"
+							></div>
+						</div>
+						<span class="w-11 flex-none text-right text-sm text-muted dark:text-muted-dark">
+							{pct(row.total_tokens, data.total_tokens)}%
+						</span>
+					</div>
+				{/each}
+			</div>
 
-			{@const modelMax = maxTokens(data.by_model)}
-			<section class="flex flex-col gap-3">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">By model</h2>
-				<ul class="flex flex-col gap-2">
-					{#each data.by_model as row (row.model + (row.tier ?? ''))}
-						{@render usageRow(row.model, row, modelMax, row.tier)}
-					{/each}
-				</ul>
-			</section>
+			<div class="mb-3 text-sm font-semibold text-ink dark:text-ink-dark">By model</div>
+			<div class="flex flex-col gap-2.5">
+				{#each data.by_model as row (row.model + (row.tier ?? ''))}
+					<div class="flex items-center gap-3">
+						<span
+							class="w-40 flex-none truncate font-mono text-[13px] text-ink dark:text-ink-dark"
+							title={row.model}
+						>
+							{row.model}
+						</span>
+						<div class="h-3 flex-1 overflow-hidden rounded-full bg-line dark:bg-line-dark">
+							<div
+								class="h-full rounded-full bg-ink dark:bg-ink-dark"
+								style="width: {barWidth(row.total_tokens, data.total_tokens)}%"
+							></div>
+						</div>
+						<span class="w-11 flex-none text-right text-sm text-muted dark:text-muted-dark">
+							{pct(row.total_tokens, data.total_tokens)}%
+						</span>
+					</div>
+				{/each}
+			</div>
 		{/if}
 	{/if}
 </div>
-
-{#snippet usageRow(
-	label: string,
-	row: UsageByAgent | UsageByModel,
-	max: number,
-	tier?: string | null
-)}
-	<li class="rounded-lg border border-ink/12 p-3 dark:border-white/10">
-		<div class="mb-1.5 flex items-baseline justify-between gap-2">
-			<p class="truncate text-sm font-medium text-ink dark:text-ink-dark">
-				{label}
-				{#if tier}
-					<span
-						class="ml-1.5 rounded-sm bg-neutral-200/60 px-1.5 py-0.5 text-[11px] text-neutral-700 dark:bg-white/10 dark:text-neutral-300"
-					>
-						{tier}
-					</span>
-				{/if}
-			</p>
-			<p class="shrink-0 text-xs text-neutral-600 dark:text-neutral-400">
-				{formatTokens(row.total_tokens)} tokens · {formatCost(row.cost_usd)} · {row.run_count} run{row.run_count ===
-				1
-					? ''
-					: 's'}
-			</p>
-		</div>
-		<div class="h-1.5 rounded-sm bg-neutral-200/60 dark:bg-white/10">
-			<div
-				class="h-1.5 rounded-sm bg-agent-cyan-500"
-				style="width: {barWidthPct(row.total_tokens, max)}%"
-			></div>
-		</div>
-	</li>
-{/snippet}

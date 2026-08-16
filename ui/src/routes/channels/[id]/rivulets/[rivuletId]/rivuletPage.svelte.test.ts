@@ -1,11 +1,9 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts and
-// Sidebar.svelte.test.ts for the $app/state + $app/paths mocking pattern).
-// This route reads channel/rivulet ids from `page.params` and opens an
-// EventSource for live agent-token streaming (FR-12.3, the recent "agent
-// status indicators" work) whenever `auth.token` is set -- both are mocked
-// below. A hand-rolled FakeEventSource stands in for the real browser
-// EventSource so streaming events can be dispatched deterministically
-// instead of depending on a real SSE connection.
+// Browser-mode component test for the Rivulet page (06-screens.md →
+// Rivulet, mockups 1g/2o): the full conversation with handoffs as
+// first-class events, live SSE streaming, the paused banner, and a Stream
+// Bar that replies in place. A hand-rolled FakeEventSource stands in for
+// the real browser EventSource so streaming events can be dispatched
+// deterministically.
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +12,8 @@ import RivuletPage from './+page.svelte';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { channels, type Channel } from '$lib/api/channels';
 import { files as filesApi } from '$lib/api/files';
+import { teams } from '$lib/api/teams';
+import { workflows } from '$lib/api/workflows';
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -40,10 +40,9 @@ vi.mock('$lib/api/auth.svelte', () => ({
 			return authState.token;
 		},
 		// The component exchanges the session token for one of these before
-		// opening the EventSource (see +page.svelte's mintStreamTicket call)
-		// -- returning a fixed, distinct value here (rather than echoing
-		// authState.token) is what proves the FakeEventSource URL assertion
-		// below is actually observing the ticket, not the raw session token.
+		// opening the EventSource -- returning a fixed, distinct value here
+		// is what proves the FakeEventSource URL assertion below is actually
+		// observing the ticket, not the raw session token.
 		mintStreamTicket: vi.fn(async () => 'test-ticket')
 	}
 }));
@@ -54,6 +53,18 @@ vi.mock('$lib/api/channels', () => ({
 
 vi.mock('$lib/api/rivulets', () => ({
 	rivulets: { get: vi.fn(), listMessages: vi.fn(), postMessage: vi.fn(), resume: vi.fn() }
+}));
+
+vi.mock('$lib/api/teams', () => ({
+	teams: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/workflows', () => ({
+	workflows: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/sync', () => ({
+	sync: { status: vi.fn(async () => ({ node_id: 'node-a1' })) }
 }));
 
 vi.mock('$lib/api/files', () => ({
@@ -192,6 +203,22 @@ const systemAlertMessage: Message = {
 	served_model: null
 };
 
+const workflowStepMessage: Message = {
+	id: 'msg-wf',
+	rivulet_id: 'riv-1',
+	sender_type: 'system',
+	sender_id: null,
+	sender_name: 'System',
+	content: 'retry-check → Summarize',
+	content_type: 'workflow_step',
+	created_at: new Date().toISOString(),
+	attachments: [],
+	model_used: null,
+	tier: null,
+	executed_node_id: null,
+	served_model: null
+};
+
 const autoModeMessage: Message = {
 	...agentMessage,
 	id: 'msg-auto',
@@ -199,6 +226,14 @@ const autoModeMessage: Message = {
 	model_used: 'claude-haiku-4-5',
 	tier: 'cheap'
 };
+
+function seed(messages: Message[], rivulet: Rivulet = activeRivulet) {
+	vi.mocked(channels.get).mockResolvedValue(generalChannel);
+	vi.mocked(rivulets.get).mockResolvedValue(rivulet);
+	vi.mocked(rivulets.listMessages).mockResolvedValue(messages);
+	vi.mocked(teams.list).mockResolvedValue([]);
+	vi.mocked(workflows.list).mockResolvedValue([]);
+}
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -208,34 +243,28 @@ afterEach(() => {
 
 describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 	it('loads the channel, rivulet, and messages by their route params', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, agentMessage]);
+		seed([humanMessage, agentMessage]);
 
 		render(RivuletPage);
 
 		expect(channels.get).toHaveBeenCalledWith('chan-1');
 		expect(rivulets.get).toHaveBeenCalledWith('riv-1');
 		await expect.element(page.getByText('#general', { exact: false })).toBeInTheDocument();
-		// "Kickoff message" appears twice: as the derived title (h1, since
-		// this rivulet has no explicit title) and as the human message body.
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
-		await expect.element(page.getByText('Kickoff message').last()).toBeInTheDocument();
+		// "Kickoff message" appears twice: as the derived title (since this
+		// rivulet has no explicit title) and as the human message body.
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 		await expect.element(page.getByText('On it')).toBeInTheDocument();
 	});
 
 	it('sends a reply via rivulets.postMessage and refetches messages', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		seed([humanMessage]);
 		vi.mocked(rivulets.listMessages)
 			.mockResolvedValueOnce([humanMessage])
 			.mockResolvedValueOnce([humanMessage, agentMessage]);
 		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(agentMessage);
 
 		render(RivuletPage);
-		const input = page.getByPlaceholder('Reply to this rivulet…');
+		const input = page.getByPlaceholder('Reply to this conversation…');
 		await expect.element(input).toBeInTheDocument();
 
 		await input.fill('Sounds good');
@@ -246,33 +275,24 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		await expect.element(page.getByText('On it')).toBeInTheDocument();
 	});
 
-	it('shows a pause banner and resumes via rivulets.resume', async () => {
-		const pausedRivulet: Rivulet = { ...activeRivulet, status: 'paused' };
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(pausedRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+	it('shows the paused banner and resumes via rivulets.resume', async () => {
+		seed([humanMessage], { ...activeRivulet, status: 'paused' });
 		vi.mocked(rivulets.resume).mockResolvedValueOnce(activeRivulet);
 
 		render(RivuletPage);
-		await expect
-			.element(page.getByText('This rivulet is paused — agent replies are suppressed.'))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('This conversation is paused.')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Resume' }).click();
 
 		expect(rivulets.resume).toHaveBeenCalledWith('riv-1');
 	});
 
-	it('renders streamed agent tokens live from the SSE connection', async () => {
+	it('renders streamed agent tokens live with the streaming caret', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
 		const source = FakeEventSource.instances[0];
@@ -283,35 +303,34 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		source.emit('agent_token', {
 			agent_id: 'agent-1',
 			agent_name: 'Researcher',
-			token: 'Thinking'
+			token: 'Looking'
 		});
 		source.emit('agent_token', { agent_id: 'agent-1', agent_name: 'Researcher', token: '...' });
 
-		await expect.element(page.getByText('Thinking...')).toBeInTheDocument();
+		await expect.element(page.getByText('Looking...')).toBeInTheDocument();
 
 		source.emit('agent_message', {});
-		await expect.element(page.getByText('Thinking...')).not.toBeInTheDocument();
+		await expect.element(page.getByText('Looking...')).not.toBeInTheDocument();
 	});
 
-	it('shows an error when the rivulet fails to load', async () => {
-		vi.mocked(channels.get).mockRejectedValueOnce(new Error('Failed to load rivulet'));
+	it('shows a quiet error with a retry when the conversation fails to load', async () => {
+		vi.mocked(channels.get).mockRejectedValueOnce(new Error('boom'));
 		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
 		vi.mocked(rivulets.listMessages).mockResolvedValue([]);
+		vi.mocked(teams.list).mockResolvedValue([]);
+		vi.mocked(workflows.list).mockResolvedValue([]);
 
 		render(RivuletPage);
 
-		await expect.element(page.getByText('Failed to load rivulet')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load this conversation.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 
-	it('adds a pending file via the file input, shows it as a chip, and removes it', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+	it('adds a pending file via the attach input, shows it as a chip, and removes it', async () => {
+		seed([humanMessage]);
 
 		const { container } = await render(RivuletPage);
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
 		await page
@@ -325,8 +344,7 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 	});
 
 	it('uploads pending files before sending and includes their ids in the message', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
+		seed([humanMessage]);
 		vi.mocked(rivulets.listMessages)
 			.mockResolvedValueOnce([humanMessage])
 			.mockResolvedValueOnce([humanMessage, agentMessage]);
@@ -340,9 +358,7 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(agentMessage);
 
 		const { container } = await render(RivuletPage);
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
 		await page
@@ -350,80 +366,60 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
 		await expect.element(page.getByText('notes.txt')).toBeInTheDocument();
 
-		await page.getByPlaceholder('Reply to this rivulet…').fill('See attached');
+		await page.getByPlaceholder('Reply to this conversation…').fill('See attached');
 		await page.getByRole('button', { name: 'Send' }).click();
 
 		expect(filesApi.upload).toHaveBeenCalledTimes(1);
 		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-1', 'See attached', ['file-1']);
 	});
 
-	it('does nothing when the form is submitted with no reply text and no pending files', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+	it('does nothing when Send is pressed with no reply text and no pending files', async () => {
+		seed([humanMessage]);
 
-		const { container } = await render(RivuletPage);
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
+		render(RivuletPage);
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 
-		// The Send button is disabled in this state, so drive the guard
-		// inside handleReply directly via a native form submission instead.
-		const form = container.querySelector('form')!;
-		form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+		await page.getByRole('button', { name: 'Send' }).click();
 
 		expect(rivulets.postMessage).not.toHaveBeenCalled();
 	});
 
-	it('shows an error when sending a reply fails', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
-		vi.mocked(rivulets.postMessage).mockRejectedValueOnce(new Error('Failed to send message'));
+	it('shows a plain-language error when sending a reply fails', async () => {
+		seed([humanMessage]);
+		vi.mocked(rivulets.postMessage).mockRejectedValueOnce(new Error('boom'));
 
 		render(RivuletPage);
-		await expect
-			.element(page.getByRole('heading', { name: 'Kickoff message' }))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 
-		await page.getByPlaceholder('Reply to this rivulet…').fill('Hello');
+		await page.getByPlaceholder('Reply to this conversation…').fill('Hello');
 		await page.getByRole('button', { name: 'Send' }).click();
 
-		await expect.element(page.getByText('Failed to send message')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't send that. Try again.")).toBeInTheDocument();
 		// A send failure must not hide the existing transcript behind the
-		// error -- it's a distinct `sendError`, not a reuse of `loadError`.
-		// (Rivulet has no title, so "Kickoff message" also matches the <h1>
-		// derived from it -- .last() targets the transcript message itself.)
+		// error -- it's a distinct sendError, not a reuse of loadError.
 		await expect.element(page.getByText('Kickoff message').last()).toBeInTheDocument();
 	});
 
 	it('shows an error on the banner when resume fails, without throwing', async () => {
-		const pausedRivulet: Rivulet = { ...activeRivulet, status: 'paused' };
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(pausedRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
-		vi.mocked(rivulets.resume).mockRejectedValueOnce(new Error('Failed to resume rivulet'));
+		seed([humanMessage], { ...activeRivulet, status: 'paused' });
+		vi.mocked(rivulets.resume).mockRejectedValueOnce(new Error('boom'));
 
 		render(RivuletPage);
-		await expect
-			.element(page.getByText('This rivulet is paused — agent replies are suppressed.'))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('This conversation is paused.')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Resume' }).click();
 
 		expect(rivulets.resume).toHaveBeenCalledWith('riv-1');
-		await expect.element(page.getByText('Failed to resume rivulet')).toBeInTheDocument();
+		await expect
+			.element(page.getByText("Couldn't resume this conversation. Try again."))
+			.toBeInTheDocument();
 		// The banner (and its "still paused" implication) stays up rather than
 		// leaving the user staring at a resume button with no explanation.
-		await expect
-			.element(page.getByText('This rivulet is paused — agent replies are suppressed.'))
-			.toBeInTheDocument();
+		await expect.element(page.getByText('This conversation is paused.')).toBeInTheDocument();
 	});
 
-	it('downloads an attachment when clicked', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([attachedMessage]);
+	it('downloads an attachment when its 48px file row is clicked', async () => {
+		seed([attachedMessage]);
 		vi.mocked(filesApi.download).mockResolvedValueOnce(undefined);
 
 		render(RivuletPage);
@@ -435,66 +431,78 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 	});
 
 	it('shows a download error when the download fails', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([attachedMessage]);
-		vi.mocked(filesApi.download).mockRejectedValueOnce(new Error('Failed to download file'));
+		seed([attachedMessage]);
+		vi.mocked(filesApi.download).mockRejectedValueOnce(new Error('boom'));
 
 		render(RivuletPage);
 		await expect.element(page.getByRole('button', { name: /report\.pdf/ })).toBeInTheDocument();
 
 		await page.getByRole('button', { name: /report\.pdf/ }).click();
 
-		await expect.element(page.getByText('Failed to download file')).toBeInTheDocument();
+		await expect
+			.element(page.getByText("Couldn't download that file. Try again."))
+			.toBeInTheDocument();
 	});
 
-	it('renders a handoff message as a divider', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, handoffMessage]);
+	it('renders a handoff as a first-class "Handed off" event, not a bubble', async () => {
+		seed([humanMessage, handoffMessage]);
 
 		render(RivuletPage);
 
-		await expect.element(page.getByText('handoff')).toBeInTheDocument();
+		await expect.element(page.getByText('Handed off')).toBeInTheDocument();
 		await expect
 			.element(page.getByText('Researcher handed off to Writer', { exact: false }))
 			.toBeInTheDocument();
 	});
 
-	it('shows the model used and tier for an auto-mode reply', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, autoModeMessage]);
+	it('renders a workflow step as a quiet rail event', async () => {
+		seed([humanMessage, workflowStepMessage]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('retry-check → Summarize')).toBeInTheDocument();
+	});
+
+	it('renders markdown in message bodies', async () => {
+		seed([
+			humanMessage,
+			{ ...agentMessage, id: 'msg-md', content: 'Use **bold** and `code` here' }
+		]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('bold', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('code', { exact: true })).toBeInTheDocument();
+	});
+
+	it('shows the model that answered an auto-mode reply', async () => {
+		seed([humanMessage, autoModeMessage]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('claude-haiku-4-5', { exact: false })).toBeInTheDocument();
+	});
+
+	it("notes when a reply came from the agent's backup model (#103)", async () => {
+		seed([
+			humanMessage,
+			{
+				...agentMessage,
+				id: 'msg-fallback',
+				content: 'Answered',
+				served_model: 'openai:gpt-4o-mini'
+			}
+		]);
 
 		render(RivuletPage);
 
 		await expect
-			.element(page.getByText('via claude-haiku-4-5', { exact: false }))
+			.element(page.getByText('backup: openai:gpt-4o-mini', { exact: false }))
 			.toBeInTheDocument();
 	});
 
-	it("shows a fallback badge when a reply came from the agent's fallback chain (#103)", async () => {
-		const fallbackMessage: Message = {
-			...agentMessage,
-			id: 'msg-fallback',
-			content: 'Answered via backup',
-			served_model: 'openai:gpt-4o-mini'
-		};
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, fallbackMessage]);
-
-		render(RivuletPage);
-
-		await expect
-			.element(page.getByText('fallback: openai:gpt-4o-mini', { exact: false }))
-			.toBeInTheDocument();
-	});
-
-	it('renders system alert messages distinctly from human/agent messages', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, systemAlertMessage]);
+	it('renders system alerts as an inline banner, not a chat bubble', async () => {
+		seed([humanMessage, systemAlertMessage]);
 
 		render(RivuletPage);
 
@@ -503,11 +511,9 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
-	it('shows an executing_tool status pill with the tool name from an agent_status event', async () => {
+	it('shows a "Using …" status pill with the tool name from an agent_status event', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -520,14 +526,12 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			detail: 'search_web'
 		});
 
-		await expect.element(page.getByText('using search_web…')).toBeInTheDocument();
+		await expect.element(page.getByText('Using search_web…')).toBeInTheDocument();
 	});
 
-	it('shows a waiting_for_handoff status pill', async () => {
+	it('shows a "Handing off…" status pill', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -540,14 +544,12 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			detail: null
 		});
 
-		await expect.element(page.getByText('handing off…')).toBeInTheDocument();
+		await expect.element(page.getByText('Handing off…')).toBeInTheDocument();
 	});
 
-	it('shows a thinking status pill, then updates it in place for a second event from the same agent', async () => {
+	it('shows a thinking pill, then updates it in place for a second event from the same agent', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -559,7 +561,7 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			status: 'thinking',
 			detail: null
 		});
-		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
 
 		// Same agent id as before -> updates the existing liveMessage's status
 		// in place instead of creating a second one.
@@ -569,14 +571,12 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			status: 'executing_tool',
 			detail: 'search_web'
 		});
-		await expect.element(page.getByText('using search_web…')).toBeInTheDocument();
+		await expect.element(page.getByText('Using search_web…')).toBeInTheDocument();
 	});
 
 	it('clears the live status pill on a handoff event', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -588,17 +588,15 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			status: 'thinking',
 			detail: null
 		});
-		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
 
 		source.emit('handoff', {});
-		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).not.toBeInTheDocument();
 	});
 
 	it('clears the live status pill on a system_alert event', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -610,17 +608,15 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			status: 'thinking',
 			detail: null
 		});
-		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
 
 		source.emit('system_alert', {});
-		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).not.toBeInTheDocument();
 	});
 
 	it('clears the live status pill on a connection error event', async () => {
 		authState.token = 'test-token';
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.get).mockResolvedValue(activeRivulet);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed([humanMessage]);
 
 		render(RivuletPage);
 		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
@@ -632,9 +628,9 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			status: 'thinking',
 			detail: null
 		});
-		await expect.element(page.getByText('thinking…')).toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
 
 		source.emit('error', {});
-		await expect.element(page.getByText('thinking…')).not.toBeInTheDocument();
+		await expect.element(page.getByText('Thinking…')).not.toBeInTheDocument();
 	});
 });

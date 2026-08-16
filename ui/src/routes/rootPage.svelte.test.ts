@@ -1,19 +1,189 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts).
-// The root route has no imports, no state, and no API dependency -- it's
-// static markup shown when no channel is selected -- so there's nothing to
-// mock and only one meaningful assertion.
+// Browser-mode component test for Home (06-screens.md → Home): the
+// first-value setup cards while setup is incomplete, then the inbox of
+// recent conversations with a Stream Bar that asks which channel to post
+// into.
 
 import { page } from 'vitest/browser';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
-import RootPage from './+page.svelte';
+import HomePage from './+page.svelte';
+import { channels, type Channel } from '$lib/api/channels';
+import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
+import { teams } from '$lib/api/teams';
+import { providers, type Provider } from '$lib/api/providers';
+import { goto } from '$app/navigation';
 
-describe('routes/+page.svelte', () => {
-	it('shows the empty-state prompt to select or create a channel', async () => {
-		render(RootPage);
+const authState = vi.hoisted(() => ({ grant: 'owner', displayName: 'Riley' }));
+
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+vi.mock('$app/paths', () => ({
+	resolve: (path: string, params?: Record<string, string>) => {
+		let out = path;
+		if (params) {
+			for (const [key, value] of Object.entries(params)) out = out.replace(`[${key}]`, value);
+		}
+		return out;
+	}
+}));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		},
+		get displayName() {
+			return authState.displayName;
+		}
+	}
+}));
+
+vi.mock('$lib/api/channels', () => ({
+	channels: { list: vi.fn(), create: vi.fn(), update: vi.fn() }
+}));
+vi.mock('$lib/api/rivulets', () => ({
+	rivulets: { listForChannel: vi.fn(), listMessages: vi.fn(), create: vi.fn() }
+}));
+vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
+vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn(), create: vi.fn() } }));
+vi.mock('$lib/api/files', () => ({ files: { upload: vi.fn() } }));
+
+afterEach(() => {
+	vi.clearAllMocks();
+	authState.grant = 'owner';
+});
+
+const general: Channel = {
+	id: 'chan-1',
+	name: 'general',
+	description: 'Default room',
+	team_id: 'team-1',
+	position: 0,
+	archived: false
+};
+
+const provider: Provider = {
+	id: 'prov-1',
+	provider: 'anthropic',
+	label: 'Anthropic',
+	base_url: null,
+	is_default: true
+};
+
+const rivulet: Rivulet = {
+	id: 'riv-1',
+	channel_id: 'chan-1',
+	title: 'Welcome to Rivulets. Ask the team anything.',
+	status: 'active',
+	created_by: 'human-1',
+	created_at: '2026-01-01T00:00:00Z'
+};
+
+const messages: Message[] = [
+	{
+		id: 'msg-1',
+		rivulet_id: 'riv-1',
+		sender_type: 'human',
+		sender_id: 'human-1',
+		sender_name: 'Riley',
+		content: 'Welcome to Rivulets. Ask the team anything.',
+		content_type: 'text',
+		created_at: '2026-01-01T00:00:00Z',
+		attachments: [],
+		model_used: null,
+		tier: null,
+		executed_node_id: null,
+		served_model: null
+	},
+	{
+		id: 'msg-2',
+		rivulet_id: 'riv-1',
+		sender_type: 'agent',
+		sender_id: 'agent-1',
+		sender_name: 'Assistant',
+		content: "You're set up.",
+		content_type: 'text',
+		created_at: '2026-01-01T00:01:00Z',
+		attachments: [],
+		model_used: null,
+		tier: null,
+		executed_node_id: null,
+		served_model: null
+	}
+];
+
+function seedComplete() {
+	vi.mocked(channels.list).mockResolvedValue([general]);
+	vi.mocked(teams.list).mockResolvedValue([
+		{ id: 'team-1', name: 'Starter Team', description: null }
+	]);
+	vi.mocked(providers.list).mockResolvedValue([provider]);
+	vi.mocked(rivulets.listForChannel).mockResolvedValue([rivulet]);
+	vi.mocked(rivulets.listMessages).mockResolvedValue(messages);
+}
+
+describe('routes/+page.svelte (Home)', () => {
+	it('walks an owner through setup while no provider exists', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(teams.list).mockResolvedValue([]);
+		vi.mocked(providers.list).mockResolvedValue([]);
+
+		render(HomePage);
 
 		await expect
-			.element(page.getByText('Select a channel, or create one in the sidebar.'))
+			.element(page.getByText('Three things before the team can answer'))
 			.toBeInTheDocument();
+		await expect.element(page.getByText('Add an API key')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Save key' })).toBeInTheDocument();
+	});
+
+	it('shows recent conversations across channels once setup is complete', async () => {
+		seedComplete();
+
+		render(HomePage);
+
+		await expect.element(page.getByText('Recent conversations')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Welcome to Rivulets. Ask the team anything.'))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('#general', { exact: true }).first()).toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
+		await expect.element(page.getByText('Routes to Starter Team')).toBeInTheDocument();
+	});
+
+	it('shows the empty inbox with a way into #general when no conversations exist', async () => {
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
+
+		render(HomePage);
+
+		await expect.element(page.getByText('No conversations yet.')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Start one in #general' }))
+			.toBeInTheDocument();
+	});
+
+	it('never shows setup cards to a guest — providers are owner-only', async () => {
+		authState.grant = 'invite';
+		seedComplete();
+		vi.mocked(providers.list).mockRejectedValue(new Error('403'));
+
+		render(HomePage);
+
+		await expect.element(page.getByText('Recent conversations')).toBeInTheDocument();
+		expect(providers.list).not.toHaveBeenCalled();
+	});
+
+	it('posting from Home creates a conversation in the picked channel and opens it', async () => {
+		seedComplete();
+		vi.mocked(rivulets.create).mockResolvedValue({ ...rivulet, id: 'riv-2' });
+
+		render(HomePage);
+		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Start a conversation…').fill('Hello team');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(rivulets.create).toHaveBeenCalledWith('chan-1', 'Hello team', []);
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-2');
 	});
 });

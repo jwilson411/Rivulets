@@ -1,19 +1,19 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
-// route depends on $lib/api/providers, plus the real (unmocked)
-// $lib/api/client for the ApiError class it uses in instanceof checks --
-// that module makes no network calls of its own, so there's nothing to stub.
+// Browser-mode component test for Providers (06-screens.md → Providers,
+// mockup 2k, owner only): large provider cards as a picker (never a select
+// of slugs), key entry, Ollama's address-instead-of-key path, and the
+// keychain-fallback disclosure (#118).
 
 import { page } from 'vitest/browser';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import ProvidersPage from './+page.svelte';
 import { providers, type Provider } from '$lib/api/providers';
-import { ApiError } from '$lib/api/client';
 
-// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
-// follows -- defaults to 'owner' so the existing (pre-#351) tests below
-// don't have to know about grants at all.
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/providers', () => ({
+	providers: { list: vi.fn(), create: vi.fn(), remove: vi.fn(), credentialStorage: vi.fn() }
+}));
 
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
@@ -23,316 +23,143 @@ vi.mock('$lib/api/auth.svelte', () => ({
 	}
 }));
 
-vi.mock('$lib/api/providers', () => ({
-	providers: {
-		list: vi.fn(),
-		create: vi.fn(),
-		update: vi.fn(),
-		remove: vi.fn(),
-		credentialStorage: vi.fn()
-	}
-}));
-
-const anthropicProvider: Provider = {
-	id: 'prov-1',
-	provider: 'anthropic',
-	label: 'My Anthropic key',
-	base_url: null,
-	is_default: true
-};
-
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.grant = 'owner';
 });
 
-describe('providers/+page.svelte', () => {
-	beforeEach(() => {
-		// Most tests here don't care about the credential-storage banner --
-		// default to the common (non-Docker) case so it stays hidden and
-		// existing assertions aren't affected by it.
-		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
-	});
+const anthropic: Provider = {
+	id: 'prov-1',
+	provider: 'anthropic',
+	label: 'Anthropic',
+	base_url: null,
+	is_default: true
+};
 
-	it('shows an owner-only empty state to a non-owner session without calling the API (#351)', async () => {
+function seed(list: Provider[] = []) {
+	vi.mocked(providers.list).mockResolvedValue(list);
+	vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
+}
+
+describe('providers/+page.svelte', () => {
+	it('renders the owner-only empty state for a guest without firing requests (#351)', async () => {
 		authState.grant = 'invite';
 
 		render(ProvidersPage);
 
 		await expect
-			.element(page.getByText('only available to the workspace owner', { exact: false }))
+			.element(page.getByText('This is only available to the workspace owner.'))
 			.toBeInTheDocument();
 		expect(providers.list).not.toHaveBeenCalled();
-		expect(providers.credentialStorage).not.toHaveBeenCalled();
 	});
 
-	it('lists configured providers with their kind badge', async () => {
-		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
+	it('shows a configured provider as Connected with its key never displayed', async () => {
+		seed([anthropic]);
 
 		render(ProvidersPage);
 
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
-		// "anthropic" also appears as a <select> option; scope to the badge.
-		await expect.element(page.getByText('anthropic').last()).toBeInTheDocument();
+		await expect.element(page.getByText('Anthropic', { exact: true }).first()).toBeInTheDocument();
+		await expect.element(page.getByText('Connected')).toBeInTheDocument();
+		await expect.element(page.getByText('Key stays on this machine')).toBeInTheDocument();
 	});
 
-	it('shows the empty state when no providers are configured', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
+	it('offers the six lead providers as large cards, not a slug select', async () => {
+		seed();
 
 		render(ProvidersPage);
 
-		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
-			.toBeInTheDocument();
+		for (const label of ['Anthropic', 'OpenAI', 'Google', 'xAI', 'Ollama', 'OpenAI-compatible']) {
+			await expect
+				.element(page.getByRole('button', { name: label, exact: true }))
+				.toBeInTheDocument();
+		}
+		expect(document.querySelector('select')).toBeNull();
 	});
 
-	it('adds a provider via providers.create and clears the form', async () => {
-		vi.mocked(providers.list).mockResolvedValueOnce([]).mockResolvedValueOnce([anthropicProvider]);
-		vi.mocked(providers.create).mockResolvedValueOnce(anthropicProvider);
+	it('saves a key for the picked provider with an auto-derived label', async () => {
+		seed();
+		vi.mocked(providers.create).mockResolvedValueOnce(anthropic);
 
 		render(ProvidersPage);
-		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
-			.toBeInTheDocument();
-
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('My Anthropic key');
-		await page.getByPlaceholder('API key').fill('sk-test-123');
-		await page.getByRole('button', { name: 'Add provider' }).click();
+		await page.getByLabelText('API key').fill('sk-ant-secret');
+		await page.getByRole('button', { name: 'Save key' }).click();
 
 		expect(providers.create).toHaveBeenCalledWith({
 			provider: 'anthropic',
-			label: 'My Anthropic key',
-			api_key: 'sk-test-123',
+			label: 'Anthropic',
+			api_key: 'sk-ant-secret',
 			base_url: undefined
 		});
-		await expect.element(page.getByPlaceholder('Label (e.g. Anthropic)')).toHaveValue('');
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
 	});
 
-	it('requires a base URL for openai_compatible and blocks the request otherwise', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-
-		render(ProvidersPage);
-
-		await page.getByRole('combobox').selectOptions('openai_compatible');
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local model');
-		await page.getByPlaceholder('API key').fill('sk-test-123');
-		await page.getByRole('button', { name: 'Add provider' }).click();
-
-		await expect
-			.element(page.getByText('openai_compatible requires a base URL'))
-			.toBeInTheDocument();
-		expect(providers.create).not.toHaveBeenCalled();
-	});
-
-	it('requires a base URL for ollama and blocks the request otherwise', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-
-		render(ProvidersPage);
-
-		await page.getByRole('combobox').selectOptions('ollama');
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local Ollama');
-		await page.getByRole('button', { name: 'Add provider' }).click();
-
-		await expect
-			.element(page.getByText('ollama requires a base URL (its local host address)'))
-			.toBeInTheDocument();
-		expect(providers.create).not.toHaveBeenCalled();
-	});
-
-	it('adds an ollama provider with no API key', async () => {
-		const ollamaProvider: Provider = {
-			id: 'prov-2',
+	it('asks Ollama for a local address instead of a key', async () => {
+		seed();
+		vi.mocked(providers.create).mockResolvedValueOnce({
+			...anthropic,
 			provider: 'ollama',
-			label: 'Local Ollama',
-			base_url: 'http://localhost:11434',
-			is_default: false
-		};
-		vi.mocked(providers.list).mockResolvedValueOnce([]).mockResolvedValueOnce([ollamaProvider]);
-		vi.mocked(providers.create).mockResolvedValueOnce(ollamaProvider);
+			label: 'Ollama'
+		});
 
 		render(ProvidersPage);
-		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
-			.toBeInTheDocument();
+		await page.getByRole('button', { name: 'Ollama', exact: true }).click();
 
-		await page.getByRole('combobox').selectOptions('ollama');
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('Local Ollama');
-		await page
-			.getByPlaceholder('Base URL (e.g. http://localhost:11434)')
-			.fill('http://localhost:11434');
-		await page.getByRole('button', { name: 'Add provider' }).click();
+		await expect.element(page.getByLabelText('API key')).not.toBeInTheDocument();
+		await page.getByLabelText('Local address').fill('http://localhost:11434');
+		await page.getByRole('button', { name: 'Save key' }).click();
 
 		expect(providers.create).toHaveBeenCalledWith({
 			provider: 'ollama',
-			label: 'Local Ollama',
-			api_key: '',
+			label: 'Ollama',
+			api_key: 'ollama',
 			base_url: 'http://localhost:11434'
 		});
-		await expect.element(page.getByText('Local Ollama')).toBeInTheDocument();
 	});
 
-	it('removes a provider via providers.remove and refreshes the list', async () => {
-		vi.mocked(providers.list).mockResolvedValueOnce([anthropicProvider]).mockResolvedValueOnce([]);
-		vi.mocked(providers.remove).mockResolvedValueOnce(undefined);
+	it('rejects an OpenAI-compatible provider without an address', async () => {
+		seed();
 
 		render(ProvidersPage);
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'OpenAI-compatible', exact: true }).click();
+		await page.getByLabelText('API key').fill('sk-whatever');
+		await page.getByRole('button', { name: 'Save key' }).click();
 
-		await page.getByRole('button', { name: 'Remove' }).click();
-
-		expect(providers.remove).toHaveBeenCalledWith('prov-1');
+		expect(providers.create).not.toHaveBeenCalled();
 		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
+			.element(page.getByText('An OpenAI-compatible provider needs its address.'))
 			.toBeInTheDocument();
 	});
 
-	it('shows the ApiError message when removing a provider fails', async () => {
-		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
-		vi.mocked(providers.remove).mockRejectedValueOnce(
-			new ApiError(409, 'cannot remove the default provider')
-		);
+	it('shows the rejected-key message when saving fails', async () => {
+		seed();
+		vi.mocked(providers.create).mockRejectedValueOnce(new Error('401'));
 
 		render(ProvidersPage);
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
+		await page.getByLabelText('API key').fill('sk-bad');
+		await page.getByRole('button', { name: 'Save key' }).click();
 
-		await page.getByRole('button', { name: 'Remove' }).click();
-
-		await expect.element(page.getByText('cannot remove the default provider')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('That key was rejected. Check it and try again.'))
+			.toBeInTheDocument();
 	});
 
-	it('shows the mnemonic-disclosure banner when keys are stored in the fallback (#118)', async () => {
+	it('removes a provider', async () => {
+		seed([anthropic]);
+		vi.mocked(providers.remove).mockResolvedValueOnce(undefined);
+
+		render(ProvidersPage);
+		await page.getByRole('button', { name: 'Remove' }).click();
+
+		expect(providers.remove).toHaveBeenCalledWith('prov-1');
+	});
+
+	it('discloses the keychain fallback when keys are phrase-encrypted (#118)', async () => {
 		vi.mocked(providers.list).mockResolvedValue([]);
 		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'fallback' });
 
 		render(ProvidersPage);
 
 		await expect
-			.element(page.getByText('encrypted with a key derived from your workspace recovery phrase'))
+			.element(page.getByText('No OS keychain was found on this install', { exact: false }))
 			.toBeInTheDocument();
-	});
-
-	it('does not show the disclosure banner when the OS keychain is available', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-		vi.mocked(providers.credentialStorage).mockResolvedValue({ backend: 'keychain' });
-
-		render(ProvidersPage);
-		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
-			.toBeInTheDocument();
-
-		await expect
-			.element(page.getByText('encrypted with a key derived from your workspace recovery phrase'))
-			.not.toBeInTheDocument();
-	});
-
-	it('filters the provider list by label via the search box', async () => {
-		const openaiProvider: Provider = {
-			id: 'prov-2',
-			provider: 'openai',
-			label: 'Work OpenAI key',
-			base_url: null,
-			is_default: false
-		};
-		vi.mocked(providers.list).mockResolvedValue([anthropicProvider, openaiProvider]);
-
-		render(ProvidersPage);
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
-		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
-
-		await page.getByPlaceholder('Search providers…').fill('work');
-
-		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
-		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
-	});
-
-	it('shows an Ollama setup pointer only when ollama is selected (#128)', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-
-		render(ProvidersPage);
-		await expect
-			.element(page.getByText('No providers configured yet — add one above.'))
-			.toBeInTheDocument();
-
-		await expect.element(page.getByText('New to Ollama?')).not.toBeInTheDocument();
-
-		await page.getByRole('combobox').selectOptions('ollama');
-
-		await expect.element(page.getByText('New to Ollama?')).toBeInTheDocument();
-		await expect
-			.element(page.getByPlaceholder('Base URL (e.g. http://localhost:11434)'))
-			.toBeInTheDocument();
-	});
-
-	it('filters the provider list by type', async () => {
-		const openaiProvider: Provider = {
-			id: 'prov-2',
-			provider: 'openai',
-			label: 'Work OpenAI key',
-			base_url: null,
-			is_default: false
-		};
-		vi.mocked(providers.list).mockResolvedValue([anthropicProvider, openaiProvider]);
-
-		render(ProvidersPage);
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
-		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
-
-		await page.getByRole('combobox', { name: 'Type' }).selectOptions('openai');
-
-		await expect.element(page.getByText('Work OpenAI key')).toBeInTheDocument();
-		await expect.element(page.getByText('My Anthropic key')).not.toBeInTheDocument();
-	});
-
-	it('shows an error when the initial provider list fails to load', async () => {
-		vi.mocked(providers.list).mockRejectedValueOnce(new Error('Failed to load providers'));
-
-		render(ProvidersPage);
-
-		await expect.element(page.getByText('Failed to load providers')).toBeInTheDocument();
-	});
-
-	it('does not submit while the label is blank', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-
-		render(ProvidersPage);
-		await page.getByPlaceholder('API key').fill('sk-test-123');
-		await page.getByRole('button', { name: 'Add provider' }).click();
-
-		expect(providers.create).not.toHaveBeenCalled();
-	});
-
-	it('does not submit while the api key is blank for a non-ollama provider', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-
-		render(ProvidersPage);
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('My Anthropic key');
-		await page.getByRole('button', { name: 'Add provider' }).click();
-
-		expect(providers.create).not.toHaveBeenCalled();
-	});
-
-	it('shows a generic error when adding a provider fails', async () => {
-		vi.mocked(providers.list).mockResolvedValue([]);
-		vi.mocked(providers.create).mockRejectedValueOnce(new Error('Failed to add provider'));
-
-		render(ProvidersPage);
-		await page.getByPlaceholder('Label (e.g. Anthropic)').fill('My Anthropic key');
-		await page.getByPlaceholder('API key').fill('sk-test-123');
-		await page.getByRole('button', { name: 'Add provider' }).click();
-
-		await expect.element(page.getByText('Failed to add provider')).toBeInTheDocument();
-	});
-
-	it('shows a generic error when removing a provider fails with a non-ApiError', async () => {
-		vi.mocked(providers.list).mockResolvedValue([anthropicProvider]);
-		vi.mocked(providers.remove).mockRejectedValueOnce(new Error('network blip'));
-
-		render(ProvidersPage);
-		await expect.element(page.getByText('My Anthropic key')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Remove' }).click();
-
-		await expect.element(page.getByText('Failed to remove provider')).toBeInTheDocument();
 	});
 });

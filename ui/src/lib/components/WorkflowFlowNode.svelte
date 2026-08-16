@@ -33,12 +33,12 @@
 	// overlaid, so this never has to arbitrate between the two.
 	const highlightClass = $derived(
 		data.mergeHighlight === 'ancestor'
-			? 'border-2 border-dashed border-agent-cyan-600 ring-2 ring-agent-cyan-600/30'
+			? 'border-2 border-dashed border-accent ring-2 ring-accent/30 dark:border-accent-dark'
 			: data.mergeHighlight === 'branch'
-				? 'border-agent-cyan-600/60 ring-1 ring-agent-cyan-600/30'
+				? 'border-accent/60 ring-1 ring-accent/30 dark:border-accent-dark/60'
 				: data.isEntry || onRunPath
-					? 'border-agent-cyan-600 ring-2 ring-agent-cyan-600/40'
-					: 'border-ink/12 dark:border-white/10'
+					? 'border-accent ring-2 ring-accent/30 dark:border-accent-dark'
+					: 'border-line dark:border-line-dark'
 	);
 
 	// #201: drilling into a nested workflow node navigates to its own
@@ -57,7 +57,7 @@
 	data-entry={data.isEntry}
 	data-merge-highlight={data.mergeHighlight ?? undefined}
 	data-run-status={data.runStatus ?? undefined}
-	class="relative w-56 rounded-lg border bg-surface p-3 shadow-sm dark:bg-surface-dark {highlightClass} {dimmed
+	class="relative w-56 rounded-xl border bg-surface px-4 py-3.5 dark:bg-surface-dark {highlightClass} {dimmed
 		? 'opacity-40 grayscale'
 		: ''}"
 >
@@ -84,36 +84,34 @@
 
 	<div class="flex items-center justify-between gap-2">
 		<span
-			class="flex items-center gap-1 rounded-sm bg-neutral-200 px-1.5 py-0.5 text-[11px] font-medium text-neutral-700 dark:bg-white/10 dark:text-neutral-300"
+			class="flex items-center gap-1 rounded-md bg-paper px-1.5 py-0.5 text-[11px] font-medium text-muted dark:bg-paper-dark dark:text-muted-dark"
 		>
 			<Icon
 				name={NODE_TYPE_ICONS[data.nodeType]}
-				class="h-3 w-3 {data.nodeType === 'human_input'
-					? 'text-amber-600 dark:text-amber-400'
-					: ''}"
+				class="h-3 w-3 {data.nodeType === 'human_input' ? 'text-warn' : ''}"
 			/>
 			{NODE_TYPE_LABELS[data.nodeType]}
 		</span>
 		{#if data.isEntry}
 			<span
-				class="rounded-full bg-agent-cyan-100 px-1.5 py-0.5 text-[10px] font-medium text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400"
+				class="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
 			>
 				Start
 			</span>
 		{:else if data.mergeHighlight === 'ancestor'}
 			<span
-				class="rounded-full bg-agent-cyan-100 px-1.5 py-0.5 text-[10px] font-medium text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400"
+				class="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
 			>
 				Splits here
 			</span>
 		{/if}
 	</div>
 
-	<p class="mt-1 truncate font-medium text-ink dark:text-ink-dark" title={data.label}>
+	<p class="mt-1 truncate text-[15px] font-semibold text-ink dark:text-ink-dark" title={data.label}>
 		{data.label}
 	</p>
 	{#if data.subtitle}
-		<p class="mt-0.5 truncate text-xs text-neutral-500" title={data.subtitle}>
+		<p class="mt-0.5 truncate text-[13px] text-muted dark:text-muted-dark" title={data.subtitle}>
 			{data.subtitle}
 		</p>
 	{/if}
@@ -121,7 +119,7 @@
 		<button
 			type="button"
 			data-testid={`workflow-node-${id}-open-nested`}
-			class="nodrag nopan mt-1.5 flex items-center gap-1 text-xs font-medium text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+			class="nodrag nopan mt-1.5 flex items-center gap-1 text-xs font-semibold text-accent hover:underline dark:text-accent-dark"
 			onclick={openNestedWorkflow}
 		>
 			<Icon name="external-link" class="h-3 w-3" />

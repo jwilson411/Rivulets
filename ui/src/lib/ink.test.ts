@@ -4,32 +4,32 @@ import {
 	agentInkMap,
 	initials,
 	INK_AVATAR,
+	INK_BUBBLE,
 	INK_NAME_TEXT,
-	INK_SPINE,
 	INK_SWATCH
 } from './ink';
 
 describe('agentInk', () => {
-	it('cycles cyan, magenta, yellow in order of index', () => {
-		expect(agentInk(0)).toBe('cyan');
-		expect(agentInk(1)).toBe('magenta');
-		expect(agentInk(2)).toBe('yellow');
+	it('cycles agent-a, agent-b, agent-c in order of index', () => {
+		expect(agentInk(0)).toBe('a');
+		expect(agentInk(1)).toBe('b');
+		expect(agentInk(2)).toBe('c');
 	});
 
 	it('wraps back around after the third ink', () => {
-		expect(agentInk(3)).toBe('cyan');
-		expect(agentInk(4)).toBe('magenta');
-		expect(agentInk(5)).toBe('yellow');
-		expect(agentInk(7)).toBe('magenta');
+		expect(agentInk(3)).toBe('a');
+		expect(agentInk(4)).toBe('b');
+		expect(agentInk(5)).toBe('c');
+		expect(agentInk(7)).toBe('b');
 	});
 });
 
 describe('ink style maps', () => {
 	it('have an entry for every AgentInk value', () => {
-		for (const ink of ['cyan', 'magenta', 'yellow'] as const) {
+		for (const ink of ['a', 'b', 'c'] as const) {
 			expect(INK_SWATCH[ink]).toBeTypeOf('string');
 			expect(INK_AVATAR[ink]).toBeTypeOf('string');
-			expect(INK_SPINE[ink]).toBeTypeOf('string');
+			expect(INK_BUBBLE[ink]).toBeTypeOf('string');
 			expect(INK_NAME_TEXT[ink]).toBeTypeOf('string');
 		}
 	});
@@ -54,14 +54,14 @@ describe('initials', () => {
 describe('agentInkMap', () => {
 	it('assigns inks to agent senders in order of first appearance', () => {
 		const map = agentInkMap([
-			{ sender_type: 'agent', sender_id: 'agent-b' },
+			{ sender_type: 'agent', sender_id: 'agent-2' },
 			{ sender_type: 'human', sender_id: 'human-1' },
-			{ sender_type: 'agent', sender_id: 'agent-a' },
-			{ sender_type: 'agent', sender_id: 'agent-b' }
+			{ sender_type: 'agent', sender_id: 'agent-1' },
+			{ sender_type: 'agent', sender_id: 'agent-2' }
 		]);
 
-		expect(map.get('agent-b')).toBe('cyan');
-		expect(map.get('agent-a')).toBe('magenta');
+		expect(map.get('agent-2')).toBe('a');
+		expect(map.get('agent-1')).toBe('b');
 		expect(map.has('human-1')).toBe(false);
 		expect(map.size).toBe(2);
 	});
@@ -80,6 +80,6 @@ describe('agentInkMap', () => {
 			{ sender_type: 'agent', sender_id: 'a4' }
 		]);
 
-		expect(map.get('a4')).toBe('cyan');
+		expect(map.get('a4')).toBe('a');
 	});
 });

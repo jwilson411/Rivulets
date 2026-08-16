@@ -6,7 +6,17 @@
 		type MCPTool,
 		type MCPTransport
 	} from '$lib/api/mcpServers';
-	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
+
+	// MCP servers (06-screens.md → MCP servers, mockup 2j): a list with a
+	// connected chip, and an "Add an MCP server" sheet asking how it
+	// connects — "Web address" or "App on this machine", never transport
+	// slugs (banned-words list). Headers/env live behind More options.
 
 	// JSON Schema keywords that make one argument's requiredness/shape depend
 	// on another — surfaced as a badge so a user scanning the tool list can
@@ -20,7 +30,7 @@
 	// "Name: value" per line -- simpler to type/paste than a dynamic
 	// row-add-remove widget for what's usually one or two entries, and
 	// matches the shape a user copies straight out of an MCP server's docs.
-	// Shared by auth headers and stdio env vars, which have identical shape.
+	// Shared by auth headers and subprocess env vars, which have identical shape.
 	function parseKeyValueLines(text: string): Record<string, string> {
 		const entries: Record<string, string> = {};
 		for (const rawLine of text.split('\n')) {
@@ -47,21 +57,11 @@
 			.filter((line) => line.length > 0);
 	}
 
-	const serverFilters: ListFilter<MCPServerDetail>[] = [
-		{
-			id: 'connection',
-			label: 'Status',
-			options: [
-				{ value: 'connected', label: 'Connected' },
-				{ value: 'disconnected', label: 'Disconnected' }
-			],
-			predicate: (server, value) => (value === 'connected' ? server.connected : !server.connected)
-		}
-	];
-
 	let serverList = $state<MCPServerDetail[]>([]);
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 
+	let adding = $state(false);
 	let name = $state('');
 	let transport = $state<MCPTransport>('streamable-http');
 	let url = $state('');
@@ -69,20 +69,21 @@
 	let command = $state('');
 	let argLines = $state('');
 	let envLines = $state('');
-	let creating = $state(false);
+	let createBusy = $state(false);
 	let createError = $state<string | null>(null);
-	let rowError = $state<string | null>(null);
-	let reconnectingId = $state<string | null>(null);
 
-	let editingHeadersId = $state<string | null>(null);
-	let editHeaderLines = $state('');
-	let savingHeaders = $state(false);
-	let headersError = $state<string | null>(null);
+	let openServer = $state<MCPServerDetail | null>(null);
+	let sheetError = $state<string | null>(null);
+	let reconnecting = $state(false);
+	let editSecretLines = $state('');
+	let savingSecrets = $state(false);
+	let confirmingRemove = $state(false);
 
-	let editingEnvId = $state<string | null>(null);
-	let editEnvLines = $state('');
-	let savingEnv = $state(false);
-	let envError = $state<string | null>(null);
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
+	const argsPlaceholder = '-y\n@modelcontextprotocol/server-filesystem\n/path/to/dir';
+	const monoAreaClass =
+		'rounded-lg border border-line bg-surface px-4 py-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark';
 
 	async function refresh() {
 		loadError = null;
@@ -91,8 +92,13 @@
 			// each server to show its discovered tool count inline.
 			const servers = await mcpServers.list();
 			serverList = await Promise.all(servers.map((s) => mcpServers.get(s.id)));
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load MCP servers';
+			if (openServer) {
+				openServer = serverList.find((s) => s.id === openServer!.id) ?? null;
+			}
+		} catch {
+			loadError = "Couldn't load MCP servers.";
+		} finally {
+			loading = false;
 		}
 	}
 
@@ -112,6 +118,7 @@
 		createError = null;
 		if (!name.trim()) return;
 
+		let body;
 		if (transport === 'streamable-http') {
 			if (!url.trim()) return;
 			let headers: Record<string, string> | undefined;
@@ -119,500 +126,415 @@
 				try {
 					headers = parseKeyValueLines(headerLines);
 				} catch (err) {
-					createError = err instanceof Error ? err.message : 'Invalid headers';
+					createError = err instanceof Error ? err.message : 'Those headers don’t look right.';
 					return;
 				}
 			}
-			creating = true;
-			try {
-				await mcpServers.create({ name: name.trim(), transport, url: url.trim(), headers });
-				resetForm();
-				await refresh();
-			} catch (err) {
-				createError = err instanceof ApiError ? err.message : 'Failed to register MCP server';
-			} finally {
-				creating = false;
+			body = { name: name.trim(), transport, url: url.trim(), headers };
+		} else {
+			if (!command.trim()) return;
+			const args = parseArgLines(argLines);
+			let env: Record<string, string> | undefined;
+			if (envLines.trim()) {
+				try {
+					env = parseKeyValueLines(envLines);
+				} catch (err) {
+					createError = err instanceof Error ? err.message : 'Those variables don’t look right.';
+					return;
+				}
 			}
-			return;
-		}
-
-		if (!command.trim()) return;
-		const args = parseArgLines(argLines);
-		let env: Record<string, string> | undefined;
-		if (envLines.trim()) {
-			try {
-				env = parseKeyValueLines(envLines);
-			} catch (err) {
-				createError = err instanceof Error ? err.message : 'Invalid env vars';
-				return;
-			}
-		}
-		creating = true;
-		try {
-			await mcpServers.create({
+			body = {
 				name: name.trim(),
 				transport,
 				command: command.trim(),
 				args: args.length > 0 ? args : undefined,
 				env
-			});
+			};
+		}
+
+		createBusy = true;
+		try {
+			await mcpServers.create(body);
 			resetForm();
+			adding = false;
 			await refresh();
 		} catch (err) {
-			createError = err instanceof ApiError ? err.message : 'Failed to register MCP server';
+			createError = err instanceof ApiError ? err.message : "Couldn't connect that server.";
 		} finally {
-			creating = false;
+			createBusy = false;
 		}
 	}
 
-	function openHeaderEditor(id: string) {
-		headersError = null;
-		editHeaderLines = '';
-		editingHeadersId = id;
+	function openDetail(server: MCPServerDetail) {
+		sheetError = null;
+		editSecretLines = '';
+		confirmingRemove = false;
+		openServer = server;
 	}
 
-	async function handleSaveHeaders(id: string) {
-		headersError = null;
-		let headers: Record<string, string>;
+	async function handleReconnect() {
+		if (!openServer) return;
+		sheetError = null;
+		reconnecting = true;
 		try {
-			headers = parseKeyValueLines(editHeaderLines);
+			await mcpServers.reconnect(openServer.id);
+			await refresh();
 		} catch (err) {
-			headersError = err instanceof Error ? err.message : 'Invalid headers';
+			sheetError = err instanceof ApiError ? err.message : "Couldn't reconnect.";
+		} finally {
+			reconnecting = false;
+		}
+	}
+
+	// Full replace on save — leaving the box blank and saving clears all.
+	async function handleSaveSecrets() {
+		if (!openServer) return;
+		sheetError = null;
+		let parsed: Record<string, string>;
+		try {
+			parsed = parseKeyValueLines(editSecretLines);
+		} catch (err) {
+			sheetError = err instanceof Error ? err.message : 'Those lines don’t look right.';
 			return;
 		}
-		savingHeaders = true;
+		savingSecrets = true;
 		try {
-			await mcpServers.setHeaders(id, headers);
-			editingHeadersId = null;
+			if (openServer.transport === 'stdio') {
+				await mcpServers.setEnv(openServer.id, parsed);
+			} else {
+				await mcpServers.setHeaders(openServer.id, parsed);
+			}
+			editSecretLines = '';
 			await refresh();
 		} catch (err) {
-			headersError = err instanceof ApiError ? err.message : 'Failed to save headers';
+			sheetError = err instanceof ApiError ? err.message : "Couldn't save. Owner access needed.";
 		} finally {
-			savingHeaders = false;
+			savingSecrets = false;
 		}
 	}
 
-	async function handleClearHeaders(id: string) {
-		headersError = null;
-		savingHeaders = true;
+	async function handleRemove() {
+		if (!openServer) return;
+		sheetError = null;
 		try {
-			await mcpServers.setHeaders(id, {});
-			editingHeadersId = null;
+			await mcpServers.remove(openServer.id);
+			openServer = null;
 			await refresh();
 		} catch (err) {
-			headersError = err instanceof ApiError ? err.message : 'Failed to clear headers';
-		} finally {
-			savingHeaders = false;
-		}
-	}
-
-	function openEnvEditor(id: string) {
-		envError = null;
-		editEnvLines = '';
-		editingEnvId = id;
-	}
-
-	async function handleSaveEnv(id: string) {
-		envError = null;
-		let env: Record<string, string>;
-		try {
-			env = parseKeyValueLines(editEnvLines);
-		} catch (err) {
-			envError = err instanceof Error ? err.message : 'Invalid env vars';
-			return;
-		}
-		savingEnv = true;
-		try {
-			await mcpServers.setEnv(id, env);
-			editingEnvId = null;
-			await refresh();
-		} catch (err) {
-			envError = err instanceof ApiError ? err.message : 'Failed to save env vars';
-		} finally {
-			savingEnv = false;
-		}
-	}
-
-	async function handleClearEnv(id: string) {
-		envError = null;
-		savingEnv = true;
-		try {
-			await mcpServers.setEnv(id, {});
-			editingEnvId = null;
-			await refresh();
-		} catch (err) {
-			envError = err instanceof ApiError ? err.message : 'Failed to clear env vars';
-		} finally {
-			savingEnv = false;
-		}
-	}
-
-	async function handleReconnect(id: string) {
-		rowError = null;
-		reconnectingId = id;
-		try {
-			await mcpServers.reconnect(id);
-			await refresh();
-		} catch (err) {
-			rowError = err instanceof ApiError ? err.message : 'Failed to reconnect';
-		} finally {
-			reconnectingId = null;
-		}
-	}
-
-	async function handleDelete(id: string) {
-		rowError = null;
-		try {
-			await mcpServers.remove(id);
-			await refresh();
-		} catch (err) {
-			rowError = err instanceof ApiError ? err.message : 'Failed to remove MCP server';
+			sheetError = err instanceof ApiError ? err.message : "Couldn't remove this server.";
+			confirmingRemove = false;
 		}
 	}
 </script>
 
-<div class="mx-auto flex max-w-2xl flex-col gap-8 px-6 py-8">
-	<header class="flex flex-col gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">MCP Servers</h1>
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				A server that fails to connect is still saved — reconnect to retry.
-			</p>
-		</div>
-		<div
-			class="bg-agent-cyan-50 dark:bg-agent-cyan-950/20 flex flex-col gap-1 rounded-md border border-agent-cyan-600/40 p-3 text-xs text-ink dark:text-ink-dark"
-		>
-			<p>
-				<span class="font-medium">MCP (Model Context Protocol)</span> is an open standard for connecting
-				external tools to AI agents. Register a server below and its tools become available for your agents
-				to use, alongside Rivulets' built-in tools.
-			</p>
-			<p class="text-neutral-600 dark:text-neutral-400">
-				Streamable-HTTP servers need an endpoint URL, e.g.
-				<code class="font-mono">http://localhost:3001/mcp</code>. Stdio servers run as a local
-				command Rivulets spawns itself, e.g. <code class="font-mono">npx -y some-mcp-server</code>.
-				See the
-				<a
-					href="https://modelcontextprotocol.io"
-					target="_blank"
-					rel="noreferrer"
-					class="underline hover:text-agent-cyan-700 dark:hover:text-agent-cyan-400"
-				>
-					MCP docs
-				</a>
-				for where to find or how to run one.
-			</p>
-		</div>
-	</header>
+<div class="mx-auto max-w-[720px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-6 flex items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">MCP servers</h1>
+		<Button onclick={() => (adding = true)}>
+			<Icon name="plus" class="h-[18px] w-[18px]" />
+			Add an MCP server
+		</Button>
+	</div>
 
-	<form
-		onsubmit={handleCreate}
-		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Register server</h2>
-		<input
-			type="text"
-			bind:value={name}
-			placeholder="Name (e.g. Filesystem tools)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<fieldset class="flex items-center gap-4 text-sm text-ink dark:text-ink-dark">
-			<legend class="sr-only">Transport</legend>
-			<label class="flex items-center gap-1.5">
-				<input type="radio" bind:group={transport} value="streamable-http" />
-				Streamable-HTTP
-			</label>
-			<label class="flex items-center gap-1.5">
-				<input type="radio" bind:group={transport} value="stdio" />
-				Stdio (local command)
-			</label>
-		</fieldset>
+	<p class="mb-6 max-w-[60ch] text-[15px] leading-normal text-muted dark:text-muted-dark">
+		MCP connects outside tools to your agents. Add a server and its tools show up under Tools, next
+		to the built-in ones. A server that fails to connect is still saved — open it to retry.
+	</p>
 
-		{#if transport === 'streamable-http'}
-			<input
-				type="text"
-				bind:value={url}
-				placeholder="URL (streamable-http endpoint)"
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			/>
-			<details class="group">
-				<summary
-					class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
-				>
-					Advanced: auth headers
-				</summary>
-				<div class="mt-2 flex flex-col gap-1">
-					<p class="text-xs text-neutral-500">
-						One per line, as <code>Header-Name: value</code> — e.g.
-						<code>Authorization: Bearer sk-...</code>. Requires an owner session; values are stored
-						in your OS keychain, never shown again once saved.
-					</p>
-					<textarea
-						bind:value={headerLines}
-						rows="2"
-						placeholder="Authorization: Bearer sk-..."
-						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					></textarea>
-				</div>
-			</details>
-		{:else}
-			<p
-				class="bg-agent-magenta-50 dark:bg-agent-magenta-950/20 rounded-md border border-agent-magenta-600/40 p-2 text-xs text-ink dark:text-ink-dark"
-			>
-				Stdio servers run as a local subprocess Rivulets spawns and controls — a bigger security
-				surface than a network call. Requires an owner session.
-			</p>
-			<input
-				type="text"
-				bind:value={command}
-				placeholder="Command (e.g. npx)"
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			/>
-			<textarea
-				bind:value={argLines}
-				rows="2"
-				placeholder="-y
-@modelcontextprotocol/server-filesystem
-/path/to/dir"
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			></textarea>
-			<p class="text-xs text-neutral-500">One argument per line.</p>
-			<details class="group">
-				<summary
-					class="cursor-pointer text-xs text-neutral-600 marker:content-none dark:text-neutral-400"
-				>
-					Advanced: env vars
-				</summary>
-				<div class="mt-2 flex flex-col gap-1">
-					<p class="text-xs text-neutral-500">
-						One per line, as <code>NAME: value</code> — e.g. <code>API_KEY: sk-...</code>. Values
-						are stored in your OS keychain, never shown again once saved.
-					</p>
-					<textarea
-						bind:value={envLines}
-						rows="2"
-						placeholder="API_KEY: sk-..."
-						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					></textarea>
-				</div>
-			</details>
-		{/if}
-
-		<button
-			type="submit"
-			disabled={creating}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creating ? 'Registering…' : 'Register server'}
-		</button>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-		{/if}
-	</form>
-
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+	{#if loading}
+		<SkeletonCards count={2} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if serverList.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">
+			No MCP servers connected yet.
+		</p>
 	{:else}
-		{#if rowError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{rowError}</p>
-		{/if}
-		<FilterableList
-			items={serverList}
-			getKey={(server) => server.id}
-			searchPlaceholder="Search MCP servers…"
-			searchPredicate={(server, q) => server.name.toLowerCase().includes(q.toLowerCase())}
-			filters={serverFilters}
-			emptyMessage="No MCP servers registered yet — add one above."
-			noMatchMessage="No MCP servers match your search or filter."
-		>
-			{#snippet item(server)}
-				<li class="rounded-lg border border-ink/12 px-4 py-3 dark:border-white/10">
-					<div class="flex items-center justify-between">
-						<div>
-							<p class="font-medium text-ink dark:text-ink-dark">
-								{server.name}
-								<span
-									class="ml-2 rounded-sm px-2 py-0.5 text-xs {server.connected
-										? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-										: 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400'}"
-								>
-									{server.connected ? 'connected' : 'disconnected'}
-								</span>
-							</p>
-							{#if server.transport === 'stdio'}
-								<p class="font-mono text-xs text-neutral-500">
-									{server.command}
-									{server.args.join(' ')}
-								</p>
-								{#if server.env_names.length > 0}
-									<p class="mt-1 text-xs text-neutral-500">
-										Env vars: {server.env_names.join(', ')}
-									</p>
-								{/if}
-							{:else}
-								<p class="text-xs text-neutral-500">{server.url}</p>
-								{#if server.header_names.length > 0}
-									<p class="mt-1 text-xs text-neutral-500">
-										Auth headers: {server.header_names.join(', ')}
-									</p>
-								{/if}
-							{/if}
-							{#if server.connected}
-								<p class="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
-									{server.tools.length} tool{server.tools.length === 1 ? '' : 's'}
-								</p>
-								<ul class="mt-2 flex flex-col gap-1">
-									{#each server.tools as tool (tool.id)}
-										<li>
-											<details class="group">
-												<summary
-													class="cursor-pointer text-xs text-neutral-700 marker:content-none dark:text-neutral-300"
-												>
-													<span class="font-mono">{tool.name}</span>
-													{#if hasConditionalArgs(tool)}
-														<span
-															class="ml-1 rounded-sm bg-agent-cyan-100 px-1.5 py-0.5 text-[10px] text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400"
-														>
-															conditional args
-														</span>
-													{/if}
-												</summary>
-												<div class="mt-1 ml-3 flex flex-col gap-1">
-													{#if tool.description}
-														<p class="text-xs text-neutral-500">{tool.description}</p>
-													{/if}
-													<pre
-														class="overflow-x-auto rounded-md bg-ink/5 p-2 text-[11px] text-ink dark:bg-white/5 dark:text-ink-dark">{JSON.stringify(
-															tool.input_schema,
-															null,
-															2
-														)}</pre>
-												</div>
-											</details>
-										</li>
-									{/each}
-								</ul>
-							{/if}
-						</div>
-						<div class="flex shrink-0 items-center gap-3">
-							{#if server.transport === 'stdio'}
-								<button
-									onclick={() => openEnvEditor(server.id)}
-									class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
-								>
-									{server.env_names.length > 0 ? 'Edit env vars' : 'Add env vars'}
-								</button>
-							{:else}
-								<button
-									onclick={() => openHeaderEditor(server.id)}
-									class="text-xs text-neutral-600 hover:text-agent-cyan-700 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
-								>
-									{server.header_names.length > 0 ? 'Edit headers' : 'Add headers'}
-								</button>
-							{/if}
-							<button
-								onclick={() => handleReconnect(server.id)}
-								disabled={reconnectingId === server.id}
-								class="text-xs text-neutral-600 hover:text-agent-cyan-700 disabled:opacity-50 dark:text-neutral-400 dark:hover:text-agent-cyan-400"
-							>
-								{reconnectingId === server.id ? 'Reconnecting…' : 'Reconnect'}
-							</button>
-							<button
-								onclick={() => handleDelete(server.id)}
-								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-							>
-								Remove
-							</button>
-						</div>
-					</div>
-					{#if editingHeadersId === server.id}
-						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
-							<p class="text-xs text-neutral-500">
-								One per line, as <code>Header-Name: value</code>. Replaces the full set — leave
-								blank and save to clear all headers. Requires an owner session.
-							</p>
-							<textarea
-								bind:value={editHeaderLines}
-								rows="2"
-								placeholder="Authorization: Bearer sk-..."
-								class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							></textarea>
-							{#if headersError}
-								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-									{headersError}
-								</p>
-							{/if}
-							<div class="flex items-center gap-3">
-								<button
-									onclick={() => handleSaveHeaders(server.id)}
-									disabled={savingHeaders}
-									class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-								>
-									{savingHeaders ? 'Saving…' : 'Save headers'}
-								</button>
-								{#if server.header_names.length > 0}
-									<button
-										onclick={() => handleClearHeaders(server.id)}
-										disabled={savingHeaders}
-										class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
-									>
-										Clear all
-									</button>
-								{/if}
-								<button
-									onclick={() => (editingHeadersId = null)}
-									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									Cancel
-								</button>
-							</div>
-						</div>
+		<div class="flex flex-col gap-2">
+			{#each serverList as server (server.id)}
+				<button
+					type="button"
+					onclick={() => openDetail(server)}
+					class="flex min-h-14 w-full flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4.5 py-2 text-left hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
+				>
+					<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">
+						{server.name}
+					</span>
+					{#if server.connected}
+						<span class="text-[13px] text-muted dark:text-muted-dark">
+							{server.tools.length} tool{server.tools.length === 1 ? '' : 's'} discovered
+						</span>
 					{/if}
-					{#if editingEnvId === server.id}
-						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
-							<p class="text-xs text-neutral-500">
-								One per line, as <code>NAME: value</code>. Replaces the full set — leave blank and
-								save to clear all env vars. Requires an owner session.
-							</p>
-							<textarea
-								bind:value={editEnvLines}
-								rows="2"
-								placeholder="API_KEY: sk-..."
-								class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							></textarea>
-							{#if envError}
-								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-									{envError}
-								</p>
-							{/if}
-							<div class="flex items-center gap-3">
-								<button
-									onclick={() => handleSaveEnv(server.id)}
-									disabled={savingEnv}
-									class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-								>
-									{savingEnv ? 'Saving…' : 'Save env vars'}
-								</button>
-								{#if server.env_names.length > 0}
-									<button
-										onclick={() => handleClearEnv(server.id)}
-										disabled={savingEnv}
-										class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
-									>
-										Clear all
-									</button>
-								{/if}
-								<button
-									onclick={() => (editingEnvId = null)}
-									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									Cancel
-								</button>
-							</div>
-						</div>
-					{/if}
-				</li>
-			{/snippet}
-		</FilterableList>
+					<StatusPill
+						tone={server.connected ? 'accent' : 'neutral'}
+						dot
+						class="ml-auto h-[22px] text-xs"
+					>
+						{server.connected ? 'Connected' : 'Not connected'}
+					</StatusPill>
+				</button>
+			{/each}
+		</div>
 	{/if}
 </div>
+
+{#if adding}
+	<Sheet title="Add an MCP server" onClose={() => (adding = false)}>
+		<form id="new-mcp-form" onsubmit={handleCreate} class="flex flex-col gap-5">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="mcp-name">Name</label>
+				<input
+					id="mcp-name"
+					type="text"
+					bind:value={name}
+					placeholder="Filesystem tools"
+					class={inputClass}
+				/>
+			</div>
+
+			<div class="flex flex-col gap-2">
+				<span class="text-sm font-semibold text-ink dark:text-ink-dark">How it connects</span>
+				<div class="flex gap-2">
+					<button
+						type="button"
+						onclick={() => (transport = 'streamable-http')}
+						aria-pressed={transport === 'streamable-http'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {transport ===
+						'streamable-http'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						Web address
+					</button>
+					<button
+						type="button"
+						onclick={() => (transport = 'stdio')}
+						aria-pressed={transport === 'stdio'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {transport ===
+						'stdio'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						App on this machine
+					</button>
+				</div>
+			</div>
+
+			{#if transport === 'streamable-http'}
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="mcp-url">
+						Address
+					</label>
+					<input
+						id="mcp-url"
+						type="text"
+						bind:value={url}
+						placeholder="http://localhost:9310/mcp"
+						class="{inputClass} font-mono text-sm"
+					/>
+				</div>
+			{:else}
+				<p
+					class="rounded-xl border border-warn-line bg-warn-soft px-4 py-3 text-[13px] leading-normal text-warn-ink dark:border-warn-line-dark dark:bg-warn-soft-dark dark:text-warn-ink-dark"
+				>
+					An app server runs as a local program Rivulets starts and controls — a bigger security
+					surface than a web call. Owner only.
+				</p>
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="mcp-command">
+						Command
+					</label>
+					<input
+						id="mcp-command"
+						type="text"
+						bind:value={command}
+						placeholder="npx"
+						class="{inputClass} font-mono text-sm"
+					/>
+				</div>
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="mcp-args">
+						Arguments — one per line
+					</label>
+					<textarea
+						id="mcp-args"
+						rows="3"
+						bind:value={argLines}
+						placeholder={argsPlaceholder}
+						class={monoAreaClass}></textarea>
+				</div>
+			{/if}
+
+			<details>
+				<summary
+					class="flex cursor-pointer items-center gap-2 text-base font-medium text-ink dark:text-ink-dark"
+				>
+					<Icon name="chevron-right" class="h-4 w-4 text-muted dark:text-muted-dark" />
+					More options
+					<span class="text-sm font-normal text-muted dark:text-muted-dark">
+						{transport === 'streamable-http' ? 'Headers' : 'Environment'}
+					</span>
+				</summary>
+				<div class="mt-3 flex flex-col gap-2">
+					<p class="text-[13px] text-muted dark:text-muted-dark">
+						One per line, as <code class="font-mono">Name: value</code>. Owner only — values are
+						kept in your OS keychain and never shown again.
+					</p>
+					{#if transport === 'streamable-http'}
+						<textarea
+							rows="2"
+							bind:value={headerLines}
+							placeholder="Authorization: Bearer sk-…"
+							aria-label="Auth headers"
+							class={monoAreaClass}></textarea>
+					{:else}
+						<textarea
+							rows="2"
+							bind:value={envLines}
+							placeholder="API_KEY: sk-…"
+							aria-label="Environment variables"
+							class={monoAreaClass}></textarea>
+					{/if}
+				</div>
+			</details>
+
+			{#if createError}
+				<p class="text-sm text-danger">{createError}</p>
+			{/if}
+		</form>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (adding = false)}>Cancel</Button>
+			<Button
+				disabled={createBusy ||
+					!name.trim() ||
+					(transport === 'streamable-http' ? !url.trim() : !command.trim())}
+				onclick={() => (document.getElementById('new-mcp-form') as HTMLFormElement).requestSubmit()}
+			>
+				{createBusy ? 'Connecting…' : 'Connect'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if openServer && !confirmingRemove}
+	<Sheet title={openServer.name} onClose={() => (openServer = null)}>
+		<div class="flex flex-wrap items-center gap-3">
+			<StatusPill tone={openServer.connected ? 'accent' : 'neutral'} dot>
+				{openServer.connected ? 'Connected' : 'Not connected'}
+			</StatusPill>
+			<code class="min-w-0 truncate font-mono text-[13px] text-muted dark:text-muted-dark">
+				{openServer.transport === 'stdio'
+					? `${openServer.command} ${openServer.args.join(' ')}`
+					: openServer.url}
+			</code>
+		</div>
+
+		<Button
+			variant="secondary"
+			size="md"
+			class="self-start"
+			onclick={handleReconnect}
+			disabled={reconnecting}
+		>
+			{reconnecting ? 'Reconnecting…' : 'Reconnect'}
+		</Button>
+
+		{#if openServer.connected && openServer.tools.length > 0}
+			<div class="flex flex-col gap-2">
+				<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+					{openServer.tools.length} tool{openServer.tools.length === 1 ? '' : 's'} discovered
+				</span>
+				{#each openServer.tools as tool (tool.id)}
+					<details class="rounded-lg border border-line px-3.5 py-2.5 dark:border-line-dark">
+						<summary class="cursor-pointer">
+							<span class="font-mono text-sm text-ink dark:text-ink-dark">{tool.name}</span>
+							{#if hasConditionalArgs(tool)}
+								<span
+									class="ml-2 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
+								>
+									conditional inputs
+								</span>
+							{/if}
+						</summary>
+						<div class="mt-2 flex flex-col gap-2">
+							{#if tool.description}
+								<p class="text-[13px] text-muted dark:text-muted-dark">{tool.description}</p>
+							{/if}
+							<pre
+								class="overflow-x-auto rounded-lg bg-paper p-3 font-mono text-[11px] text-ink dark:bg-paper-dark dark:text-ink-dark">{JSON.stringify(
+									tool.input_schema,
+									null,
+									2
+								)}</pre>
+						</div>
+					</details>
+				{/each}
+			</div>
+		{/if}
+
+		<div class="flex flex-col gap-2 border-t border-line pt-4 dark:border-line-dark">
+			<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+				{openServer.transport === 'stdio' ? 'Environment' : 'Headers'}
+			</span>
+			{#if (openServer.transport === 'stdio' ? openServer.env_names : openServer.header_names).length > 0}
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					Currently set:
+					{(openServer.transport === 'stdio' ? openServer.env_names : openServer.header_names).join(
+						', '
+					)} — values are never shown.
+				</p>
+			{/if}
+			<p class="text-[13px] text-muted dark:text-muted-dark">
+				One per line, as <code class="font-mono">Name: value</code>. Saving replaces the whole set;
+				save blank to clear. Owner only.
+			</p>
+			<textarea
+				rows="2"
+				bind:value={editSecretLines}
+				placeholder={openServer.transport === 'stdio'
+					? 'API_KEY: sk-…'
+					: 'Authorization: Bearer sk-…'}
+				aria-label={openServer.transport === 'stdio' ? 'Environment variables' : 'Auth headers'}
+				class={monoAreaClass}></textarea>
+			<Button
+				variant="secondary"
+				size="md"
+				class="self-start"
+				onclick={handleSaveSecrets}
+				disabled={savingSecrets}
+			>
+				{savingSecrets ? 'Saving…' : 'Save'}
+			</Button>
+		</div>
+
+		{#if sheetError}
+			<p class="text-sm text-danger">{sheetError}</p>
+		{/if}
+
+		{#snippet footer()}
+			<button
+				type="button"
+				onclick={() => (confirmingRemove = true)}
+				class="mr-auto text-[15px] font-medium text-danger hover:underline"
+			>
+				Remove server
+			</button>
+			<Button variant="secondary" onclick={() => (openServer = null)}>Close</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if openServer && confirmingRemove}
+	<Sheet title="Remove {openServer.name}?" onClose={() => (confirmingRemove = false)} width={480}>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Its tools disappear from agents immediately.
+		</p>
+		{#if sheetError}
+			<p class="text-sm text-danger">{sheetError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingRemove = false)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleRemove}>Remove server</Button>
+		{/snippet}
+	</Sheet>
+{/if}

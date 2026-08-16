@@ -1,42 +1,45 @@
-// Agent -> print ink assignment (design: "agents as process inks").
-// Each agent that speaks in a rivulet is assigned an ink in order of first
-// appearance — cyan, magenta, yellow, then repeating. Humans always print in
-// the fixed black "ink" plate rather than joining the cycle.
+// Agent identity inks (Wide Stream, 03-design-direction.md). Each agent
+// that speaks in a rivulet is assigned an ink in order of first appearance
+// — agent-a (green), agent-b (blue), agent-c (amber), then repeating.
+// Humans always print in the fixed ink plate rather than joining the cycle.
+// Identity is never color alone: an initial disc + name always show.
 
-export type AgentInk = 'cyan' | 'magenta' | 'yellow';
+export type AgentInk = 'a' | 'b' | 'c';
 
-const INK_ORDER: AgentInk[] = ['cyan', 'magenta', 'yellow'];
+const INK_ORDER: AgentInk[] = ['a', 'b', 'c'];
 
 export function agentInk(index: number): AgentInk {
 	return INK_ORDER[index % INK_ORDER.length];
 }
 
+/** Solid ink for dots and bars. */
 export const INK_SWATCH: Record<AgentInk, string> = {
-	cyan: 'bg-agent-cyan-500',
-	magenta: 'bg-agent-magenta-500',
-	yellow: 'bg-agent-yellow-500'
+	a: 'bg-agent-a',
+	b: 'bg-agent-b',
+	c: 'bg-agent-c'
 };
 
+/** Rounded-xl initial disc, colored by ink. */
 export const INK_AVATAR: Record<AgentInk, string> = {
-	cyan: 'bg-agent-cyan-600 text-neutral-100 shadow-[2px_2px_0_rgba(56,166,207,.4)]',
-	magenta: 'bg-agent-magenta-600 text-neutral-100 shadow-[2px_2px_0_rgba(216,32,113,.35)]',
-	yellow: 'bg-agent-yellow-500 text-ink shadow-[2px_2px_0_rgba(237,187,0,.45)]'
+	a: 'bg-agent-a text-white',
+	b: 'bg-agent-b text-white',
+	c: 'bg-agent-c text-white'
 };
 
-export const INK_SPINE: Record<AgentInk, string> = {
-	cyan: 'bg-agent-cyan-500',
-	magenta: 'bg-agent-magenta-500',
-	yellow: 'bg-agent-yellow-500'
+/** Soft tinted fill for an agent's message bubble. */
+export const INK_BUBBLE: Record<AgentInk, string> = {
+	a: 'bg-agent-a-soft dark:bg-agent-a-soft-dark',
+	b: 'bg-agent-b-soft dark:bg-agent-b-soft-dark',
+	c: 'bg-agent-c-soft dark:bg-agent-c-soft-dark'
 };
 
 export const INK_NAME_TEXT: Record<AgentInk, string> = {
-	cyan: 'text-agent-cyan-700 dark:text-agent-cyan-400',
-	magenta: 'text-agent-magenta-700 dark:text-agent-magenta-400',
-	yellow: 'text-agent-yellow-700 dark:text-agent-yellow-500'
+	a: 'text-agent-a',
+	b: 'text-agent-b',
+	c: 'text-agent-c'
 };
 
 export const HUMAN_AVATAR = 'bg-ink text-paper dark:bg-ink-dark dark:text-paper-dark';
-export const HUMAN_SPINE = 'bg-neutral-300 dark:bg-neutral-700';
 export const HUMAN_NAME_TEXT = 'text-ink dark:text-ink-dark';
 
 export function initials(name: string): string {
@@ -54,4 +57,10 @@ export function agentInkMap(
 		map.set(m.sender_id, agentInk(map.size));
 	}
 	return map;
+}
+
+/** Stable ink for an agent list (agents page, teams, channel headers):
+ *  assigned by position in the given ordered list. */
+export function agentInkByPosition(index: number): AgentInk {
+	return agentInk(index);
 }

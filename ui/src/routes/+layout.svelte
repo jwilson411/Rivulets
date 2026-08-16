@@ -3,9 +3,15 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { auth } from '$lib/api/auth.svelte';
+	import { writeLastChannel } from '$lib/lastChannel';
 	import IdentityPicker from '$lib/components/IdentityPicker.svelte';
 	import LoginForm from '$lib/components/LoginForm.svelte';
-	import Sidebar from '$lib/components/Sidebar.svelte';
+	import IconRail from '$lib/shell/IconRail.svelte';
+	import ContextPanel from '$lib/shell/ContextPanel.svelte';
+	import MobileTabs from '$lib/shell/MobileTabs.svelte';
+	import MoreSheet from '$lib/shell/MoreSheet.svelte';
+	import AccountMenu from '$lib/shell/AccountMenu.svelte';
+	import CommandPalette from '$lib/shell/CommandPalette.svelte';
 
 	let { children } = $props();
 
@@ -38,7 +44,26 @@
 				resuming = false;
 			});
 	});
+
+	let moreOpen = $state(false);
+	let accountOpen = $state(false);
+	let paletteOpen = $state(false);
+
+	// The Hash rail icon reopens whatever channel was last visited.
+	$effect(() => {
+		const match = /^\/channels\/([^/]+)/.exec(page.url.pathname);
+		if (match) writeLastChannel(match[1]);
+	});
+
+	function handleKeydown(event: KeyboardEvent) {
+		if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+			event.preventDefault();
+			paletteOpen = !paletteOpen;
+		}
+	}
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 {#if isInviteRoute}
 	{@render children()}
@@ -46,17 +71,31 @@
 	<!-- Blank-ish while the silent resume is in flight, rather than
 	     flashing the login form at someone who's about to be let in. -->
 	<main class="flex min-h-screen items-center justify-center">
-		<p class="text-sm text-neutral-500">Signing you back in…</p>
+		<p class="text-sm text-muted dark:text-muted-dark">Signing you back in…</p>
 	</main>
 {:else if !auth.isAuthenticated}
 	<LoginForm sessionExpired={auth.sessionExpired} />
 {:else if !auth.humanId}
 	<IdentityPicker />
 {:else}
-	<div class="flex h-screen">
-		<Sidebar />
-		<div class="flex-1 overflow-y-auto">
-			{@render children()}
+	<div class="flex h-screen flex-col">
+		<div class="flex min-h-0 flex-1">
+			<IconRail onOpenMore={() => (moreOpen = true)} onOpenAccount={() => (accountOpen = true)} />
+			<ContextPanel />
+			<main class="min-w-0 flex-1 overflow-y-auto">
+				{@render children()}
+			</main>
 		</div>
+		<MobileTabs onOpenMore={() => (moreOpen = true)} />
 	</div>
+
+	{#if moreOpen}
+		<MoreSheet onClose={() => (moreOpen = false)} />
+	{/if}
+	{#if accountOpen}
+		<AccountMenu onClose={() => (accountOpen = false)} />
+	{/if}
+	{#if paletteOpen}
+		<CommandPalette onClose={() => (paletteOpen = false)} />
+	{/if}
 {/if}
