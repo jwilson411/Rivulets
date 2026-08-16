@@ -150,3 +150,80 @@ async def test_agent_run_failure_still_produces_an_error_span(
 async def test_run_not_found_returns_404(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/runs/does-not-exist", headers=auth_headers)
     assert response.status_code == 404
+
+
+def _invite_headers(client: TestClient, auth_headers: dict[str, str]) -> dict[str, str]:
+    created_invite = client.post("/api/v1/invites", json={}, headers=auth_headers).json()
+    invite_token = created_invite["url"].rsplit("/", 1)[-1]
+    accepted = client.post(
+        "/api/v1/invites/accept",
+        json={"invite_token": invite_token, "display_name": "Guest"},
+    ).json()
+    return {"Authorization": f"Bearer {accepted['token']}"}
+
+
+def _fake_run_agent_with_tool_call(content: str) -> Any:
+    """Like _fake_run_agent, but the run output carries one recorded tool
+    call whose args/result hold exactly the kind of secret #357 is about --
+    an http_request Authorization header."""
+
+    async def fake(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[
+                SimpleNamespace(
+                    tool_name="http_request",
+                    tool_args={
+                        "url": "https://api.example.com/v1/things",
+                        "headers": {"Authorization": "Bearer sk-run-trace-secret"},
+                    },
+                    result="200 OK: run-trace-result-body",
+                    tool_call_error=False,
+                    metrics=None,
+                )
+            ],
+            get_content_as_string=lambda: content,
+        )
+
+    return fake
+
+
+async def test_invite_grant_gets_redacted_tool_call_payloads(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#357 (leftover of #321): ToolCallLog's arguments_json/result_summary
+    are the same class of secret-bearing payload that got custom-tool
+    source owner-gated. An invited session may still list runs and read a
+    trace's span tree -- including that a tool ran, its name, and status --
+    but both payload fields come back null, while the owner keeps seeing
+    them in full."""
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent", _fake_run_agent_with_tool_call("Fetched it.")
+    )
+    agent_id = _create_agent_with_always_rule(client, auth_headers, "Tool Trace Agent")
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "fetch the thing"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    trace_id = client.get("/api/v1/runs", headers=auth_headers).json()[0]["id"]
+
+    owner_detail = client.get(f"/api/v1/runs/{trace_id}", headers=auth_headers)
+    owner_calls = [c for s in owner_detail.json()["spans"] for c in s["tool_calls"]]
+    assert owner_calls, "expected the fake run's tool call to be logged onto the trace"
+    assert "sk-run-trace-secret" in owner_calls[0]["arguments_json"]
+    assert owner_calls[0]["result_summary"] == "200 OK: run-trace-result-body"
+
+    invite_headers = _invite_headers(client, auth_headers)
+    guest_detail = client.get(f"/api/v1/runs/{trace_id}", headers=invite_headers)
+    assert guest_detail.status_code == 200
+    guest_calls = [c for s in guest_detail.json()["spans"] for c in s["tool_calls"]]
+    assert len(guest_calls) == len(owner_calls)
+    assert guest_calls[0]["tool_name"] == "http_request"
+    assert guest_calls[0]["sensitive"] is True
+    assert all(c["arguments_json"] is None for c in guest_calls)
+    assert all(c["result_summary"] is None for c in guest_calls)
+    assert "sk-run-trace-secret" not in guest_detail.text
+    assert "run-trace-result-body" not in guest_detail.text
