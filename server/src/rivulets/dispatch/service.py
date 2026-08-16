@@ -3538,7 +3538,13 @@ async def _handle_reconnect_mcp_server_trigger(
     (_requires_owner_to_mutate) -- this trigger has no live session to
     check (_mcp_server_requires_owner_to_mutate's docstring), so it
     refuses those outright rather than silently reusing stored secrets/
-    respawning a subprocess on any rivulet participant's say-so."""
+    respawning a subprocess on any rivulet participant's say-so.
+
+    #365: the stored url is also re-run through check_host_is_public
+    before every reconnect, unconditionally -- register-time checking
+    alone is defeated by re-pointing the hostname's DNS at a private
+    address afterwards, and (as with register above) there's no live
+    owner session behind an agent-driven call to exempt."""
     result = await _resolve_mcp_server_ref(db, server_ref)
     if result is None:
         return [
@@ -3568,6 +3574,36 @@ async def _handle_reconnect_mcp_server_trigger(
                 f"@{agent.name} tried to reconnect MCP server {server.name!r}, but it's a stdio "
                 "server or has stored auth -- that requires a live owner session in the UI, not "
                 "just this chat.",
+            )
+        ]
+
+    # #365: re-run the register-time SSRF check on the *stored* url before
+    # dialing it again -- DNS for the name can have been re-pointed at
+    # loopback/LAN since registration, and like register above there's no
+    # live session behind this call to grant an owner exception, so every
+    # reconnect re-resolves and re-checks unconditionally. `server` is a
+    # headerless streamable-http row here (the stdio case was refused just
+    # above), so it always carries a url.
+    assert server.url is not None
+    host = urlsplit(server.url).hostname
+    if host is None:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to reconnect MCP server {server.name!r}, but its stored "
+                f"url {server.url!r} has no host to connect to.",
+            )
+        ]
+    try:
+        check_host_is_public(host)
+    except BlockedHostError:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to reconnect MCP server {server.name!r}, but its stored "
+                "url points at an internal/private network address, which isn't permitted.",
             )
         ]
 
