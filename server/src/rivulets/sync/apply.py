@@ -63,6 +63,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,7 @@ from rivulets.db.models import (
     Rivulet,
     SyncConflict,
     SyncPendingInbound,
+    SyncResolution,
     Team,
     TeamAgent,
     Tool,
@@ -114,6 +116,75 @@ logger = logging.getLogger(__name__)
 # publish_tombstone. Not a real synced field on any EntitySpec, so it can
 # never collide with one.
 TOMBSTONE_FIELD = "__deleted__"
+
+# #348: marks a gossipsub envelope as the publish of a resolved conflict
+# (api/sync.py's resolve_conflict), carrying the resolution's timestamp
+# (resolution_stamp(), below). Same never-collides reasoning as
+# TOMBSTONE_FIELD. Two independently-resolved conflicts publish clocks
+# that are concurrent *again* (each side bumped only its own component
+# past the merged clock), so without this marker each resolution would
+# just re-record a conflict on the other node -- or, for "keep remote" on
+# both sides, silently swap the two states forever. A CONCURRENT envelope
+# carrying this marker is instead settled last-writer-wins against the
+# SyncResolution register: the later (resolved_at, origin_node_id) pair
+# wins on every node, deterministically.
+RESOLUTION_FIELD = "__resolution__"
+
+
+def resolution_stamp() -> str:
+    """Wall-clock stamp for a conflict resolution -- microsecond precision
+    (unlike utcnow_iso's whole seconds) so two rapid resolutions on one
+    node still order correctly; a cross-node tie at the same microsecond
+    falls back to comparing node ids. Lexicographic comparison of these
+    strings matches chronological order."""
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+async def record_resolution(
+    db: AsyncSession, entity_type: str, entity_id: str, resolved_at: str, node_id: str
+) -> None:
+    """Upserts the SyncResolution register (#348) to say this node's data
+    now reflects the resolution stamped (resolved_at, node_id). No commit:
+    callers commit alongside their own writes."""
+    row = await db.get(SyncResolution, (entity_type, entity_id))
+    if row is None:
+        db.add(
+            SyncResolution(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                resolved_at=resolved_at,
+                node_id=node_id,
+            )
+        )
+    else:
+        row.resolved_at = resolved_at
+        row.node_id = node_id
+
+
+async def _resolution_supersedes(
+    db: AsyncSession, entity_type: str, entity_id: str, resolved_at: str, node_id: str
+) -> bool:
+    row = await db.get(SyncResolution, (entity_type, entity_id))
+    if row is None:
+        return True
+    return (resolved_at, node_id) > (row.resolved_at, row.node_id)
+
+
+async def _mark_conflicts_resolved(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+    """#348: a resolution-marked envelope supersedes any conflict this node
+    still has open for the same entity -- its snapshots predate the
+    mesh-level decision, so letting a human resolve it later could
+    republish a stale snapshot right back over the settled state. No
+    commit: callers commit alongside their own writes."""
+    await db.execute(
+        update(SyncConflict)
+        .where(
+            SyncConflict.entity_type == entity_type,
+            SyncConflict.entity_id == entity_id,
+            SyncConflict.resolved.is_(False),
+        )
+        .values(resolved=True)
+    )
 
 
 class ClockComparison(Enum):
@@ -482,29 +553,45 @@ async def apply_remote_change(
         return ApplyResult(applied=False, conflict=False)
 
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
+    resolution = payload.get(RESOLUTION_FIELD)
 
     if comparison is ClockComparison.CONCURRENT:
-        local_instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
-        db.add(
-            SyncConflict(
-                entity_type=spec.entity_type,
-                entity_id=entity_id,
-                local_snapshot=json.dumps(
-                    _snapshot(local_instance, spec.synced_fields) if local_instance else {}
-                ),
-                remote_snapshot=json.dumps(payload),
-                remote_node_id=remote_node_id,
+        if resolution is None:
+            local_instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
+            db.add(
+                SyncConflict(
+                    entity_type=spec.entity_type,
+                    entity_id=entity_id,
+                    local_snapshot=json.dumps(
+                        _snapshot(local_instance, spec.synced_fields) if local_instance else {}
+                    ),
+                    remote_snapshot=json.dumps(payload),
+                    remote_node_id=remote_node_id,
+                )
             )
-        )
-        # Vector-clock bookkeeping still advances even though we didn't
-        # apply the payload: this node is now causally aware of both
-        # versions, which is what lets a *future* incoming message be
-        # correctly judged against what's already been seen.
-        await _store_vector_clock(db, spec.entity_type, entity_id, merged)
-        await db.commit()
-        return ApplyResult(applied=False, conflict=True)
+            # Vector-clock bookkeeping still advances even though we didn't
+            # apply the payload: this node is now causally aware of both
+            # versions, which is what lets a *future* incoming message be
+            # correctly judged against what's already been seen.
+            await _store_vector_clock(db, spec.entity_type, entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=True)
+        if not await _resolution_supersedes(
+            db, spec.entity_type, entity_id, resolution, remote_node_id
+        ):
+            # #348: this node already reflects a later resolution -- ignore
+            # the older one's payload (the peer will adopt ours the same
+            # way), but still merge clocks so future messages are judged
+            # against everything seen.
+            await _mark_conflicts_resolved(db, spec.entity_type, entity_id)
+            await _store_vector_clock(db, spec.entity_type, entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=False)
+        # #348: a winning resolution is applied like REMOTE_NEWER (below)
+        # even though the clocks are concurrent -- it's a human's explicit
+        # decision, stamped later than anything this node holds.
 
-    # REMOTE_NEWER: a clean, non-conflicting update -- apply it.
+    # REMOTE_NEWER (or a superseding conflict resolution): apply it.
     instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
     if instance is None:
         instance = new_entity_instance(spec, entity_id)
@@ -521,6 +608,9 @@ async def apply_remote_change(
         # hasn't synced here yet, see module docstring) can therefore
         # raise IntegrityError from inside this call, not just from the
         # commit() below, so both need to be inside the same try.
+        if resolution is not None:
+            await record_resolution(db, spec.entity_type, entity_id, resolution, remote_node_id)
+            await _mark_conflicts_resolved(db, spec.entity_type, entity_id)
         await _store_vector_clock(db, spec.entity_type, entity_id, merged)
         await db.commit()
     except IntegrityError:
@@ -565,6 +655,7 @@ async def apply_remote_delete(
     entity_id: str,
     remote_vector_clock: dict[str, int],
     remote_node_id: str,
+    resolution: str | None = None,
 ) -> ApplyResult:
     """The delete counterpart to apply_remote_change (#238). `entity_type`
     is whatever a live create/update message for this entity already uses
@@ -599,22 +690,32 @@ async def apply_remote_delete(
     )
 
     if comparison is ClockComparison.CONCURRENT:
-        db.add(
-            SyncConflict(
-                entity_type=entity_type,
-                entity_id=entity_id,
-                local_snapshot=json.dumps(
-                    _snapshot(instance, spec.synced_fields) if instance is not None and spec else {}
-                ),
-                remote_snapshot=json.dumps({"deleted": True}),
-                remote_node_id=remote_node_id,
+        if resolution is None:
+            db.add(
+                SyncConflict(
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    local_snapshot=json.dumps(
+                        _snapshot(instance, spec.synced_fields)
+                        if instance is not None and spec
+                        else {}
+                    ),
+                    remote_snapshot=json.dumps({"deleted": True}),
+                    remote_node_id=remote_node_id,
+                )
             )
-        )
-        await _store_vector_clock(db, entity_type, entity_id, merged)
-        await db.commit()
-        return ApplyResult(applied=False, conflict=True)
+            await _store_vector_clock(db, entity_type, entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=True)
+        if not await _resolution_supersedes(db, entity_type, entity_id, resolution, remote_node_id):
+            # #348: same as apply_remote_change -- an older resolution's
+            # tombstone loses to the one this node already reflects.
+            await _mark_conflicts_resolved(db, entity_type, entity_id)
+            await _store_vector_clock(db, entity_type, entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=False)
 
-    # REMOTE_NEWER: a clean, non-conflicting delete -- apply it.
+    # REMOTE_NEWER (or a superseding conflict resolution): apply it.
     source_path_to_unlink: str | None = None
     if instance is not None:
         if entity_type == "tool" and isinstance(instance, Tool) and instance.tool_type == "custom":
@@ -628,6 +729,9 @@ async def apply_remote_delete(
             source_path_to_unlink = instance.source_path
         await clear_delete_blockers(db, entity_type, entity_id)
         await db.delete(instance)
+    if resolution is not None:
+        await record_resolution(db, entity_type, entity_id, resolution, remote_node_id)
+        await _mark_conflicts_resolved(db, entity_type, entity_id)
     await _store_vector_clock(db, entity_type, entity_id, merged)
     await db.commit()
     if source_path_to_unlink:
@@ -636,6 +740,27 @@ async def apply_remote_delete(
 
 
 _TOOL_SYNCED_FIELDS = ("name", "description")
+
+
+async def write_tool_source(db: AsyncSession, tool: Tool, source_code: str) -> None:
+    """Writes a custom tool's source to this node's own tool.source_path
+    and records a new ToolVersion so rollback history stays meaningful
+    here too. Shared by apply_remote_tool_change (a clean incoming sync)
+    and api/sync.py's resolve_conflict ("keep remote" on a tool conflict,
+    #348 -- previously that path updated name/description only, leaving
+    this node executing its own pre-conflict source under the remote
+    tool's name). No commit: callers commit alongside their own writes."""
+    assert tool.source_path is not None  # both callers set it before calling
+    source_path = Path(tool.source_path)
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(source_code, encoding="utf-8")
+    await db.flush()
+    latest_version = await db.scalar(
+        select(ToolVersion.version)
+        .where(ToolVersion.tool_id == tool.id)
+        .order_by(ToolVersion.version.desc())
+    )
+    db.add(ToolVersion(tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code))
 
 
 async def apply_remote_tool_change(
@@ -659,23 +784,43 @@ async def apply_remote_tool_change(
         return ApplyResult(applied=False, conflict=False)
 
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
+    resolution = payload.get(RESOLUTION_FIELD)
 
     if comparison is ClockComparison.CONCURRENT:
-        local_tool = await db.get(Tool, entity_id)
-        db.add(
-            SyncConflict(
-                entity_type="tool",
-                entity_id=entity_id,
-                local_snapshot=json.dumps(
-                    _snapshot(local_tool, _TOOL_SYNCED_FIELDS) if local_tool else {}
-                ),
-                remote_snapshot=json.dumps({k: payload[k] for k in _TOOL_SYNCED_FIELDS}),
-                remote_node_id=remote_node_id,
+        if resolution is None:
+            local_tool = await db.get(Tool, entity_id)
+            db.add(
+                SyncConflict(
+                    entity_type="tool",
+                    entity_id=entity_id,
+                    local_snapshot=json.dumps(
+                        _snapshot(local_tool, _TOOL_SYNCED_FIELDS) if local_tool else {}
+                    ),
+                    # #348: source_code rides along so "keep remote" can
+                    # actually write the chosen bytes to this node's
+                    # {id}.py, not just rename the tool while its source
+                    # stays local (api/sync.py's resolve_conflict).
+                    remote_snapshot=json.dumps(
+                        {
+                            k: payload[k]
+                            for k in (*_TOOL_SYNCED_FIELDS, "source_code")
+                            if k in payload
+                        }
+                    ),
+                    remote_node_id=remote_node_id,
+                )
             )
-        )
-        await _store_vector_clock(db, "tool", entity_id, merged)
-        await db.commit()
-        return ApplyResult(applied=False, conflict=True)
+            await _store_vector_clock(db, "tool", entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=True)
+        if not await _resolution_supersedes(db, "tool", entity_id, resolution, remote_node_id):
+            await _mark_conflicts_resolved(db, "tool", entity_id)
+            await _store_vector_clock(db, "tool", entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=False)
+        # #348: a superseding resolution falls through to the normal apply
+        # below -- including the source-code write, which is what puts the
+        # chosen bytes on this node.
 
     name = payload["name"]
     if not TOOL_NAME_RE.match(name):
@@ -731,17 +876,7 @@ async def apply_remote_tool_change(
 
     source_code = payload.get("source_code")
     if source_code is not None:
-        Path(source_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(source_path).write_text(source_code, encoding="utf-8")
-        await db.flush()
-        latest_version = await db.scalar(
-            select(ToolVersion.version)
-            .where(ToolVersion.tool_id == tool.id)
-            .order_by(ToolVersion.version.desc())
-        )
-        db.add(
-            ToolVersion(tool_id=tool.id, version=(latest_version or 0) + 1, source_code=source_code)
-        )
+        await write_tool_source(db, tool, source_code)
 
     try:
         # The name_collision pre-check above closes the common case; this
@@ -749,6 +884,9 @@ async def apply_remote_tool_change(
         # sync applies introducing the same name under different ids) --
         # same treatment api/tools.py's create_tool gives its own race
         # against idx_tool_custom_name.
+        if resolution is not None:
+            await record_resolution(db, "tool", entity_id, resolution, remote_node_id)
+            await _mark_conflicts_resolved(db, "tool", entity_id)
         await _store_vector_clock(db, "tool", entity_id, merged)
         await db.commit()
     except IntegrityError:
@@ -797,23 +935,30 @@ async def apply_remote_file_change(
         return ApplyResult(applied=False, conflict=False)
 
     merged = merge_vector_clocks(local_vc, remote_vector_clock)
+    resolution = payload.get(RESOLUTION_FIELD)
 
     if comparison is ClockComparison.CONCURRENT:
-        local_file = await db.get(File, entity_id)
-        db.add(
-            SyncConflict(
-                entity_type="file",
-                entity_id=entity_id,
-                local_snapshot=json.dumps(
-                    _snapshot(local_file, _FILE_SYNCED_FIELDS) if local_file else {}
-                ),
-                remote_snapshot=json.dumps({k: payload.get(k) for k in _FILE_SYNCED_FIELDS}),
-                remote_node_id=remote_node_id,
+        if resolution is None:
+            local_file = await db.get(File, entity_id)
+            db.add(
+                SyncConflict(
+                    entity_type="file",
+                    entity_id=entity_id,
+                    local_snapshot=json.dumps(
+                        _snapshot(local_file, _FILE_SYNCED_FIELDS) if local_file else {}
+                    ),
+                    remote_snapshot=json.dumps({k: payload.get(k) for k in _FILE_SYNCED_FIELDS}),
+                    remote_node_id=remote_node_id,
+                )
             )
-        )
-        await _store_vector_clock(db, "file", entity_id, merged)
-        await db.commit()
-        return ApplyResult(applied=False, conflict=True)
+            await _store_vector_clock(db, "file", entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=True)
+        if not await _resolution_supersedes(db, "file", entity_id, resolution, remote_node_id):
+            await _mark_conflicts_resolved(db, "file", entity_id)
+            await _store_vector_clock(db, "file", entity_id, merged)
+            await db.commit()
+            return ApplyResult(applied=False, conflict=False)
 
     content_hash = payload["content_hash"]
     try:
@@ -839,15 +984,36 @@ async def apply_remote_file_change(
             setattr(file_row, field, payload[field])
     file_row.local_path = str(local_path)
     file_row.vector_clock = max(merged.values())
+    if resolution is not None:
+        await record_resolution(db, "file", entity_id, resolution, remote_node_id)
+        await _mark_conflicts_resolved(db, "file", entity_id)
     await _store_vector_clock(db, "file", entity_id, merged)
     await db.commit()
 
-    if not local_path.exists():
-        await _remember_known_source(db, file_row, remote_node_id)
-        if await _should_eager_fetch(db, remote_node_id):
-            await _fetch_file_content(remote_node_id, content_hash, local_path)
+    await ensure_file_content_available(db, file_row, remote_node_id)
 
     return ApplyResult(applied=True, conflict=False)
+
+
+async def ensure_file_content_available(
+    db: AsyncSession, file_row: File, source_node_id: str
+) -> None:
+    """Post-apply bytes handling for a File row whose metadata just changed
+    hands: if this node doesn't already hold the bytes for its
+    content_hash, remember source_node_id as a peer known to have them
+    (so a lazy fetch can happen on demand later) and eager-fetch now when
+    the #123 policy allows. Shared by apply_remote_file_change and
+    api/sync.py's resolve_conflict ("keep remote" on a file conflict,
+    #348 -- previously that path could point content_hash at bytes this
+    node never fetched, with no recorded source to ever fetch them from).
+    Expects file_row to be committed already (local_path/content_hash
+    current)."""
+    local_path = Path(file_row.local_path)
+    if local_path.exists():
+        return
+    await _remember_known_source(db, file_row, source_node_id)
+    if await _should_eager_fetch(db, source_node_id):
+        await _fetch_file_content(source_node_id, file_row.content_hash, local_path)
 
 
 # WorkspaceSetting keys and defaults for issue #123's eager-sync policy --
@@ -1101,7 +1267,12 @@ async def handle_incoming_state_change(
                 logger.info("Dropping tombstone for unsupported entity_type=%r", entity_type)
                 return
             result = await apply_remote_delete(
-                db, entity_type, entity_id, vector_clock, origin_node_id
+                db,
+                entity_type,
+                entity_id,
+                vector_clock,
+                origin_node_id,
+                resolution=payload.get(RESOLUTION_FIELD),
             )
         elif entity_type == "tool":
             result = await apply_remote_tool_change(

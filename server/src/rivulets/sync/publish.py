@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rivulets.db.models import File, SyncPendingOutbound, Tool
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import (
+    RESOLUTION_FIELD,
     TOMBSTONE_FIELD,
     EntitySpec,
     encode_entity_id,
@@ -58,7 +59,9 @@ async def publish_entity_change(
         await _record_pending_outbound(db, entity_type, entity_id)
 
 
-async def publish_tombstone(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+async def publish_tombstone(
+    db: AsyncSession, entity_type: str, entity_id: str, *, resolution: str | None = None
+) -> None:
     """The delete counterpart to publish_current_state (#238): called after
     a local hard-delete has already been committed, so unlike
     publish_current_state there's no live row left to rebuild a payload
@@ -70,16 +73,26 @@ async def publish_tombstone(db: AsyncSession, entity_type: str, entity_id: str) 
     deleted entities" no longer happen). Best-effort like
     publish_entity_change: engine down or a publish failure queues a
     tombstone retry (SyncPendingOutbound.deleted) instead of dropping the
-    delete forever."""
+    delete forever.
+
+    `resolution` (#348): resolution stamp (apply.py's resolution_stamp) for
+    a tombstone published by conflict resolution -- rides in the payload as
+    RESOLUTION_FIELD so peers settle it last-writer-wins against their own
+    resolutions instead of recording a fresh conflict. Lost on the
+    queued-retry path (SyncPendingOutbound doesn't store it): an offline
+    resolution degrades to a plain clock-bumped republish, which still
+    converges unless the other side resolved concurrently too, in which
+    case it surfaces as a new conflict rather than a silent split."""
     engine = get_sync_engine()
     if not engine.running:
         await _record_pending_outbound(db, entity_type, entity_id, deleted=True)
         return
+    payload: dict[str, Any] = {TOMBSTONE_FIELD: True}
+    if resolution is not None:
+        payload[RESOLUTION_FIELD] = resolution
     try:
         vector_clock = await record_local_change(db, entity_type, entity_id, engine.node_id)
-        await engine.publish_state_change(
-            entity_type, entity_id, {TOMBSTONE_FIELD: True}, vector_clock
-        )
+        await engine.publish_state_change(entity_type, entity_id, payload, vector_clock)
     except Exception:
         logger.warning(
             "Failed to publish sync tombstone for %s/%s", entity_type, entity_id, exc_info=True
@@ -87,14 +100,21 @@ async def publish_tombstone(db: AsyncSession, entity_type: str, entity_id: str) 
         await _record_pending_outbound(db, entity_type, entity_id, deleted=True)
 
 
-async def publish_current_state(db: AsyncSession, entity_type: str, entity_id: str) -> None:
+async def publish_current_state(
+    db: AsyncSession, entity_type: str, entity_id: str, *, resolution: str | None = None
+) -> None:
     """Convenience wrapper for call sites that don't already have a
     payload dict in hand (or want the guarantee that what's published
     always exactly matches the entity's current synced fields): re-reads
     the entity and publishes it. A no-op if the entity no longer exists or
-    isn't in a syncable state (e.g. a non-custom Tool)."""
+    isn't in a syncable state (e.g. a non-custom Tool). `resolution` marks
+    the envelope as a conflict-resolution publish -- see
+    publish_tombstone's docstring (#348), including the queued-retry
+    degradation."""
     payload = await build_entity_payload(db, entity_type, entity_id)
     if payload is not None:
+        if resolution is not None:
+            payload[RESOLUTION_FIELD] = resolution
         await publish_entity_change(db, entity_type, entity_id, payload)
 
 

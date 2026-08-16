@@ -14,26 +14,33 @@ when the number matters.
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
-from rivulets.db.models import SyncConflict, SyncPendingInbound, SyncPendingOutbound
+from rivulets.db.models import File, SyncConflict, SyncPendingInbound, SyncPendingOutbound, Tool
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import (
     clear_delete_blockers,
     current_vector_clock,
+    ensure_file_content_available,
     entity_pk_value,
     get_entity_spec,
     new_entity_instance,
+    record_resolution,
+    resolution_stamp,
+    write_tool_source,
 )
 from rivulets.sync.capabilities import load_capabilities, save_capabilities
 from rivulets.sync.engine import PeerInfo as EnginePeerInfo
 from rivulets.sync.publish import build_entity_payload, publish_current_state, publish_tombstone
+from rivulets.validation import TOOL_NAME_RE, local_path_for_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +262,7 @@ async def resolve_conflict(
     if body.keep not in ("local", "remote"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "keep must be 'local' or 'remote'")
 
+    source_path_to_unlink: str | None = None
     if body.keep == "remote":
         spec = get_entity_spec(conflict.entity_type)
         if spec is not None:
@@ -268,9 +276,25 @@ async def resolve_conflict(
                 # making "keep remote" on a delete-conflict a no-op
                 # that looks like it worked.
                 if instance is not None:
+                    if isinstance(instance, Tool) and instance.tool_type == "custom":
+                        # #362, same as apply_remote_delete: the source
+                        # file is this node's own artifact and would
+                        # otherwise outlive the kept delete.
+                        source_path_to_unlink = instance.source_path
                     await clear_delete_blockers(db, conflict.entity_type, conflict.entity_id)
                     await db.delete(instance)
             else:
+                if conflict.entity_type == "tool" and not TOOL_NAME_RE.match(
+                    remote.get("name", "")
+                ):
+                    # Same reasoning as apply_remote_tool_change's #239
+                    # check: the name is exec'd against as a Python
+                    # identifier, and conflict snapshots are recorded
+                    # *before* that check ever ran on the payload.
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "Remote snapshot has an invalid tool name",
+                    )
                 if instance is None:
                     # #325: the local row can be gone -- e.g. this node
                     # deleted it locally while a peer concurrently edited
@@ -281,36 +305,108 @@ async def resolve_conflict(
                     # not silently no-op because there was nothing to
                     # `setattr` onto.
                     instance = new_entity_instance(spec, conflict.entity_id)
+                    if isinstance(instance, Tool):
+                        # Bespoke-path columns the generic spec doesn't
+                        # cover -- only custom tools ever sync/conflict,
+                        # and source_path is always this node's own
+                        # tools_dir (see apply_remote_tool_change).
+                        instance.tool_type = "custom"
+                        instance.source_path = str(
+                            get_settings().tools_dir / f"{conflict.entity_id}.py"
+                        )
                     db.add(instance)
                 for field in spec.synced_fields:
                     if field in remote:
                         setattr(instance, field, remote[field])
+                if isinstance(instance, Tool) and remote.get("source_code") is not None:
+                    # #348: the chosen side's *bytes*, not just its
+                    # metadata -- without this, "keep remote" renamed the
+                    # tool while this node kept executing its own
+                    # pre-conflict source under that name.
+                    instance.source_path = str(
+                        get_settings().tools_dir / f"{conflict.entity_id}.py"
+                    )
+                    await write_tool_source(db, instance, remote["source_code"])
+                if isinstance(instance, File) and remote.get("content_hash"):
+                    # #348: local_path must follow the chosen content_hash
+                    # (apply_remote_file_change always derives it the same
+                    # way) or the row keeps pointing at the old content's
+                    # path on disk.
+                    try:
+                        instance.local_path = str(
+                            local_path_for_content_hash(remote["content_hash"])
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(
+                            status.HTTP_400_BAD_REQUEST,
+                            "Remote snapshot has an invalid content_hash",
+                        ) from exc
                 if hasattr(instance, "vector_clock"):
                     vc = await current_vector_clock(db, conflict.entity_type, conflict.entity_id)
                     if vc:
                         setattr(instance, "vector_clock", max(vc.values()))  # noqa: B010
 
+    # #348: stamp this resolution in the SyncResolution register before
+    # publishing it under the same stamp -- if another node resolved the
+    # same conflict independently, whichever (resolved_at, node_id) pair is
+    # later wins on every node (apply.py's _resolution_supersedes), instead
+    # of the two resolution publishes swapping states or re-conflicting.
+    engine = get_sync_engine()
+    resolved_at = resolution_stamp()
     conflict.resolved = True
-    await db.commit()
+    try:
+        await record_resolution(
+            db,
+            conflict.entity_type,
+            conflict.entity_id,
+            resolved_at,
+            engine.node_id if engine.running else "",
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        # A kept-remote tool name can collide with a different local custom
+        # tool's (idx_tool_custom_name) -- surface it rather than 500.
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Remote snapshot collides with existing local data",
+        ) from exc
     await db.refresh(conflict)
+    if source_path_to_unlink:
+        Path(source_path_to_unlink).unlink(missing_ok=True)
 
-    if body.keep == "local":
-        # #325: a resolved conflict must actually converge the mesh, not
-        # just silence this node's own copy of it. Both sides already
-        # merged to the same vector clock the moment the conflict was
-        # detected (apply_remote_change/apply_remote_delete's CONCURRENT
-        # branch), so without republishing here, this node's data can never
-        # be judged newer than what peers already have -- the mesh stays
-        # split even though the UI reports the conflict resolved.
-        # publish_current_state/publish_tombstone bump this node's own
-        # clock component past that merged value (via record_local_change),
-        # so peers apply it as REMOTE_NEWER. Whether the local row still
-        # exists decides which one applies: "keep local" after a local
-        # delete means keeping the delete.
-        payload = await build_entity_payload(db, conflict.entity_type, conflict.entity_id)
-        if payload is not None:
-            await publish_current_state(db, conflict.entity_type, conflict.entity_id)
-        else:
-            await publish_tombstone(db, conflict.entity_type, conflict.entity_id)
+    if body.keep == "remote" and conflict.entity_type == "file":
+        file_row = await db.get(File, conflict.entity_id)
+        if file_row is not None:
+            # #348: the chosen hash may name bytes this node never fetched
+            # -- record the conflicting peer as a known source (and
+            # eager-fetch per the #123 policy) so they're actually
+            # obtainable, same as a clean incoming file sync.
+            await ensure_file_content_available(db, file_row, conflict.remote_node_id)
+
+    # #325/#348: a resolved conflict must actually converge the mesh, not
+    # just silence this node's own copy of it. Both sides already merged to
+    # the same vector clock the moment the conflict was detected
+    # (apply_remote_change/apply_remote_delete's CONCURRENT branch), so
+    # without republishing here, this node's data can never be judged newer
+    # than what peers already have -- the mesh stays split even though the
+    # UI reports the conflict resolved. That holds for *both* keeps: after
+    # the "keep remote" apply above, local state IS the chosen snapshot, so
+    # publishing current state publishes the choice either way.
+    # publish_current_state/publish_tombstone bump this node's own clock
+    # component past the merged value (via record_local_change), so peers
+    # apply it as REMOTE_NEWER; the resolution stamp settles the case where
+    # a peer resolved concurrently. Whether the local row still exists now
+    # decides which one publishes: a kept local delete and a kept remote
+    # delete both mean publishing the tombstone.
+    payload = await build_entity_payload(db, conflict.entity_type, conflict.entity_id)
+    if payload is not None:
+        await publish_current_state(
+            db, conflict.entity_type, conflict.entity_id, resolution=resolved_at
+        )
+    else:
+        await publish_tombstone(
+            db, conflict.entity_type, conflict.entity_id, resolution=resolved_at
+        )
 
     return _conflict_out(conflict)

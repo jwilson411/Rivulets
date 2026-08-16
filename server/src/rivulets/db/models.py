@@ -1689,6 +1689,28 @@ class SyncPendingInbound(Base):
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
 
 
+class SyncResolution(Base):
+    """#348: the conflict *resolution* this node's data currently reflects
+    for an entity — a last-writer-wins register ordered by (resolved_at,
+    node_id). Two nodes that resolve the same conflict independently
+    publish vector clocks that are concurrent again (each bumped only its
+    own component past the merged clock), so the clocks alone can never
+    pick a winner — this register is the deterministic tie-break both
+    sides agree on: the later (resolved_at, node_id) pair's snapshot wins
+    (sync/apply.py's `_resolution_supersedes`). Written when this node
+    resolves a conflict itself (api/sync.py's resolve_conflict) and when
+    it applies a resolution-marked envelope from a peer. Not synced
+    itself; the stamp travels in the envelope payload
+    (RESOLUTION_FIELD)."""
+
+    __tablename__ = "sync_resolution"
+
+    entity_type: Mapped[str] = mapped_column(primary_key=True)
+    entity_id: Mapped[str] = mapped_column(primary_key=True)
+    resolved_at: Mapped[str]  # microsecond-precision ISO, lexicographically ordered
+    node_id: Mapped[str]
+
+
 class KnowledgeBase(Base):
     """A named collection of ingested documents an agent or team can
     search mid-conversation via the search_knowledge_base builtin tool
