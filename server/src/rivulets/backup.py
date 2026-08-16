@@ -45,11 +45,12 @@ daily/pre-upgrade snapshot:
   docstring.
 
 Every SQLite file staged into the archive uses `VACUUM INTO`, including
-for the pre-upgrade case where the doc describes a raw `cp db db-wal
-db-shm` instead — VACUUM INTO checkpoints the live DB into one
-self-contained file regardless of whether the source is WAL-mode-on-disk
-or (as in tests) :memory:, which is both simpler and safer than copying
-three files that could be mid-write relative to each other.
+for the pre-upgrade case (an earlier revision of the doc described a raw
+`cp db db-wal db-shm` there instead) — VACUUM INTO checkpoints the live
+DB into one self-contained file regardless of whether the source is
+WAL-mode-on-disk or (as in tests) :memory:, which is both simpler and
+safer than copying three files that could be mid-write relative to each
+other.
 
 Backups are node-local recovery artifacts and are never synced to peers:
 this module has no dependency on rivulets.sync (only copying the small
