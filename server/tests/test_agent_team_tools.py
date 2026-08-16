@@ -1349,3 +1349,154 @@ def test_rollback_agent_version_target_holding_owner_scope_is_refused(
         _tool_execution("rollback_agent_version", {"agent": target["name"], "version": 1}),
     )
     assert "holds a capability scope" in messages[2]["content"]
+
+
+# #387: leftover of #353/#326 at the dispatch layer -- update_team/
+# delete_team have no live session to check a claims.grant == "owner"
+# bypass against. Adding or dropping a scoped member, or deleting a team
+# that holds one, must refuse the same way HTTP already does.
+
+
+def test_update_team_adding_scoped_member_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387 / #326: a controller with agents_teams:manage must not be
+    able to add an agent that holds an owner-granted capability scope."""
+    controller_id = _create_controller_agent(client, auth_headers, "ScopedAdder")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
+    scoped = _create_unscoped_target(client, auth_headers, f"ScopedAddTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{scoped['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+    team = client.post(
+        "/api/v1/teams", json={"name": f"AddScopedTarget-{controller_id}"}, headers=auth_headers
+    ).json()
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution(
+            "update_team",
+            {"team": team["id"], "name": "Should-Not-Rename", "agent_ids": [scoped["name"]]},
+        ),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+    updated = client.get(f"/api/v1/teams/{team['id']}", headers=auth_headers).json()
+    assert updated["name"] == f"AddScopedTarget-{controller_id}"
+    assert updated["agent_ids"] == []
+
+
+def test_update_team_dropping_scoped_member_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387 / #353: full-replace membership that omits a scoped member
+    severs the @mention path the owner set up."""
+    controller_id = _create_controller_agent(client, auth_headers, "ScopedDropper")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
+    scoped = _create_unscoped_target(client, auth_headers, f"ScopedDropTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{scoped['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+    team = client.post(
+        "/api/v1/teams", json={"name": f"DropScopedTarget-{controller_id}"}, headers=auth_headers
+    ).json()
+    patched = client.patch(
+        f"/api/v1/teams/{team['id']}", json={"agent_ids": [scoped["id"]]}, headers=auth_headers
+    )
+    assert patched.status_code == 200, patched.text
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("update_team", {"team": team["id"], "agent_ids": []}),
+    )
+    assert "holds a capability scope" in messages[2]["content"]
+    updated = client.get(f"/api/v1/teams/{team['id']}", headers=auth_headers).json()
+    assert updated["agent_ids"] == [scoped["id"]]
+
+
+def test_update_team_keeping_scoped_member_still_allowed(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP update_team lets a non-owner keep/reorder an existing scoped
+    member; the tool must match so a name-only edit isn't blocked."""
+    controller_id = _create_controller_agent(client, auth_headers, "ScopedKeeper")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "update_team")
+    scoped = _create_unscoped_target(client, auth_headers, f"ScopedKeepTarget-{controller_id}")
+    client.put(
+        f"/api/v1/agents/{scoped['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+    team = client.post(
+        "/api/v1/teams", json={"name": f"KeepScopedTarget-{controller_id}"}, headers=auth_headers
+    ).json()
+    patched = client.patch(
+        f"/api/v1/teams/{team['id']}", json={"agent_ids": [scoped["id"]]}, headers=auth_headers
+    )
+    assert patched.status_code == 200, patched.text
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution(
+            "update_team",
+            {
+                "team": team["id"],
+                "name": f"Renamed-KeepScoped-{controller_id}",
+                "agent_ids": [scoped["id"]],
+            },
+        ),
+    )
+    assert "updated team" in messages[2]["content"]
+    updated = client.get(f"/api/v1/teams/{team['id']}", headers=auth_headers).json()
+    assert updated["name"] == f"Renamed-KeepScoped-{controller_id}"
+    assert updated["agent_ids"] == [scoped["id"]]
+
+
+def test_delete_team_holding_scoped_agent_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387 / #353: deleting the whole team is at least as disruptive as
+    dropping the scoped member."""
+    controller_id = _create_controller_agent(client, auth_headers, "ScopedTeamDeleter")
+    channel_id = _create_channel_with_team(client, auth_headers, controller_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, controller_id, "delete_team")
+    scoped = _create_unscoped_target(
+        client, auth_headers, f"ScopedTeamDeleteTarget-{controller_id}"
+    )
+    client.put(
+        f"/api/v1/agents/{scoped['id']}/tool-scopes",
+        json={"scopes": ["channels:manage"]},
+        headers=auth_headers,
+    )
+    team = client.post(
+        "/api/v1/teams", json={"name": f"Doomed-Scoped-{controller_id}"}, headers=auth_headers
+    ).json()
+    patched = client.patch(
+        f"/api/v1/teams/{team['id']}", json={"agent_ids": [scoped["id"]]}, headers=auth_headers
+    )
+    assert patched.status_code == 200, patched.text
+
+    messages = _trigger(
+        client,
+        auth_headers,
+        channel_id,
+        monkeypatch,
+        _tool_execution("delete_team", {"team": team["id"]}),
+    )
+    assert "holds an agent with a capability scope" in messages[2]["content"]
+    assert client.get(f"/api/v1/teams/{team['id']}", headers=auth_headers).status_code == 200

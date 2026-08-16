@@ -378,9 +378,80 @@ def test_update_workflow_unknown_reference_is_rejected(
     assert "no workflow with that id or name" in messages[2]["content"]
 
 
-def test_delete_workflow_removes_workflow(
+def test_update_workflow_rename_of_published_is_refused(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#387 / #356: a published workflow's name is its `/{name}` trigger
+    surface. The trigger has no live session to grant an owner exception."""
+    agent_id = _create_agent(client, auth_headers, "PublishedRenamer")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workflow")
+    old_name = f"published-rename-{agent_id}"
+    workflow_id = _create_workflow_via_api(client, auth_headers, old_name)
+    _give_entry_point(client, auth_headers, workflow_id)
+    published = client.post(f"/api/v1/workflows/{workflow_id}/publish", headers=auth_headers)
+    assert published.status_code == 200, published.text
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(
+            _tool_execution("update_workflow", {"workflow": old_name, "name": "should-not-rename"})
+        ),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go rename it"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "requires a live owner session" in messages[2]["content"]
+
+    updated = client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).json()
+    assert updated["name"] == old_name
+
+
+def test_update_workflow_description_of_published_still_allowed(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP PATCH still lets any grant edit a published workflow's
+    description; the tool must match."""
+    agent_id = _create_agent(client, auth_headers, "PublishedDescriber")
+    channel_id = _create_channel_with_team(client, auth_headers, agent_id)
+    authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "update_workflow")
+    name = f"published-describe-{agent_id}"
+    workflow_id = _create_workflow_via_api(client, auth_headers, name)
+    _give_entry_point(client, auth_headers, workflow_id)
+    published = client.post(f"/api/v1/workflows/{workflow_id}/publish", headers=auth_headers)
+    assert published.status_code == 200, published.text
+
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent(
+            _tool_execution(
+                "update_workflow", {"workflow": name, "description": "still just a blurb"}
+            )
+        ),
+    )
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "go update it"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert "updated workflow" in messages[2]["content"]
+
+    updated = client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).json()
+    assert updated["name"] == name
+    assert updated["description"] == "still just a blurb"
+
+
+def test_delete_workflow_is_refused(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387: HTTP delete_workflow is OwnerGrant. The trigger has no live
+    session, so it refuses outright -- even a draft."""
     agent_id = _create_agent(client, auth_headers, "Deleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_workflow")
@@ -398,17 +469,16 @@ def test_delete_workflow_removes_workflow(
     )
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert "deleted workflow" in messages[2]["content"]
+    assert "requires a live owner session" in messages[2]["content"]
+    assert client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 200
 
-    assert client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).status_code == 404
 
-
-async def test_delete_workflow_trigger_queues_sync_tombstone(
+async def test_delete_workflow_trigger_does_not_queue_tombstone(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#287: an agent-triggered delete (dispatch/service.py's
-    _handle_delete_workflow_trigger) must tombstone the same as the HTTP
-    delete_workflow route does."""
+    """#387: a refused delete must not tombstone the workflow. The HTTP
+    delete_workflow route still tombstones (#287); this trigger just
+    never reaches that write."""
     agent_id = _create_agent(client, auth_headers, "SyncDeleter")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "delete_workflow")
@@ -428,8 +498,7 @@ async def test_delete_workflow_trigger_queues_sync_tombstone(
 
     async with session_scope() as db:
         pending = await db.get(SyncPendingOutbound, ("workflow", workflow_id))
-        assert pending is not None
-        assert pending.deleted is True
+        assert pending is None or pending.deleted is not True
 
 
 def test_delete_workflow_unknown_reference_is_rejected(
@@ -453,9 +522,11 @@ def test_delete_workflow_unknown_reference_is_rejected(
     assert "no workflow with that id or name" in messages[2]["content"]
 
 
-def test_publish_workflow_with_entry_point_succeeds(
+def test_publish_workflow_with_entry_point_is_refused(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#387: HTTP publish_workflow is OwnerGrant. A ready draft still
+    cannot be flipped live from chat."""
     agent_id = _create_agent(client, auth_headers, "Publisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "publish_workflow")
@@ -474,10 +545,10 @@ def test_publish_workflow_with_entry_point_succeeds(
     )
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert "published workflow" in messages[2]["content"]
+    assert "requires a live owner session" in messages[2]["content"]
 
     published = client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).json()
-    assert published["published"] is True
+    assert published["published"] is False
 
 
 def test_publish_workflow_without_entry_point_is_rejected(
@@ -529,9 +600,11 @@ def test_publish_workflow_already_published_is_rejected(
     assert "already published" in messages[2]["content"]
 
 
-def test_unpublish_workflow_reverts_to_draft(
+def test_unpublish_workflow_is_refused(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#387: HTTP unpublish_workflow is OwnerGrant. Detaching `/{name}`
+    from chat is the same live-surface rewrite as publish."""
     agent_id = _create_agent(client, auth_headers, "Unpublisher")
     channel_id = _create_channel_with_team(client, auth_headers, agent_id)
     authorize_agent_for_builtin_tool(client, auth_headers, agent_id, "unpublish_workflow")
@@ -552,10 +625,10 @@ def test_unpublish_workflow_reverts_to_draft(
     )
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert "unpublished workflow" in messages[2]["content"]
+    assert "requires a live owner session" in messages[2]["content"]
 
     unpublished = client.get(f"/api/v1/workflows/{workflow_id}", headers=auth_headers).json()
-    assert unpublished["published"] is False
+    assert unpublished["published"] is True
 
 
 def test_unpublish_workflow_not_published_is_rejected(

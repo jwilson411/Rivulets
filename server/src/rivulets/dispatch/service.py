@@ -77,6 +77,7 @@ from rivulets.agentos.mcp import (
 from rivulets.agentos.models import AUTO_MODEL, ModelTier, resolve_model, resolve_tier_model
 from rivulets.agentos.tool_resolution import is_builtin_tool_authorized
 from rivulets.api.agents import agent_holds_owner_scope, find_unauthorized_tool_assignment
+from rivulets.api.teams import team_holds_owner_scoped_agent
 from rivulets.config import get_settings
 from rivulets.db.base import utcnow_iso
 from rivulets.db.models import (
@@ -3281,7 +3282,13 @@ async def _handle_update_team_trigger(
     (_resolve_agent_ref) rather than raw id only, since a model is far
     more likely to know a teammate's name than its uuid; api/teams.py's
     own TeamUpdate.agent_ids only ever accepts ids because a human's UI
-    already resolved the name to an id before the request was built."""
+    already resolved the name to an id before the request was built.
+
+    #387: also mirrors that handler's #326/#353 membership gates --
+    adding or dropping a scoped member is owner-only on the HTTP side,
+    and this trigger has no live session to compare a claims.grant ==
+    "owner" bypass against, so it refuses those diffs outright. Keeping
+    or reordering an existing scoped member stays allowed, same as HTTP."""
     result = await _resolve_team_ref(db, call.team_ref)
     if result is None:
         return [
@@ -3315,6 +3322,9 @@ async def _handle_update_team_trigger(
         ]
 
     resolved_agents: list[Agent] = []
+    old_member_ids: set[str] | None = None
+    new_member_ids: set[str] | None = None
+    deduped: list[Agent] = []
     if call.agent_ids is not None:
         for ref in call.agent_ids:
             member = await _resolve_agent_ref(db, ref)
@@ -3328,15 +3338,6 @@ async def _handle_update_team_trigger(
                     )
                 ]
             resolved_agents.append(member)
-
-    previous_name = team.name
-    if call.name is not None:
-        team.name = call.name
-    if call.description is not None:
-        team.description = call.description
-    old_member_ids: set[str] | None = None
-    new_member_ids: set[str] | None = None
-    if call.agent_ids is not None:
         # De-duped by id, first-seen order preserved -- two different refs
         # (e.g. an agent's name and its id) can resolve to the same Agent,
         # and TeamAgent's primary key is the (team_id, agent_id) pair, so
@@ -3346,10 +3347,49 @@ async def _handle_update_team_trigger(
         old_member_ids = set(
             (await db.scalars(select(TeamAgent.agent_id).where(TeamAgent.team_id == team.id))).all()
         )
+        new_member_ids = {member.id for member in deduped}
+        # #387 / #326: adding a scoped agent is the confused-deputy half
+        # HTTP update_team already refuses without an owner session.
+        # Checked before any field write so a refused membership change
+        # can't piggy-back a name/description commit.
+        for member in deduped:
+            if member.id in old_member_ids:
+                continue
+            if await agent_holds_owner_scope(db, member.id):
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to add @{member.name} to team {team.name!r}, but "
+                        "it holds a capability scope -- that requires a live owner session in "
+                        "the UI, not just this chat.",
+                    )
+                ]
+        # #387 / #353: dropping a scoped member severs the @mention path
+        # the owner set up, same standing as delete_team below.
+        for member_id in old_member_ids - new_member_ids:
+            if await agent_holds_owner_scope(db, member_id):
+                dropped = await db.get(Agent, member_id)
+                dropped_name = dropped.name if dropped is not None else member_id
+                return [
+                    _system_message(
+                        db,
+                        rivulet,
+                        f"@{agent.name} tried to remove @{dropped_name} from team "
+                        f"{team.name!r}, but it holds a capability scope -- that requires a "
+                        "live owner session in the UI, not just this chat.",
+                    )
+                ]
+
+    previous_name = team.name
+    if call.name is not None:
+        team.name = call.name
+    if call.description is not None:
+        team.description = call.description
+    if call.agent_ids is not None:
         await db.execute(delete(TeamAgent).where(TeamAgent.team_id == team.id))
         for position, member in enumerate(deduped):
             db.add(TeamAgent(team_id=team.id, agent_id=member.id, position=position))
-        new_member_ids = {member.id for member in deduped}
 
     await db.commit()
     await publish_current_state(db, "team", team.id)
@@ -3375,7 +3415,12 @@ async def _handle_delete_team_trigger(
     db: AsyncSession, rivulet: Rivulet, agent: Agent, team_ref: str
 ) -> list[Message]:
     """#190: an agent called the delete_team tool. Mirrors api/teams.py's
-    delete_team handler."""
+    delete_team handler.
+
+    #387: also mirrors that handler's #353 gate -- deleting a team that
+    holds a scoped agent is owner-only on the HTTP side, and this trigger
+    has no live session to check a claims.grant == "owner" bypass
+    against, so it refuses outright."""
     result = await _resolve_team_ref(db, team_ref)
     if result is None:
         return [
@@ -3397,6 +3442,16 @@ async def _handle_delete_team_trigger(
             )
         ]
     team = result
+    if await team_holds_owner_scoped_agent(db, team.id):
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to delete team {team.name!r}, but it holds an agent with "
+                "a capability scope -- that requires a live owner session in the UI, not just "
+                "this chat.",
+            )
+        ]
     team_name = team.name
     team_id = team.id
     await db.delete(team)
@@ -3876,7 +3931,13 @@ async def _handle_update_workflow_trigger(
     workflows.py's update_workflow handler for the name/description
     fields only -- on_failure_workflow_id/on_call_agent_id aren't
     settable through this tool (tools/builtin/workflows.py's module
-    docstring)."""
+    docstring).
+
+    #387: also mirrors that handler's #356 published-name gate -- a
+    published workflow's name *is* its `/{name}` trigger surface, and
+    this trigger has no live session to grant an owner exception, so a
+    rename is refused outright. Draft renames and description edits
+    (published or not) stay open, same as HTTP."""
     workflow = await _resolve_workflow_ref(db, call.workflow_ref)
     if workflow is None:
         return [
@@ -3900,6 +3961,17 @@ async def _handle_update_workflow_trigger(
 
     previous_name = workflow.name
     if call.name is not None and call.name != workflow.name:
+        # #387 / #356: renaming a published workflow detaches `/{name}`.
+        if workflow.published:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to rename published workflow {workflow.name!r} -- "
+                    "that requires a live owner session in the UI, not just this chat. "
+                    "Unpublish it first.",
+                )
+            ]
         if not _WORKFLOW_NAME_PATTERN.match(call.name):
             return [
                 _system_message(
@@ -3943,7 +4015,12 @@ async def _handle_delete_workflow_trigger(
     """#192: an agent called the delete_workflow tool. Mirrors api/
     workflows.py's delete_workflow handler (cascade delete of the
     workflow's own nodes/connections, Workflow.nodes/connections'
-    cascade="all, delete-orphan")."""
+    cascade="all, delete-orphan").
+
+    #387: that HTTP route is OwnerGrant. This trigger has no live
+    session to check a claims.grant == "owner" bypass against, so it
+    refuses outright rather than letting a guest @mention a
+    workflows:manage agent into deleting the definition."""
     workflow = await _resolve_workflow_ref(db, workflow_ref)
     if workflow is None:
         return [
@@ -3954,22 +4031,14 @@ async def _handle_delete_workflow_trigger(
                 "that id or name was found.",
             )
         ]
-    workflow_name = workflow.name
-    workflow_id = workflow.id
-    await db.delete(workflow)
-    await db.commit()
-    # #287: mirrors api/workflows.py's delete_workflow -- same #238 failure
-    # mode; nodes/connections cascade-delete on the applying peer too (see
-    # that handler's comment for why they don't need their own tombstone).
-    await publish_tombstone(db, "workflow", workflow_id)
-
-    message = _system_message(db, rivulet, f"@{agent.name} deleted workflow {workflow_name!r}.")
-    publish(
-        rivulet.id,
-        "system_alert",
-        {"type": "workflow_deleted", "workflow_name": workflow_name, "deleted_by": agent.id},
-    )
-    return [message]
+    return [
+        _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} tried to delete workflow {workflow.name!r} -- that requires a "
+            "live owner session in the UI, not just this chat.",
+        )
+    ]
 
 
 async def _handle_publish_workflow_trigger(
@@ -3978,7 +4047,12 @@ async def _handle_publish_workflow_trigger(
     """#192: an agent called the publish_workflow tool. Mirrors api/
     workflows.py's publish_workflow handler (refuses without an entry
     connection, the same "can this even run" check the engine itself
-    makes at trigger time)."""
+    makes at trigger time).
+
+    #387: that HTTP route is OwnerGrant. This trigger has no live
+    session to check a claims.grant == "owner" bypass against, so a
+    successful publish (flipping the live `/{name}` surface on) is
+    refused outright."""
     workflow = await _resolve_workflow_ref(db, workflow_ref)
     if workflow is None:
         return [
@@ -4014,17 +4088,16 @@ async def _handle_publish_workflow_trigger(
             )
         ]
 
-    workflow.published = True
-    await db.commit()
-    await publish_current_state(db, "workflow", workflow.id)
-
-    message = _system_message(db, rivulet, f"@{agent.name} published workflow {workflow.name!r}.")
-    publish(
-        rivulet.id,
-        "system_alert",
-        {"type": "workflow_published", "workflow_id": workflow.id, "agent_id": agent.id},
-    )
-    return [message]
+    # #387: HTTP publish_workflow is OwnerGrant -- flipping `published`
+    # attaches `/{name}` for every peer. No live session here.
+    return [
+        _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} tried to publish workflow {workflow.name!r} -- that requires a "
+            "live owner session in the UI, not just this chat.",
+        )
+    ]
 
 
 async def _handle_unpublish_workflow_trigger(
@@ -4032,7 +4105,11 @@ async def _handle_unpublish_workflow_trigger(
 ) -> list[Message]:
     """#192: an agent called the unpublish_workflow tool. Mirrors api/
     workflows.py's unpublish_workflow handler (reverts to draft; has no
-    effect on a run already in flight)."""
+    effect on a run already in flight).
+
+    #387: that HTTP route is OwnerGrant. Detaching `/{name}` is the
+    same live-surface rewrite as publish; no live session here, so
+    refused outright."""
     workflow = await _resolve_workflow_ref(db, workflow_ref)
     if workflow is None:
         return [
@@ -4053,17 +4130,16 @@ async def _handle_unpublish_workflow_trigger(
             )
         ]
 
-    workflow.published = False
-    await db.commit()
-    await publish_current_state(db, "workflow", workflow.id)
-
-    message = _system_message(db, rivulet, f"@{agent.name} unpublished workflow {workflow.name!r}.")
-    publish(
-        rivulet.id,
-        "system_alert",
-        {"type": "workflow_unpublished", "workflow_id": workflow.id, "agent_id": agent.id},
-    )
-    return [message]
+    # #387: HTTP unpublish_workflow is OwnerGrant -- same live-surface
+    # rewrite as publish, no live session to grant an owner exception.
+    return [
+        _system_message(
+            db,
+            rivulet,
+            f"@{agent.name} tried to unpublish workflow {workflow.name!r} -- that requires a "
+            "live owner session in the UI, not just this chat.",
+        )
+    ]
 
 
 async def _handle_list_workflows_trigger(
