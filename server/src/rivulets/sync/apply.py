@@ -1141,8 +1141,10 @@ async def fetch_file_content_from_known_sources(file_row: File) -> bool:
 # time (agentos/tool_resolution.py), so a synced source edit (or a tool
 # tombstone) that doesn't rebuild leaves already-registered agents
 # running the stale in-memory function until something else happens to
-# rebuild them.
-_AGENTOS_RESYNC_ENTITY_TYPES = frozenset({"agent", "agent_tool", "agent_tool_scope", "tool"})
+# rebuild them. Public because api/sync.py's resolve_conflict needs the
+# identical set: a keep-remote resolution applies the same class of
+# change as an incoming apply (#390).
+AGENTOS_RESYNC_ENTITY_TYPES = frozenset({"agent", "agent_tool", "agent_tool_scope", "tool"})
 
 _DISPATCH: dict[str, EntitySpec] = {
     "agent": AGENT_SPEC,
@@ -1296,7 +1298,7 @@ async def handle_incoming_state_change(
             logger.info(
                 "Applied remote change for %s/%s from %s", entity_type, entity_id, origin_node_id
             )
-            if entity_type in _AGENTOS_RESYNC_ENTITY_TYPES:
+            if entity_type in AGENTOS_RESYNC_ENTITY_TYPES:
                 # Without this, a node that only ever *receives* an Agent
                 # row via sync has the DB row but no matching in-process
                 # AgentOS registration -- run_agent() would raise "Agent

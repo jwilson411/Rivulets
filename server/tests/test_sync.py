@@ -2641,13 +2641,23 @@ async def test_concurrent_tombstone_resolution_applies_by_stamp(
 
 
 async def test_tool_conflict_keep_remote_writes_source_code(
-    client: TestClient, auth_headers: dict[str, str]
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#348: tool conflict snapshots used to be metadata-only, so "keep
     remote" renamed the tool while this node kept executing its own
     pre-conflict source under that name. The snapshot now carries the
     remote source_code, and resolving toward it writes the chosen bytes to
-    this node's {id}.py plus a ToolVersion for rollback history."""
+    this node's {id}.py plus a ToolVersion for rollback history. #390
+    (#362 leftover): writing the chosen bytes isn't enough on its own --
+    custom tool source is loaded at agent *build* time, so the resolve
+    must also rebuild AgentOS (sync_agents) or already-registered agents
+    keep executing the pre-conflict function from memory."""
+    sync_agents_calls: list[object] = []
+
+    async def fake_sync_agents(db: object) -> None:
+        sync_agents_calls.append(db)
+
+    monkeypatch.setattr("rivulets.api.sync.sync_agents", fake_sync_agents)
     local_source = "def add_numbers(a, b):\n    return a + b\n"
     remote_source = "def add_numbers(a, b):\n    return a * b\n"
     source_path = get_settings().tools_dir / "tool-res-1.py"
@@ -2692,6 +2702,7 @@ async def test_tool_conflict_keep_remote_writes_source_code(
     assert resolved.status_code == 200, resolved.text
 
     assert source_path.read_text() == remote_source
+    assert len(sync_agents_calls) == 1
     async with session_scope() as db:
         tool = await db.get(Tool, "tool-res-1")
         assert tool is not None
@@ -2702,6 +2713,69 @@ async def test_tool_conflict_keep_remote_writes_source_code(
             .all()
         )
         assert [v.source_code for v in versions] == [remote_source]
+
+
+async def test_tool_conflict_keep_remote_delete_resyncs_agentos_registry(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#390's delete half (#362 leftover): "keep remote" on a tool
+    modify/delete conflict deletes the row and unlinks the .py, but before
+    the fix never rebuilt AgentOS, leaving the agent's cached in-memory
+    function callable after the tool was gone. Keep-local, by contrast,
+    changes nothing AgentOS can see and must NOT trigger a rebuild -- both
+    halves asserted here via two conflicts on two tools."""
+    sync_agents_calls: list[object] = []
+
+    async def fake_sync_agents(db: object) -> None:
+        sync_agents_calls.append(db)
+
+    monkeypatch.setattr("rivulets.api.sync.sync_agents", fake_sync_agents)
+
+    source = "def doomed_tool():\n    return 1\n"
+    paths: dict[str, Path] = {}
+    async with session_scope() as db:
+        for tool_id in ("tool-del-res-1", "tool-del-res-2"):
+            source_path = get_settings().tools_dir / f"{tool_id}.py"
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(source)
+            paths[tool_id] = source_path
+            db.add(
+                Tool(
+                    id=tool_id,
+                    name=tool_id.replace("-", "_"),
+                    description="Deleted remotely, edited locally.",
+                    tool_type="custom",
+                    source_path=str(source_path),
+                )
+            )
+        await db.commit()
+        for tool_id in ("tool-del-res-1", "tool-del-res-2"):
+            await record_local_change(db, "tool", tool_id, "node-a")
+            result = await apply_remote_delete(db, "tool", tool_id, {"node-b": 1}, "node-b")
+            assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    by_entity = {c["entity_id"]: c for c in conflicts if c["entity_id"] in paths}
+    assert len(by_entity) == 2
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{by_entity['tool-del-res-1']['id']}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert len(sync_agents_calls) == 1
+    assert not paths["tool-del-res-1"].exists()
+    async with session_scope() as db:
+        assert await db.get(Tool, "tool-del-res-1") is None
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{by_entity['tool-del-res-2']['id']}/resolve",
+        json={"keep": "local"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert len(sync_agents_calls) == 1  # keep-local did not rebuild
 
 
 async def test_file_conflict_keep_remote_recomputes_path_and_records_source(
