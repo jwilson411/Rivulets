@@ -210,7 +210,14 @@ async def _run_workflow_case(
     that path -- the only caller who shouldn't fire a draft -- is gated
     at the API layer instead (#355, api/evals.py's
     _require_owner_for_draft_workflow, checked at both suite create and
-    run), matching how every other trigger enforces the published gate."""
+    run), matching how every other trigger enforces the published gate.
+
+    #389: triggered_by='eval' makes the engine suppress #360's builtin
+    side-effect tool triggers for every agent node in the run (and in
+    anything it nests) -- an eval run is unattended and invite-grant can
+    fire one against a published workflow (#355), so it must measure the
+    graph without creating channels/schedules/child runs against the
+    workspace. See run_workflow's `suppress_tool_triggers`."""
     workflow = await db.get(Workflow, workflow_id)
     if workflow is None:
         raise RuntimeError("Workflow no longer exists")

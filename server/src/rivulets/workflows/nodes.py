@@ -127,8 +127,13 @@ async def execute_agent_node(
     post their confirmation/rejection messages into; `ancestry` (the
     engine's _RunContext.ancestry) makes an agent-triggered run_workflow
     a properly-guarded nested run instead of an unguarded recursion
-    vector. Both default to "skip trigger processing" so direct callers
-    (evals) keep the old run-only behavior."""
+    vector. Both default to "skip trigger processing", which is also how
+    eval-triggered workflow runs stay run-only (#389): the engine
+    withholds `rivulet_id` when its _RunContext.suppress_tool_triggers is
+    set (derived from triggered_by == 'eval', inherited by nested runs),
+    so an eval measures what the agent said and called without executing
+    create_channel/schedule_workflow/run_workflow against the
+    workspace."""
     if node.agent_id is None:
         raise ValueError(f"Node {node.name!r} has no agent assigned")
     agent = await db.get(Agent, node.agent_id)
