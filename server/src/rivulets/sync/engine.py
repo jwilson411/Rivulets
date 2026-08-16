@@ -103,6 +103,11 @@ from rivulets.sync.file_transfer import (
     read_exactly,
 )
 from rivulets.sync.identity import load_or_create_node_key
+from rivulets.sync.state_snapshot import (
+    STATE_SNAPSHOT_PROTOCOL,
+    read_snapshot_frames,
+    write_snapshot_frame,
+)
 from rivulets.validation import local_path_for_content_hash
 
 logger = logging.getLogger(__name__)
@@ -114,11 +119,16 @@ _THREAD_START_TIMEOUT_SECONDS = 10
 _THREAD_STOP_TIMEOUT_SECONDS = 10
 _FILE_TRANSFER_TIMEOUT_SECONDS = 60
 _AGENT_DISPATCH_ACK_TIMEOUT_SECONDS = 10
+# Whole-snapshot bounds, both directions: sending N small frames and
+# reading a peer's stream until EOF each get one overall deadline rather
+# than a per-frame one -- a peer trickling bytes forever must not pin a
+# stream handler open indefinitely.
+_SNAPSHOT_TIMEOUT_SECONDS = 120
 
 StateChangeHandler = Callable[
     [str, str, dict[str, int], str, dict[str, Any]], Coroutine[Any, Any, None]
 ]
-PeerConnectedHandler = Callable[[], Coroutine[Any, Any, None]]
+PeerConnectedHandler = Callable[[str], Coroutine[Any, Any, None]]
 AgentDispatchHandler = Callable[[AgentDispatchRequest], Coroutine[Any, Any, None]]
 
 _MESH_FORM_DELAY_SECONDS = 2.0
@@ -368,9 +378,10 @@ class SyncEngine:
         self._on_state_change = handler
 
     def set_peer_connected_handler(self, handler: PeerConnectedHandler) -> None:
-        """Called (after a short delay — see _on_peer_connected) whenever
-        a *new* peer connects, mDNS-discovered or manually connected.
-        api/auth.py's login wires this to drain_pending_outbound: draining
+        """Called with the new peer's id (after a short delay — see
+        _on_peer_connected) whenever a *new* peer connects, mDNS-discovered
+        or manually connected. app.py wires this to drain_pending_outbound
+        plus a full catch-up snapshot push to that peer (#347): draining
         once at login time isn't enough on its own — mDNS discovery +
         gossipsub mesh formation (heartbeat-driven GRAFT) both take a few
         seconds after the engine starts, so a drain that runs immediately
@@ -429,6 +440,7 @@ class SyncEngine:
         self._started_monotonic = trio.current_time()
         host.set_stream_handler(FILE_TRANSFER_PROTOCOL, self._handle_file_transfer_stream)
         host.set_stream_handler(AGENT_DISPATCH_PROTOCOL, self._handle_agent_dispatch_stream)
+        host.set_stream_handler(STATE_SNAPSHOT_PROTOCOL, self._handle_state_snapshot_stream)
         host.get_network().register_notifee(
             _PeerConnectionNotifee(self._on_peer_connected, self._on_peer_disconnected)
         )
@@ -627,7 +639,7 @@ class SyncEngine:
             self._connected_peers[peer_id] = address
             logger.info("Peer %s connected", peer_id)
         if is_new:
-            trio.lowlevel.spawn_system_task(self._trigger_peer_connected_handler)
+            trio.lowlevel.spawn_system_task(self._trigger_peer_connected_handler, peer_id)
 
     def _on_peer_disconnected(self, peer_id: str) -> None:
         if self._connected_peers.pop(peer_id, None) is not None:
@@ -643,12 +655,12 @@ class SyncEngine:
             # second cross-thread wakeup path just for this.
             self._last_coordinator_heartbeat_at = None
 
-    async def _trigger_peer_connected_handler(self) -> None:
+    async def _trigger_peer_connected_handler(self, peer_id: str) -> None:
         await trio.sleep(_MESH_FORM_DELAY_SECONDS)
         handler = self._on_peer_connected_handler
         loop = self._loop
         if handler is not None and loop is not None:
-            asyncio.run_coroutine_threadsafe(handler(), loop)
+            asyncio.run_coroutine_threadsafe(handler(peer_id), loop)
 
     async def list_peers(self) -> list[PeerInfo]:
         return [
@@ -959,6 +971,80 @@ class SyncEngine:
                     )
                 return await read_exactly(stream, length)
         finally:
+            await stream.close()
+
+    async def _handle_state_snapshot_stream(self, stream: INetStream) -> None:
+        """Server side of state_snapshot.py's wire protocol (#347): reads a
+        peer's full snapshot, then hands the envelopes to asyncio as ONE
+        sequential-apply coroutine rather than one fire-and-forget task per
+        envelope the way _receive_loop does for live gossip -- a snapshot
+        can carry hundreds of envelopes at once, and firing them all
+        concurrently at a single SQLite file is a lock pile-up, not a
+        speedup. Each envelope still goes through the exact same handler
+        (sync/apply.py's handle_incoming_state_change) a gossip message
+        does, so vector-clock staleness/conflict judgment is identical."""
+        try:
+            with trio.fail_after(_SNAPSHOT_TIMEOUT_SECONDS):
+                frames = await read_snapshot_frames(stream)
+        except Exception:
+            logger.warning("Error reading state-snapshot stream", exc_info=True)
+            return
+        finally:
+            await stream.close()
+        self._dispatch_snapshot_frames(frames)
+
+    def _dispatch_snapshot_frames(self, frames: list[bytes]) -> None:
+        handler = self._on_state_change
+        loop = self._loop
+        if not frames or handler is None or loop is None:
+            return
+        parsed: list[tuple[str, str, dict[str, int], str, dict[str, Any]]] = []
+        for frame in frames:
+            try:
+                envelope = json.loads(frame.decode())
+                parsed.append(
+                    (
+                        envelope["entity_type"],
+                        envelope["entity_id"],
+                        envelope["vector_clock"],
+                        envelope["origin_node_id"],
+                        envelope["payload"],
+                    )
+                )
+            except Exception:
+                logger.warning("Discarding malformed snapshot envelope", exc_info=True)
+
+        async def _apply_sequentially() -> None:
+            for args in parsed:
+                await handler(*args)
+
+        asyncio.run_coroutine_threadsafe(_apply_sequentially(), loop)
+
+    async def send_state_snapshot(self, peer_id: str, envelopes: list[bytes]) -> bool:
+        """Client side: stream this node's full state to `peer_id` (#347's
+        connect-time/periodic catch-up -- see sync/catchup.py for when this
+        is called and how the envelopes are built). Returns False on any
+        transport failure, same best-effort convention as request_file;
+        the periodic catch-up loop is the retry."""
+        if self._thread is None:
+            return False
+        try:
+            await self._call_trio(self._trio_send_snapshot, peer_id, envelopes)
+        except Exception:
+            logger.warning("Could not send state snapshot to peer %s", peer_id, exc_info=True)
+            return False
+        return True
+
+    async def _trio_send_snapshot(self, peer_id: str, envelopes: list[bytes]) -> None:
+        assert self._host is not None
+        stream = await self._host.new_stream(ID.from_base58(peer_id), [STATE_SNAPSHOT_PROTOCOL])
+        try:
+            with trio.fail_after(_SNAPSHOT_TIMEOUT_SECONDS):
+                for envelope in envelopes:
+                    await write_snapshot_frame(stream, envelope)
+        finally:
+            # Closing is what terminates the stream -- the receiver reads
+            # until EOF (see state_snapshot.py: no response frame exists).
             await stream.close()
 
     async def _handle_agent_dispatch_stream(self, stream: INetStream) -> None:
