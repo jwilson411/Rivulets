@@ -2017,13 +2017,16 @@ def test_sync_status_when_not_running(client: TestClient, auth_headers: dict[str
     response = client.get("/api/v1/sync/status", headers=auth_headers)
     assert response.status_code == 200
     body = response.json()
-    assert body == {
-        "running": False,
-        "node_id": None,
-        "peers": [],
-        "pending_changes": 0,
-        "own_addresses": [],
-    }
+    assert body["running"] is False
+    assert body["node_id"] is None
+    assert body["peers"] == []
+    assert body["own_addresses"] == []
+    # #347: pending_changes is the real SyncPendingOutbound/-Inbound
+    # backlog now, not a hardcoded 0 — and under this fixture the engine
+    # never runs, so workspace bootstrap's own publishes are legitimately
+    # queued. Exact count is bootstrap's business, not this test's;
+    # test_sync_catchup.py asserts the counting itself.
+    assert body["pending_changes"] >= 0
 
 
 def test_sync_connect_when_not_running(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -3228,7 +3231,7 @@ async def test_trigger_peer_connected_handler_is_a_noop_with_no_handler(tmp_path
     original_sleep = engine_module.trio.sleep
     engine_module.trio.sleep = _no_sleep  # type: ignore[assignment]
     try:
-        await engine._trigger_peer_connected_handler()  # pyright: ignore[reportPrivateUsage]
+        await engine._trigger_peer_connected_handler("peer-1")  # pyright: ignore[reportPrivateUsage]
     finally:
         engine_module.trio.sleep = original_sleep  # type: ignore[assignment]
 
@@ -3239,8 +3242,10 @@ async def test_trigger_peer_connected_handler_invokes_the_registered_handler(
     engine = SyncEngine(tmp_path)
     engine._loop = asyncio.get_running_loop()  # pyright: ignore[reportPrivateUsage]
     called = asyncio.Event()
+    seen: list[str] = []
 
-    async def handler() -> None:
+    async def handler(peer_id: str) -> None:
+        seen.append(peer_id)
         called.set()
 
     engine.set_peer_connected_handler(handler)
@@ -3253,8 +3258,9 @@ async def test_trigger_peer_connected_handler_invokes_the_registered_handler(
     original_sleep = engine_module.trio.sleep
     engine_module.trio.sleep = _no_sleep  # type: ignore[assignment]
     try:
-        await engine._trigger_peer_connected_handler()  # pyright: ignore[reportPrivateUsage]
+        await engine._trigger_peer_connected_handler("peer-1")  # pyright: ignore[reportPrivateUsage]
         await asyncio.wait_for(called.wait(), timeout=5)
+        assert seen == ["peer-1"]
     finally:
         engine_module.trio.sleep = original_sleep  # type: ignore[assignment]
 

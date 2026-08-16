@@ -127,6 +127,12 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     # test suite the same way -- no-op it here too. Real retention behavior
     # is covered by tests/test_tracing.py against prune_old_traces directly.
     monkeypatch.setattr("rivulets.app.run_retention_loop", _noop_async)
+    # #347's run_catchup_loop is the same shape again (bare
+    # asyncio.create_task at lifespan startup, session_scope() per tick
+    # against the shared StaticPool connection) -- no-op it here too. Real
+    # catch-up behavior is covered by tests/test_sync_catchup.py against
+    # the catchup functions directly.
+    monkeypatch.setattr("rivulets.app.run_catchup_loop", _noop_async)
 
     override_engine(make_engine(in_memory=True))
     reset_agentos_for_testing()
