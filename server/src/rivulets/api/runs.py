@@ -20,15 +20,27 @@ per-span request; fetching every relevant ToolCallLog row alongside the
 trace's spans in `get_run`'s single query (grouped client-side by
 agent_run_id) keeps this endpoint's existing "whole trace detail in one
 call" shape.
+
+#357 (leftover of #321): tool-call payloads are owner-only. ToolCallLog's
+`arguments_json`/`result_summary` carry the same class of secrets that got
+GET /tools/{id}/versions owner-gated -- `http_request` Authorization
+headers, `write_file` contents, `query_workspace_db` SQL, and whatever a
+custom/MCP tool was passed. Rather than 403ing the whole trace detail for
+an invited human (run visibility is deliberately open to any grant, like
+the list view), `get_run` nulls both fields on every tool call for a
+non-owner session. All calls, not just `sensitive=True` ones: custom/MCP
+calls always log sensitive=False (log_tool_calls' docstring -- no UI to
+mark them yet), so the flag can't be trusted to mean "safe to show".
 """
 
 from collections import defaultdict
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
-from rivulets.api.deps import CurrentWorkspaceId, DbSession
+from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_session_claims
 from rivulets.db.models import RunSpan, RunTrace, ToolCallLog
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -104,7 +116,11 @@ async def list_runs(
 
 
 @router.get("/{trace_id}", response_model=RunTraceDetailOut)
-async def get_run(trace_id: str, db: DbSession, _: CurrentWorkspaceId) -> RunTraceDetailOut:
+async def get_run(
+    trace_id: str,
+    db: DbSession,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> RunTraceDetailOut:
     trace = await db.get(RunTrace, trace_id)
     if trace is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
@@ -113,6 +129,11 @@ async def get_run(trace_id: str, db: DbSession, _: CurrentWorkspaceId) -> RunTra
     )
     span_rows = list(spans_result.scalars().all())
 
+    # #357: an invited session still sees which tools ran (name/status/
+    # duration -- all the runs UI renders), but never what they were called
+    # with or returned. See module docstring for why this is all calls
+    # rather than just sensitive=True ones.
+    redact = claims.grant != "owner"
     agent_run_ids = [s.entity_id for s in span_rows if s.span_type == "agent_run" and s.entity_id]
     tool_calls_by_run: dict[str, list[ToolCallOut]] = defaultdict(list)
     if agent_run_ids:
@@ -123,7 +144,10 @@ async def get_run(trace_id: str, db: DbSession, _: CurrentWorkspaceId) -> RunTra
         )
         for call in calls_result.scalars().all():
             assert call.agent_run_id is not None
-            tool_calls_by_run[call.agent_run_id].append(ToolCallOut.model_validate(call))
+            out = ToolCallOut.model_validate(call)
+            if redact:
+                out = out.model_copy(update={"arguments_json": None, "result_summary": None})
+            tool_calls_by_run[call.agent_run_id].append(out)
 
     spans = [
         RunSpanOut(
