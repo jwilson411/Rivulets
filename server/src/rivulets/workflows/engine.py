@@ -104,15 +104,21 @@ existing paused banner needs no changes to pick this up) and stops.
 calls once workflows/trigger.py's find_awaiting_workflow_run recognizes
 the next message in that rivulet as the reply (not run_workflow again --
 there's no fresh input_content, no new entry point, just picking the walk
-back up at `current_node_id` with the reply as that node's output). The
-original call's visit_counts/total_steps were local Python state, not
-persisted, so a resumed run's loop guard starts fresh. A pause inside a
-fan-out that also shares a merge point with sibling branches has one
-known gap: only the paused branch's own path is resumed -- a sibling that
-already reached the merge node before the pause isn't replayed, so that
-merge (if reached again on resume) fires with just the resumed branch's
-input. Pausing on a linear path, or in a fan-out with no shared merge
-downstream, has no such gap.
+back up at `current_node_id` with the reply as that node's output).
+Pausing inside a fan-out (#359): a sibling branch that reached a shared
+merge node before the pause has its arrival banked on
+`WorkflowRun.pending_merge_arrivals_json` rather than dropped, and
+resume_workflow folds those back into merge resolution once every wait
+is answered -- the merge fires with every input that actually reached
+it, not just the resumed branch's. Sibling branches that pause in
+parallel resolve one reply at a time: resume completes the wait at
+`current_node_id`, and if another branch's WorkflowNodeRun is still
+'awaiting_human' the run re-pauses on it (_repause_on_waiting_branch)
+instead of finalizing. A sibling that fails outright still fails the
+whole run (failed > paused, unchanged), but _finalize_run now also fails
+any dangling 'awaiting_human' node runs and releases the rivulet's
+pause, so a failed run can't leave the paused banner up with no
+resumable run underneath it.
 
 Run-graph snapshotting (#84): `run_workflow` freezes the workflow's nodes
 and connections into `WorkflowRun.graph_snapshot_json`
@@ -177,6 +183,12 @@ pausing) predates nesting entirely. `_execute_workflow_node` fails the
 child run too when this happens (not just the parent) and clears the
 rivulet's pause, rather than leaving a paused-but-orphaned child sitting
 there discoverable by a later reply with no parent left waiting on it.
+Since #359 this is a backstop rather than the primary defense:
+api/workflows.py refuses at save time to wire a 'workflow' node whose
+child (transitively) contains a 'human_input' node, and to add a
+'human_input' node to a workflow already embedded as a child -- only
+graphs that arrive by sync (which bypasses API validation) can still
+reach this runtime path.
 Because of this, `resume_workflow` never needs nesting-awareness: a
 nested run either completes or fails synchronously within the same
 `run_workflow` call that started it, so `find_awaiting_workflow_run` can
@@ -193,7 +205,7 @@ without this module or its API needing a new tree-shaped endpoint.
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 from sqlalchemy import select, update
@@ -281,6 +293,14 @@ class _RunContext:
     # args). See that column's own docstring for what "unattended" means
     # and how it's derived/inherited.
     unattended: bool = False
+    # #359: (merge_node_id, input) pairs a 'human_input' pause stranded --
+    # sibling branches of a fan-out that reached a merge node before
+    # another sibling paused. Banked by _resolve_merge_arrivals when a
+    # pause wins its batch, persisted by _finalize_run's paused path onto
+    # WorkflowRun.pending_merge_arrivals_json, and folded back into merge
+    # resolution by resume_workflow once every waiting branch is answered.
+    # Same shared-mutation safety story as visit_counts above.
+    pending_merge_arrivals: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
 
 
 @dataclass
@@ -784,7 +804,9 @@ async def run_workflow(
         [entry_outcome], db, run.id, workflow, rivulet.id, nodes, connections, ctx
     )
 
-    return await _finalize_run(db, workflow, rivulet, run, outcome, run_span_id, run_trace_ctx)
+    return await _finalize_run(
+        db, workflow, rivulet, run, outcome, run_span_id, run_trace_ctx, ctx=ctx
+    )
 
 
 async def _finalize_run(
@@ -795,12 +817,26 @@ async def _finalize_run(
     outcome: _BranchOutcome,
     run_span_id: str | None = None,
     trace_ctx: TraceContext | None = None,
+    ctx: _RunContext | None = None,
 ) -> WorkflowRun:
     """Shared by run_workflow and resume_workflow. A paused outcome's
     status/current_node_id were already committed inside
     _pause_for_human_input, possibly on a different (sibling) session --
     refresh rather than reassign so the returned `run` reflects that write
-    instead of clobbering it with a stale in-memory value.
+    instead of clobbering it with a stale in-memory value. The paused path
+    also persists `ctx`'s banked merge arrivals and its final loop-guard
+    counters (#359): _pause_for_human_input snapshotted the counters at
+    the moment *its* branch stopped, but sibling branches kept executing
+    (and arriving at merges) until the whole gather settled, and only here
+    is that settled state known.
+
+    A finalized (non-paused) run has no branch left to wait on (#359): a
+    failed sibling used to finalize the run while another branch sat
+    paused, leaving its WorkflowNodeRun 'awaiting_human' forever and
+    Rivulet.status='paused' keeping the banner up with no run left for
+    find_awaiting_workflow_run to match -- the next typed message went to
+    dispatch under a stuck banner. Any dangling waits are failed here and
+    the rivulet's pause released.
 
     triggered_by='eval' (#95) is excluded from the failed-run notification
     path entirely: an eval suite deliberately exercising a failure case
@@ -821,6 +857,17 @@ async def _finalize_run(
     parent_span_id is `run_span_id`), reading as "this run's failure
     caused this" in the trace tree."""
     if outcome.paused:
+        if ctx is not None:
+            await db.execute(
+                update(WorkflowRun)
+                .where(WorkflowRun.id == run.id)
+                .values(
+                    pending_merge_arrivals_json=json.dumps(ctx.pending_merge_arrivals),
+                    visit_counts_json=json.dumps(ctx.visit_counts),
+                    total_steps=ctx.total_steps[0],
+                )
+            )
+            await db.commit()
         await db.refresh(run)
         return run
 
@@ -828,6 +875,28 @@ async def _finalize_run(
     run.error_message = outcome.error_message
     run.final_output = outcome.output if not outcome.failed else None
     run.completed_at = utcnow_iso()
+    run.pending_merge_arrivals_json = "[]"
+    dangling_result = await db.execute(
+        select(WorkflowNodeRun).where(
+            WorkflowNodeRun.workflow_run_id == run.id,
+            WorkflowNodeRun.status == "awaiting_human",
+        )
+    )
+    dangling = list(dangling_result.scalars().all())
+    for node_run in dangling:
+        node_run.status = "failed"
+        node_run.error_message = "the run ended while this step was still waiting for a reply"
+        node_run.completed_at = utcnow_iso()
+        dangling_span_id = await db.scalar(
+            select(RunSpan.id).where(
+                RunSpan.span_type == "workflow_node_run", RunSpan.entity_id == node_run.id
+            )
+        )
+        await finish_span(db, dangling_span_id, status="error")
+    if dangling:
+        await db.refresh(rivulet)
+        if rivulet.status == "paused":
+            rivulet.status = "active"
     await finish_span(db, run_span_id, status="error" if outcome.failed else "completed")
     await db.commit()
 
@@ -1035,8 +1104,18 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     It does look up and re-attach to the *original* run_span (if this run
     was traced when it started), purely so that span -- left 'running' by
     _finalize_run's paused early-return -- eventually gets closed with the
-    run's real final status instead of showing 'running' forever."""
-    assert run.current_node_id is not None  # set by _pause_for_human_input
+    run's real final status instead of showing 'running' forever.
+
+    #359: the run's own 'awaiting_human' WorkflowNodeRun row, not
+    `current_node_id`, decides which node the reply answers.
+    `current_node_id` is position telemetry every `_begin_node` call
+    updates -- inside a fan-out, a sibling branch still executing after
+    `_pause_for_human_input` committed its pause overwrites it with
+    whatever node that sibling moved onto, so resuming from it walked the
+    graph from the wrong node (and skipped completing the wait) whenever
+    the pause wasn't the run's last write. It's only the fallback for a
+    run with no awaiting row left (its node deleted from the snapshot's
+    perspective is handled below either way)."""
     workflow = await db.get(Workflow, run.workflow_id)
     rivulet = await db.get(Rivulet, run.rivulet_id)
     assert workflow is not None
@@ -1047,7 +1126,18 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
     )
 
     nodes, connections = _deserialize_graph(run.graph_snapshot_json)
-    paused_node = nodes.get(run.current_node_id)
+    paused_node_run = await db.scalar(
+        select(WorkflowNodeRun)
+        .where(
+            WorkflowNodeRun.workflow_run_id == run.id,
+            WorkflowNodeRun.status == "awaiting_human",
+        )
+        .order_by(WorkflowNodeRun.started_at.desc())
+        .limit(1)
+    )
+    paused_node_id = paused_node_run.node_id if paused_node_run is not None else run.current_node_id
+    assert paused_node_id is not None  # set by _pause_for_human_input
+    paused_node = nodes.get(paused_node_id)
     if paused_node is None:
         return await _finalize_run(
             db,
@@ -1060,16 +1150,6 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
             run_span_id,
         )
 
-    paused_node_run = await db.scalar(
-        select(WorkflowNodeRun)
-        .where(
-            WorkflowNodeRun.workflow_run_id == run.id,
-            WorkflowNodeRun.node_id == paused_node.id,
-            WorkflowNodeRun.status == "awaiting_human",
-        )
-        .order_by(WorkflowNodeRun.started_at.desc())
-        .limit(1)
-    )
     if paused_node_run is not None:
         paused_node_run.status = "completed"
         paused_node_run.output_content = human_reply
@@ -1101,11 +1181,108 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
         # know it, since a pause/resume boundary doesn't carry the old one
         # forward (this function's own docstring).
         unattended=run.unattended,
+        # #359: restores the merge arrivals sibling branches banked before
+        # the pause (WorkflowRun's own docstring), so the merge they
+        # reached can eventually fire with their inputs too.
+        pending_merge_arrivals=[
+            (str(merge_id), str(merge_input))
+            for merge_id, merge_input in json.loads(run.pending_merge_arrivals_json)
+        ],
     )
     outcome = await _follow_edges(
         db, run.id, workflow, rivulet.id, nodes, connections, paused_node.id, human_reply, ctx
     )
-    return await _finalize_run(db, workflow, rivulet, run, outcome, run_span_id)
+
+    if not outcome.failed and not outcome.paused:
+        # #359: one reply resolves one branch. If another branch of this
+        # run is still sitting on its own 'human_input' node (parallel
+        # 'human_input' fan-out -- current_node_id used to be last-writer-
+        # wins and the losing branch waited forever), re-pause on it
+        # instead of finalizing, banking this branch's merge arrival (if
+        # any) for the final join.
+        next_waiting = await db.scalar(
+            select(WorkflowNodeRun)
+            .where(
+                WorkflowNodeRun.workflow_run_id == run.id,
+                WorkflowNodeRun.status == "awaiting_human",
+            )
+            .order_by(WorkflowNodeRun.started_at)
+            .limit(1)
+        )
+        if next_waiting is not None:
+            if outcome.arrived_at_merge is not None:
+                ctx.pending_merge_arrivals.append(outcome.arrived_at_merge)
+            return await _repause_on_waiting_branch(
+                db, run, workflow, rivulet, nodes, next_waiting, ctx
+            )
+        # #359: every wait is answered -- fold the banked sibling arrivals
+        # (and this branch's own, if it stopped at a merge) into one
+        # resolution batch so a shared merge fires with everything that
+        # actually reached it, not just the resumed branch's input.
+        banked = [
+            _BranchOutcome(failed=False, arrived_at_merge=(merge_id, merge_input))
+            for merge_id, merge_input in ctx.pending_merge_arrivals
+        ]
+        ctx.pending_merge_arrivals = []
+        outcome = await _resolve_merge_arrivals(
+            [outcome, *banked], db, run.id, workflow, rivulet.id, nodes, connections, ctx
+        )
+
+    return await _finalize_run(db, workflow, rivulet, run, outcome, run_span_id, ctx=ctx)
+
+
+async def _repause_on_waiting_branch(
+    db: AsyncSession,
+    run: WorkflowRun,
+    workflow: Workflow,
+    rivulet: Rivulet,
+    nodes: dict[str, WorkflowNode],
+    waiting_node_run: WorkflowNodeRun,
+    ctx: _RunContext,
+) -> WorkflowRun:
+    """#359: parallel 'human_input' branches resolve one reply at a time.
+    resume_workflow just completed one branch's wait, but
+    `waiting_node_run` (another branch's, created by _pause_for_human_input
+    during the original fan-out) is still open -- point the run back at it
+    and re-pause, re-announcing the step so the human knows which question
+    is now current, instead of finalizing with the other branch abandoned.
+    Persists the same pause-boundary state _finalize_run's paused path
+    does (banked merge arrivals, loop-guard counters), since finalize is
+    exactly what this path skips."""
+    await db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == run.id)
+        .values(
+            current_node_id=waiting_node_run.node_id,
+            status="awaiting_human",
+            visit_counts_json=json.dumps(ctx.visit_counts),
+            total_steps=ctx.total_steps[0],
+            pending_merge_arrivals_json=json.dumps(ctx.pending_merge_arrivals),
+        )
+    )
+    rivulet.status = "paused"
+    await db.commit()
+    await db.refresh(run)
+    node = nodes.get(waiting_node_run.node_id)
+    if node is not None:
+        await _post_message(
+            db,
+            Message(
+                rivulet_id=rivulet.id,
+                sender_type="system",
+                sender_name="system",
+                content=(
+                    f"⏸ Workflow /{workflow.name} is waiting for your reply at step {node.name!r}."
+                ),
+                content_type="system_alert",
+            ),
+        )
+        publish(
+            rivulet.id,
+            "system_alert",
+            {"type": "workflow_awaiting_human", "workflow_id": workflow.id, "node_id": node.id},
+        )
+    return run
 
 
 async def _run_branch(
@@ -1355,11 +1532,11 @@ async def _resolve_merge_arrivals(
     A paused (#83) sibling takes priority over any unresolved merge
     arrivals in the same batch (but not over an outright failure, checked
     first) -- if one sibling is waiting on a human, a merge that also
-    needed *another* sibling's contribution can't fire yet either way, so
-    there's nothing to lose by not attempting it. Resuming re-enters at
-    the paused node specifically (resume_workflow), not this fan-out, so
-    any sibling that already reached a merge node before the pause won't
-    be replayed -- see module docstring's pause/resume section.
+    needed *another* sibling's contribution can't fire yet either way.
+    The batch's arrivals are banked on ctx.pending_merge_arrivals (#359)
+    for resume_workflow to fold back into resolution once every wait is
+    answered, rather than dropped -- see module docstring's pause/resume
+    section.
 
     When nothing arrived at a merge and nothing paused, this batch is
     just a set of independently-terminated branches -- the first one
@@ -1372,6 +1549,14 @@ async def _resolve_merge_arrivals(
 
     paused = next((o for o in outcomes if o.paused), None)
     if paused is not None:
+        # #359: siblings that already reached a merge node can't fire it
+        # yet (the paused branch may still be headed there too) -- bank
+        # their arrivals for resume_workflow to fold back into resolution
+        # once every wait is answered, instead of dropping them with this
+        # batch.
+        for outcome in outcomes:
+            if outcome.arrived_at_merge is not None:
+                ctx.pending_merge_arrivals.append(outcome.arrived_at_merge)
         return paused
 
     merge_groups: dict[str, list[str]] = {}

@@ -454,6 +454,32 @@ def _compute_next_fire_at_or_400(cron_expression: str) -> str:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid cron expression: {exc}") from exc
 
 
+async def _workflow_contains_human_input(db: DbSession, workflow_id: str) -> bool:
+    """#359: True if `workflow_id`'s graph -- followed transitively
+    through its own node_type='workflow' steps -- contains a
+    'human_input' node anywhere. The `seen` set makes this terminate even
+    on a graph with an embedding cycle (which _validate_child_workflow
+    can't fully rule out -- see its docstring)."""
+    seen: set[str] = set()
+    frontier = [workflow_id]
+    while frontier:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        result = await db.execute(
+            select(WorkflowNode.node_type, WorkflowNode.child_workflow_id).where(
+                WorkflowNode.workflow_id == current
+            )
+        )
+        for node_type, child_workflow_id in result.all():
+            if node_type == "human_input":
+                return True
+            if node_type == "workflow" and child_workflow_id is not None:
+                frontier.append(child_workflow_id)
+    return False
+
+
 async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workflow_id: str) -> None:
     """#85: only the cheap, always-correct static check -- a direct
     self-reference (a workflow embedding itself). A multi-hop cycle
@@ -461,11 +487,28 @@ async def _validate_child_workflow(db: DbSession, workflow_id: str, child_workfl
     later purely by editing a *different* workflow's nodes, so it's the
     runtime ancestry check in workflows/engine.py's _execute_workflow_node
     that actually guarantees safety, not this endpoint -- see that
-    module's docstring."""
+    module's docstring.
+
+    #359: also refuses a child whose graph (transitively) contains a
+    'human_input' node -- the engine can't propagate a nested pause up
+    through ancestor runs (workflows/engine.py's module docstring on why
+    that's out of scope), so before this check the node saved fine and
+    then failed every run at execution time. The complementary check on
+    creating a 'human_input' node (create_node below) keeps the invariant
+    when it's the *child* that's edited after the parent wired it in;
+    graphs arriving by sync bypass both, so the engine's runtime failure
+    stays as the backstop."""
     if child_workflow_id == workflow_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A workflow can't embed itself as a step")
-    if await db.get(Workflow, child_workflow_id) is None:
+    child = await db.get(Workflow, child_workflow_id)
+    if child is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
+    if await _workflow_contains_human_input(db, child_workflow_id):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Workflow /{child.name} contains a human-input step — pausing for human input "
+            "isn't supported inside a nested workflow",
+        )
 
 
 async def _validate_on_failure_workflow(db: DbSession, on_failure_workflow_id: str) -> None:
@@ -737,6 +780,26 @@ async def create_node(
                 "child_workflow_id is required for node_type='workflow'",
             )
         await _validate_child_workflow(db, workflow_id, body.child_workflow_id)
+    if body.node_type == "human_input":
+        # #359: the reverse of _validate_child_workflow's human-input
+        # check -- a workflow already embedded as a child step elsewhere
+        # can't gain a 'human_input' node, or every run of that parent
+        # would start failing at execution time. A direct-reference query
+        # suffices for the transitive case too: whichever workflow embeds
+        # this one is itself a direct parent.
+        embedding_workflow_id = await db.scalar(
+            select(WorkflowNode.workflow_id)
+            .where(WorkflowNode.child_workflow_id == workflow_id)
+            .limit(1)
+        )
+        if embedding_workflow_id is not None:
+            embedding = await db.get(Workflow, embedding_workflow_id)
+            embedding_name = embedding.name if embedding is not None else "another workflow"
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"This workflow is embedded as a step in /{embedding_name} — pausing for "
+                "human input isn't supported inside a nested workflow",
+            )
     node = WorkflowNode(
         workflow_id=workflow_id,
         name=body.name,

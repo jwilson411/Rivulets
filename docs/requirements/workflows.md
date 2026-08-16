@@ -124,14 +124,21 @@ These were the original "Deferred" list. They now ship:
   animates over the canvas.
 - **Branching / parallel / loops (#81).** See FR-13.2.
 - **Real `merge` node (#82).** See FR-13.1.
-- **Pause / resume (#83).** A `human_input` node sets
+- **Pause / resume (#83, #359).** A `human_input` node sets
   `WorkflowRun.status='awaiting_human'` and `Rivulet.status='paused'`.
   The next human message in that rivulet becomes the node's output
-  (`resume_workflow`). A nested child's own `human_input` pause is
-  treated as a failure of the parent `workflow` node rather than
-  propagating up the ancestor chain. A pause inside a fan-out that
-  also shares a merge with siblings has a known gap: only the paused
-  branch's path is resumed.
+  (`resume_workflow`). Sibling merge arrivals stranded by a
+  mid-fan-out pause are persisted
+  (`WorkflowRun.pending_merge_arrivals_json`) and folded back into
+  the merge on resume. Parallel `human_input` branches resolve one
+  reply at a time — the run re-pauses on the next waiting branch
+  until every wait is answered. A sibling failure fails any dangling
+  waits and releases the rivulet's pause instead of leaving the
+  paused banner up over a failed run. Wiring a `workflow` node whose
+  child (transitively) contains `human_input` — or adding
+  `human_input` to a workflow already embedded as a child — is
+  refused at save time; the engine's fail-the-parent behavior remains
+  as the backstop for graphs that arrive by sync.
 - **Draft vs. published (#84).** A new workflow starts unpublished.
   `published` is a boolean gate on *starting* a new run via slash
   command or `run_workflow`, not a second copy of the graph. Editing
@@ -158,6 +165,7 @@ These were the original "Deferred" list. They now ship:
 - **Coordinator-owned schedule firing.** Election exists;
   `scheduler._tick` does not check `is_self`. Schedules stay
   node-local so they don't double-fire.
-- **Propagating a nested pause** up through ancestor runs.
-- **Replaying sibling merge arrivals** after a mid-fan-out pause.
+- **Propagating a nested pause** up through ancestor runs. Since
+  #359 the API refuses to save such a graph instead; the engine
+  still fails the parent `workflow` node if one arrives by sync.
 - **Standalone FR docs for FR-1–12.** Still comment references only.

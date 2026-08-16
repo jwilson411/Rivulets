@@ -900,7 +900,19 @@ class WorkflowRun(Base):
     `_RunContext` from these columns instead of starting at zero. A run
     that never pauses never touches these -- the loop guard's usual
     in-memory-only path (module docstring's "Loops" section) is unchanged
-    for the common case."""
+    for the common case.
+
+    `pending_merge_arrivals_json` (#359): the merge arrivals a pause left
+    stranded, persisted across the pause/resume boundary the same way the
+    loop-guard counters are. A JSON list of `[merge_node_id, input]`
+    pairs: sibling branches of a fan-out that reached a merge node before
+    another sibling paused on 'human_input' used to be simply dropped --
+    the resumed branch would fire the merge with only its own input.
+    `_finalize_run`'s paused path writes whatever the in-flight
+    `_RunContext` accumulated; `resume_workflow` seeds from it and folds
+    the banked arrivals back into merge resolution once every waiting
+    branch has been answered. Empty for a run that never pauses mid-
+    fan-out."""
 
     __tablename__ = "workflow_run"
     __table_args__ = (Index("idx_workflow_run_workflow", "workflow_id", "started_at"),)
@@ -925,6 +937,9 @@ class WorkflowRun(Base):
     # see this class's own docstring.
     visit_counts_json: Mapped[str] = mapped_column(default="{}")
     total_steps: Mapped[int] = mapped_column(default=0)
+    # #359: merge arrivals banked across a pause/resume boundary -- see
+    # this class's own docstring.
+    pending_merge_arrivals_json: Mapped[str] = mapped_column(default="[]")
     started_at: Mapped[str] = mapped_column(default=utcnow_iso)
     completed_at: Mapped[str | None] = mapped_column(default=None)
 
