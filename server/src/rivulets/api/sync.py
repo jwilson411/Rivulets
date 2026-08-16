@@ -22,11 +22,13 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from rivulets.agentos import sync_agents
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import File, SyncConflict, SyncPendingInbound, SyncPendingOutbound, Tool
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import (
+    AGENTOS_RESYNC_ENTITY_TYPES,
     clear_delete_blockers,
     current_vector_clock,
     ensure_file_content_available,
@@ -374,6 +376,15 @@ async def resolve_conflict(
     await db.refresh(conflict)
     if source_path_to_unlink:
         Path(source_path_to_unlink).unlink(missing_ok=True)
+
+    if body.keep == "remote" and conflict.entity_type in AGENTOS_RESYNC_ENTITY_TYPES:
+        # #390 (#362 leftover): the keep-remote apply above is the same
+        # class of change as an incoming sync apply -- a tool source
+        # write/delete (or an agent/tool-assignment change) is resolved at
+        # agent *build* time, so already-registered agents keep executing
+        # the pre-conflict in-memory state until the registry is rebuilt.
+        # "keep local" changed nothing AgentOS could see, so it skips this.
+        await sync_agents(db)
 
     if body.keep == "remote" and conflict.entity_type == "file":
         file_row = await db.get(File, conflict.entity_id)
