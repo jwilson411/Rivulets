@@ -290,6 +290,29 @@ def test_run_suite_with_no_cases_returns_400(
     assert resp.status_code == 400
 
 
+def _fake_run_agent_with_tool_call(content: str) -> Any:
+    """Like the e2e fake_run_agent, but the run output carries one recorded
+    tool call whose args hold exactly the kind of secret #388 is about --
+    an http_request Authorization header."""
+
+    async def fake(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[
+                SimpleNamespace(
+                    tool_name="http_request",
+                    tool_args={
+                        "url": "https://api.example.com/v1/things",
+                        "headers": {"Authorization": "Bearer sk-eval-secret"},
+                    },
+                )
+            ],
+            get_content_as_string=lambda: content,
+        )
+
+    return fake
+
+
 def test_run_agent_suite_end_to_end(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -796,3 +819,58 @@ def test_owner_can_create_and_run_suite_against_draft_workflow(
     run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=auth_headers)
     assert run_resp.status_code == 200, run_resp.text
     assert run_resp.json()["pass_count"] == 1
+
+
+def test_invite_grant_gets_redacted_eval_tool_call_args(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#388 (leftover of #357/#321): EvalCaseResult.actual_tool_calls_json
+    is a second copy of the same secret-bearing payload get_run already
+    redacts. An invited session may still list eval runs and read results
+    -- including that a tool ran and its name -- but tool_args come back
+    null, while the owner keeps seeing them in full."""
+    monkeypatch.setattr(
+        "rivulets.evals.runner.run_agent", _fake_run_agent_with_tool_call("Fetched it.")
+    )
+    agent_id = _create_agent(client, auth_headers, "Eval Trace Agent")
+    suite = _create_suite(client, auth_headers, "eval-redact-suite", agent_id=agent_id)
+    created_case = client.post(
+        f"/api/v1/evals/suites/{suite['id']}/cases",
+        json={
+            "name": "calls-http",
+            "input_content": "fetch the thing",
+            "judge_type": "structural",
+            "expected_tool_name": "http_request",
+        },
+        headers=auth_headers,
+    )
+    assert created_case.status_code == 201, created_case.text
+
+    run_resp = client.post(f"/api/v1/evals/suites/{suite['id']}/run", headers=auth_headers)
+    assert run_resp.status_code == 200, run_resp.text
+    run_id = run_resp.json()["id"]
+
+    owner_resp = client.get(
+        f"/api/v1/evals/suites/{suite['id']}/runs/{run_id}/results", headers=auth_headers
+    )
+    assert owner_resp.status_code == 200, owner_resp.text
+    owner_calls = owner_resp.json()[0]["actual_tool_calls"]
+    assert owner_calls, "expected the fake run's tool call to be stored on the result"
+    assert owner_calls[0]["tool_name"] == "http_request"
+    assert owner_calls[0]["tool_args"]["headers"]["Authorization"] == "Bearer sk-eval-secret"
+
+    invite_headers = _invite_headers(client, auth_headers)
+    guest_resp = client.get(
+        f"/api/v1/evals/suites/{suite['id']}/runs/{run_id}/results", headers=invite_headers
+    )
+    assert guest_resp.status_code == 200, guest_resp.text
+    guest_calls = guest_resp.json()[0]["actual_tool_calls"]
+    assert len(guest_calls) == len(owner_calls)
+    assert guest_calls[0]["tool_name"] == "http_request"
+    assert all(c["tool_args"] is None for c in guest_calls)
+    assert "sk-eval-secret" not in guest_resp.text
+
+    # List/run metadata stays open to any grant, same as GET /runs.
+    runs_listed = client.get(f"/api/v1/evals/suites/{suite['id']}/runs", headers=invite_headers)
+    assert runs_listed.status_code == 200
+    assert [r["id"] for r in runs_listed.json()] == [run_id]

@@ -21,6 +21,14 @@ at the SQLite level too.
 and update_case) since only an agent run's RunOutput.tools carries
 tool-call data -- WorkflowRun has no equivalent (evals/runner.py's
 _run_workflow_case always returns an empty tool-call list).
+
+#388 (leftover of #357/#321): EvalCaseResult.actual_tool_calls_json is a
+second copy of the same class of secrets get_run already redacts --
+`http_request` headers, `write_file` contents, `query_workspace_db` SQL,
+custom/MCP args. List/run metadata stay open to any grant (same as GET
+/runs); `list_results` nulls `tool_args` on every stored call for a
+non-owner session. Tool names stay: the evals UI and structural verdict
+only need to know *which* tool ran, not what it was called with.
 """
 
 import json
@@ -164,7 +172,14 @@ class EvalCaseResultOut(BaseModel):
     completed_at: str | None
 
     @classmethod
-    def from_row(cls, row: EvalCaseResult) -> "EvalCaseResultOut":
+    def from_row(cls, row: EvalCaseResult, *, redact: bool = False) -> "EvalCaseResultOut":
+        tool_calls: list[dict[str, object]] | None = (
+            json.loads(row.actual_tool_calls_json) if row.actual_tool_calls_json else None
+        )
+        # #388: keep tool_name (structural judging / the evals UI) but drop
+        # tool_args -- same standing as get_run nulling arguments_json.
+        if redact and tool_calls is not None:
+            tool_calls = [{**call, "tool_args": None} for call in tool_calls]
         return cls(
             id=row.id,
             run_id=row.run_id,
@@ -172,9 +187,7 @@ class EvalCaseResultOut(BaseModel):
             status=row.status,
             score=row.score,
             actual_output=row.actual_output,
-            actual_tool_calls=(
-                json.loads(row.actual_tool_calls_json) if row.actual_tool_calls_json else None
-            ),
+            actual_tool_calls=tool_calls,
             judge_reasoning=row.judge_reasoning,
             error_message=row.error_message,
             started_at=row.started_at,
@@ -538,7 +551,11 @@ async def list_runs(suite_id: str, db: DbSession, _: CurrentWorkspaceId) -> list
 
 @router.get("/suites/{suite_id}/runs/{run_id}/results", response_model=list[EvalCaseResultOut])
 async def list_results(
-    suite_id: str, run_id: str, db: DbSession, _: CurrentWorkspaceId
+    suite_id: str,
+    run_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> list[EvalCaseResultOut]:
     run = await db.get(EvalRun, run_id)
     if run is None or run.suite_id != suite_id:
@@ -548,4 +565,5 @@ async def list_results(
         .where(EvalCaseResult.run_id == run_id)
         .order_by(EvalCaseResult.started_at)
     )
-    return [EvalCaseResultOut.from_row(row) for row in result.scalars().all()]
+    redact = claims.grant != "owner"
+    return [EvalCaseResultOut.from_row(row, redact=redact) for row in result.scalars().all()]
