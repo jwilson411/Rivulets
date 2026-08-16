@@ -112,7 +112,7 @@ async def download_file(file_id: str, db: DbSession, _: CurrentWorkspaceId) -> F
         # Lazy sync (sync.eager_files_lan/_wan, issue #123) may have
         # deferred fetching this file's bytes when its metadata synced in
         # -- try now, on demand, before giving up.
-        await fetch_file_content_from_known_sources(row)
+        await fetch_file_content_from_known_sources(row.content_hash, row.synced_to_nodes)
     if not local_path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File content not available locally yet")
     return FileResponse(local_path, media_type=row.mime_type, filename=row.filename)

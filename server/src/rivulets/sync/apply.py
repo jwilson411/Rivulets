@@ -988,8 +988,9 @@ async def apply_remote_file_change(
     either way remote_node_id is remembered as a known source
     (_remember_known_source) so a deferred fetch can still happen later,
     on demand (fetch_file_content_from_known_sources, used by
-    api/files.py's download_file). `local_path` is always recomputed from
-    this node's own files_dir, never copied verbatim from the sender,
+    api/files.py's download_file and the other byte readers -- #391).
+    `local_path` is always recomputed from this node's own files_dir,
+    never copied verbatim from the sender,
     matching Tool's source_path handling. `File.message_id` has no FK
     constraint (see db/models.py), so unlike Rivulet/Message there's no
     ordering hazard to guard against here."""
@@ -1086,7 +1087,11 @@ async def ensure_file_content_available(
         return
     await _remember_known_source(db, file_row, source_node_id)
     if await _should_eager_fetch(db, source_node_id):
-        await _fetch_file_content(source_node_id, file_row.content_hash, local_path)
+        # #391: source_node_id was just recorded above, so this tries the
+        # origin first -- but unlike the old single-peer fetch it falls
+        # back to every other connected peer when the origin can't serve
+        # the bytes, the same way the on-demand (download) path does.
+        await fetch_file_content_from_known_sources(file_row.content_hash, file_row.synced_to_nodes)
 
 
 # WorkspaceSetting keys and defaults for issue #123's eager-sync policy --
@@ -1137,70 +1142,57 @@ def _digest_matches(data: bytes, content_hash: str) -> bool:
     return hashlib.sha256(data).hexdigest() == content_hash
 
 
-async def _fetch_file_content(peer_id: str, content_hash: str, local_path: Path) -> None:
-    engine = get_sync_engine()
-    if not engine.running:
-        return
-    data = await engine.request_file(peer_id, content_hash)
-    if data is None:
-        logger.info("Peer %s doesn't have file content for hash=%s yet", peer_id, content_hash[:12])
-        return
-    if not _digest_matches(data, content_hash):
-        logger.warning(
-            "Discarding file content from %s: %d bytes don't hash to requested hash=%s",
-            peer_id,
-            len(data),
-            content_hash[:12],
-        )
-        return
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_bytes(data)
-    logger.info("Fetched file content (%d bytes) from %s", len(data), peer_id)
+async def fetch_file_content_from_known_sources(
+    content_hash: str, synced_to_nodes: str | None
+) -> bool:
+    """Fetches a file's bytes from whatever peer can serve them: every node
+    recorded by _remember_known_source (the `synced_to_nodes` JSON list),
+    then every other currently-connected peer (#363) -- synced_to_nodes
+    only ever records gossip origins, so a peer that eager-fetched the
+    bytes from the publisher is never in it; if the publisher has since
+    gone offline, such a holder may be the only reachable copy.
+    request_file answers a clean MISS when a peer doesn't have the hash,
+    so asking peers speculatively is safe. Returns whether local_path
+    exists afterwards.
 
-
-async def fetch_file_content_from_known_sources(file_row: File) -> bool:
-    """On-demand counterpart to the eager path above -- api/files.py's
-    download_file calls this when local_path is missing (either lazy sync
-    deferred the fetch, or an eager fetch failed transiently) rather than
-    serving a 404 for content a peer already has. Tries every node
-    recorded by _remember_known_source, then falls back to every other
-    currently-connected peer (#363): synced_to_nodes only ever records
-    gossip origins, so a peer that eager-fetched the bytes from the
-    publisher is never in it -- if the publisher has since gone offline,
-    such a holder may be the only reachable copy. request_file answers a
-    clean MISS when a peer doesn't have the hash, so asking peers
-    speculatively is safe. Returns whether local_path exists afterwards.
+    Every reader of file bytes recovers through this one path (#391):
+    ensure_file_content_available's eager fetch, api/files.py's
+    download_file, api/knowledge_bases.py's ingest_document, and
+    tools/builtin/files.py's read_attached_file. Takes plain column
+    values rather than a File row so that last caller (which reads the
+    `file` table over raw sqlite3, without the async ORM) can call it too.
 
     Re-derives the path from files_dir + content_hash rather than trusting
     the stored `File.local_path` column (#239) -- the same reasoning as
     apply_remote_file_change not copying a sender's local_path verbatim,
     extended to reads."""
-    local_path = local_path_for_content_hash(file_row.content_hash)
+    local_path = local_path_for_content_hash(content_hash)
     if local_path.exists():
         return True
     engine = get_sync_engine()
     if not engine.running:
         return False
-    known: list[str] = json.loads(file_row.synced_to_nodes) if file_row.synced_to_nodes else []
+    known: list[str] = json.loads(synced_to_nodes) if synced_to_nodes else []
     connected = [peer.peer_id for peer in await engine.list_peers()]
     tried: set[str] = set()
     for node_id in [*known, *connected]:
         if node_id in tried:
             continue
         tried.add(node_id)
-        data = await engine.request_file(node_id, file_row.content_hash)
+        data = await engine.request_file(node_id, content_hash)
         if data is None:
             continue
-        if not _digest_matches(data, file_row.content_hash):
+        if not _digest_matches(data, content_hash):
             logger.warning(
                 "Discarding file content from %s: %d bytes don't hash to requested hash=%s",
                 node_id,
                 len(data),
-                file_row.content_hash[:12],
+                content_hash[:12],
             )
             continue
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(data)
+        logger.info("Fetched file content (%d bytes) from %s", len(data), node_id)
         return True
     return False
 
