@@ -53,6 +53,7 @@ from rivulets.db.models import (
     Rivulet,
     SyncConflict,
     SyncPendingInbound,
+    SyncResolution,
     Team,
     TeamAgent,
     Tool,
@@ -73,6 +74,7 @@ from rivulets.sync.apply import (
     CHANNEL_SPEC,
     MCP_SERVER_SPEC,
     MESSAGE_SPEC,
+    RESOLUTION_FIELD,
     RIVULET_SPEC,
     TEAM_AGENT_SPEC,
     TEAM_SPEC,
@@ -86,6 +88,7 @@ from rivulets.sync.apply import (
     apply_remote_file_change,
     apply_remote_tool_change,
     compare_vector_clocks,
+    current_vector_clock,
     encode_entity_id,
     entity_pk_value,
     handle_incoming_state_change,
@@ -105,6 +108,7 @@ from rivulets.sync.engine import (
     reset_sync_engine_for_testing,
 )
 from rivulets.sync.file_transfer import HASH_LEN, HIT_PREFIX, MAX_FILE_BYTES, MISS_MARKER
+from rivulets.validation import local_path_for_content_hash
 
 _AGENT_FIELDS = {
     "description": "A test agent used only in sync tests.",
@@ -2341,6 +2345,420 @@ async def test_resolve_conflict_keep_remote_recreates_entity_after_local_delete(
     recreated = client.get(f"/api/v1/agents/{agent_id}", headers=auth_headers)
     assert recreated.status_code == 200, recreated.text
     assert recreated.json()["name"] == "Renamed By Peer"
+
+
+class _CapturingPublishEngine:
+    """Stand-in for SyncEngine on the publish side -- collects what
+    resolve_conflict hands to publish_state_change so tests can assert on
+    the republished payload/clock (#325/#348)."""
+
+    running = True
+    node_id = "node-a"
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str, dict[str, Any], dict[str, int]]] = []
+
+    async def publish_state_change(
+        self,
+        entity_type: str,
+        entity_id: str,
+        payload: dict[str, Any],
+        vector_clock: dict[str, int],
+    ) -> None:
+        self.published.append((entity_type, entity_id, payload, vector_clock))
+
+
+async def _channel_conflict(client: TestClient, auth_headers: dict[str, str]) -> str:
+    """Creates a channel locally as node-a, then records a concurrent
+    node-b rename of it -- both sides merged to {node-a: 1, node-b: 1} the
+    moment the conflict was detected, the exact starting state of #348's
+    reproduction. Returns the channel id."""
+    create = client.post("/api/v1/channels", json={"name": "local-name-chan"}, headers=auth_headers)
+    channel_id: str = create.json()["id"]
+    async with session_scope() as db:
+        await record_local_change(db, "channel", channel_id, "node-a")
+        result = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-b": 1},
+            "node-b",
+            {
+                "name": "remote-name-chan",
+                "description": "from remote",
+                "position": 0,
+                "archived": False,
+            },
+        )
+        assert result.conflict is True
+    return channel_id
+
+
+async def test_resolve_conflict_keep_remote_bumps_clock_and_republishes(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#348 (the keep-remote half of #325): "keep remote" used to apply the
+    snapshot locally and stop -- no clock bump, no publish -- so with both
+    humans clicking "keep remote" the two nodes simply swapped states and
+    stayed split (clocks already equal, later gossip a no-op). The chosen
+    snapshot must be republished under a strictly-dominating clock exactly
+    like "keep local" already does, carrying the resolution stamp."""
+    channel_id = await _channel_conflict(client, auth_headers)
+    async with session_scope() as db:
+        merged_clock = await current_vector_clock(db, "channel", channel_id)
+    assert merged_clock == {"node-a": 1, "node-b": 1}
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == channel_id)
+
+    engine = _CapturingPublishEngine()
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: engine)
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    assert len(engine.published) == 1
+    entity_type, entity_id, payload, vector_clock = engine.published[0]
+    assert entity_type == "channel"
+    assert entity_id == channel_id
+    assert payload["name"] == "remote-name-chan"  # the *chosen* snapshot
+    assert RESOLUTION_FIELD in payload
+    # A peer still sitting at the merged clock judges this REMOTE_NEWER --
+    # the mesh converges on the chosen snapshot instead of staying split.
+    assert compare_vector_clocks(merged_clock, vector_clock) is ClockComparison.REMOTE_NEWER
+
+
+async def test_resolve_conflict_keep_remote_delete_publishes_tombstone(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#348: keeping a remote *delete* must converge the mesh too -- the
+    republished envelope is a tombstone (the row is gone locally, so
+    there's no live state to publish) carrying the resolution stamp."""
+    create = client.post(
+        "/api/v1/agents",
+        json={"name": "Doomed By Peer", **_AGENT_FIELDS},
+        headers=auth_headers,
+    )
+    agent_id = create.json()["id"]
+
+    async with session_scope() as db:
+        await record_local_change(db, "agent", agent_id, "node-a")
+        result = await apply_remote_delete(db, "agent", agent_id, {"node-b": 1}, "node-b")
+        assert result.conflict is True
+        merged_clock = await current_vector_clock(db, "agent", agent_id)
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == agent_id)
+
+    engine = _CapturingPublishEngine()
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: engine)
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    assert client.get(f"/api/v1/agents/{agent_id}", headers=auth_headers).status_code == 404
+
+    assert len(engine.published) == 1
+    _, entity_id, payload, vector_clock = engine.published[0]
+    assert entity_id == agent_id
+    assert payload[TOMBSTONE_FIELD] is True
+    assert RESOLUTION_FIELD in payload
+    assert compare_vector_clocks(merged_clock, vector_clock) is ClockComparison.REMOTE_NEWER
+
+
+async def test_concurrent_resolutions_converge_on_last_stamp(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#348: two nodes resolving the same conflict independently publish
+    clocks that are concurrent *again* (each bumped only its own component
+    past the merged clock) -- previously that recorded a fresh conflict
+    pair on both sides ("keep local" twice) or silently swapped states
+    ("keep remote" twice). The RESOLUTION_FIELD stamp settles it: the
+    later (resolved_at, node_id) resolution wins deterministically on
+    every node, and an older one is ignored without re-conflicting."""
+    channel_id = await _channel_conflict(client, auth_headers)
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == channel_id)
+
+    engine = _CapturingPublishEngine()
+    monkeypatch.setattr("rivulets.sync.publish.get_sync_engine", lambda: engine)
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "local"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    # This node now sits at {node-a: 2, node-b: 1} -- exactly concurrent
+    # with what node-b's own independent resolution publishes below.
+
+    remote_fields = {
+        "name": "node-b-final",
+        "description": "node-b's pick",
+        "position": 0,
+        "archived": False,
+    }
+    async with session_scope() as db:
+        # node-b resolved its copy of the conflict *later* (stamp sorts
+        # after anything resolution_stamp() produced above) -- its choice
+        # must win here even though the clocks can't order the two.
+        later = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-a": 1, "node-b": 2},
+            "node-b",
+            {**remote_fields, RESOLUTION_FIELD: "2999-01-01T00:00:00.000000Z"},
+        )
+        assert later.applied is True
+        assert later.conflict is False
+
+        channel = await db.get(Channel, channel_id)
+        assert channel is not None
+        assert channel.name == "node-b-final"
+
+        # A third, *older* resolution (e.g. a long-offline node's) must
+        # lose to the one this node already reflects -- ignored, clocks
+        # merged, and no new conflict recorded.
+        older = await apply_remote_change(
+            db,
+            CHANNEL_SPEC,
+            channel_id,
+            {"node-a": 1, "node-b": 1, "node-c": 1},
+            "node-c",
+            {
+                **remote_fields,
+                "name": "stale-pick",
+                RESOLUTION_FIELD: "2000-01-01T00:00:00.000000Z",
+            },
+        )
+        assert older.applied is False
+        assert older.conflict is False
+
+        await db.refresh(channel)
+        assert channel.name == "node-b-final"
+
+        open_conflicts = (
+            (
+                await db.execute(
+                    select(SyncConflict).where(
+                        SyncConflict.entity_id == channel_id, SyncConflict.resolved.is_(False)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert open_conflicts == []
+        register = await db.get(SyncResolution, ("channel", channel_id))
+        assert register is not None
+        assert (register.resolved_at, register.node_id) == (
+            "2999-01-01T00:00:00.000000Z",
+            "node-b",
+        )
+
+
+async def test_incoming_resolution_auto_resolves_open_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """#348: when a peer resolves first, its resolution envelope supersedes
+    this node's still-open conflict for the same entity -- the local
+    conflict's snapshots predate the mesh-level decision, and resolving it
+    later could republish a stale snapshot right back over the settled
+    state. Applying the resolution flips the local conflict to resolved."""
+    db_session.add(Team(id="team-1", name="Local Name", description=""))
+    await db_session.commit()
+    await record_local_change(db_session, "team", "team-1", "node-a")
+
+    conflicted = await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-1",
+        {"node-b": 1},
+        "node-b",
+        {"name": "Remote Name", "description": ""},
+    )
+    assert conflicted.conflict is True
+
+    # node-b resolved on its side (keep local there) and republished under
+    # a bumped clock -- REMOTE_NEWER here, carrying the resolution stamp.
+    result = await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-1",
+        {"node-a": 1, "node-b": 2},
+        "node-b",
+        {"name": "Remote Name", "description": "", RESOLUTION_FIELD: "2999-01-01T00:00:00.000000Z"},
+    )
+    assert result.applied is True
+
+    open_conflicts = (
+        (
+            await db_session.execute(
+                select(SyncConflict).where(
+                    SyncConflict.entity_id == "team-1", SyncConflict.resolved.is_(False)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert open_conflicts == []
+
+
+async def test_concurrent_tombstone_resolution_applies_by_stamp(
+    db_session: AsyncSession,
+) -> None:
+    """#348: apply_remote_delete's resolution path -- a concurrent
+    tombstone carrying a superseding resolution stamp deletes the row
+    instead of recording another conflict."""
+    db_session.add(Team(id="team-2", name="Kept Locally", description=""))
+    await db_session.commit()
+    await record_local_change(db_session, "team", "team-2", "node-a")
+
+    result = await apply_remote_delete(
+        db_session,
+        "team",
+        "team-2",
+        {"node-b": 1},
+        "node-b",
+        resolution="2999-01-01T00:00:00.000000Z",
+    )
+    assert result.applied is True
+    assert result.conflict is False
+    assert await db_session.get(Team, "team-2") is None
+
+
+async def test_tool_conflict_keep_remote_writes_source_code(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#348: tool conflict snapshots used to be metadata-only, so "keep
+    remote" renamed the tool while this node kept executing its own
+    pre-conflict source under that name. The snapshot now carries the
+    remote source_code, and resolving toward it writes the chosen bytes to
+    this node's {id}.py plus a ToolVersion for rollback history."""
+    local_source = "def add_numbers(a, b):\n    return a + b\n"
+    remote_source = "def add_numbers(a, b):\n    return a * b\n"
+    source_path = get_settings().tools_dir / "tool-res-1.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(local_source)
+
+    async with session_scope() as db:
+        db.add(
+            Tool(
+                id="tool-res-1",
+                name="add_numbers",
+                description="Local version.",
+                tool_type="custom",
+                source_path=str(source_path),
+            )
+        )
+        await db.commit()
+        await record_local_change(db, "tool", "tool-res-1", "node-a")
+        result = await apply_remote_tool_change(
+            db,
+            "tool-res-1",
+            {"node-b": 1},
+            "node-b",
+            {
+                "name": "add_numbers",
+                "description": "Remote version.",
+                "source_code": remote_source,
+            },
+        )
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    matching = [c for c in conflicts if c["entity_id"] == "tool-res-1"]
+    assert len(matching) == 1
+    assert matching[0]["remote_snapshot"]["source_code"] == remote_source
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{matching[0]['id']}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    assert source_path.read_text() == remote_source
+    async with session_scope() as db:
+        tool = await db.get(Tool, "tool-res-1")
+        assert tool is not None
+        assert tool.description == "Remote version."
+        versions = (
+            (await db.execute(select(ToolVersion).where(ToolVersion.tool_id == "tool-res-1")))
+            .scalars()
+            .all()
+        )
+        assert [v.source_code for v in versions] == [remote_source]
+
+
+async def test_file_conflict_keep_remote_recomputes_path_and_records_source(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#348: "keep remote" on a file conflict used to point content_hash at
+    bytes this node never fetched, while local_path kept naming the *old*
+    content's location. The path must follow the chosen hash, and the
+    conflicting peer must be recorded as a known source so the bytes are
+    actually obtainable later (api/files.py's on-demand fetch)."""
+    local_hash = hashlib.sha256(b"local-bytes").hexdigest()
+    remote_hash = hashlib.sha256(b"remote-bytes").hexdigest()
+
+    async with session_scope() as db:
+        db.add(
+            File(
+                id="file-res-1",
+                content_hash=local_hash,
+                filename="local.txt",
+                mime_type="text/plain",
+                size_bytes=11,
+                local_path=str(local_path_for_content_hash(local_hash)),
+            )
+        )
+        await db.commit()
+        await record_local_change(db, "file", "file-res-1", "node-a")
+        result = await apply_remote_file_change(
+            db,
+            "file-res-1",
+            {"node-b": 1},
+            "node-b",
+            {
+                "content_hash": remote_hash,
+                "filename": "remote.txt",
+                "mime_type": "text/plain",
+                "size_bytes": 12,
+                "message_id": None,
+            },
+        )
+        assert result.conflict is True
+
+    conflicts = client.get("/api/v1/sync/conflicts", headers=auth_headers).json()
+    conflict_id = next(c["id"] for c in conflicts if c["entity_id"] == "file-res-1")
+
+    resolved = client.post(
+        f"/api/v1/sync/conflicts/{conflict_id}/resolve",
+        json={"keep": "remote"},
+        headers=auth_headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    async with session_scope() as db:
+        file_row = await db.get(File, "file-res-1")
+        assert file_row is not None
+        assert file_row.content_hash == remote_hash
+        assert file_row.local_path == str(local_path_for_content_hash(remote_hash))
+        # The engine isn't running here, so no eager fetch -- but node-b is
+        # recorded as a known source for the deferred one.
+        assert file_row.synced_to_nodes is not None
+        assert json.loads(file_row.synced_to_nodes) == ["node-b"]
 
 
 def test_agent_create_does_not_fail_when_sync_engine_not_running(
