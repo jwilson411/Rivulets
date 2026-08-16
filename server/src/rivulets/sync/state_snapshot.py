@@ -31,7 +31,21 @@ above MAX_SNAPSHOT_TOTAL_BYTES are rejected before buffering more — the
 PSK is the only gate on who can open this protocol, so a peer-declared
 length is never trusted (same discipline as file_transfer.MAX_FILE_BYTES
 and agent_dispatch.MAX_DISPATCH_FRAME_BYTES).
+
+An envelope too large for one frame (#392) is not skipped — that entity
+would simply never catch up anywhere — and not sent as one oversized
+frame either (every receiver rejects those). Instead the sender splits
+its bytes across consecutive ENVELOPE_CHUNK_FIELD frames
+(chunk_envelope) that the receiver reassembles in stream order
+(EnvelopeAssembler) before treating the result as a normal envelope.
+Total memory stays bounded by MAX_SNAPSHOT_TOTAL_BYTES exactly as
+before — the per-frame cap never bounded the whole stream, only one
+peer-declared length.
 """
+
+import base64
+import json
+from typing import Any
 
 from libp2p.abc import INetStream
 from libp2p.custom_types import TProtocol
@@ -44,10 +58,11 @@ STATE_SNAPSHOT_PROTOCOL = TProtocol("/rivulets/state-snapshot/1.0.0")
 _LENGTH_PREFIX_BYTES = 4
 
 # Same sizing rationale as agent_dispatch.MAX_DISPATCH_FRAME_BYTES: one
-# envelope is small JSON (the largest legitimate payloads — a message body
-# or a custom tool's source — are capped well under this by their own
-# HTTP-side limits), so 1 MiB leaves escaping headroom without letting a
-# peer demand meaningful memory per frame.
+# envelope is small JSON, so 1 MiB leaves escaping headroom without letting
+# a peer demand meaningful memory per frame. Not a hard payload cap (#392
+# — a message body or a custom tool's source can legitimately exceed it):
+# a bigger envelope rides across multiple chunk frames (chunk_envelope)
+# rather than being dropped from the snapshot.
 MAX_SNAPSHOT_FRAME_BYTES = 1024 * 1024
 
 # Cap on one whole snapshot read into memory. Entities are metadata-sized
@@ -55,6 +70,69 @@ MAX_SNAPSHOT_FRAME_BYTES = 1024 * 1024
 # workspace sits orders of magnitude below this; the cap exists so a
 # malicious peer streaming frames forever can't buffer unbounded memory.
 MAX_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+# #392: sole key of a frame that carries one piece of an oversized
+# envelope rather than an envelope itself. Same never-collides-with-real-
+# fields naming as apply.py's TOMBSTONE_FIELD, but at the frame level: a
+# receiver that predates chunking parses the frame fine, finds no
+# entity_type, and discards it as malformed — degrading to the old
+# missing-entity behavior instead of aborting the whole snapshot.
+ENVELOPE_CHUNK_FIELD = "__envelope_chunk__"
+
+# Raw envelope bytes per chunk frame: base64 expands by 4/3, and the JSON
+# wrapper (key, seq/total, quotes) needs headroom under the frame cap.
+_CHUNK_DATA_BYTES = 3 * (MAX_SNAPSHOT_FRAME_BYTES - 1024) // 4
+
+
+def chunk_envelope(envelope: bytes) -> list[bytes]:
+    """#392: splits an envelope too large for one frame into an ordered
+    run of chunk frames, each under MAX_SNAPSHOT_FRAME_BYTES. The sender
+    writes them consecutively on the stream (never interleaved with other
+    frames), which is what lets EnvelopeAssembler reassemble by position
+    alone."""
+    parts = [
+        envelope[i : i + _CHUNK_DATA_BYTES] for i in range(0, len(envelope), _CHUNK_DATA_BYTES)
+    ]
+    return [
+        json.dumps(
+            {
+                ENVELOPE_CHUNK_FIELD: {
+                    "seq": seq,
+                    "total": len(parts),
+                    "data": base64.b64encode(part).decode(),
+                }
+            }
+        ).encode()
+        for seq, part in enumerate(parts)
+    ]
+
+
+class EnvelopeAssembler:
+    """Receiver-side counterpart to chunk_envelope — one instance per
+    snapshot stream. `add` returns the reassembled envelope bytes on the
+    final chunk, None while more are expected. A chunk that doesn't
+    continue the run in progress (wrong seq, changed total) discards the
+    partial envelope and raises ValueError so the caller's per-frame
+    malformed-envelope handling logs it; the assembler itself is reset and
+    a later seq-0 chunk starts a fresh envelope."""
+
+    def __init__(self) -> None:
+        self._parts: list[bytes] = []
+        self._total = 0
+
+    def add(self, chunk: dict[str, Any]) -> bytes | None:
+        seq, total, data = chunk["seq"], chunk["total"], base64.b64decode(chunk["data"])
+        if total < 1 or seq != len(self._parts) or (self._parts and total != self._total):
+            self._parts, self._total = [], 0
+            raise ValueError(f"snapshot envelope chunk out of order (seq={seq}, total={total})")
+        self._total = total
+        self._parts.append(data)
+        if len(self._parts) < total:
+            return None
+        assembled = b"".join(self._parts)
+        self._parts, self._total = [], 0
+        return assembled
 
 
 async def write_snapshot_frame(stream: INetStream, data: bytes) -> None:

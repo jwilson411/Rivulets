@@ -26,19 +26,32 @@ from rivulets.db.models import (
     Agent,
     SyncPendingInbound,
     SyncPendingOutbound,
+    SyncResolution,
     SyncState,
     Tool,
     VectorClockTracker,
 )
 from rivulets.db.session import session_scope
-from rivulets.sync.apply import TOMBSTONE_FIELD, record_local_change
+from rivulets.sync.apply import (
+    RESOLUTION_FIELD,
+    RESOLUTION_NODE_FIELD,
+    TOMBSTONE_FIELD,
+    record_local_change,
+)
 from rivulets.sync.catchup import (
     build_snapshot_envelopes,
     push_snapshot_to_all_peers,
     push_snapshot_to_peer,
 )
 from rivulets.sync.engine import PeerInfo, SyncEngine
-from rivulets.sync.state_snapshot import read_snapshot_frames, write_snapshot_frame
+from rivulets.sync.state_snapshot import (
+    ENVELOPE_CHUNK_FIELD,
+    MAX_SNAPSHOT_FRAME_BYTES,
+    EnvelopeAssembler,
+    chunk_envelope,
+    read_snapshot_frames,
+    write_snapshot_frame,
+)
 
 _AGENT_FIELDS = {
     "description": "A test agent for catch-up tests.",
@@ -112,6 +125,36 @@ async def test_read_snapshot_frames_raises_on_truncated_frame() -> None:
         await read_snapshot_frames(stream)  # type: ignore[arg-type]
 
 
+def test_chunk_envelope_roundtrips_and_stays_under_frame_cap() -> None:
+    """#392: an envelope over the frame cap splits into chunk frames that
+    each fit a frame and reassemble to the exact original bytes."""
+    envelope = json.dumps({"entity_type": "tool", "payload": {"source_code": "x" * 3_000_000}})
+    envelope_bytes = envelope.encode()
+    chunks = chunk_envelope(envelope_bytes)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= MAX_SNAPSHOT_FRAME_BYTES for chunk in chunks)
+    assembler = EnvelopeAssembler()
+    assembled = None
+    for chunk in chunks:
+        assert assembled is None  # only the final chunk completes it
+        assembled = assembler.add(json.loads(chunk.decode())[ENVELOPE_CHUNK_FIELD])
+    assert assembled == envelope_bytes
+
+
+def test_envelope_assembler_rejects_a_chunk_that_breaks_the_run() -> None:
+    """A chunk that doesn't continue the in-progress run discards the
+    partial envelope and raises -- and a fresh seq-0 run still works
+    afterwards, so one bad envelope doesn't poison the rest of the
+    stream."""
+    chunks = [json.loads(c.decode())[ENVELOPE_CHUNK_FIELD] for c in chunk_envelope(b"payload")]
+    assert len(chunks) == 1
+    assembler = EnvelopeAssembler()
+    with pytest.raises(ValueError, match="out of order"):
+        assembler.add({**chunks[0], "seq": 3})
+    assert assembler.add(chunks[0]) == b"payload"
+
+
 # ---------------------------------------------------------------------------
 # Snapshot building (catchup.build_snapshot_envelopes)
 # ---------------------------------------------------------------------------
@@ -181,15 +224,81 @@ async def test_build_snapshot_skips_unknown_entity_types(db_session: AsyncSessio
     assert await build_snapshot_envelopes(db_session, "node-self") == []
 
 
-async def test_build_snapshot_skips_oversized_envelope(
+async def test_build_snapshot_chunks_oversized_envelope(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#392: an envelope over the frame cap used to be logged and skipped
+    -- that entity never caught up on any peer, ever. It now rides across
+    consecutive chunk frames that reassemble to the original envelope."""
     db_session.add(Agent(id="agent-1", name="Big", **_AGENT_FIELDS))
     await db_session.commit()
     await record_local_change(db_session, "agent", "agent-1", "node-a")
     monkeypatch.setattr("rivulets.sync.catchup.MAX_SNAPSHOT_FRAME_BYTES", 10)
+    monkeypatch.setattr("rivulets.sync.state_snapshot._CHUNK_DATA_BYTES", 64)
 
-    assert await build_snapshot_envelopes(db_session, "node-self") == []
+    frames = await build_snapshot_envelopes(db_session, "node-self")
+
+    assert len(frames) > 1
+    assembler = EnvelopeAssembler()
+    assembled = None
+    for frame in frames:
+        assert assembled is None
+        assembled = assembler.add(json.loads(frame.decode())[ENVELOPE_CHUNK_FIELD])
+    assert assembled is not None
+    envelope = json.loads(assembled.decode())
+    assert envelope["entity_id"] == "agent-1"
+    assert envelope["payload"]["name"] == "Big"
+
+
+async def test_build_snapshot_carries_resolution_stamp(db_session: AsyncSession) -> None:
+    """#392: an entity whose conflict the mesh already settled snapshots
+    with the SyncResolution register's (resolved_at, node_id) pair, so a
+    late joiner still holding a concurrent pre-resolution clock settles it
+    last-writer-wins instead of re-opening the conflict. The node field
+    names the original resolver, not the snapshot sender."""
+    db_session.add(Agent(id="agent-1", name="Settled", **_AGENT_FIELDS))
+    db_session.add(
+        SyncResolution(
+            entity_type="agent",
+            entity_id="agent-1",
+            resolved_at="2026-01-01T00:00:00.000000Z",
+            node_id="node-resolver",
+        )
+    )
+    await db_session.commit()
+    await record_local_change(db_session, "agent", "agent-1", "node-a")
+
+    envelopes = _decode(await build_snapshot_envelopes(db_session, "node-self"))
+
+    assert len(envelopes) == 1
+    payload = envelopes[0]["payload"]
+    assert payload["name"] == "Settled"
+    assert payload[RESOLUTION_FIELD] == "2026-01-01T00:00:00.000000Z"
+    assert payload[RESOLUTION_NODE_FIELD] == "node-resolver"
+
+
+async def test_build_snapshot_stamps_resolved_tombstones_too(db_session: AsyncSession) -> None:
+    """#392: a conflict resolved toward a delete replays as a tombstone
+    carrying the same stamp -- without it, a late joiner's concurrent
+    pre-resolution edit would re-conflict against the settled delete."""
+    db_session.add(
+        SyncResolution(
+            entity_type="agent",
+            entity_id="deleted-agent",
+            resolved_at="2026-01-01T00:00:00.000000Z",
+            node_id="node-resolver",
+        )
+    )
+    await db_session.commit()
+    await record_local_change(db_session, "agent", "deleted-agent", "node-a")
+
+    envelopes = _decode(await build_snapshot_envelopes(db_session, "node-self"))
+
+    assert len(envelopes) == 1
+    payload = envelopes[0]["payload"]
+    assert payload[TOMBSTONE_FIELD] is True
+    assert payload[RESOLUTION_FIELD] == "2026-01-01T00:00:00.000000Z"
+    assert payload[RESOLUTION_NODE_FIELD] == "node-resolver"
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +446,51 @@ async def test_dispatch_snapshot_frames_applies_sequentially_in_order(tmp_path: 
 
     await asyncio.wait_for(done.wait(), timeout=5)
     assert received == ["agent-1", "agent-2"]
+
+
+async def test_dispatch_snapshot_frames_reassembles_chunked_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#392: a run of chunk frames mid-stream is reassembled into one
+    envelope and applied through the same handler, in stream order with
+    the unchunked envelopes around it."""
+    monkeypatch.setattr("rivulets.sync.state_snapshot._CHUNK_DATA_BYTES", 64)
+    engine = SyncEngine(tmp_path)
+    engine._loop = asyncio.get_running_loop()  # pyright: ignore[reportPrivateUsage]
+    received: list[tuple[str, dict[str, Any]]] = []
+    done = asyncio.Event()
+
+    async def on_change(
+        entity_type: str,
+        entity_id: str,
+        vector_clock: dict[str, int],
+        origin_node_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        received.append((entity_id, payload))
+        if len(received) == 3:
+            done.set()
+
+    engine.set_state_change_handler(on_change)
+    big_payload = {"name": "big-agent", "instructions": "x" * 500}
+    big_frame = json.dumps(
+        {
+            "entity_type": "agent",
+            "entity_id": "big-agent",
+            "vector_clock": {"node-a": 1},
+            "origin_node_id": "node-a",
+            "payload": big_payload,
+        }
+    ).encode()
+    chunks = chunk_envelope(big_frame)
+    assert len(chunks) > 1
+    engine._dispatch_snapshot_frames(  # pyright: ignore[reportPrivateUsage]
+        [_envelope_frame("agent-1"), *chunks, _envelope_frame("agent-2")]
+    )
+
+    await asyncio.wait_for(done.wait(), timeout=5)
+    assert [entity_id for entity_id, _ in received] == ["agent-1", "big-agent", "agent-2"]
+    assert received[1][1] == big_payload
 
 
 async def test_dispatch_snapshot_frames_is_a_noop_with_no_handler(tmp_path: Path) -> None:

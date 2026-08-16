@@ -75,6 +75,7 @@ from rivulets.sync.apply import (
     MCP_SERVER_SPEC,
     MESSAGE_SPEC,
     RESOLUTION_FIELD,
+    RESOLUTION_NODE_FIELD,
     RIVULET_SPEC,
     TEAM_AGENT_SPEC,
     TEAM_SPEC,
@@ -94,6 +95,7 @@ from rivulets.sync.apply import (
     handle_incoming_state_change,
     merge_vector_clocks,
     record_local_change,
+    record_resolution,
     retry_pending_inbound,
 )
 from rivulets.sync.engine import (
@@ -2638,6 +2640,111 @@ async def test_concurrent_tombstone_resolution_applies_by_stamp(
     assert result.applied is True
     assert result.conflict is False
     assert await db_session.get(Team, "team-2") is None
+
+
+async def test_catchup_resolution_stamp_settles_late_joiner_and_keeps_resolver_node(
+    db_session: AsyncSession,
+) -> None:
+    """#392: a catch-up snapshot envelope re-carries a settled conflict's
+    resolution stamp with RESOLUTION_NODE_FIELD naming the original
+    resolver -- the relaying sender's own node id must not leak into the
+    register's tie-break pair, and a node still holding a concurrent
+    pre-resolution clock must adopt the settled state instead of recording
+    a fresh SyncConflict."""
+    db_session.add(Team(id="team-3", name="Pre-Resolution Pick", description=""))
+    await db_session.commit()
+    await record_local_change(db_session, "team", "team-3", "node-a")
+
+    result = await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-3",
+        {"node-b": 2},  # concurrent with local {node-a: 1}
+        "node-sender",  # snapshot relayer, NOT the resolver
+        {
+            "name": "Settled Name",
+            "description": "",
+            RESOLUTION_FIELD: "2999-01-01T00:00:00.000000Z",
+            RESOLUTION_NODE_FIELD: "node-resolver",
+        },
+    )
+
+    assert result.applied is True
+    assert result.conflict is False
+    team = await db_session.get(Team, "team-3")
+    assert team is not None
+    assert team.name == "Settled Name"
+    register = await db_session.get(SyncResolution, ("team", "team-3"))
+    assert register is not None
+    assert (register.resolved_at, register.node_id) == (
+        "2999-01-01T00:00:00.000000Z",
+        "node-resolver",
+    )
+
+
+async def test_already_reflected_resolution_stamp_records_fresh_conflict(
+    db_session: AsyncSession,
+) -> None:
+    """#392: catch-up stamps every push for a once-resolved entity forever,
+    so a CONCURRENT envelope carrying the exact (resolved_at, node_id) pair
+    this node already reflects is *new* divergence created after settling,
+    not the settled conflict re-arriving. Swallowing it as
+    already-resolved (the pre-#392 behavior for any non-superseding stamp)
+    would leave both sides silently diverged with no conflict recorded
+    anywhere."""
+    db_session.add(Team(id="team-4", name="Edited After Settling", description=""))
+    await db_session.commit()
+    await record_local_change(db_session, "team", "team-4", "node-a")
+    await record_resolution(
+        db_session, "team", "team-4", "2020-01-01T00:00:00.000000Z", "node-resolver"
+    )
+    await db_session.commit()
+
+    result = await apply_remote_change(
+        db_session,
+        TEAM_SPEC,
+        "team-4",
+        {"node-b": 2},
+        "node-b",
+        {
+            "name": "Their Post-Settle Edit",
+            "description": "",
+            RESOLUTION_FIELD: "2020-01-01T00:00:00.000000Z",
+            RESOLUTION_NODE_FIELD: "node-resolver",
+        },
+    )
+
+    assert result.applied is False
+    assert result.conflict is True
+    team = await db_session.get(Team, "team-4")
+    assert team is not None
+    assert team.name == "Edited After Settling"
+    conflict = await db_session.scalar(
+        select(SyncConflict).where(
+            SyncConflict.entity_id == "team-4", SyncConflict.resolved.is_(False)
+        )
+    )
+    assert conflict is not None
+    # The stamp markers describe the envelope, not the entity -- they must
+    # not leak into the snapshot a human sees / "keep remote" applies.
+    assert RESOLUTION_FIELD not in json.loads(conflict.remote_snapshot)
+
+
+async def test_record_resolution_never_regresses_the_register(
+    db_session: AsyncSession,
+) -> None:
+    """#392: catch-up replays stamps forever, including from senders whose
+    register lags the mesh -- an older (resolved_at, node_id) pair arriving
+    on an otherwise-applicable envelope must not overwrite a later one."""
+    await record_resolution(db_session, "team", "team-5", "2030-01-01T00:00:00.000000Z", "node-b")
+    await db_session.commit()
+
+    await record_resolution(db_session, "team", "team-5", "2020-01-01T00:00:00.000000Z", "node-a")
+    await db_session.commit()
+
+    register = await db_session.get(SyncResolution, ("team", "team-5"))
+    assert register is not None
+    assert (register.resolved_at, register.node_id) == ("2030-01-01T00:00:00.000000Z", "node-b")
 
 
 async def test_tool_conflict_keep_remote_writes_source_code(

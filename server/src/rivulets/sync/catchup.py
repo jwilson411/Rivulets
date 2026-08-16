@@ -27,17 +27,24 @@ durable deleted-clock and this module replays them."""
 import asyncio
 import json
 import logging
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.base import utcnow_iso
-from rivulets.db.models import SyncState, VectorClockTracker
+from rivulets.db.models import SyncResolution, SyncState, VectorClockTracker
 from rivulets.db.session import session_scope
-from rivulets.sync.apply import TOMBSTONE_FIELD, entity_pk_value, get_entity_spec
+from rivulets.sync.apply import (
+    RESOLUTION_FIELD,
+    RESOLUTION_NODE_FIELD,
+    TOMBSTONE_FIELD,
+    entity_pk_value,
+    get_entity_spec,
+)
 from rivulets.sync.engine import get_sync_engine
 from rivulets.sync.publish import build_entity_payload
-from rivulets.sync.state_snapshot import MAX_SNAPSHOT_FRAME_BYTES
+from rivulets.sync.state_snapshot import MAX_SNAPSHOT_FRAME_BYTES, chunk_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -57,23 +64,42 @@ async def build_snapshot_envelopes(db: AsyncSession, own_node_id: str) -> list[b
     a tombstone for clock-tracked entities whose row is gone. Entities
     that exist but aren't publishable (e.g. a non-custom Tool — clock rows
     for those shouldn't exist, but a peer's data is not worth corrupting
-    over "shouldn't") are skipped rather than mistaken for tombstones."""
+    over "shouldn't") are skipped rather than mistaken for tombstones.
+
+    #392, the two holes that made this snapshot lossy: an entity whose
+    SyncResolution register has a row gets its (resolved_at, node_id)
+    stamp re-attached (RESOLUTION_FIELD/RESOLUTION_NODE_FIELD), so a late
+    joiner still holding a concurrent pre-resolution clock settles it
+    last-writer-wins exactly as a live resolution publish would, instead
+    of re-opening a conflict the mesh already settled; and an envelope
+    over the frame cap is split across chunk frames (state_snapshot.py's
+    chunk_envelope) instead of silently dropped from every snapshot
+    forever."""
     result = await db.execute(select(VectorClockTracker))
     clocks: dict[tuple[str, str], dict[str, int]] = {}
     for row in result.scalars():
         clocks.setdefault((row.entity_type, row.entity_id), {})[row.node_id] = row.clock
+
+    resolution_result = await db.execute(select(SyncResolution))
+    resolutions: dict[tuple[str, str], tuple[str, str]] = {
+        (row.entity_type, row.entity_id): (row.resolved_at, row.node_id)
+        for row in resolution_result.scalars()
+    }
 
     envelopes: list[bytes] = []
     for (entity_type, entity_id), vector_clock in clocks.items():
         spec = get_entity_spec(entity_type)
         if spec is None:
             continue
-        payload = await build_entity_payload(db, entity_type, entity_id)
+        payload: dict[str, Any] | None = await build_entity_payload(db, entity_type, entity_id)
         if payload is None:
             instance = await db.get(spec.model, entity_pk_value(spec, entity_id))
             if instance is not None:
                 continue
             payload = {TOMBSTONE_FIELD: True}
+        stamp = resolutions.get((entity_type, entity_id))
+        if stamp is not None:
+            payload[RESOLUTION_FIELD], payload[RESOLUTION_NODE_FIELD] = stamp
         envelope = json.dumps(
             {
                 "entity_type": entity_type,
@@ -84,14 +110,17 @@ async def build_snapshot_envelopes(db: AsyncSession, own_node_id: str) -> list[b
             }
         ).encode()
         if len(envelope) > MAX_SNAPSHOT_FRAME_BYTES:
-            logger.warning(
-                "Skipping oversized snapshot envelope for %s/%s (%d bytes)",
+            chunks = chunk_envelope(envelope)
+            logger.info(
+                "Chunking oversized snapshot envelope for %s/%s (%d bytes across %d frames)",
                 entity_type,
                 entity_id,
                 len(envelope),
+                len(chunks),
             )
-            continue
-        envelopes.append(envelope)
+            envelopes.extend(chunks)
+        else:
+            envelopes.append(envelope)
     return envelopes
 
 

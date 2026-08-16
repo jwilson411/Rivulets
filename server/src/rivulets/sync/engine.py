@@ -104,7 +104,9 @@ from rivulets.sync.file_transfer import (
 )
 from rivulets.sync.identity import load_or_create_node_key
 from rivulets.sync.state_snapshot import (
+    ENVELOPE_CHUNK_FIELD,
     STATE_SNAPSHOT_PROTOCOL,
+    EnvelopeAssembler,
     read_snapshot_frames,
     write_snapshot_frame,
 )
@@ -999,9 +1001,18 @@ class SyncEngine:
         if not frames or handler is None or loop is None:
             return
         parsed: list[tuple[str, str, dict[str, int], str, dict[str, Any]]] = []
+        assembler = EnvelopeAssembler()
         for frame in frames:
             try:
                 envelope = json.loads(frame.decode())
+                # #392: an oversized envelope arrives as a consecutive run
+                # of chunk frames -- reassemble before treating it as one.
+                chunk = envelope.get(ENVELOPE_CHUNK_FIELD) if isinstance(envelope, dict) else None
+                if chunk is not None:
+                    assembled = assembler.add(chunk)
+                    if assembled is None:
+                        continue
+                    envelope = json.loads(assembled.decode())
                 parsed.append(
                     (
                         envelope["entity_type"],
