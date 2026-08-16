@@ -1,16 +1,29 @@
 <script lang="ts">
 	import { teams, type TeamDetail } from '$lib/api/teams';
 	import { agents, type Agent } from '$lib/api/agents';
+	import { auth } from '$lib/api/auth.svelte';
 	import FilterableList from '$lib/components/FilterableList.svelte';
 
 	let teamList = $state<TeamDetail[]>([]);
 	let agentList = $state<Agent[]>([]);
 	let loadError = $state<string | null>(null);
+	// #393 (#353 leftover): which agents hold a capability scope. Delete
+	// and membership writes 403 for an invite-grant session on a team that
+	// holds one of these -- owners skip the fetch, they can always write.
+	let scopedAgentIds = $state<Set<string>>(new Set());
 
 	let newTeamName = $state('');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 	let actionError = $state<string | null>(null);
+
+	function agentIsGated(agentId: string): boolean {
+		return auth.grant !== 'owner' && scopedAgentIds.has(agentId);
+	}
+
+	function teamIsGated(team: TeamDetail): boolean {
+		return auth.grant !== 'owner' && team.agent_ids.some((id) => scopedAgentIds.has(id));
+	}
 
 	async function refresh() {
 		loadError = null;
@@ -18,6 +31,23 @@
 			const [teamSummaries, loadedAgents] = await Promise.all([teams.list(), agents.list()]);
 			teamList = await Promise.all(teamSummaries.map((t) => teams.get(t.id)));
 			agentList = loadedAgents;
+			if (auth.grant !== 'owner') {
+				const gated = new Set<string>();
+				await Promise.all(
+					loadedAgents.map(async (agent) => {
+						try {
+							const out = await agents.getToolScopes(agent.id);
+							if (out.scopes.length > 0) gated.add(agent.id);
+						} catch {
+							// Can't tell — hide the write that would 403 if it is gated.
+							gated.add(agent.id);
+						}
+					})
+				);
+				scopedAgentIds = gated;
+			} else {
+				scopedAgentIds = new Set();
+			}
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load teams';
 		}
@@ -42,6 +72,7 @@
 	}
 
 	async function toggleAgent(team: TeamDetail, agentId: string, checked: boolean) {
+		if (agentIsGated(agentId)) return;
 		const agentIds = checked
 			? [...team.agent_ids, agentId]
 			: team.agent_ids.filter((id) => id !== agentId);
@@ -55,6 +86,8 @@
 	}
 
 	async function handleDelete(teamId: string) {
+		const team = teamList.find((item) => item.id === teamId);
+		if (team && teamIsGated(team)) return;
 		actionError = null;
 		try {
 			await teams.remove(teamId);
@@ -115,12 +148,14 @@
 				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
 					<div class="flex items-center justify-between">
 						<p class="font-medium text-ink dark:text-ink-dark">{team.name}</p>
-						<button
-							onclick={() => handleDelete(team.id)}
-							class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-						>
-							Delete
-						</button>
+						{#if !teamIsGated(team)}
+							<button
+								onclick={() => handleDelete(team.id)}
+								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
+							>
+								Delete
+							</button>
+						{/if}
 					</div>
 
 					<div class="mt-3 flex flex-col gap-1 border-t border-ink/10 pt-3 dark:border-white/10">
@@ -133,6 +168,7 @@
 									<input
 										type="checkbox"
 										checked={team.agent_ids.includes(agent.id)}
+										disabled={agentIsGated(agent.id)}
 										onchange={(e) =>
 											toggleAgent(team, agent.id, (e.target as HTMLInputElement).checked)}
 									/>

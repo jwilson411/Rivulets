@@ -379,6 +379,33 @@ describe('workflows/[id]/+page.svelte', () => {
 		await expect.element(page.getByTestId('palette-node-transform')).toBeInTheDocument();
 	});
 
+	// #393 (#356 leftover): renaming a published workflow 403s for an
+	// invite-grant session -- hide Edit the same way Publish is hidden.
+	it('hides the rename control for an invite-grant session on a published workflow', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByRole('heading', { name: /review-pr/ })).toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('banner').getByRole('button', { name: 'Edit' }))
+			.not.toBeInTheDocument();
+	});
+
+	it('keeps rename available for an invite-grant session on a draft workflow', async () => {
+		authState.grant = 'invite';
+		mockLoad();
+		vi.mocked(workflows.get).mockResolvedValue({ ...reviewFlow, published: false });
+
+		render(WorkflowBuilderPage);
+		await expect.element(page.getByRole('heading', { name: /review-pr/ })).toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('banner').getByRole('button', { name: 'Edit' }))
+			.toBeInTheDocument();
+	});
+
 	it('loads and expands run history', async () => {
 		mockLoad();
 		vi.mocked(workflows.listRuns).mockResolvedValueOnce([
