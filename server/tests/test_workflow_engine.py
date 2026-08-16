@@ -1983,3 +1983,100 @@ async def test_agent_node_create_channel_with_assignment_creates_the_channel(
     )
     alerts = [m.content for m in result.scalars().all()]
     assert any("created channel /roadmap" in content for content in alerts)
+
+
+# --- #389: eval-triggered runs keep agent nodes run-only ------------------
+
+
+async def test_eval_triggered_run_does_not_fire_agent_node_tool_triggers(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#389 (a #360 leftover): an eval-triggered run is unattended and can
+    be fired by invite-grant against a published workflow (#355), so even
+    a fully-assigned side-effect tool must stay a measurement, not an
+    execution -- the same call that creates a channel on a human-triggered
+    run must create nothing here."""
+    agent = await _make_agent(db_session, "EvalChannelMaker")
+    tool = Tool(
+        name="create_channel",
+        description="Creates channels.",
+        tool_type="builtin",
+        required_scope="channels:manage",
+    )
+    db_session.add(tool)
+    await db_session.flush()
+    db_session.add(AgentTool(agent_id=agent.id, tool_id=tool.id))
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="channels:manage"))
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_agent_node_workflow(db_session, "eval-channel-flow", agent)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output("Made it.", "create_channel", {"name": "roadmap"})
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="eval", triggered_by_id="eval-run-1"
+    )
+
+    assert run.status == "completed"
+    assert run.final_output == "Made it."
+    created = await db_session.scalar(select(Channel).where(Channel.name == "roadmap"))
+    assert created is None
+    # No trigger handler ran, so no confirmation/rejection alert either.
+    alert = await db_session.scalar(
+        select(Message).where(
+            Message.rivulet_id == rivulet.id, Message.content_type == "system_alert"
+        )
+    )
+    assert alert is None
+
+
+async def test_eval_triggered_run_suppresses_triggers_in_nested_workflow_node(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#389: a 'workflow' node inside an eval run inherits the suppression
+    (same inheritance _execute_workflow_node gives `unattended`, #100)
+    rather than re-deriving from the nested run's literal 'workflow'
+    trigger -- otherwise wrapping the agent one level deep would re-arm
+    its side effects."""
+    agent = await _make_agent(db_session, "NestedLauncher")
+    rivulet = await _make_rivulet(db_session)
+
+    target = await _make_workflow(db_session, name="side-effect-target")
+    target.published = True
+    echo = _transform_node(target.id, "echo", "ran: {input}")
+    db_session.add(echo)
+    await db_session.flush()
+    await _entry_connect(db_session, target.id, echo.id)
+
+    inner = await _make_agent_node_workflow(db_session, "inner-launcher", agent)
+
+    outer = await _make_workflow(db_session, name="outer-eval")
+    hop = _workflow_node(outer.id, "hop", inner.id)
+    db_session.add(hop)
+    await db_session.flush()
+    await _entry_connect(db_session, outer.id, hop.id)
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return _tool_call_output(
+            "Launching.",
+            "run_workflow",
+            {"workflow_name": "side-effect-target", "workflow_input": "ping"},
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_workflow(
+        db_session, outer, rivulet, "go", triggered_by="eval", triggered_by_id="eval-run-2"
+    )
+
+    assert run.status == "completed"
+    assert run.final_output == "Launching."
+    target_run = await db_session.scalar(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == target.id)
+    )
+    assert target_run is None

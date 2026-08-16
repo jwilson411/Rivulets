@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -328,6 +330,73 @@ async def test_run_eval_suite_workflow_suite_case_error_on_pause(db_session: Asy
         await db_session.scalars(select(EvalCaseResult).where(EvalCaseResult.run_id == run.id))
     ).one()
     assert "human_input" in (result.error_message or "")
+
+
+async def test_workflow_suite_run_does_not_execute_agent_side_effect_tools(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#389 (a #360 leftover): a workflow-attached suite runs through
+    run_workflow(triggered_by='eval'), which #360 had silently turned
+    into a live side-effect path -- a guest Run against a published
+    workflow (#355) could create channels/schedules/child runs. The eval
+    must judge what the agent *said* while its run_workflow call stays
+    unexecuted."""
+    agent = await _make_agent(db_session, "Launcher")
+
+    target = await _make_workflow(db_session, "target-flow")
+    target.published = True
+    target_node = WorkflowNode(
+        workflow_id=target.id,
+        name="echo",
+        node_type="transform",
+        config_json='{"template": "ran: {input}"}',
+    )
+    db_session.add(target_node)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=target.id, from_node_id=None, to_node_id=target_node.id)
+    )
+
+    measured = await _make_workflow(db_session, "measured-flow")
+    agent_node = WorkflowNode(
+        workflow_id=measured.id, name="act", node_type="agent", agent_id=agent.id
+    )
+    db_session.add(agent_node)
+    await db_session.flush()
+    db_session.add(
+        WorkflowConnection(workflow_id=measured.id, from_node_id=None, to_node_id=agent_node.id)
+    )
+
+    suite = EvalSuite(name="s-389", workflow_id=measured.id)
+    db_session.add(suite)
+    await db_session.flush()
+    db_session.add(_exact_case(suite.id, "case-1", "go", "Kicking it off."))
+    await db_session.commit()
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        # A real RunOutput (not SimpleNamespace) because a live trigger
+        # path would inspect `.tools` -- mirrors test_workflow_engine.py's
+        # #360 fixtures.
+        return RunOutput(
+            status=RunStatus.completed,
+            content="Kicking it off.",
+            tools=[
+                ToolExecution(
+                    tool_name="run_workflow",
+                    tool_args={"workflow_name": "target-flow", "workflow_input": "ping"},
+                )
+            ],
+        )
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", fake_run_agent)
+
+    run = await run_eval_suite(db_session, suite, human_id=None)
+
+    assert run.pass_count == 1
+    target_run = await db_session.scalar(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == target.id)
+    )
+    assert target_run is None
 
 
 async def test_eval_triggered_workflow_failure_does_not_notify_on_call_or_remediate(

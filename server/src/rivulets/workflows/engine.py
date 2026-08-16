@@ -293,6 +293,15 @@ class _RunContext:
     # args). See that column's own docstring for what "unattended" means
     # and how it's derived/inherited.
     unattended: bool = False
+    # #389: True for a run whose ultimate trigger is an eval
+    # (triggered_by='eval', inherited by anything it nests, same
+    # inheritance story as `unattended` above) -- makes _execute_node
+    # withhold `rivulet_id` from execute_agent_node, which is that
+    # function's documented "skip trigger processing" switch (#360), so
+    # an eval run stays run-only: no create_channel/schedule_workflow/
+    # run_workflow side effects fire against the workspace from an
+    # unattended eval. See run_workflow's parameter of the same name.
+    suppress_tool_triggers: bool = False
     # #359: (merge_node_id, input) pairs a 'human_input' pause stranded --
     # sibling branches of a fan-out that reached a merge node before
     # another sibling paused. Banked by _resolve_merge_arrivals when a
@@ -569,7 +578,10 @@ async def _execute_node(
             # #360: lets the node act on any builtin side-effect tools the
             # agent called (rivulet_id for the handlers' messages, ancestry
             # so an agent-triggered run_workflow is a guarded nested run).
-            rivulet_id=rivulet_id,
+            # #389: withheld for eval-triggered runs -- rivulet_id=None is
+            # execute_agent_node's documented run-only switch, so an eval
+            # exercises the agent without firing its side-effect tools.
+            rivulet_id=None if ctx.suppress_tool_triggers else rivulet_id,
             ancestry=ctx.ancestry,
         )
     if node.node_type == "transform":
@@ -661,6 +673,10 @@ async def _execute_workflow_node(
         # a workflow node inside a scheduled run is still unattended, and
         # one inside a live human-triggered run still isn't.
         unattended=ctx.unattended,
+        # #389: same inheritance for trigger suppression -- a workflow
+        # node inside an eval run must stay run-only too, not re-derive
+        # False from the literal 'workflow' trigger.
+        suppress_tool_triggers=ctx.suppress_tool_triggers,
     )
     if child_run.status == "awaiting_human":
         detail = (
@@ -700,6 +716,7 @@ async def run_workflow(
     ancestry: frozenset[str] = frozenset(),
     trace_ctx: TraceContext | None = None,
     unattended: bool | None = None,
+    suppress_tool_triggers: bool | None = None,
     run_id: str | None = None,
 ) -> WorkflowRun:
     """Run `workflow` against `rivulet`, starting with `input_content` as
@@ -730,6 +747,16 @@ async def run_workflow(
     passes it explicitly, inheriting the parent run's value rather than
     letting a nested run's literal 'workflow' trigger derive to False.
 
+    `suppress_tool_triggers` (#389): same default/inheritance shape as
+    `unattended` -- None derives it from `triggered_by == 'eval'`, and only
+    `_execute_workflow_node` passes it explicitly so nesting inherits it.
+    When True, agent nodes run without #360's builtin side-effect trigger
+    processing (see _RunContext's field of the same name): an eval of a
+    workflow measures the agent's output/tool *calls*, it must not
+    create channels, schedules, or child runs against the workspace --
+    especially since invite-grant can fire a published workflow's suite
+    (#355) unattended.
+
     `run_id` (#242): every call site leaves this at its default of None,
     letting WorkflowRun.id fall back to its normal uuid7 default. The one
     exception is api/webhooks.py, which needs this run's id *before*
@@ -740,6 +767,8 @@ async def run_workflow(
     """
     if unattended is None:
         unattended = triggered_by in _UNATTENDED_TRIGGERS
+    if suppress_tool_triggers is None:
+        suppress_tool_triggers = triggered_by == "eval"
     nodes, connections = await _load_nodes_and_connections(db, workflow.id)
 
     run = WorkflowRun(
@@ -796,6 +825,7 @@ async def run_workflow(
         trace_ctx=run_trace_ctx,
         run_span_id=run_span_id,
         unattended=unattended,
+        suppress_tool_triggers=suppress_tool_triggers,
     )
     entry_outcome = await _advance(
         db, run.id, workflow, rivulet.id, nodes, connections, entry_node_id, input_content, ctx
@@ -1181,6 +1211,10 @@ async def resume_workflow(db: AsyncSession, run: WorkflowRun, human_reply: str) 
         # know it, since a pause/resume boundary doesn't carry the old one
         # forward (this function's own docstring).
         unattended=run.unattended,
+        # #389: re-derived from the run's own trigger -- resume only ever
+        # handles a top-level run (see module docstring), so the row's
+        # literal triggered_by is exactly what run_workflow derived from.
+        suppress_tool_triggers=run.triggered_by == "eval",
         # #359: restores the merge arrivals sibling branches banked before
         # the pause (WorkflowRun's own docstring), so the merge they
         # reached can eventually fire with their inputs too.
