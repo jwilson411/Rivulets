@@ -351,6 +351,97 @@ def test_create_workflow_node_rejects_unknown_child_workflow(
     assert resp.status_code == 404
 
 
+def test_workflow_node_rejects_child_containing_human_input(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#359: the engine can't propagate a nested child's 'human_input'
+    pause up to the parent run, so wiring a 'workflow' node to a child
+    that contains one used to save fine and then fail every run at
+    execution time. Refuse at save time instead."""
+    child_id = _create_workflow(client, auth_headers, "asks-a-question")
+    _add_human_input_node(client, auth_headers, child_id, "ask")
+    parent_id = _create_workflow(client, auth_headers, "wants-to-nest")
+
+    resp = client.post(
+        f"/api/v1/workflows/{parent_id}/nodes",
+        json={"name": "invoke", "node_type": "workflow", "child_workflow_id": child_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "human-input" in resp.json()["detail"]
+
+
+async def test_workflow_node_rejects_transitively_nested_human_input(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#359: the human-input scan follows 'workflow' nodes transitively.
+    The intermediate embedding (middle -> asks) can't itself be built
+    through the API (the direct check refuses it), so it's inserted
+    straight into the DB the way a synced graph would arrive."""
+    from rivulets.db.models import WorkflowNode
+
+    asks_id = _create_workflow(client, auth_headers, "asks-transitively")
+    _add_human_input_node(client, auth_headers, asks_id, "ask")
+    middle_id = _create_workflow(client, auth_headers, "middle-flow")
+    async with session_scope() as db:
+        db.add(
+            WorkflowNode(
+                workflow_id=middle_id,
+                name="synced-invoke",
+                node_type="workflow",
+                child_workflow_id=asks_id,
+            )
+        )
+        await db.commit()
+    parent_id = _create_workflow(client, auth_headers, "grand-parent-flow")
+
+    resp = client.post(
+        f"/api/v1/workflows/{parent_id}/nodes",
+        json={"name": "invoke", "node_type": "workflow", "child_workflow_id": middle_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "human-input" in resp.json()["detail"]
+
+
+def test_update_node_rejects_switching_child_to_one_containing_human_input(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#359: PATCHing child_workflow_id runs the same gate as create."""
+    plain_id = _create_workflow(client, auth_headers, "plain-child")
+    asking_id = _create_workflow(client, auth_headers, "asking-child")
+    _add_human_input_node(client, auth_headers, asking_id, "ask")
+    parent_id = _create_workflow(client, auth_headers, "switching-parent")
+    node_id = _add_workflow_node(client, auth_headers, parent_id, "invoke", plain_id)
+
+    resp = client.patch(
+        f"/api/v1/workflows/{parent_id}/nodes/{node_id}",
+        json={"child_workflow_id": asking_id},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "human-input" in resp.json()["detail"]
+
+
+def test_human_input_node_rejected_in_workflow_embedded_as_child(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#359: the reverse edit -- the parent wired in a child that had no
+    'human_input' node, then someone adds one to the child. Without this
+    check the parent's next run would fail at execution time."""
+    child_id = _create_workflow(client, auth_headers, "quiet-child")
+    parent_id = _create_workflow(client, auth_headers, "embedding-parent")
+    _add_workflow_node(client, auth_headers, parent_id, "invoke", child_id)
+
+    resp = client.post(
+        f"/api/v1/workflows/{child_id}/nodes",
+        json={"name": "ask", "node_type": "human_input"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "embedded as a step" in resp.json()["detail"]
+
+
 def test_create_workflow_node_round_trips_child_workflow_id(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

@@ -1311,6 +1311,194 @@ async def test_loop_guard_survives_repeated_pause_resume_cycles(
     assert "loop guard" in (run.error_message or "")
 
 
+async def test_pause_inside_fan_out_preserves_sibling_merge_arrivals(
+    db_session: AsyncSession,
+) -> None:
+    """#359: a sibling branch that reached a shared merge node before
+    another branch paused on 'human_input' used to be dropped -- the merge
+    fired on resume with just the resumed branch's input. The arrival is
+    now banked on WorkflowRun.pending_merge_arrivals_json and folded back
+    in on resume, so the merge fires once with both inputs."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="pause-vs-merge")
+    start = _transform_node(workflow.id, "start", "{input}")
+    ask = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
+    branch_b = _transform_node(workflow.id, "branch-b", "B: {input}")
+    merge = WorkflowNode(workflow_id=workflow.id, name="merge", node_type="merge")
+    db_session.add_all([start, ask, branch_b, merge])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=start.id, to_node_id=ask.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=branch_b.id
+            ),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask.id, to_node_id=merge.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=branch_b.id, to_node_id=merge.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "awaiting_human"
+    assert json.loads(run.pending_merge_arrivals_json) == [[merge.id, "B: go"]]
+
+    resumed = await resume_workflow(db_session, run, "yes")
+
+    assert resumed.status == "completed"
+    assert resumed.pending_merge_arrivals_json == "[]"
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == merge.id)
+    )
+    merge_runs = list(result.scalars().all())
+    assert len(merge_runs) == 1
+    assert set(json.loads(merge_runs[0].input_content)) == {"yes", "B: go"}
+    assert set(json.loads(resumed.final_output or "[]")) == {"yes", "B: go"}
+
+
+async def test_parallel_human_input_branches_resume_one_reply_at_a_time(
+    db_session: AsyncSession,
+) -> None:
+    """#359: two 'human_input' nodes pausing in the same fan-out used to
+    be last-writer-wins on current_node_id -- one reply completed one
+    node's wait and the other WorkflowNodeRun stayed 'awaiting_human'
+    forever. Resume now re-pauses on the next waiting branch until every
+    wait is answered, then joins both replies at the shared merge."""
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="ask-in-parallel")
+    start = _transform_node(workflow.id, "start", "{input}")
+    ask1 = WorkflowNode(workflow_id=workflow.id, name="ask1", node_type="human_input")
+    ask2 = WorkflowNode(workflow_id=workflow.id, name="ask2", node_type="human_input")
+    merge = WorkflowNode(workflow_id=workflow.id, name="merge", node_type="merge")
+    db_session.add_all([start, ask1, ask2, merge])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=start.id, to_node_id=ask1.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=start.id, to_node_id=ask2.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask1.id, to_node_id=merge.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=ask2.id, to_node_id=merge.id),
+        ]
+    )
+    await db_session.commit()
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+    assert run.status == "awaiting_human"
+
+    run = await resume_workflow(db_session, run, "first answer")
+
+    # One wait answered, the other branch's is still open -- the run
+    # re-pauses on it (current_node_id now points at the still-waiting
+    # node) rather than finalizing.
+    assert run.status == "awaiting_human"
+    assert rivulet.status == "paused"
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id.in_([ask1.id, ask2.id]))
+    )
+    interim_runs = list(result.scalars().all())
+    assert sorted(nr.status for nr in interim_runs) == ["awaiting_human", "completed"]
+    still_waiting = next(nr for nr in interim_runs if nr.status == "awaiting_human")
+    assert run.current_node_id == still_waiting.node_id
+
+    run = await resume_workflow(db_session, run, "second answer")
+
+    assert run.status == "completed"
+    assert rivulet.status == "active"
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id.in_([ask1.id, ask2.id]))
+    )
+    ask_runs = list(result.scalars().all())
+    assert len(ask_runs) == 2
+    assert all(nr.status == "completed" for nr in ask_runs)
+    assert {nr.output_content for nr in ask_runs} == {"first answer", "second answer"}
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == merge.id)
+    )
+    merge_runs = list(result.scalars().all())
+    assert len(merge_runs) == 1
+    assert set(json.loads(merge_runs[0].input_content)) == {"first answer", "second answer"}
+
+
+async def test_failed_sibling_after_pause_releases_the_rivulet_and_fails_the_wait(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#359: failed beats paused when a fan-out resolves, but
+    _finalize_run used to leave Rivulet.status='paused' and the paused
+    branch's WorkflowNodeRun 'awaiting_human' -- the paused banner stayed
+    up with no run left for find_awaiting_workflow_run to match, and the
+    next typed message went to dispatch underneath it. Finalizing must
+    fail the dangling wait and release the rivulet."""
+    from rivulets.workflows.trigger import find_awaiting_workflow_run
+
+    agent = Agent(
+        name="DoomedSibling",
+        description="An agent whose fake run_agent always raises, for #359's failed-sibling test.",
+        instructions="n/a",
+        model="anthropic:claude-3-5-haiku-latest",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    rivulet = await _make_rivulet(db_session)
+    workflow = await _make_workflow(db_session, name="pause-vs-failure")
+    start = _transform_node(workflow.id, "start", "{input}")
+    ask = WorkflowNode(workflow_id=workflow.id, name="ask", node_type="human_input")
+    doomed = WorkflowNode(
+        workflow_id=workflow.id,
+        name="doomed",
+        node_type="agent",
+        agent_id=agent.id,
+        retry_max_attempts=0,
+        retry_backoff_seconds=0,
+    )
+    db_session.add_all([start, ask, doomed])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=None, to_node_id=start.id),
+            WorkflowConnection(workflow_id=workflow.id, from_node_id=start.id, to_node_id=ask.id),
+            WorkflowConnection(
+                workflow_id=workflow.id, from_node_id=start.id, to_node_id=doomed.id
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    async def always_fails(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr("rivulets.workflows.nodes.run_agent", always_fails)
+
+    run = await run_workflow(
+        db_session, workflow, rivulet, "go", triggered_by="human", triggered_by_id="h1"
+    )
+
+    assert run.status == "failed"
+    assert "provider is down" in (run.error_message or "")
+    assert rivulet.status == "active"
+
+    result = await db_session.execute(
+        select(WorkflowNodeRun).where(WorkflowNodeRun.node_id == ask.id)
+    )
+    ask_run = result.scalars().one()
+    assert ask_run.status == "failed"
+    assert "still waiting" in (ask_run.error_message or "")
+    assert ask_run.completed_at is not None
+
+    # The failed run is no longer discoverable as a resumable pause -- the
+    # next message in this rivulet goes to ordinary dispatch.
+    assert await find_awaiting_workflow_run(db_session, rivulet.id) is None
+
+
 async def test_run_final_output_reflects_the_terminal_nodes_output(
     db_session: AsyncSession,
 ) -> None:
