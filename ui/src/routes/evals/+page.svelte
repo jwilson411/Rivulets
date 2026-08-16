@@ -24,6 +24,9 @@
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
 	let loadError = $state<string | null>(null);
+	// Agents / workflows a guest's suite writes would 403 against.
+	let scopedAgentIds = $state<Set<string>>(new Set());
+	let scopedWorkflowIds = $state<Set<string>>(new Set());
 
 	// #355: the server 403s an invite-grant suite create/run against an
 	// unpublished workflow (owner-only draft runs), so don't offer drafts
@@ -31,15 +34,75 @@
 	const selectableWorkflows = $derived(
 		auth.grant === 'owner' ? workflowList : workflowList.filter((workflow) => workflow.published)
 	);
+	// #393 (#326 leftover): same idea for a scoped agent -- create/run/delete
+	// against that subject 403s, so don't offer it in the picker either.
+	const selectableAgents = $derived(
+		auth.grant === 'owner' ? agentList : agentList.filter((agent) => !scopedAgentIds.has(agent.id))
+	);
+
+	function suiteSubjectGated(suite: EvalSuite): boolean {
+		if (auth.grant === 'owner') return false;
+		if (suite.agent_id && scopedAgentIds.has(suite.agent_id)) return true;
+		if (suite.workflow_id && scopedWorkflowIds.has(suite.workflow_id)) return true;
+		return false;
+	}
+
+	function suiteRunGated(suite: EvalSuite): boolean {
+		if (suiteSubjectGated(suite)) return true;
+		if (auth.grant === 'owner' || !suite.workflow_id) return false;
+		const workflow = workflowList.find((item) => item.id === suite.workflow_id);
+		return workflow !== undefined && !workflow.published;
+	}
 
 	async function refresh() {
 		loadError = null;
 		try {
-			[suiteList, agentList, workflowList] = await Promise.all([
+			const [loadedSuites, loadedAgents, loadedWorkflows] = await Promise.all([
 				evals.listSuites(),
 				agents.list(),
 				workflows.list()
 			]);
+			suiteList = loadedSuites;
+			agentList = loadedAgents;
+			workflowList = loadedWorkflows;
+			if (auth.grant !== 'owner') {
+				const nextScopedAgents = new Set<string>();
+				await Promise.all(
+					loadedAgents.map(async (agent) => {
+						try {
+							const out = await agents.getToolScopes(agent.id);
+							if (out.scopes.length > 0) nextScopedAgents.add(agent.id);
+						} catch {
+							nextScopedAgents.add(agent.id);
+						}
+					})
+				);
+				const workflowIds = [
+					...new Set(
+						loadedSuites.map((suite) => suite.workflow_id).filter((id): id is string => id !== null)
+					)
+				];
+				const nextScopedWorkflows = new Set<string>();
+				await Promise.all(
+					workflowIds.map(async (id) => {
+						try {
+							const nodes = await workflows.listNodes(id);
+							if (
+								nodes.some((node) => node.agent_id !== null && nextScopedAgents.has(node.agent_id))
+							) {
+								nextScopedWorkflows.add(id);
+							}
+						} catch {
+							nextScopedWorkflows.add(id);
+						}
+					})
+				);
+				scopedAgentIds = nextScopedAgents;
+				scopedWorkflowIds = nextScopedWorkflows;
+			} else {
+				scopedAgentIds = new Set();
+				scopedWorkflowIds = new Set();
+			}
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Failed to load eval suites';
 		}
@@ -87,6 +150,8 @@
 	}
 
 	async function handleDeleteSuite(suiteId: string) {
+		const suite = suiteList.find((item) => item.id === suiteId);
+		if (suite && suiteSubjectGated(suite)) return;
 		try {
 			await evals.deleteSuite(suiteId);
 			await refresh();
@@ -197,6 +262,8 @@
 	let resultsError = $state<string | null>(null);
 
 	async function handleRunSuite(suiteId: string) {
+		const suite = suiteList.find((item) => item.id === suiteId);
+		if (suite && suiteRunGated(suite)) return;
 		runBusy[suiteId] = true;
 		runError[suiteId] = null;
 		try {
@@ -332,7 +399,7 @@
 					{suiteSubjectType === 'agent' ? 'Select an agent…' : 'Select a workflow…'}
 				</option>
 				{#if suiteSubjectType === 'agent'}
-					{#each agentList as agent (agent.id)}
+					{#each selectableAgents as agent (agent.id)}
 						<option value={agent.id}>{agent.name}</option>
 					{/each}
 				{:else}
@@ -389,19 +456,23 @@
 							{/if}
 						</div>
 						<div class="flex flex-none items-center gap-2">
-							<button
-								onclick={() => handleRunSuite(suite.id)}
-								disabled={runBusy[suite.id] || suite.case_count === 0}
-								class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-							>
-								{runBusy[suite.id] ? 'Running…' : 'Run'}
-							</button>
-							<button
-								onclick={() => handleDeleteSuite(suite.id)}
-								class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-							>
-								Delete
-							</button>
+							{#if !suiteRunGated(suite)}
+								<button
+									onclick={() => handleRunSuite(suite.id)}
+									disabled={runBusy[suite.id] || suite.case_count === 0}
+									class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+								>
+									{runBusy[suite.id] ? 'Running…' : 'Run'}
+								</button>
+							{/if}
+							{#if !suiteSubjectGated(suite)}
+								<button
+									onclick={() => handleDeleteSuite(suite.id)}
+									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
+								>
+									Delete
+								</button>
+							{/if}
 						</div>
 					</div>
 					{#if runError[suite.id]}

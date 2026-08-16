@@ -20,7 +20,19 @@ vi.mock('$lib/api/teams', () => ({
 }));
 
 vi.mock('$lib/api/agents', () => ({
-	agents: { list: vi.fn() }
+	agents: { list: vi.fn(), getToolScopes: vi.fn() }
+}));
+
+// #393: the page fetches tool scopes for invite-grant sessions so it can
+// hide Delete / disable membership on teams that hold a scoped agent.
+const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
 }));
 
 const researcher: Agent = {
@@ -43,6 +55,7 @@ const supportTeam: TeamDetail = {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 describe('teams/+page.svelte', () => {
@@ -204,5 +217,39 @@ describe('teams/+page.svelte', () => {
 
 		await expect.element(page.getByText('Billing')).toBeInTheDocument();
 		await expect.element(page.getByText('Support')).not.toBeInTheDocument();
+	});
+
+	it('hides Delete and disables scoped-agent checkboxes for an invite-grant session (#393)', async () => {
+		authState.grant = 'invite';
+		const writer: Agent = { ...researcher, id: 'agent-2', name: 'Writer' };
+		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
+		vi.mocked(teams.get).mockResolvedValue(supportTeam);
+		vi.mocked(agents.list).mockResolvedValue([researcher, writer]);
+		vi.mocked(agents.getToolScopes).mockImplementation((id) =>
+			Promise.resolve({ scopes: id === 'agent-1' ? ['sensitive_tools:manage'] : [] })
+		);
+
+		render(TeamsPage);
+		await expect.element(page.getByText('Support')).toBeInTheDocument();
+
+		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+		await expect.element(page.getByRole('checkbox', { name: 'Researcher' })).toBeDisabled();
+		await expect.element(page.getByRole('checkbox', { name: 'Writer' })).not.toBeDisabled();
+		expect(agents.getToolScopes).toHaveBeenCalled();
+	});
+
+	it('still offers Delete on an ungated team for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		const emptyTeam: TeamDetail = { ...supportTeam, agent_ids: [] };
+		vi.mocked(teams.list).mockResolvedValue([emptyTeam]);
+		vi.mocked(teams.get).mockResolvedValue(emptyTeam);
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
+
+		render(TeamsPage);
+		await expect.element(page.getByText('Support')).toBeInTheDocument();
+
+		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+		await expect.element(page.getByRole('checkbox', { name: 'Researcher' })).toBeDisabled();
 	});
 });

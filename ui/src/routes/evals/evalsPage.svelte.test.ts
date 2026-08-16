@@ -3,7 +3,7 @@
 // mocked here -- no SvelteKit routing modules are involved.
 
 import { page } from 'vitest/browser';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import EvalsPage from './+page.svelte';
 import {
@@ -32,11 +32,11 @@ vi.mock('$lib/api/evals', () => ({
 }));
 
 vi.mock('$lib/api/agents', () => ({
-	agents: { list: vi.fn() }
+	agents: { list: vi.fn(), getToolScopes: vi.fn() }
 }));
 
 vi.mock('$lib/api/workflows', () => ({
-	workflows: { list: vi.fn() }
+	workflows: { list: vi.fn(), listNodes: vi.fn() }
 }));
 
 // #355: the page filters draft workflows out of the subject picker for
@@ -105,6 +105,11 @@ const draftWorkflow: Workflow = {
 	name: 'scratchpad',
 	published: false
 };
+
+beforeEach(() => {
+	vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: [] });
+	vi.mocked(workflows.listNodes).mockResolvedValue([]);
+});
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -814,5 +819,72 @@ describe('evals/+page.svelte', () => {
 
 		await expect.element(page.getByRole('option', { name: '/digest' })).toBeInTheDocument();
 		await expect.element(page.getByRole('option', { name: /scratchpad/ })).not.toBeInTheDocument();
+	});
+
+	it('hides Run and Delete on a scoped-agent suite for an invite-grant session (#393)', async () => {
+		authState.grant = 'invite';
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+		vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
+
+		render(EvalsPage);
+		await expect.element(page.getByText('greeting-suite')).toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Run', exact: true }))
+			.not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+	});
+
+	it('hides Run on a draft-workflow suite for an invite-grant session (#393)', async () => {
+		authState.grant = 'invite';
+		const draftSuite: EvalSuite = {
+			...agentSuite,
+			id: 'suite-2',
+			name: 'scratchpad-suite',
+			agent_id: null,
+			workflow_id: 'wf-2',
+			subject_type: 'workflow',
+			subject_name: 'scratchpad',
+			case_count: 1
+		};
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(workflows.list).mockResolvedValue([digestWorkflow, draftWorkflow]);
+		vi.mocked(evals.listSuites).mockResolvedValue([draftSuite]);
+
+		render(EvalsPage);
+		await expect.element(page.getByText('scratchpad-suite')).toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Run', exact: true }))
+			.not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+	});
+
+	it('keeps Run and Delete on an ungated suite for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		stubLists();
+		vi.mocked(evals.listSuites).mockResolvedValue([agentSuite]);
+
+		render(EvalsPage);
+		await expect.element(page.getByText('greeting-suite')).toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Run', exact: true }))
+			.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+	});
+
+	it('hides a scoped agent from the subject picker for an invite-grant session', async () => {
+		authState.grant = 'invite';
+		vi.mocked(agents.list).mockResolvedValue([researcher]);
+		vi.mocked(workflows.list).mockResolvedValue([digestWorkflow]);
+		vi.mocked(evals.listSuites).mockResolvedValue([]);
+		vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
+
+		render(EvalsPage);
+		await page.getByRole('button', { name: '+ New suite' }).click();
+
+		await expect.element(page.getByRole('option', { name: 'Researcher' })).not.toBeInTheDocument();
 	});
 });

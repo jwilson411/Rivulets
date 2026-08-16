@@ -172,6 +172,11 @@
 	// as an owner, but once it's published only the owner can rewrite the
 	// live graph a schedule/webhook/slash-command can already fire against.
 	const canEditGraph = $derived(auth.grant === 'owner' || !workflow?.published);
+	// #393 (#356 leftover): a published workflow's name *is* its /{name}
+	// slash command. The server 403s that PATCH for invite-grant sessions,
+	// so don't offer rename once the canvas is already read-only for them.
+	// Drafts stay renameable, same as canEditGraph.
+	const canRename = $derived(auth.grant === 'owner' || !workflow?.published);
 
 	async function load(workflowId: string) {
 		loadError = null;
@@ -221,7 +226,7 @@
 	});
 
 	function startRename() {
-		if (!workflow) return;
+		if (!workflow || !canRename) return;
 		renameError = null;
 		nameDraft = workflow.name;
 		descriptionDraft = workflow.description ?? '';
@@ -888,12 +893,14 @@
 								{/if}
 							</button>
 						{/if}
-						<button
-							onclick={startRename}
-							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							Edit
-						</button>
+						{#if canRename}
+							<button
+								onclick={startRename}
+								class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+							>
+								Edit
+							</button>
+						{/if}
 					</div>
 				</div>
 				{#if publishError}
