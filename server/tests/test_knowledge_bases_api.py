@@ -3,16 +3,19 @@ through the real HTTP API. Embedding calls are monkeypatched to a
 deterministic fake -- no real OpenAI network access in the test suite.
 """
 
+import json
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from rivulets.config import get_settings
 from rivulets.db.models import AgentRun, SyncPendingOutbound
 from rivulets.db.models import File as FileRow
 from rivulets.db.session import session_scope
 from rivulets.knowledge_base.embeddings import EmbeddingResult
+from rivulets.sync.engine import PeerInfo
 
 
 def _create_agent(client: TestClient, headers: dict[str, str], name: str = "KB Agent") -> str:
@@ -320,6 +323,55 @@ def test_ingest_document_without_embedding_provider_fails_clearly(
         f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers
     ).json()
     assert documents[0]["status"] == "failed"
+
+
+async def test_ingest_document_fetches_missing_content_from_a_known_source(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#391: ingest previously 400'd outright when the file's bytes weren't
+    on disk, even when a reachable peer held them -- it must try the same
+    on-demand fetch api/files.py's download route uses (#363) before
+    failing."""
+    agent_id = _create_agent(client, auth_headers)
+    kb_id = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "Docs", "scope_type": "agent", "agent_id": agent_id},
+        headers=auth_headers,
+    ).json()["id"]
+    content = b"kb content held by a peer"
+    file_id = _upload(client, auth_headers, "notes.txt", content)
+
+    async with session_scope() as db:
+        row = await db.get(FileRow, file_id)
+        assert row is not None
+        content_hash = row.content_hash
+        row.synced_to_nodes = json.dumps(["node-b"])
+        await db.commit()
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    local_path.unlink()  # simulate lazy sync never having fetched the bytes
+
+    class _FakeEngine:
+        running = True
+
+        async def list_peers(self) -> list[PeerInfo]:
+            return []
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            assert peer_id == "node-b"
+            assert requested_hash == content_hash
+            return content
+
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+
+    response = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/documents",
+        json={"file_id": file_id},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "ingested"
+    assert local_path.read_bytes() == content
 
 
 async def test_ingest_document_ignores_a_stale_local_path_pointing_outside_files_dir(

@@ -1250,8 +1250,8 @@ def not_running_sync_engine(tmp_path: Path) -> Iterator[None]:
     """apply_remote_file_change calls get_sync_engine() to (maybe) fetch
     content — it needs the singleton initialized (unlike db_session-only
     tests, which never go through create_app()'s init_sync_engine call),
-    but not actually running, so _fetch_file_content's engine.running
-    check cleanly skips without touching the network."""
+    but not actually running, so fetch_file_content_from_known_sources's
+    engine.running check cleanly skips without touching the network."""
     reset_sync_engine_for_testing()
     init_sync_engine(tmp_path / "sync")
     yield
@@ -1301,6 +1301,9 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
             assert peer_id == "node-b"
             return True
 
+        async def list_peers(self) -> list[PeerInfo]:
+            return []
+
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             assert peer_id == "node-b"
             assert requested_hash == content_hash
@@ -1334,6 +1337,61 @@ async def test_apply_remote_file_change_fetches_content_when_missing_locally(
     assert json.loads(file_row.synced_to_nodes) == ["node-b"]
 
 
+async def test_apply_remote_file_change_eager_fetch_falls_back_to_connected_peers(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#391: the eager fetch previously asked only the gossip origin -- if
+    that node couldn't serve the bytes (offline, or itself lazy), they
+    stayed missing until someone happened to hit the download route. It
+    must fall back to other connected peers the same way the on-demand
+    path does."""
+    content = b"held by a peer that eager-fetched earlier"
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    asked: list[str] = []
+
+    class _FakeEngine:
+        running = True
+
+        def peer_is_lan(self, peer_id: str) -> bool:
+            assert peer_id == "node-b"
+            return True
+
+        async def list_peers(self) -> list[PeerInfo]:
+            return [PeerInfo(peer_id="node-c", address="/ip4/10.0.0.9/tcp/4001", connected=True)]
+
+        async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
+            asked.append(peer_id)
+            assert requested_hash == content_hash
+            if peer_id == "node-b":  # the origin can't serve the bytes
+                return None
+            return content
+
+    reset_sync_engine_for_testing()
+    monkeypatch.setattr("rivulets.sync.apply.get_sync_engine", lambda: _FakeEngine())
+    monkeypatch.setattr(get_settings(), "workspace_dir", tmp_path)
+
+    result = await apply_remote_file_change(
+        db_session,
+        "file-1",
+        {"node-b": 1},
+        "node-b",
+        {
+            "content_hash": content_hash,
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "size_bytes": len(content),
+            "message_id": None,
+        },
+    )
+    assert result.applied is True
+
+    local_path = get_settings().files_dir / content_hash[:2] / content_hash
+    assert local_path.read_bytes() == content
+    # The just-recorded origin is asked first, then the connected peer.
+    assert asked == ["node-b", "node-c"]
+
+
 async def test_apply_remote_file_change_discards_content_that_does_not_match_hash(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1349,6 +1407,9 @@ async def test_apply_remote_file_change_discards_content_that_does_not_match_has
 
         def peer_is_lan(self, peer_id: str) -> bool:
             return True
+
+        async def list_peers(self) -> list[PeerInfo]:
+            return []
 
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             return b"not the bytes that hash to content_hash"
@@ -1434,6 +1495,9 @@ async def test_apply_remote_file_change_fetches_wan_content_when_eager_wan_enabl
 
         def peer_is_lan(self, peer_id: str) -> bool:
             return False
+
+        async def list_peers(self) -> list[PeerInfo]:
+            return []
 
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             return content
@@ -3202,6 +3266,9 @@ async def test_apply_remote_file_change_logs_when_peer_also_lacks_content(
 
         def peer_is_lan(self, peer_id: str) -> bool:
             return True
+
+        async def list_peers(self) -> list[PeerInfo]:
+            return []
 
         async def request_file(self, peer_id: str, requested_hash: str) -> bytes | None:
             assert peer_id == "node-b"

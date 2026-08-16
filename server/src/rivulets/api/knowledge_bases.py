@@ -50,6 +50,7 @@ from rivulets.knowledge_base.embeddings import (
     embed_texts,
     record_embedding_run,
 )
+from rivulets.sync.apply import fetch_file_content_from_known_sources
 from rivulets.sync.publish import publish_current_state, publish_tombstone
 from rivulets.validation import local_path_for_content_hash
 
@@ -276,6 +277,12 @@ async def ingest_document(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "File has an invalid content hash"
         ) from exc
+    if not path.exists():
+        # Lazy sync (sync.eager_files_lan/_wan, #123) may have deferred
+        # fetching this file's bytes, or the eager fetch failed -- try on
+        # demand from known sources and connected peers (#391), the same
+        # recovery api/files.py's download_file uses, before failing.
+        await fetch_file_content_from_known_sources(file_row.content_hash, file_row.synced_to_nodes)
     if not path.exists():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
