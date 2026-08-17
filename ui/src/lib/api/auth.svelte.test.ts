@@ -8,11 +8,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { auth } from './auth.svelte';
 
 const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
+const OWNER_STAY_STORAGE_KEY = 'rivulets-owner-stay';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
 	localStorage.removeItem(RESUME_STORAGE_KEY);
+	auth.forgetOwnerStay();
 });
 
 describe('auth', () => {
@@ -409,6 +411,169 @@ describe('auth', () => {
 		expect(JSON.parse(localStorage.getItem(RESUME_STORAGE_KEY)!).token).toBe(
 			'sess-1.resume-secret'
 		);
+	});
+
+	it('rememberOwnerStay() persists the phrase so a later resume can re-derive (#407)', async () => {
+		auth.rememberOwnerStay('apple banana cherry', 'secret');
+
+		expect(auth.ownerStayEnabled).toBe(true);
+		expect(JSON.parse(localStorage.getItem(OWNER_STAY_STORAGE_KEY)!)).toEqual({
+			mnemonic: 'apple banana cherry',
+			passphrase: 'secret'
+		});
+	});
+
+	it('resumeOwnerSession() logs in with the stored phrase and re-claims the last identity', async () => {
+		localStorage.setItem(
+			OWNER_STAY_STORAGE_KEY,
+			JSON.stringify({
+				mnemonic: 'apple banana cherry',
+				passphrase: 'secret',
+				humanId: 'human-1'
+			})
+		);
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ token: 'tok-stay', expires_at: 'x', grant: 'owner' }), {
+					status: 200
+				})
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						token: 'tok-claimed',
+						expires_at: 'x',
+						human_id: 'human-1',
+						display_name: 'Ada',
+						grant: 'owner'
+					}),
+					{ status: 200 }
+				)
+			);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(auth.resumeOwnerSession()).resolves.toBe(true);
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const [loginUrl, loginInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(loginUrl).toBe('/api/v1/auth/login');
+		expect(loginInit.body).toBe(
+			JSON.stringify({ key: 'apple banana cherry', passphrase: 'secret' })
+		);
+		const [identityUrl, identityInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+		expect(identityUrl).toBe('/api/v1/auth/identity');
+		expect(identityInit.body).toBe(JSON.stringify({ human_id: 'human-1' }));
+		expect(auth.token).toBe('tok-claimed');
+		expect(auth.humanId).toBe('human-1');
+		expect(auth.ownerStayEnabled).toBe(true);
+	});
+
+	it('resumeOwnerSession() resolves false without a request when nothing is stored', async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(auth.resumeOwnerSession()).resolves.toBe(false);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('resumeOwnerSession() discards a credential the server rejects (401)', async () => {
+		auth.rememberOwnerStay('apple banana cherry');
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(new Response('{"detail":"Incorrect recovery phrase"}', { status: 401 }))
+		);
+
+		await expect(auth.resumeOwnerSession()).resolves.toBe(false);
+
+		expect(localStorage.getItem(OWNER_STAY_STORAGE_KEY)).toBeNull();
+		expect(auth.ownerStayEnabled).toBe(false);
+	});
+
+	it('resumeOwnerSession() keeps the credential and rethrows on a transient failure (503)', async () => {
+		auth.rememberOwnerStay('apple banana cherry');
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					new Response('{"detail":"This workspace is not unlocked"}', { status: 503 })
+				)
+		);
+
+		await expect(auth.resumeOwnerSession()).rejects.toThrow('not unlocked');
+
+		expect(JSON.parse(localStorage.getItem(OWNER_STAY_STORAGE_KEY)!).mnemonic).toBe(
+			'apple banana cherry'
+		);
+		expect(auth.ownerStayEnabled).toBe(true);
+	});
+
+	it('resumeOwnerSession() still signs in when the stored identity can no longer be claimed', async () => {
+		localStorage.setItem(
+			OWNER_STAY_STORAGE_KEY,
+			JSON.stringify({ mnemonic: 'apple banana cherry', humanId: 'gone' })
+		);
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ token: 'tok-stay', expires_at: 'x', grant: 'owner' }), {
+					status: 200
+				})
+			)
+			.mockResolvedValueOnce(new Response('{"detail":"Unknown human"}', { status: 404 }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await expect(auth.resumeOwnerSession()).resolves.toBe(true);
+
+		expect(auth.token).toBe('tok-stay');
+		expect(auth.humanId).toBeNull();
+		expect(auth.ownerStayEnabled).toBe(true);
+	});
+
+	it('claimIdentity() records the claimed human on a stored stay credential', async () => {
+		auth.rememberOwnerStay('apple banana cherry');
+		const fetchMock = vi.fn().mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					token: 'tok-claimed',
+					expires_at: 'x',
+					human_id: 'human-1',
+					display_name: 'Ada',
+					grant: 'owner'
+				}),
+				{ status: 200 }
+			)
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await auth.claimIdentity({ displayName: 'Ada' });
+
+		expect(JSON.parse(localStorage.getItem(OWNER_STAY_STORAGE_KEY)!)).toEqual({
+			mnemonic: 'apple banana cherry',
+			humanId: 'human-1'
+		});
+	});
+
+	it('logout() drops the owner stay credential (#407)', async () => {
+		auth.rememberOwnerStay('apple banana cherry');
+		auth.applySession({
+			token: 'tok-owner',
+			expires_at: 'x',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+		await auth.logout();
+
+		expect(auth.token).toBeNull();
+		expect(auth.ownerStayEnabled).toBe(false);
+		expect(localStorage.getItem(OWNER_STAY_STORAGE_KEY)).toBeNull();
 	});
 
 	it('login() clears a stale sessionExpired flag on success', async () => {

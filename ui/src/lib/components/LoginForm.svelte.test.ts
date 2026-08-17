@@ -12,15 +12,23 @@ import { ApiError } from '$lib/api/client';
 
 // #350: resumeDisplayName is behind a getter so individual tests can flip
 // the stored-invite-credential state on and off.
-const authState = vi.hoisted(() => ({ resumeDisplayName: null as string | null }));
+const authState = vi.hoisted(() => ({
+	resumeDisplayName: null as string | null,
+	ownerStayEnabled: false
+}));
 
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		login: vi.fn(),
 		logout: vi.fn(),
 		resumeInviteSession: vi.fn(),
+		rememberOwnerStay: vi.fn(),
+		forgetOwnerStay: vi.fn(),
 		get resumeDisplayName() {
 			return authState.resumeDisplayName;
+		},
+		get ownerStayEnabled() {
+			return authState.ownerStayEnabled;
 		}
 	}
 }));
@@ -49,6 +57,7 @@ beforeEach(() => {
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.resumeDisplayName = null;
+	authState.ownerStayEnabled = false;
 });
 
 async function openPhraseEntry() {
@@ -98,7 +107,41 @@ describe('LoginForm.svelte', () => {
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
+		expect(auth.forgetOwnerStay).toHaveBeenCalledOnce();
+		expect(auth.rememberOwnerStay).not.toHaveBeenCalled();
 		await expect.element(input).toHaveValue('');
+	});
+
+	it('warns that refresh signs you out, and persists the phrase when stay-signed-in is checked (#407)', async () => {
+		vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+		render(LoginForm);
+		await openPhraseEntry();
+
+		await expect
+			.element(page.getByText('Refreshing or opening a new tab will sign you out.'))
+			.toBeInTheDocument();
+
+		await page.getByText('Stay signed in on this machine').click();
+		await expect
+			.element(page.getByText('Stores your recovery phrase in this browser', { exact: false }))
+			.toBeInTheDocument();
+
+		await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
+		await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
+		expect(auth.rememberOwnerStay).toHaveBeenCalledWith('apple banana cherry', undefined);
+		expect(auth.forgetOwnerStay).not.toHaveBeenCalled();
+	});
+
+	it('starts with stay-signed-in checked when this browser already opted in', async () => {
+		authState.ownerStayEnabled = true;
+		render(LoginForm);
+		await openPhraseEntry();
+
+		await expect
+			.element(page.getByText('Stores your recovery phrase in this browser', { exact: false }))
+			.toBeInTheDocument();
 	});
 
 	it('reveals the passphrase field on demand and sends it with the login', async () => {
@@ -171,6 +214,19 @@ describe('LoginForm.svelte', () => {
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined, undefined);
+			expect(auth.forgetOwnerStay).toHaveBeenCalledOnce();
+		});
+
+		it('can stay signed in from the generated-phrase screen (#407)', async () => {
+			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+			await page.getByText('Stay signed in on this machine').click();
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.rememberOwnerStay).toHaveBeenCalledWith(STUB_PHRASE, undefined);
 		});
 
 		it('logs in with the entered passphrase alongside the generated phrase', async () => {

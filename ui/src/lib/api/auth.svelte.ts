@@ -1,12 +1,18 @@
 // Reactive session state (api-design.md#authentication-flow). The JWT lives
-// in memory only — never localStorage/sessionStorage — per NFR-3.4 and
-// security-and-risks.md's "JWT in memory (not localStorage)" mitigation for
-// DOM-based XSS. That also means a page refresh always requires re-login;
-// wiring up the documented "re-derive from mnemonic in session storage"
-// refresh path is a deliberate product decision, not scaffolding — left as
-// a TODO here rather than silently choosing a weaker storage mode.
+// in memory only — never localStorage/sessionStorage — per
+// security.md's "JWT in memory (not localStorage)" mitigation for
+// DOM-based XSS. A refresh therefore cannot reuse the JWT; staying signed
+// in means re-deriving a fresh one.
 //
-// #350: invite-grant sessions are the one deliberate exception to
+// #407: owners can opt in to "Stay signed in on this machine". That
+// persists the recovery phrase (and optional passphrase) in localStorage
+// so a refresh, new tab, or typed URL can POST /auth/login again and
+// re-claim the last identity. The JWT itself still never touches storage.
+// This is off by default and cleared on explicit sign-out — storing the
+// phrase is a real XSS/local-access tradeoff, so LoginForm discloses it
+// next to the checkbox rather than doing it silently.
+//
+// #350: invite-grant sessions are the other deliberate exception to
 // "nothing in localStorage" — not for the JWT itself (still memory-only),
 // but for the invite *resume token* (api/invites.py's POST
 // /invites/resume). An invited human has no mnemonic to re-login with and
@@ -49,10 +55,17 @@ interface StreamTicketResponse {
 }
 
 const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
+const OWNER_STAY_STORAGE_KEY = 'rivulets-owner-stay';
 
 interface StoredResume {
 	token: string;
 	displayName: string;
+}
+
+interface StoredOwnerStay {
+	mnemonic: string;
+	passphrase?: string;
+	humanId?: string;
 }
 
 // Same `typeof localStorage` guard as theme.svelte.ts's readStored — the
@@ -84,6 +97,50 @@ function writeStoredResume(value: StoredResume | null): void {
 	else localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(value));
 }
 
+function readStoredOwnerStay(): StoredOwnerStay | null {
+	if (typeof localStorage === 'undefined') return null;
+	const raw = localStorage.getItem(OWNER_STAY_STORAGE_KEY);
+	if (!raw) return null;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			parsed &&
+			typeof parsed === 'object' &&
+			typeof (parsed as StoredOwnerStay).mnemonic === 'string' &&
+			(parsed as StoredOwnerStay).mnemonic.length > 0
+		) {
+			const stay = parsed as StoredOwnerStay;
+			return {
+				mnemonic: stay.mnemonic,
+				passphrase:
+					typeof stay.passphrase === 'string' && stay.passphrase.length > 0
+						? stay.passphrase
+						: undefined,
+				humanId:
+					typeof stay.humanId === 'string' && stay.humanId.length > 0 ? stay.humanId : undefined
+			};
+		}
+	} catch {
+		// fall through — a corrupt entry is treated as absent
+	}
+	return null;
+}
+
+function writeStoredOwnerStay(value: StoredOwnerStay | null): void {
+	if (typeof localStorage === 'undefined') return;
+	if (value === null) localStorage.removeItem(OWNER_STAY_STORAGE_KEY);
+	else localStorage.setItem(OWNER_STAY_STORAGE_KEY, JSON.stringify(value));
+}
+
+function persistOwnerHumanId(nextHumanId: string | null): void {
+	const stored = readStoredOwnerStay();
+	if (stored === null) return;
+	writeStoredOwnerStay({
+		...stored,
+		humanId: nextHumanId ?? undefined
+	});
+}
+
 let token = $state<string | null>(null);
 let humanId = $state<string | null>(null);
 let displayName = $state<string | null>(null);
@@ -94,6 +151,10 @@ let expiresAt = $state<string | null>(null);
 // reactive state so LoginForm's "Continue as …" offer appears/disappears
 // without a reload when the credential is stored or discarded.
 let resumeDisplayName = $state<string | null>(readStoredResume()?.displayName ?? null);
+// True when this browser holds an owner stay-signed-in credential (#407)
+// — mirrored into reactive state so +layout.svelte can decide to silent-
+// resume on first paint without re-reading localStorage.
+let ownerStayEnabled = $state(readStoredOwnerStay() !== null);
 // True only when a previously-valid session was torn down out from under
 // the user (a 401 mid-session, or the JWT's own expiry) -- distinct from
 // simply being logged out, so LoginForm can say *why* it's showing again
@@ -167,6 +228,11 @@ export const auth = {
 	get resumeDisplayName() {
 		return resumeDisplayName;
 	},
+	// True when this browser holds an owner stay-signed-in credential
+	// (#407) — +layout.svelte uses this to silent-resume on load.
+	get ownerStayEnabled() {
+		return ownerStayEnabled;
+	},
 	// bootstrapToken (server/api/auth.py's LoginRequest.bootstrap_token,
 	// #247/#291) is only consulted server-side when this login is about to
 	// create the workspace row while app_server_host is 0.0.0.0 -- fine to
@@ -180,6 +246,11 @@ export const auth = {
 		token = response.token;
 		grant = response.grant;
 		expiresAt = response.expires_at;
+		// /auth/login mints a workspace session with no human_id claim —
+		// drop any leftover identity from a previous token so IdentityPicker
+		// (or resumeOwnerSession's re-claim) is what sets it.
+		humanId = null;
+		displayName = null;
 		sessionExpired = false;
 		scheduleExpiry(response.expires_at);
 	},
@@ -238,6 +309,7 @@ export const auth = {
 			'humanId' in params ? { human_id: params.humanId } : { display_name: params.displayName };
 		const response = await api.post<SessionInfo>('/auth/identity', body, token ?? undefined);
 		auth.applySession(response);
+		persistOwnerHumanId(response.human_id);
 	},
 	// Drops the claimed identity only, without a server round-trip -- #14
 	// is a lightweight claim, not a credential, so re-picking who you are
@@ -245,6 +317,7 @@ export const auth = {
 	clearIdentity(): void {
 		humanId = null;
 		displayName = null;
+		persistOwnerHumanId(null);
 	},
 	// A short-lived, purpose-scoped token for the one endpoint that can't
 	// use a normal Authorization header: the SSE stream (api/deps.py's
@@ -262,12 +335,68 @@ export const auth = {
 		);
 		return response.ticket;
 	},
+	// Persists the recovery phrase so this browser can re-derive a JWT
+	// after a refresh (#407). Opt-in only — LoginForm's checkbox is what
+	// calls this, after a successful login. Keeps any already-stored
+	// humanId so a later "stay signed in" on the same machine still
+	// skips the identity picker.
+	rememberOwnerStay(mnemonic: string, passphrase?: string): void {
+		const prev = readStoredOwnerStay();
+		writeStoredOwnerStay({
+			mnemonic,
+			passphrase: passphrase || undefined,
+			humanId: humanId ?? prev?.humanId
+		});
+		ownerStayEnabled = true;
+	},
+	// Drops the owner stay-signed-in credential (#407). Called on
+	// explicit sign-out, and on a successful login that left the
+	// checkbox unchecked (so a previous opt-in does not linger).
+	forgetOwnerStay(): void {
+		writeStoredOwnerStay(null);
+		ownerStayEnabled = false;
+	},
+	// Re-derives an owner session from the persisted phrase (#407).
+	// Resolves false when nothing is stored or the server rejected the
+	// phrase (400/401 — workspace reset, corrupt entry), in which case
+	// the credential is discarded. Transient failures rethrow WITHOUT
+	// discarding, same contract as resumeInviteSession.
+	async resumeOwnerSession(): Promise<boolean> {
+		const stored = readStoredOwnerStay();
+		if (stored === null) return false;
+		try {
+			await auth.login(stored.mnemonic, stored.passphrase);
+		} catch (err) {
+			if (err instanceof ApiError && (err.status === 400 || err.status === 401)) {
+				auth.forgetOwnerStay();
+				return false;
+			}
+			throw err;
+		}
+		// login() succeeded and rewrote token/grant, but does not persist
+		// the stay flag itself — put the phrase back (and keep humanId)
+		// so a later refresh still has something to resume from.
+		auth.rememberOwnerStay(stored.mnemonic, stored.passphrase);
+		if (stored.humanId) {
+			try {
+				await auth.claimIdentity({ humanId: stored.humanId });
+			} catch {
+				// Workspace session is valid; let IdentityPicker handle a
+				// stale or deleted human rather than failing the resume.
+			}
+		}
+		return true;
+	},
 	// Deliberately leaves any persisted invite resume credential in place
 	// (#350): sign-out ends the session, but an invited human has no other
 	// way back in — LoginForm's "Continue as …" is their re-entry, the way
 	// re-entering the mnemonic is the owner's.
+	//
+	// The owner stay-signed-in credential (#407) is the opposite: sign-out
+	// is the way to stop staying signed in, so it is dropped here.
 	async logout(): Promise<void> {
 		const activeToken = token;
+		auth.forgetOwnerStay();
 		clearSession(false);
 		if (activeToken) await api.post('/auth/logout', {}, activeToken);
 	}

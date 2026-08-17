@@ -16,10 +16,12 @@ const authState = vi.hoisted(() => ({
 	humanId: null as string | null,
 	displayName: null as string | null,
 	grant: null as string | null,
-	resumeDisplayName: null as string | null
+	resumeDisplayName: null as string | null,
+	ownerStayEnabled: false
 }));
 
 const resumeInviteSessionMock = vi.hoisted(() => vi.fn());
+const resumeOwnerSessionMock = vi.hoisted(() => vi.fn());
 
 const routeState = vi.hoisted(() => ({ pathname: '/' }));
 
@@ -54,7 +56,11 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		get resumeDisplayName() {
 			return authState.resumeDisplayName;
 		},
+		get ownerStayEnabled() {
+			return authState.ownerStayEnabled;
+		},
 		resumeInviteSession: resumeInviteSessionMock,
+		resumeOwnerSession: resumeOwnerSessionMock,
 		logout: vi.fn(),
 		claimIdentity: vi.fn(),
 		clearIdentity: vi.fn()
@@ -88,6 +94,7 @@ afterEach(() => {
 	authState.displayName = null;
 	authState.grant = null;
 	authState.resumeDisplayName = null;
+	authState.ownerStayEnabled = false;
 	routeState.pathname = '/';
 });
 
@@ -203,6 +210,29 @@ describe('routes/+layout.svelte', () => {
 			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
+		expect(resumeOwnerSessionMock).not.toHaveBeenCalled();
+	});
+
+	it('silently resumes a stay-signed-in owner session on load instead of showing Unlock (#407)', async () => {
+		authState.isAuthenticated = false;
+		authState.ownerStayEnabled = true;
+		let finishResume!: (value: boolean) => void;
+		resumeOwnerSessionMock.mockReturnValue(
+			new Promise<boolean>((resolve) => {
+				finishResume = resolve;
+			})
+		);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await expect.element(page.getByText('Signing you back in…')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
+			.not.toBeInTheDocument();
+		expect(resumeOwnerSessionMock).toHaveBeenCalledOnce();
+		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
+
+		finishResume(true);
 	});
 
 	it('opens the command palette from the Search / jump control (#416)', async () => {
