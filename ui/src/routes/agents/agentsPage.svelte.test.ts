@@ -102,13 +102,16 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('Needs a provider')).toBeInTheDocument();
 	});
 
-	it('filters the cards by search', async () => {
+	it('names the search box and filters the cards by query', async () => {
 		seed();
 
 		render(AgentsPage);
 		await expect.element(page.getByText('Writer')).toBeInTheDocument();
 
-		await page.getByPlaceholder('Search agents').fill('assis');
+		const search = page.getByRole('searchbox', { name: 'Search agents' });
+		await expect.element(search).toBeInTheDocument();
+		await expect.element(search).toHaveAttribute('placeholder', 'Search agents');
+		await search.fill('assis');
 
 		await expect.element(page.getByText('Assistant')).toBeInTheDocument();
 		await expect.element(page.getByText('Writer')).not.toBeInTheDocument();

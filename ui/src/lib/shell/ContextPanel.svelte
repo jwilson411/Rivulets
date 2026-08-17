@@ -130,12 +130,13 @@
 		<label
 			class="mb-5 flex h-11 items-center gap-2.5 rounded-lg border border-line bg-surface px-3.5 focus-within:border-accent dark:border-line-dark dark:bg-surface-dark dark:focus-within:border-accent-dark"
 		>
+			<span class="sr-only">Filter channels</span>
 			<Icon name="search" class="h-[18px] w-[18px] flex-none text-muted dark:text-muted-dark" />
 			<input
 				type="search"
 				bind:value={search}
-				placeholder="Search channels"
-				class="min-w-0 flex-1 bg-transparent text-[15px] text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
+				placeholder="Filter channels"
+				class="min-w-0 flex-1 appearance-none bg-transparent text-[15px] text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
 			/>
 		</label>
 		<SectionLabel class="mb-2 px-3.5">Channels</SectionLabel>
