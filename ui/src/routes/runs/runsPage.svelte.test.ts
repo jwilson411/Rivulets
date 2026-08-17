@@ -19,7 +19,7 @@ vi.mock('$app/paths', () => ({
 }));
 
 vi.mock('$lib/api/runs', () => ({
-	runs: { list: vi.fn(), get: vi.fn() }
+	runs: { list: vi.fn(), get: vi.fn(), cancel: vi.fn() }
 }));
 
 afterEach(() => {
@@ -130,5 +130,37 @@ describe('runs/+page.svelte', () => {
 
 		await expect.element(page.getByText("Couldn't load runs.")).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+	});
+
+	it('warns on a stale running zero-step run and lets the user cancel it', async () => {
+		const stuck: RunTrace = {
+			...completedTrace,
+			id: 'trace-stuck',
+			status: 'running',
+			span_count: 0,
+			total_cost_usd: null,
+			completed_at: null,
+			started_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
+		};
+		vi.mocked(runs.list).mockResolvedValue([stuck]);
+		vi.mocked(runs.get).mockResolvedValue({ ...stuck, spans: [] });
+		vi.mocked(runs.cancel).mockResolvedValue({
+			...stuck,
+			status: 'cancelled',
+			completed_at: new Date().toISOString()
+		});
+
+		render(RunsPage);
+
+		await expect.element(page.getByText('Running')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('No steps recorded. This run looks interrupted.'))
+			.toBeInTheDocument();
+
+		await page.getByText('Riley posted in #launch-readiness').click();
+		await page.getByRole('button', { name: 'Cancel' }).click();
+
+		expect(runs.cancel).toHaveBeenCalledWith('trace-stuck');
+		await expect.element(page.getByText('Cancelled')).toBeInTheDocument();
 	});
 });

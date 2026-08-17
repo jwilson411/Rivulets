@@ -11,6 +11,7 @@ import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams, type Team } from '$lib/api/teams';
 import { files as filesApi } from '$lib/api/files';
 import { workflows as workflowsApi } from '$lib/api/workflows';
+import { runs, type RunTrace } from '$lib/api/runs';
 import { goto } from '$app/navigation';
 
 vi.mock('$app/state', () => ({
@@ -47,6 +48,10 @@ vi.mock('$lib/api/agents', () => ({
 
 vi.mock('$lib/api/workflows', () => ({
 	workflows: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/runs', () => ({
+	runs: { list: vi.fn() }
 }));
 
 vi.mock('$lib/api/files', () => ({
@@ -111,6 +116,7 @@ function seed(overrides?: { channel?: Channel; rivulets?: Rivulet[]; teams?: Tea
 	vi.mocked(teams.list).mockResolvedValue(overrides?.teams ?? []);
 	vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, agentMessage]);
 	vi.mocked(workflowsApi.list).mockResolvedValue([]);
+	vi.mocked(runs.list).mockResolvedValue([]);
 }
 
 afterEach(() => {
@@ -127,6 +133,28 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
 		await expect.element(page.getByText('1 conversation', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText(/Researcher/)).toBeInTheDocument();
+	});
+
+	it('says so on the thread card when the latest run is still running or failed', async () => {
+		const stuckRun: RunTrace = {
+			id: 'trace-1',
+			trigger_type: 'message',
+			label: 'Kickoff message',
+			rivulet_id: 'riv-1',
+			channel_id: 'chan-1',
+			status: 'running',
+			span_count: 0,
+			total_cost_usd: null,
+			total_tokens: 0,
+			started_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+			completed_at: null
+		};
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(runs.list).mockResolvedValue([stuckRun]);
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('Last run is stuck — no steps recorded.')).toBeInTheDocument();
 	});
 
 	it('shows the empty state when the channel has no conversations', async () => {

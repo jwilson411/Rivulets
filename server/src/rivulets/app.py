@@ -34,7 +34,7 @@ from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
 from rivulets.sync.catchup import push_snapshot_to_peer, run_catchup_loop
 from rivulets.sync.publish import drain_pending_outbound
-from rivulets.tracing import run_retention_loop
+from rivulets.tracing import reap_stale_traces, run_retention_loop
 from rivulets.version import APP_VERSION
 from rivulets.workflows.scheduler import run_scheduler_loop
 
@@ -128,6 +128,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         # agents created before a restart need to be re-registered since
         # AgentOS's in-process agent list isn't itself persisted.
         await sync_agents(db)
+        # #414: the previous process is gone, so any RunTrace still
+        # 'running' that isn't a workflow pause waiting on a person is a
+        # leftover from a crash / 500 / container restart. Fail them here
+        # rather than leaving "Running · 0 steps" on the Runs page for
+        # days. Periodic zero-span reap lives in tracing.py's retention
+        # tick; this is the one-shot orphan pass.
+        reaped = await reap_stale_traces(db, include_orphaned=True)
+        if reaped:
+            await db.commit()
     # #92: the app's first plain-asyncio recurring background task — see
     # workflows/scheduler.py's module docstring for why this doesn't need
     # the sync engine's trio-on-a-thread machinery below.

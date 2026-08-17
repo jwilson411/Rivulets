@@ -2,6 +2,7 @@
 	import { resolve } from '$app/paths';
 	import { runs, type RunTrace, type RunSpan } from '$lib/api/runs';
 	import { timeAgo } from '$lib/format';
+	import Button from '$lib/ui/Button.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
 	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
@@ -17,6 +18,9 @@
 	let expandedTraceId = $state<string | null>(null);
 	let spansByTrace = $state<Record<string, RunSpan[]>>({});
 	let detailError = $state<string | null>(null);
+	let cancelError = $state<string | null>(null);
+	let cancelErrorId = $state<string | null>(null);
+	let cancellingId = $state<string | null>(null);
 
 	async function refresh() {
 		listError = null;
@@ -56,7 +60,35 @@
 		if (status === 'completed') return 'Completed';
 		if (status === 'error') return 'Failed';
 		if (status === 'running') return 'Running';
+		if (status === 'cancelled') return 'Cancelled';
 		return status.charAt(0).toUpperCase() + status.slice(1);
+	}
+
+	// A running row with no steps that is older than a minute is the
+	// leftover #414 is about -- not a request that just opened. The
+	// server reaps these after 5 minutes; the warning is so a two-day
+	// leftover never just says "Running".
+	function isStuckZeroStep(trace: RunTrace): boolean {
+		if (trace.status !== 'running' || trace.span_count > 0) return false;
+		return Date.now() - new Date(trace.started_at).getTime() > 60_000;
+	}
+
+	async function cancelTrace(traceId: string, event: MouseEvent) {
+		event.stopPropagation();
+		cancelError = null;
+		cancelErrorId = null;
+		cancellingId = traceId;
+		try {
+			const updated = await runs.cancel(traceId);
+			if (traceList) {
+				traceList = traceList.map((t) => (t.id === traceId ? { ...t, ...updated } : t));
+			}
+		} catch {
+			cancelError = "Couldn't cancel that run.";
+			cancelErrorId = traceId;
+		} finally {
+			cancellingId = null;
+		}
 	}
 
 	function formatCost(cost: number | null): string {
@@ -115,33 +147,53 @@
 				<div
 					class="rounded-2xl border border-line bg-surface dark:border-line-dark dark:bg-surface-dark"
 				>
-					<button
-						type="button"
-						onclick={() => toggleTrace(trace.id)}
-						aria-expanded={expandedTraceId === trace.id}
-						class="flex min-h-16 w-full flex-wrap items-center gap-3 px-6 py-4 text-left"
-					>
-						<Icon
-							name="chevron-right"
-							class="h-4 w-4 flex-none text-muted transition-transform duration-150 dark:text-muted-dark {expandedTraceId ===
-							trace.id
-								? 'rotate-90'
-								: ''}"
-						/>
-						<span
-							class="min-w-0 flex-1 truncate text-base font-semibold text-ink dark:text-ink-dark"
+					<div class="flex min-h-16 w-full flex-wrap items-center gap-3 px-6 py-4">
+						<button
+							type="button"
+							onclick={() => toggleTrace(trace.id)}
+							aria-expanded={expandedTraceId === trace.id}
+							class="flex min-w-0 flex-1 flex-wrap items-center gap-3 text-left"
 						>
-							{trace.label}
-						</span>
-						<StatusPill tone={statusTone(trace.status)}>{statusLabel(trace.status)}</StatusPill>
-						<span class="flex-none text-sm text-muted dark:text-muted-dark">
-							{trace.span_count} step{trace.span_count === 1 ? '' : 's'}
-							{#if trace.total_cost_usd !== null}
-								· {formatCost(trace.total_cost_usd)}
-							{/if}
-							· {timeAgo(trace.started_at)}
-						</span>
-					</button>
+							<Icon
+								name="chevron-right"
+								class="h-4 w-4 flex-none text-muted transition-transform duration-150 dark:text-muted-dark {expandedTraceId ===
+								trace.id
+									? 'rotate-90'
+									: ''}"
+							/>
+							<span
+								class="min-w-0 flex-1 truncate text-base font-semibold text-ink dark:text-ink-dark"
+							>
+								{trace.label}
+							</span>
+							<StatusPill tone={statusTone(trace.status)}>{statusLabel(trace.status)}</StatusPill>
+							<span class="flex-none text-sm text-muted dark:text-muted-dark">
+								{trace.span_count} step{trace.span_count === 1 ? '' : 's'}
+								{#if trace.total_cost_usd !== null}
+									· {formatCost(trace.total_cost_usd)}
+								{/if}
+								· {timeAgo(trace.started_at)}
+							</span>
+						</button>
+						{#if trace.status === 'running'}
+							<Button
+								variant="destructive"
+								size="md"
+								disabled={cancellingId === trace.id}
+								onclick={(event) => cancelTrace(trace.id, event)}
+							>
+								Cancel
+							</Button>
+						{/if}
+					</div>
+					{#if isStuckZeroStep(trace)}
+						<p class="px-6 pb-3 text-sm text-warn">
+							No steps recorded. This run looks interrupted.
+						</p>
+					{/if}
+					{#if cancelError && cancelErrorId === trace.id}
+						<p class="px-6 pb-3 text-sm text-danger">{cancelError}</p>
+					{/if}
 					{#if expandedTraceId === trace.id}
 						<div class="border-t border-line px-6 py-4 dark:border-line-dark">
 							{#if trace.rivulet_id && trace.channel_id}
