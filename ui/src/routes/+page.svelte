@@ -194,10 +194,9 @@
 		</div>
 	{:else}
 		<SectionLabel class="flex-none px-4 pt-6 text-sm md:px-10">Recent conversations</SectionLabel>
-		<!-- #418: composer is docked over this pane. Padding is last-card
-		     clearance for the chip row + Stream Bar + helper; the phone
-		     value is larger so scroll-to-end still clears the tab bar. -->
-		<div class="min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-52 md:px-10 md:pb-40">
+		<!-- #448: list scrolls in the leftover space above the composer.
+		     Overlay + padding-bottom drifted once Continue last landed. -->
+		<div class="min-h-0 flex-1 overflow-y-auto px-4 pt-4 md:px-10">
 			{#if agentsNotReady}
 				<ErrorBanner
 					class="mb-4"
@@ -271,7 +270,9 @@
 		</div>
 
 		<div
-			class="absolute inset-x-0 bottom-0 z-10 bg-paper px-4 pt-3 pb-3 md:px-10 md:pb-7 dark:bg-paper-dark"
+			class="flex-none bg-paper px-4 pt-3 pb-3 md:px-10 md:pb-7 dark:bg-paper-dark"
+			role="region"
+			aria-label="Start a conversation"
 		>
 			{#if activeChannels.length > 0}
 				<div

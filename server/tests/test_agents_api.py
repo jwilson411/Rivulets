@@ -270,13 +270,57 @@ def test_update_agent_name_only_does_not_regenerate_rules(
     assert after_rules == before_rules
 
 
+def _set_keyword_rules(
+    client: TestClient, auth_headers: dict[str, str], agent_id: object
+) -> list[object]:
+    response = client.patch(
+        f"/api/v1/agents/{agent_id}/routing-rules",
+        json={
+            "rules": [
+                {"rule_type": "keyword", "pattern": '["schema", "sql"]', "priority": 10},
+            ]
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    rules = client.get(f"/api/v1/agents/{agent_id}/routing-rules", headers=auth_headers).json()
+    assert [rule["rule_type"] for rule in rules] == ["keyword"]
+    return rules
+
+
+def test_update_agent_resending_same_role_does_not_regenerate_rules(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#447: AgentSheet always PATCHes description + instructions. Same
+    values must not wipe a stored keyword / custom When to speak set."""
+    agent = _create_agent(client, auth_headers)
+    before_rules = _set_keyword_rules(client, auth_headers, agent["id"])
+
+    updated = client.patch(
+        f"/api/v1/agents/{agent['id']}",
+        json={
+            "name": agent["name"],
+            "description": agent["description"],
+            "instructions": agent["instructions"],
+            "model": agent["model"],
+        },
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+
+    after_rules = client.get(
+        f"/api/v1/agents/{agent['id']}/routing-rules", headers=auth_headers
+    ).json()
+    assert after_rules == before_rules
+
+
 def test_update_agent_description_triggers_rule_regeneration(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    """Changing description is one of rule_regen_fields -- existing rules
-    (there are none here, with no provider configured) get cleared and
-    regeneration is attempted again, still safely a no-op."""
+    """A real role-text change still regenerates. No provider is configured,
+    so the generator returns nothing and the stored keyword row is cleared."""
     agent = _create_agent(client, auth_headers)
+    _set_keyword_rules(client, auth_headers, agent["id"])
 
     updated = client.patch(
         f"/api/v1/agents/{agent['id']}",
@@ -285,6 +329,10 @@ def test_update_agent_description_triggers_rule_regeneration(
     )
     assert updated.status_code == 200
     assert updated.json()["description"] == "Handles only PostgreSQL-specific questions now."
+    after_rules = client.get(
+        f"/api/v1/agents/{agent['id']}/routing-rules", headers=auth_headers
+    ).json()
+    assert after_rules == []
 
 
 def test_update_agent_tool_ids_and_team_ids(
