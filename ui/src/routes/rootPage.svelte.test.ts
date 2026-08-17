@@ -209,6 +209,80 @@ describe('routes/+page.svelte (Home)', () => {
 		expect(providers.list).not.toHaveBeenCalled();
 	});
 
+	it('scrolls the last conversation clear of the docked composer (#418)', async () => {
+		const extras: Rivulet[] = Array.from({ length: 6 }, (_, i) => ({
+			...rivulet,
+			id: `riv-old-${i}`,
+			title: i === 5 ? 'Yesterday standup notes' : `Older thread ${i + 1}`,
+			created_at: `2025-12-${(30 - i).toString().padStart(2, '0')}T00:00:00Z`
+		}));
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([rivulet, ...extras]);
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id) => {
+			const extra = extras.find((r) => r.id === id);
+			if (!extra) return messages;
+			return [
+				{
+					...messages[0],
+					id: `msg-${extra.id}`,
+					rivulet_id: extra.id,
+					content: extra.title ?? 'Conversation',
+					created_at: extra.created_at
+				}
+			];
+		});
+
+		render(HomePage);
+
+		const heading = page.getByRole('heading', { name: 'Home' });
+		await expect.element(heading).toBeInTheDocument();
+		const frame = heading.element().closest('div.relative');
+		if (frame instanceof HTMLElement) {
+			frame.style.width = '390px';
+			frame.style.height = '780px';
+		}
+
+		const lastCard = page.getByRole('link', { name: /Yesterday standup notes/ });
+		await expect.element(lastCard).toBeInTheDocument();
+		const composer = page.getByPlaceholder('Start a conversation…');
+		await expect.element(composer).toBeInTheDocument();
+
+		const scroller = lastCard.element().closest('.overflow-y-auto');
+		if (scroller instanceof HTMLElement) {
+			scroller.scrollTop = scroller.scrollHeight;
+		}
+		const cardBox = lastCard.element().getBoundingClientRect();
+		const composerBox = composer.element().getBoundingClientRect();
+		expect(cardBox.bottom).toBeLessThanOrEqual(composerBox.top + 1);
+	});
+
+	it('keeps channel chips on one scrolling row instead of wrapping (#418)', async () => {
+		const extra: Channel = {
+			...general,
+			id: 'chan-2',
+			name: 'My Channel',
+			position: 1
+		};
+		const testChannel: Channel = { ...general, name: 'test-channel' };
+		seedComplete();
+		vi.mocked(channels.list).mockResolvedValue([testChannel, extra]);
+		vi.mocked(rivulets.listForChannel).mockImplementation(async (id) =>
+			id === testChannel.id ? [rivulet] : []
+		);
+
+		render(HomePage);
+
+		const toolbar = page.getByRole('toolbar', { name: 'Post to channel' });
+		await expect.element(toolbar).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: '#test-channel' })).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: '#My Channel' })).toBeInTheDocument();
+
+		const el = toolbar.element();
+		expect(el.className).toContain('flex-nowrap');
+		expect(el.className).toContain('overflow-x-scroll');
+		expect(getComputedStyle(el).flexWrap).toBe('nowrap');
+	});
+
 	it('posting from Home creates a conversation in the picked channel and opens it', async () => {
 		seedComplete();
 		vi.mocked(rivulets.create).mockResolvedValue({ ...rivulet, id: 'riv-2' });

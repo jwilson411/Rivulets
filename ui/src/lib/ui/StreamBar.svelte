@@ -200,7 +200,7 @@
 	}
 </script>
 
-<div class="relative">
+<div class="relative min-w-0">
 	{#if mentionOpen}
 		<div
 			class="absolute bottom-full mb-3 w-full max-w-[420px] rounded-xl border border-line bg-surface p-2 shadow-pop dark:border-line-dark dark:bg-surface-dark"
@@ -297,7 +297,7 @@
 			e.preventDefault();
 			send();
 		}}
-		class="flex items-end gap-3 rounded-3xl bg-surface p-4 shadow-bar dark:border dark:border-line-dark dark:bg-surface-dark dark:shadow-bar-dark"
+		class="flex items-end gap-2 rounded-3xl bg-surface p-3 shadow-bar md:gap-3 md:p-4 dark:border dark:border-line-dark dark:bg-surface-dark dark:shadow-bar-dark"
 	>
 		<input bind:this={fileInput} type="file" multiple onchange={handleFileSelect} class="hidden" />
 		<button
@@ -324,7 +324,7 @@
 			onkeydown={handleKeydown}
 			rows="1"
 			{placeholder}
-			class="max-h-[200px] min-w-0 flex-1 resize-none bg-transparent py-2 text-xl text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
+			class="max-h-[200px] min-w-0 flex-1 resize-none bg-transparent py-2 text-lg text-ink placeholder:text-muted focus:outline-none md:text-xl dark:text-ink-dark dark:placeholder:text-muted-dark"
 		></textarea>
 		<button
 			type="submit"
