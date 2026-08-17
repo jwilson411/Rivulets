@@ -7,11 +7,20 @@ from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.starter_content import (
     _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
+    ensure_assistant_always_rule,
     seed_starter_agents,
     seed_starter_teams,
 )
 from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
-from rivulets.db.models import Agent, AgentTool, AgentToolScope, Team, TeamAgent, Tool
+from rivulets.db.models import (
+    Agent,
+    AgentRoutingRule,
+    AgentTool,
+    AgentToolScope,
+    Team,
+    TeamAgent,
+    Tool,
+)
 
 _STARTER_AGENT_NAMES = {starter.name for starter in _STARTER_AGENTS}
 
@@ -183,3 +192,85 @@ async def test_seed_starter_teams_without_agents_creates_empty_team(
     ).scalar_one()
     result = await db_session.execute(select(TeamAgent).where(TeamAgent.team_id == team.id))
     assert result.scalars().all() == []
+
+
+async def test_seed_starter_assistant_gets_always_rule(db_session: AsyncSession) -> None:
+    """#406: everyday chat in a routed channel should reach Assistant."""
+    await seed_builtin_tools(db_session)
+    await seed_starter_agents(db_session)
+
+    assistant = (
+        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
+    ).scalar_one()
+    rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == assistant.id)
+            )
+        ).scalars()
+    )
+    assert [(rule.rule_type, rule.pattern) for rule in rules] == [("always", "")]
+
+
+async def test_ensure_assistant_always_rule_backfills_keyword_assistant(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    assistant = Agent(
+        name="Assistant",
+        description="A generalist.",
+        instructions="Help.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(assistant)
+    await db_session.flush()
+    db_session.add(
+        AgentRoutingRule(
+            agent_id=assistant.id,
+            rule_type="keyword",
+            pattern='["specialist", "expert"]',
+            priority=5,
+        )
+    )
+    await db_session.commit()
+
+    await ensure_assistant_always_rule(db_session)
+
+    rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == assistant.id)
+            )
+        ).scalars()
+    )
+    assert any(rule.rule_type == "always" for rule in rules)
+    assert any(rule.rule_type == "keyword" for rule in rules)
+
+
+async def test_ensure_assistant_always_rule_leaves_mention_only_alone(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    assistant = Agent(
+        name="Assistant",
+        description="A generalist.",
+        instructions="Help.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(assistant)
+    await db_session.flush()
+    db_session.add(
+        AgentRoutingRule(agent_id=assistant.id, rule_type="mention_only", pattern="", priority=10)
+    )
+    await db_session.commit()
+
+    await ensure_assistant_always_rule(db_session)
+
+    rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == assistant.id)
+            )
+        ).scalars()
+    )
+    assert [(rule.rule_type, rule.pattern) for rule in rules] == [("mention_only", "")]

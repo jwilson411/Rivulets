@@ -1048,6 +1048,12 @@ async def _dispatch_and_respond(
             )
         )
 
+    # #406: dispatch-none used to look like a successful delivery — run
+    # Completed, composer still saying the team would answer, nothing in
+    # the thread. Tell the human nobody picked this up.
+    if not result.agent_ids and from_agent_id is None:
+        new_messages.append(await _post_unrouted_notice(db, rivulet, channel, team_agents))
+
     await finish_span(db, dispatch_span_id, status="completed")
     # #237: this closes out a recursive call's own dispatch_decision span
     # promptly rather than leaving it dangling for whatever the caller
@@ -1325,6 +1331,40 @@ def _post_budget_alert(
             "blocked": blocked,
             "message": text,
         },
+    )
+    return message
+
+
+async def _post_unrouted_notice(
+    db: AsyncSession,
+    rivulet: Rivulet,
+    channel: Channel,
+    team_agents: list[tuple[Agent, AgentDispatchInfo]],
+) -> Message:
+    """#406: visible system line when a human message matches nobody
+    (and the default-teammate fallback also had no one eligible)."""
+    team = await db.get(Team, channel.team_id) if channel.team_id is not None else None
+    team_name = team.name if team is not None else "this team"
+    suggest = next(
+        (agent.name for agent, _ in team_agents if agent.name.lower() == "assistant"),
+        None,
+    )
+    if suggest is None and team_agents:
+        suggest = team_agents[0][0].name
+    mention = f"@{suggest}" if suggest else "@someone"
+    text = f"Nobody on {team_name} picked this up. Try {mention}, or change When to speak."
+    message = Message(
+        rivulet_id=rivulet.id,
+        sender_type="system",
+        sender_name="system",
+        content=text,
+        content_type="system_alert",
+    )
+    db.add(message)
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "unrouted", "message": text, "team_name": team_name},
     )
     return message
 

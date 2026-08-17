@@ -164,7 +164,6 @@ describe('agents/+page.svelte', () => {
 
 		render(AgentsPage);
 		await page.getByRole('button', { name: /Assistant/ }).click();
-		await page.getByText('More options').click();
 		await page.getByText('When the message includes…').click();
 		await page.getByLabelText('Keywords, separated by commas').fill('retry, eval');
 		await page.getByRole('button', { name: 'Save' }).click();

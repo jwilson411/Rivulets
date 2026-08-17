@@ -11,6 +11,7 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import { agentInkMap, INK_AVATAR, INK_BUBBLE, HUMAN_AVATAR, type AgentInk } from '$lib/ink';
 	import { formatBytes, formatClock } from '$lib/format';
+	import { teamComposerHint } from '$lib/teamRouting';
 	import { renderMarkdown } from '$lib/markdown';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
@@ -121,7 +122,7 @@
 	let routedTeam = $derived(teamList.find((t) => t.id === channel?.team_id) ?? null);
 	let helper = $derived(
 		routedTeam
-			? `Routes to ${routedTeam.name} · type / to run a workflow`
+			? `${teamComposerHint(routedTeam.name)} · type / to run a workflow`
 			: "No team — agents won't answer"
 	);
 
