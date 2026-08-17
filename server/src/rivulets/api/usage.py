@@ -16,9 +16,13 @@ can have `agent_id is None` -- it evaluates a whole team's roster before
 any agent is matched, so there's nobody to attribute it to. Those rows
 still count toward totals/by_model (outerjoin, not join) but are excluded
 from by_agent, which has nothing to key them under.
+
+#419: by_model keys on the model string only. Auto cheap/capable and a
+fixed-model agent can share a provider:id; splitting those into separate
+rows made Usage list the same raw id twice.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -83,17 +87,27 @@ class _Bucket:
     cost_unknown: bool = False  # at least one run in this bucket had an unpriced model
     run_count: int = 0
     agent_name: str | None = None  # only populated on by_agent buckets
+    # #419: by_model collapses the same model across Auto cheap/capable
+    # (and fixed-model) runs so the dashboard does not list a clone row.
+    # `tier` is kept only when every run in the bucket shares one value.
+    tiers: set[str | None] = field(default_factory=lambda: set[str | None]())
 
     def add(self, run: AgentRun) -> None:
         self.input_tokens += run.input_tokens
         self.output_tokens += run.output_tokens
         self.total_tokens += run.total_tokens
         self.run_count += 1
+        self.tiers.add(run.tier)
         if run.cost_usd is not None:
             self.cost_usd += run.cost_usd
             self.cost_known = True
         else:
             self.cost_unknown = True
+
+    def shared_tier(self) -> str | None:
+        if len(self.tiers) == 1:
+            return next(iter(self.tiers))
+        return None
 
 
 @router.get("", response_model=UsageOut)
@@ -110,7 +124,7 @@ async def get_usage(db: DbSession, _: CurrentWorkspaceId, range: UsageRange = "w
 
     totals = _Bucket()
     by_agent: dict[str, _Bucket] = {}
-    by_model: dict[tuple[str, str | None], _Bucket] = {}
+    by_model: dict[str, _Bucket] = {}
 
     for run, agent_name in rows:
         totals.add(run)
@@ -123,7 +137,10 @@ async def get_usage(db: DbSession, _: CurrentWorkspaceId, range: UsageRange = "w
             agent_bucket = by_agent.setdefault(run.agent_id, _Bucket(agent_name=agent_name))
             agent_bucket.add(run)
 
-        model_bucket = by_model.setdefault((run.model, run.tier), _Bucket())
+        # #419: key on model only. Auto cheap/capable and a fixed-model
+        # agent can all land on the same provider:id; splitting by tier
+        # produced two identical labels on the Usage page.
+        model_bucket = by_model.setdefault(run.model, _Bucket())
         model_bucket.add(run)
 
     return UsageOut(
@@ -155,14 +172,14 @@ async def get_usage(db: DbSession, _: CurrentWorkspaceId, range: UsageRange = "w
             (
                 UsageByModel(
                     model=model,
-                    tier=tier,
+                    tier=bucket.shared_tier(),
                     input_tokens=bucket.input_tokens,
                     output_tokens=bucket.output_tokens,
                     total_tokens=bucket.total_tokens,
                     cost_usd=round(bucket.cost_usd, 6) if bucket.cost_known else None,
                     run_count=bucket.run_count,
                 )
-                for (model, tier), bucket in by_model.items()
+                for model, bucket in by_model.items()
             ),
             key=lambda m: m.total_tokens,
             reverse=True,

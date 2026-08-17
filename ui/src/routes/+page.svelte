@@ -14,6 +14,7 @@
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import FilterChip from '$lib/ui/FilterChip.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
 	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
 	import StreamBar from '$lib/ui/StreamBar.svelte';
@@ -44,6 +45,8 @@
 	let selectedChannelId = $state<string | null>(null);
 	let sendError = $state<string | null>(null);
 	let sending = $state(false);
+	let continueLast = $state(false);
+	let lastOpenByChannel = $state<Record<string, Rivulet>>({});
 
 	let isOwner = $derived(auth.grant === 'owner');
 	let setupIncomplete = $derived(
@@ -70,6 +73,10 @@
 	let generalChannel = $derived(
 		activeChannels.find((c) => c.name === 'general') ?? activeChannels[0] ?? null
 	);
+	let lastOpen = $derived(selectedChannel ? (lastOpenByChannel[selectedChannel.id] ?? null) : null);
+	let composerPlaceholder = $derived(
+		continueLast && lastOpen ? 'Reply to the last conversation…' : 'Start a conversation…'
+	);
 
 	async function load() {
 		loading = true;
@@ -95,12 +102,18 @@
 
 	async function loadRecent() {
 		const open = channelList.filter((c) => !c.archived);
+		const lastOpen: Record<string, Rivulet> = {};
 		const perChannel = await Promise.all(
 			open.map(async (channel) => {
 				const list = await rivulets.listForChannel(channel.id).catch(() => [] as Rivulet[]);
-				return list.map((rivulet) => ({ rivulet, channel }));
+				const newestOpen = list.find((r) => r.status !== 'closed');
+				if (newestOpen) lastOpen[channel.id] = newestOpen;
+				return list
+					.filter((rivulet) => rivulet.status !== 'closed')
+					.map((rivulet) => ({ rivulet, channel }));
 			})
 		);
+		lastOpenByChannel = lastOpen;
 		const all = perChannel
 			.flat()
 			.sort((a, b) => b.rivulet.created_at.localeCompare(a.rivulet.created_at))
@@ -135,11 +148,18 @@
 		sendError = null;
 		try {
 			const uploaded = await Promise.all(files.map((f) => filesApi.upload(f)));
-			const created = await rivulets.create(
-				selectedChannel.id,
-				text,
-				uploaded.map((f) => f.file_id)
-			);
+			const fileIds = uploaded.map((f) => f.file_id);
+			if (continueLast && lastOpen) {
+				await rivulets.postMessage(lastOpen.id, text, fileIds);
+				goto(
+					resolve('/channels/[id]/rivulets/[rivuletId]', {
+						id: selectedChannel.id,
+						rivuletId: lastOpen.id
+					})
+				);
+				return true;
+			}
+			const created = await rivulets.create(selectedChannel.id, text, fileIds);
 			goto(
 				resolve('/channels/[id]/rivulets/[rivuletId]', {
 					id: selectedChannel.id,
@@ -265,8 +285,25 @@
 					{/each}
 				</div>
 			{/if}
+			{#if lastOpen}
+				<div class="mb-3 flex flex-wrap gap-2">
+					<FilterChip selected={!continueLast} onclick={() => (continueLast = false)}>
+						New conversation
+					</FilterChip>
+					<FilterChip selected={continueLast} onclick={() => (continueLast = true)}>
+						Continue last
+					</FilterChip>
+				</div>
+			{/if}
+			<p class="mb-3 text-sm text-muted dark:text-muted-dark">
+				{#if continueLast && lastOpen}
+					This reply goes to the last conversation in #{selectedChannel?.name}.
+				{:else}
+					Each send starts a conversation — click a card to reply.
+				{/if}
+			</p>
 			<StreamBar
-				placeholder="Start a conversation…"
+				placeholder={composerPlaceholder}
 				{helper}
 				busy={sending}
 				error={sendError}

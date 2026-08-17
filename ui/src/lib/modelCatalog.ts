@@ -58,3 +58,20 @@ export const CUSTOM_MODEL_VALUE = '__custom__';
 // "provider:model" string in the same <select>.
 export const AUTO_MODEL = 'auto';
 export const AUTO_MODEL_VALUE = '__auto__';
+
+// Usage (#419) and similar readouts store `provider:model`. The picker
+// already has a friendly label for catalog ids; strip the " — fast,
+// cheap" qualifier so a bar can say "GPT-4o mini" instead of the raw
+// id. Unknown / custom models fall back to the model id alone.
+export function formatModelLabel(raw: string): string {
+	const idx = raw.indexOf(':');
+	if (idx === -1) return raw;
+	const provider = raw.slice(0, idx);
+	const modelName = raw.slice(idx + 1);
+	if (!modelName) return raw;
+	const catalog = MODEL_CATALOG[provider as ProviderKind] ?? [];
+	const option = catalog.find((m) => m.id === modelName);
+	if (!option) return modelName;
+	const qualifier = option.label.indexOf(' — ');
+	return qualifier === -1 ? option.label : option.label.slice(0, qualifier);
+}

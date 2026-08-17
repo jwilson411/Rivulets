@@ -462,6 +462,14 @@ async def post_message(
     background_tasks: BackgroundTasks,
 ) -> MessageOut:
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    if rivulet.status == "closed":
+        # #412: archived conversations stay readable but don't accept new
+        # replies until someone unarchives them (resume_rivulet). Creating
+        # a new rivulet from the channel is the other way forward.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This conversation is archived — unarchive it to reply",
+        )
     channel = await _get_channel_or_404(db, rivulet.channel_id)
     human = await _get_human_or_404(db, human_id)
     message = Message(
@@ -555,6 +563,10 @@ async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) 
     paused banner while the WorkflowRun stayed 'awaiting_human' underneath,
     leaving the human with no visible way back to it."""
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    # Also the unarchive path for a closed rivulet (#412) — flipping
+    # status back to active is the same write, and a closed conversation
+    # cannot be waiting on a human_input node because post_message refuses
+    # it while archived.
     if await find_awaiting_workflow_run(db, rivulet_id) is not None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -571,6 +583,10 @@ async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) 
 
 @router.delete("/rivulets/{rivulet_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def close_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> None:
+    """#412: soft-archive a conversation. The rivulet and its messages stay
+    in the workspace (and still sync) so they can be listed under Archived
+    and reopened via resume; nothing is destroyed. Matches channel archive
+    (FR-2.5) — recoverable, not deleted."""
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
     rivulet.status = "closed"
     await db.commit()

@@ -47,7 +47,7 @@ const weekUsage: Usage = {
 	],
 	by_model: [
 		{
-			model: 'claude-sonnet',
+			model: 'anthropic:claude-3-5-haiku-latest',
 			tier: null,
 			input_tokens: 600_000,
 			output_tokens: 298_954,
@@ -76,7 +76,29 @@ describe('usage/+page.svelte', () => {
 
 		await expect.element(page.getByText('Researcher')).toBeInTheDocument();
 		await expect.element(page.getByText('52%')).toBeInTheDocument();
-		await expect.element(page.getByText('claude-sonnet')).toBeInTheDocument();
+		await expect.element(page.getByText('Claude 3.5 Haiku')).toBeInTheDocument();
+	});
+
+	it('does not print raw provider:model ids on the by-model bars', async () => {
+		vi.mocked(usage.get).mockResolvedValue({
+			...weekUsage,
+			by_model: [
+				{
+					model: 'openai:gpt-4o-mini',
+					tier: 'cheap',
+					input_tokens: 1_284_220,
+					output_tokens: 0,
+					total_tokens: 1_284_220,
+					cost_usd: 18.4,
+					run_count: 46
+				}
+			]
+		});
+
+		render(UsagePage);
+
+		await expect.element(page.getByText('GPT-4o mini')).toBeInTheDocument();
+		await expect.element(page.getByText('openai:gpt-4o-mini')).not.toBeInTheDocument();
 	});
 
 	it('refetches when the window changes via the segmented control', async () => {

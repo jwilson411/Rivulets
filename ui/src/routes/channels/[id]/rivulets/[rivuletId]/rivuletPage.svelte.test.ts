@@ -16,6 +16,7 @@ import { teams } from '$lib/api/teams';
 import { agents } from '$lib/api/agents';
 import { workflows } from '$lib/api/workflows';
 import { runs } from '$lib/api/runs';
+import { goto } from '$app/navigation';
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -23,6 +24,8 @@ vi.mock('$app/state', () => ({
 		url: new URL('http://localhost/channels/chan-1/rivulets/riv-1')
 	}
 }));
+
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 vi.mock('$app/paths', () => ({
 	resolve: (path: string, params?: Record<string, string>) => {
@@ -60,7 +63,13 @@ vi.mock('$lib/api/channels', () => ({
 }));
 
 vi.mock('$lib/api/rivulets', () => ({
-	rivulets: { get: vi.fn(), listMessages: vi.fn(), postMessage: vi.fn(), resume: vi.fn() }
+	rivulets: {
+		get: vi.fn(),
+		listMessages: vi.fn(),
+		postMessage: vi.fn(),
+		resume: vi.fn(),
+		close: vi.fn()
+	}
 }));
 
 vi.mock('$lib/api/teams', () => ({
@@ -806,5 +815,34 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 
 		await page.getByPlaceholder('Reply to this conversation…').fill('@');
 		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
+	});
+
+	it('archives the conversation from the header after confirming', async () => {
+		seed([humanMessage]);
+		vi.mocked(rivulets.close).mockResolvedValueOnce(undefined);
+
+		render(RivuletPage);
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archive' }).click();
+		await expect.element(page.getByText('Archive this conversation?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Archive' }).last().click();
+
+		expect(rivulets.close).toHaveBeenCalledWith('riv-1');
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1');
+	});
+
+	it('hides the composer on an archived conversation and unarchives via resume', async () => {
+		seed([humanMessage], { ...activeRivulet, status: 'closed' });
+		vi.mocked(rivulets.resume).mockResolvedValueOnce(activeRivulet);
+
+		render(RivuletPage);
+		await expect.element(page.getByText('This conversation is archived.')).toBeInTheDocument();
+		await expect
+			.element(page.getByPlaceholder('Reply to this conversation…'))
+			.not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Unarchive' }).click();
+		expect(rivulets.resume).toHaveBeenCalledWith('riv-1');
 	});
 });

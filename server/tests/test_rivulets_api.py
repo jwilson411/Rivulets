@@ -74,6 +74,52 @@ def test_list_rivulets_returns_created_rivulets_newest_first(
     assert ids == [second.json()["id"], first.json()["id"]]
 
 
+def test_close_archives_a_rivulet_without_destroying_it(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#412: DELETE is a soft archive (status=closed). The row stays so
+    the UI can list it under Archived and resume can reopen it."""
+    channel = client.post("/api/v1/channels", json={"name": "archive-me"}, headers=auth_headers)
+    channel_id = channel.json()["id"]
+    created = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "accidental send"},
+        headers=auth_headers,
+    )
+    rivulet_id = created.json()["id"]
+
+    closed = client.delete(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers)
+    assert closed.status_code == 204
+
+    fetched = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["status"] == "closed"
+
+    listed = client.get(f"/api/v1/channels/{channel_id}/rivulets", headers=auth_headers)
+    assert listed.status_code == 200
+    assert listed.json()[0]["id"] == rivulet_id
+    assert listed.json()[0]["status"] == "closed"
+
+    refused = client.post(
+        f"/api/v1/rivulets/{rivulet_id}/messages",
+        json={"content": "should not land"},
+        headers=auth_headers,
+    )
+    assert refused.status_code == 400
+    assert "archived" in refused.json()["detail"]
+
+    reopened = client.post(f"/api/v1/rivulets/{rivulet_id}/resume", headers=auth_headers)
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "active"
+
+    reply = client.post(
+        f"/api/v1/rivulets/{rivulet_id}/messages",
+        json={"content": "now it lands"},
+        headers=auth_headers,
+    )
+    assert reply.status_code == 201
+
+
 def test_list_messages_on_a_rivulet_with_no_messages_yet_is_empty(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

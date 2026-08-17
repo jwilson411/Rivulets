@@ -229,3 +229,48 @@ async def test_usage_counts_dispatcher_call_rows_in_totals_but_not_by_agent(
     assert len(body["by_model"]) == 1
     assert body["by_model"][0]["model"] == "anthropic:claude-3-5-haiku-latest"
     assert body["by_model"][0]["total_tokens"] == 300
+
+
+async def test_usage_collapses_same_model_across_tiers(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#419: Auto cheap + a fixed-model (or capable) run of the same
+    provider:id must be one by_model row, not two identical labels."""
+    async with session_scope() as session:
+        session.add(
+            AgentRun(
+                agent_id=None,
+                source="dispatcher_call",
+                model="openai:gpt-4o-mini",
+                tier="cheap",
+                status="completed",
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+                cost_usd=0.0001,
+            )
+        )
+        session.add(
+            AgentRun(
+                agent_id=None,
+                source="dispatcher_call",
+                model="openai:gpt-4o-mini",
+                tier=None,
+                status="completed",
+                input_tokens=1000,
+                output_tokens=500,
+                total_tokens=1500,
+                cost_usd=0.0003,
+            )
+        )
+        await session.commit()
+
+    body = client.get("/api/v1/usage", headers=auth_headers).json()
+    assert body["run_count"] == 2
+    assert body["total_tokens"] == 1515
+    assert len(body["by_model"]) == 1
+    assert body["by_model"][0]["model"] == "openai:gpt-4o-mini"
+    assert body["by_model"][0]["total_tokens"] == 1515
+    assert body["by_model"][0]["run_count"] == 2
+    # Mixed tiers collapse to no single-tier label.
+    assert body["by_model"][0]["tier"] is None
