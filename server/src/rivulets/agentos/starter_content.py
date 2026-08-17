@@ -21,6 +21,10 @@ provider is configured. Until then these agents sit in the same
 agentos/models.py's UnknownProviderError, swallowed per-agent by
 sync_agents()), which is expected and fine.
 
+#406: Assistant is seeded with an `always` routing rule so everyday
+channel chat ("How are you all doing today?") is answered. Specialists
+keep narrower generated rules.
+
 #344: seed_starter_agents also grants each starter the AgentToolScope(s)
 its assigned tools need (BUILTIN_TOOL_SCOPES, #188) -- without this,
 Coder's execute_python/write_file and Researcher's http_request are
@@ -36,7 +40,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
-from rivulets.db.models import Agent, AgentTool, AgentToolScope, Team, TeamAgent, Tool
+from rivulets.db.models import (
+    Agent,
+    AgentRoutingRule,
+    AgentTool,
+    AgentToolScope,
+    Team,
+    TeamAgent,
+    Tool,
+)
+from rivulets.sync.publish import publish_current_state
 
 
 @dataclass(frozen=True)
@@ -104,6 +117,11 @@ _STARTER_TEAM_NAME = "Starter Team"
 _STARTER_TEAM_DESCRIPTION = (
     "The default agent roster seeded on workspace creation — edit or replace freely."
 )
+_ASSISTANT_NAME = "Assistant"
+# #406: everyday chat in a routed channel is supposed to get an answer
+# without an @mention. The generalist is the one teammate that should
+# take those messages; specialists keep narrower generated rules.
+_ASSISTANT_ALWAYS_RULE: tuple[str, str, int] = ("always", "", 0)
 
 
 async def seed_starter_agents(db: AsyncSession) -> None:
@@ -148,8 +166,48 @@ async def seed_starter_agents(db: AsyncSession) -> None:
         # advertise them working out of the box.
         for scope in required_scopes:
             db.add(AgentToolScope(agent_id=agent.id, scope=scope))
+        if starter.name == _ASSISTANT_NAME:
+            rule_type, pattern, priority = _ASSISTANT_ALWAYS_RULE
+            db.add(
+                AgentRoutingRule(
+                    agent_id=agent.id,
+                    rule_type=rule_type,
+                    pattern=pattern,
+                    priority=priority,
+                )
+            )
 
     await db.commit()
+    await ensure_assistant_always_rule(db)
+
+
+async def ensure_assistant_always_rule(db: AsyncSession) -> None:
+    """#406: workspaces created before Assistant shipped with `always`
+    still have the generated specialist-keyword rule (or no rule). Add
+    `always` unless the owner already opted that agent into mention-only.
+    Idempotent. Publishes the new row so a peer sees the same routing."""
+    assistant = await db.scalar(select(Agent).where(Agent.name == _ASSISTANT_NAME))
+    if assistant is None:
+        return
+    rules = list(
+        (
+            await db.scalars(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == assistant.id)
+            )
+        ).all()
+    )
+    if any(rule.rule_type == "mention_only" for rule in rules):
+        return
+    if any(rule.rule_type == "always" for rule in rules):
+        return
+    rule_type, pattern, priority = _ASSISTANT_ALWAYS_RULE
+    row = AgentRoutingRule(
+        agent_id=assistant.id, rule_type=rule_type, pattern=pattern, priority=priority
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    await publish_current_state(db, "agent_routing_rule", row.id)
 
 
 async def seed_starter_teams(db: AsyncSession) -> None:

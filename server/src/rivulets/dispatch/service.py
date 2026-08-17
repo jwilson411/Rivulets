@@ -1048,6 +1048,12 @@ async def _dispatch_and_respond(
             )
         )
 
+    # #406: dispatch-none used to look like a successful delivery — run
+    # Completed, composer still saying the team would answer, nothing in
+    # the thread. Tell the human nobody picked this up.
+    if not result.agent_ids and from_agent_id is None:
+        new_messages.append(await _post_unrouted_notice(db, rivulet, channel, team_agents))
+
     await finish_span(db, dispatch_span_id, status="completed")
     # #237: this closes out a recursive call's own dispatch_decision span
     # promptly rather than leaving it dangling for whatever the caller
@@ -1164,6 +1170,18 @@ _RETRYABLE_KEYWORDS = (
     "overloaded",
 )
 _ERROR_CODE_PATTERN = re.compile(r"[Ee]rror code:\s*(\d{3})")
+_RUN_ERROR_LIMIT = 300
+
+
+def _sanitize_run_error(text: str, *, limit: int = _RUN_ERROR_LIMIT) -> str:
+    """#405: collapse whitespace and cap length so Runs detail can show
+    `str(exc)` without dumping a stack-shaped wall of text into the
+    page. The rivulet thread still uses a plain-language system_alert
+    (NFR-5.4) and never displays this string."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) > limit:
+        return cleaned[: limit - 1] + "…"
+    return cleaned
 
 
 def _is_retryable_error(text: str) -> bool:
@@ -1325,6 +1343,40 @@ def _post_budget_alert(
             "blocked": blocked,
             "message": text,
         },
+    )
+    return message
+
+
+async def _post_unrouted_notice(
+    db: AsyncSession,
+    rivulet: Rivulet,
+    channel: Channel,
+    team_agents: list[tuple[Agent, AgentDispatchInfo]],
+) -> Message:
+    """#406: visible system line when a human message matches nobody
+    (and the default-teammate fallback also had no one eligible)."""
+    team = await db.get(Team, channel.team_id) if channel.team_id is not None else None
+    team_name = team.name if team is not None else "this team"
+    suggest = next(
+        (agent.name for agent, _ in team_agents if agent.name.lower() == "assistant"),
+        None,
+    )
+    if suggest is None and team_agents:
+        suggest = team_agents[0][0].name
+    mention = f"@{suggest}" if suggest else "@someone"
+    text = f"Nobody on {team_name} picked this up. Try {mention}, or change When to speak."
+    message = Message(
+        rivulet_id=rivulet.id,
+        sender_type="system",
+        sender_name="system",
+        content=text,
+        content_type="system_alert",
+    )
+    db.add(message)
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "unrouted", "message": text, "team_name": team_name},
     )
     return message
 
@@ -1502,39 +1554,29 @@ async def _invoke_agent(
         # our own run_agent() (e.g. "not registered") that happen before
         # agno even gets a chance to run, and the case where every entry
         # in the fallback chain (#103) was exhausted without success.
+        # #405: this path used to log + SSE `error` only, so the thread
+        # showed dead air after the human message. Persist the same
+        # system_alert shape as the RunStatus.error branch below; POST
+        # is synchronous, so the refetch after send picks it up without
+        # relying on SSE. The sanitized exception rides the RunSpan so
+        # Runs detail can show why.
         assert exc is not None
         logger.warning(
             "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=exc
         )
-        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
+        reason = _sanitize_run_error(str(exc))
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": reason})
         _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
-        await finish_span(db, agent_span_id, status="error")
-        # #404: "not registered" / no usable model used to leave the
-        # human message sitting alone. Persist a system_alert so the
-        # channel is not silent (sibling issue: missing SSE-only error).
-        text = (
-            f"{agent.name} couldn't respond — it isn't ready to run on this node. "
-            "Sign out and back in, or check Settings > Providers."
-        )
+        await finish_span(db, agent_span_id, status="error", error_message=reason)
         message = Message(
             rivulet_id=rivulet.id,
             sender_type="system",
             sender_name="system",
-            content=text,
+            content=f"{agent.name} couldn't respond — it failed before a run started.",
             content_type="system_alert",
         )
         db.add(message)
         new_messages.append(message)
-        publish(
-            rivulet.id,
-            "system_alert",
-            {
-                "type": "agent_not_ready",
-                "agent_id": agent.id,
-                "agent_name": agent.name,
-                "message": text,
-            },
-        )
         await db.commit()
         return new_messages
 
@@ -1548,7 +1590,8 @@ async def _invoke_agent(
         logger.warning(
             "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
-        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
+        reason = _sanitize_run_error(str(run_output.content))
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": reason})
         _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
         error_run = await record_agent_run(
             db,
@@ -1567,6 +1610,7 @@ async def _invoke_agent(
             model=served_model,
             cost_usd=error_run.cost_usd,
             total_tokens=error_run.total_tokens,
+            error_message=reason,
         )
         message = Message(
             rivulet_id=rivulet.id,

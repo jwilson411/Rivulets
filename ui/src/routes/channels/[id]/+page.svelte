@@ -5,12 +5,13 @@
 	import { channels, type Channel } from '$lib/api/channels';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { teams, type Team, type TeamDetail } from '$lib/api/teams';
-	import { agents, type Agent } from '$lib/api/agents';
+	import { agents, type Agent, type RoutingRule } from '$lib/api/agents';
 	import { workflows, type Workflow } from '$lib/api/workflows';
 	import { runs, type RunTrace } from '$lib/api/runs';
 	import { files as filesApi } from '$lib/api/files';
 	import { agentInk, INK_AVATAR } from '$lib/ink';
 	import { formatClock } from '$lib/format';
+	import { teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
@@ -33,6 +34,7 @@
 	let previews = $state<Record<string, ThreadPreview>>({});
 	let teamList = $state<Team[]>([]);
 	let teamMembers = $state<Agent[]>([]);
+	let memberRules = $state<Record<string, RoutingRule[]>>({});
 	let workflowList = $state<Workflow[]>([]);
 	let latestRunByRivulet = $state<Record<string, RunTrace>>({});
 	let loading = $state(true);
@@ -50,18 +52,36 @@
 		agentsNotReady
 			? "Agents aren't ready to run — sign out and back in"
 			: routedTeam
-				? `Routes to ${routedTeam.name}`
+				? teamComposerHint(routedTeam.name)
 				: "No team — agents won't answer"
+	);
+	let speakSummary = $derived(
+		!agentsNotReady && teamMembers.length > 0
+			? teamSpeakSummary(
+					teamMembers.map((member) => ({
+						name: member.name,
+						rules: memberRules[member.id] ?? []
+					}))
+				)
+			: ''
 	);
 
 	async function loadTeamMembers(teamId: string | null) {
 		teamMembers = [];
+		memberRules = {};
 		if (!teamId) return;
 		try {
 			const [detail, agentList] = await Promise.all([teams.get(teamId), agents.list()]);
 			teamMembers = (detail as TeamDetail).agent_ids
 				.map((id) => agentList.find((a) => a.id === id))
 				.filter((a): a is Agent => a !== undefined);
+			const ruleEntries = await Promise.all(
+				teamMembers.map(async (member) => {
+					const rules = await agents.getRoutingRules(member.id).catch(() => [] as RoutingRule[]);
+					return [member.id, rules] as const;
+				})
+			);
+			memberRules = Object.fromEntries(ruleEntries);
 		} catch {
 			// Member discs are decoration on the chip — fine to omit.
 		}
@@ -172,6 +192,9 @@
 		}
 		if (latest.status === 'error') return 'Last run failed.';
 		if (latest.status === 'cancelled') return 'Last run was cancelled.';
+		if (latest.status === 'completed' && latest.total_tokens === 0 && latest.span_count <= 1) {
+			return 'Nobody picked this up.';
+		}
 		return null;
 	}
 </script>
@@ -190,7 +213,7 @@
 					: ''}
 			</div>
 		</div>
-		<div class="relative ml-auto flex-none">
+		<div class="relative ml-auto flex max-w-full flex-none flex-col items-end gap-1.5">
 			<button
 				type="button"
 				onclick={() => (teamMenuOpen = !teamMenuOpen)}
@@ -243,6 +266,11 @@
 						No team — agents won't answer
 					</button>
 				</div>
+			{/if}
+			{#if speakSummary}
+				<p class="max-w-[28rem] text-right text-[13px] text-muted dark:text-muted-dark">
+					When to speak: {speakSummary}
+				</p>
 			{/if}
 		</div>
 		{#if teamChangeError}

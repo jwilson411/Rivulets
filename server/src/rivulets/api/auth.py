@@ -61,7 +61,11 @@ from sqlalchemy import select
 
 from rivulets.agentos import sync_agents
 from rivulets.agentos.agent_lifecycle import record_registration_flags
-from rivulets.agentos.starter_content import seed_starter_agents, seed_starter_teams
+from rivulets.agentos.starter_content import (
+    ensure_assistant_always_rule,
+    seed_starter_agents,
+    seed_starter_teams,
+)
 from rivulets.api.deps import (
     DbSession,
     OptionalSessionClaims,
@@ -177,6 +181,15 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     session_store.set_p2p_psk(p2p_psk)
     session_store.set_credential_store_key(credential_store_key)
     session_store.set_webhook_secret_key(webhook_secret_key)
+
+    # #406: existing workspaces seeded Assistant with generated keywords
+    # (or no rule). First-create seed already writes `always`; this
+    # backfills the same default on later logins unless the owner set
+    # mention-only.
+    try:
+        await ensure_assistant_always_rule(db)
+    except Exception:
+        logger.warning("Failed to ensure Assistant always-rule after login", exc_info=True)
 
     # Now that the credential store is unlocked, rebuild AgentOS from the
     # DB and rewrite agentos_agent_id from the live registry (#404).

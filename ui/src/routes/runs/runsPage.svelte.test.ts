@@ -53,6 +53,7 @@ const dispatchSpan: RunSpan = {
 	started_at: new Date().toISOString(),
 	completed_at: new Date().toISOString(),
 	duration_ms: 40,
+	error_message: null,
 	tool_calls: []
 };
 
@@ -69,6 +70,7 @@ const agentSpan: RunSpan = {
 	started_at: new Date().toISOString(),
 	completed_at: new Date().toISOString(),
 	duration_ms: 2100,
+	error_message: null,
 	tool_calls: [
 		{
 			id: 'call-1',
@@ -111,6 +113,34 @@ describe('runs/+page.svelte', () => {
 		await expect.element(page.getByText('web_search')).toBeInTheDocument();
 		const link = page.getByRole('link', { name: 'Open conversation' });
 		await expect.element(link).toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
+	});
+
+	it('shows a failed step\'s error reason in the expanded detail', async () => {
+		const failedTrace: RunTrace = {
+			...completedTrace,
+			id: 'trace-fail',
+			status: 'error',
+			span_count: 1,
+			total_cost_usd: null,
+			total_tokens: 0
+		};
+		const failedSpan: RunSpan = {
+			...agentSpan,
+			id: 'span-fail',
+			name: 'Writer',
+			status: 'error',
+			duration_ms: 2000,
+			error_message: "Agent 'writer' is not registered with AgentOS — call sync_agents() first",
+			tool_calls: []
+		};
+		vi.mocked(runs.list).mockResolvedValue([failedTrace]);
+		vi.mocked(runs.get).mockResolvedValue({ ...failedTrace, spans: [failedSpan] });
+
+		render(RunsPage);
+		await page.getByText('Riley posted in #launch-readiness').click();
+
+		await expect.element(page.getByText('Writer', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText(/not registered with AgentOS/)).toBeInTheDocument();
 	});
 
 	it('shows the empty state when nothing has run', async () => {

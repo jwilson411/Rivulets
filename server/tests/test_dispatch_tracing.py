@@ -144,7 +144,10 @@ async def test_agent_run_failure_still_produces_an_error_span(
     # This run_agent failure never reaches record_agent_run (dispatch/
     # service.py's `run_output is None` branch), so there's no AgentRun row
     # to back-fill -- entity_id stays None, unlike the error-RunOutput case.
+    # #405: the sanitized exception still lands on the span so Runs can
+    # show why, even without an AgentRun.
     assert agent_spans[0]["entity_id"] is None
+    assert "provider unreachable" in (agent_spans[0]["error_message"] or "")
 
 
 async def test_run_not_found_returns_404(client: TestClient, auth_headers: dict[str, str]) -> None:

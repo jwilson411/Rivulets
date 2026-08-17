@@ -17,8 +17,8 @@
 	import ModelPicker from './ModelPicker.svelte';
 
 	// Agent sheet (06-screens.md → Agent sheet, mockup 1j). Everyday fields
-	// up top; everything else — when to speak, tools, fallbacks, schema,
-	// unattended use, scopes, history — behind "More options" (04's
+	// (including When to speak — #406) up top; tools, fallbacks, schema,
+	// unattended use, scopes, history behind "More options" (04's
 	// progressive-disclosure table). The list page never shows routing
 	// radios. Deleting confirms in a nested sheet, never window.confirm.
 	let {
@@ -74,7 +74,10 @@
 	// "When to speak" — one exclusive rule (copy deck: Always / Only when
 	// mentioned / When the message includes…).
 	function initialRuleType(): RuleType {
-		return untrack(() => initialRules[0]?.rule_type ?? 'mention_only');
+		const rules = untrack(() => initialRules);
+		if (rules.some((rule) => rule.rule_type === 'always')) return 'always';
+		if (rules.some((rule) => rule.rule_type === 'mention_only')) return 'mention_only';
+		return rules[0]?.rule_type ?? 'mention_only';
 	}
 	function initialKeywords(): string {
 		const rule = untrack(() => initialRules[0]);
@@ -277,6 +280,38 @@
 			</div>
 		</div>
 
+		<div class="flex flex-col gap-2.5">
+			<span class="text-sm font-semibold text-ink dark:text-ink-dark">When to speak</span>
+			<div class="flex flex-col gap-2" role="radiogroup" aria-label="When to speak">
+				{#each [{ value: 'always', label: 'Always' }, { value: 'mention_only', label: 'Only when mentioned' }, { value: 'keyword', label: 'When the message includes…' }] as option (option.value)}
+					<label
+						class="flex h-12 cursor-pointer items-center gap-3 rounded-lg border px-4 {ruleType ===
+						option.value
+							? 'border-accent bg-accent-soft dark:border-accent-dark dark:bg-accent-soft-dark'
+							: 'border-line dark:border-line-dark'}"
+					>
+						<input
+							type="radio"
+							name="agent-when"
+							value={option.value}
+							bind:group={ruleType}
+							class="accent-(--color-accent)"
+						/>
+						<span class="text-[15px] text-ink dark:text-ink-dark">{option.label}</span>
+					</label>
+				{/each}
+			</div>
+			{#if ruleType === 'keyword'}
+				<input
+					type="text"
+					bind:value={keywords}
+					placeholder="retry, eval, coverage"
+					aria-label="Keywords, separated by commas"
+					class={inputClass}
+				/>
+			{/if}
+		</div>
+
 		<details class="border-t border-line pt-4 dark:border-line-dark">
 			<summary
 				class="flex cursor-pointer items-center gap-2 text-base font-medium text-ink dark:text-ink-dark"
@@ -284,42 +319,10 @@
 				<Icon name="chevron-right" class="h-4 w-4 text-muted dark:text-muted-dark" />
 				More options
 				<span class="text-sm font-normal text-muted dark:text-muted-dark">
-					When to speak · Tools · Fallbacks · Advanced
+					Tools · Fallbacks · Advanced
 				</span>
 			</summary>
 			<div class="mt-5 flex flex-col gap-6">
-				<div class="flex flex-col gap-2.5">
-					<span class="text-sm font-semibold text-ink dark:text-ink-dark">When to speak</span>
-					<div class="flex flex-col gap-2" role="radiogroup" aria-label="When to speak">
-						{#each [{ value: 'always', label: 'Always' }, { value: 'mention_only', label: 'Only when mentioned' }, { value: 'keyword', label: 'When the message includes…' }] as option (option.value)}
-							<label
-								class="flex h-12 cursor-pointer items-center gap-3 rounded-lg border px-4 {ruleType ===
-								option.value
-									? 'border-accent bg-accent-soft dark:border-accent-dark dark:bg-accent-soft-dark'
-									: 'border-line dark:border-line-dark'}"
-							>
-								<input
-									type="radio"
-									name="agent-when"
-									value={option.value}
-									bind:group={ruleType}
-									class="accent-(--color-accent)"
-								/>
-								<span class="text-[15px] text-ink dark:text-ink-dark">{option.label}</span>
-							</label>
-						{/each}
-					</div>
-					{#if ruleType === 'keyword'}
-						<input
-							type="text"
-							bind:value={keywords}
-							placeholder="retry, eval, coverage"
-							aria-label="Keywords, separated by commas"
-							class={inputClass}
-						/>
-					{/if}
-				</div>
-
 				{#if tools.length > 0}
 					<div class="flex flex-col gap-2.5">
 						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Tools</span>

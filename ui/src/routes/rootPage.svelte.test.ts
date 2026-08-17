@@ -176,7 +176,9 @@ describe('routes/+page.svelte (Home)', () => {
 			.toBeInTheDocument();
 		await expect.element(page.getByText('#general', { exact: true }).first()).toBeInTheDocument();
 		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
-		await expect.element(page.getByText('Routes to Starter Team')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Starter Team answers when a rule or @mention matches'))
+			.toBeInTheDocument();
 	});
 
 	it('shows the empty inbox with a way into #general when no conversations exist', async () => {

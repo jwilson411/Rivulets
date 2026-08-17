@@ -112,9 +112,20 @@ async def _run_generator(model: Model, prompt: str) -> GeneratedRoutingRules | N
     return content if isinstance(content, GeneratedRoutingRules) else None
 
 
+_ASSISTANT_ALWAYS: StoredRule = ("always", "", 0)
+
+
 async def generate_routing_rules(
     db: AsyncSession, name: str, description: str, instructions: str
 ) -> list[StoredRule]:
+    # #406: the starter generalist (and any later agent named Assistant)
+    # answers everyday channel chat. Inferring keywords like "specialist,
+    # expert, coder" from its description made "How are you all doing
+    # today?" a silent dispatch-none, which the composer then dressed up
+    # as a successful delivery to the team.
+    if name.lower() == "assistant":
+        return [_ASSISTANT_ALWAYS]
+
     provider_model = await pick_dispatcher_model(db)
     if provider_model is None:
         return []
