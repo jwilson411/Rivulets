@@ -148,6 +148,7 @@ async def finish_span(
     model: str | None = None,
     cost_usd: float | None = None,
     total_tokens: int | None = None,
+    error_message: str | None = None,
 ) -> None:
     """No-op when `span_id` is None -- either an untraced call site, or (for
     a workflow_run span) a run that paused: its span deliberately stays
@@ -159,7 +160,12 @@ async def finish_span(
     (created only once the run actually finishes, by
     agentos/accounting.py's record_agent_run), so its id is only known
     here. Every other span_type already knows its entity_id at start_span
-    time and leaves this None (a no-op column write, not a clear)."""
+    time and leaves this None (a no-op column write, not a clear).
+
+    `error_message` (#405) is the sanitized failure reason written onto
+    an error span so Runs detail can show why the step failed. Left
+    unset (None) on success; a None argument does not clear a previously
+    written value."""
     if span_id is None:
         return
     span = await db.get(RunSpan, span_id)
@@ -171,6 +177,8 @@ async def finish_span(
     span.model = model
     span.cost_usd = cost_usd
     span.total_tokens = total_tokens
+    if error_message is not None:
+        span.error_message = error_message
     completed_at = utcnow_iso()
     span.completed_at = completed_at
     span.duration_ms = _duration_ms(span.started_at, completed_at)

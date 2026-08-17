@@ -277,11 +277,11 @@
 		// own reserved name for connection-level failures, so this also
 		// fires on plain network hiccups, not just our agent-run-failed
 		// payloads — deliberately not parsing event.data here since its
-		// shape differs between the two cases. Agent failures are already
-		// visible durably via the persisted system_alert message (which
-		// clears liveMessage on its own listener above and shows up on the
-		// next messages refetch), so this listener only needs to stop
-		// showing a stale "still typing" bubble.
+		// shape differs between the two cases. Both agent-failure paths
+		// (RunStatus.error and run_output is None, #405) persist a
+		// system_alert Message; POST is synchronous, so handleReply's
+		// refetch picks it up without this listener. We only need to
+		// stop showing a stale "still typing" bubble.
 		source.addEventListener('error', () => {
 			liveMessage = null;
 		});

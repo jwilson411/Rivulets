@@ -1387,6 +1387,12 @@ class RunSpan(Base):
     call, a workflow node -- run for multiple seconds) rather than adding
     a separate sub-second timing channel just for this one field.
 
+    `error_message` is set only when the span ends in error (#405): a
+    sanitized `str(exc)` (or provider error content) so the Runs page can
+    show *why* a step failed. The rivulet thread keeps a separate
+    plain-language `system_alert` (NFR-5.4) and does not reuse this
+    field. Null on completed/cancelled/still-running spans.
+
     Not synced, same reasoning as RunTrace."""
 
     __tablename__ = "run_span"
@@ -1411,6 +1417,7 @@ class RunSpan(Base):
     started_at: Mapped[str] = mapped_column(default=utcnow_iso)
     completed_at: Mapped[str | None] = mapped_column(default=None)
     duration_ms: Mapped[int | None] = mapped_column(default=None)
+    error_message: Mapped[str | None] = mapped_column(default=None)
 
 
 class Rivulet(Base):

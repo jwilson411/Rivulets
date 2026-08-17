@@ -15,7 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.models import Agent, AgentPeerPreference, AgentRoutingRule
 from rivulets.db.session import session_scope
-from rivulets.dispatch.service import _resolve_remote_peer  # pyright: ignore[reportPrivateUsage]
+from rivulets.dispatch.service import (
+    _resolve_remote_peer,  # pyright: ignore[reportPrivateUsage]
+    _sanitize_run_error,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _fake_run_agent(content: str) -> Any:
@@ -287,7 +290,68 @@ def test_agent_run_failure_is_skipped_gracefully(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert [m["sender_type"] for m in messages] == ["human"]
+    assert [m["sender_type"] for m in messages] == ["human", "system"]
+    assert messages[1]["content_type"] == "system_alert"
+    assert "Flaky Agent" in messages[1]["content"]
+    assert "couldn't respond" in messages[1]["content"]
+    # Thread stays plain-language (NFR-5.4); the exception lives on the
+    # run span so Runs detail can show why.
+    assert "provider unreachable" not in messages[1]["content"]
+
+    traces = client.get("/api/v1/runs", headers=auth_headers).json()
+    assert traces[0]["status"] == "error"
+    detail = client.get(f"/api/v1/runs/{traces[0]['id']}", headers=auth_headers).json()
+    agent_spans = [s for s in detail["spans"] if s["span_type"] == "agent_run"]
+    assert len(agent_spans) == 1
+    assert agent_spans[0]["status"] == "error"
+    assert "provider unreachable" in (agent_spans[0]["error_message"] or "")
+
+
+def test_unregistered_agent_posts_system_alert_and_span_reason(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#405: ValueError from run_agent (e.g. not registered with AgentOS)
+    is the `run_output is None` path — must persist a system_alert and
+    put the sanitized exception on the run span."""
+
+    def _unregistered(*_args: object, **_kwargs: object) -> Any:
+        raise ValueError(
+            "Agent 'writer' is not registered with AgentOS — call sync_agents() first"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _unregistered)
+    agent_id = _create_agent_with_always_rule(client, auth_headers, "Unregistered Writer")
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "xqzplm wibble-frob 9f3k"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "system"]
+    assert messages[1]["content_type"] == "system_alert"
+    assert "Unregistered Writer" in messages[1]["content"]
+    assert "couldn't respond" in messages[1]["content"]
+    assert "not registered" not in messages[1]["content"]
+
+    traces = client.get("/api/v1/runs", headers=auth_headers).json()
+    assert traces[0]["status"] == "error"
+    detail = client.get(f"/api/v1/runs/{traces[0]['id']}", headers=auth_headers).json()
+    agent_spans = [s for s in detail["spans"] if s["span_type"] == "agent_run"]
+    assert len(agent_spans) == 1
+    assert "not registered with AgentOS" in (agent_spans[0]["error_message"] or "")
+
+
+def test_sanitize_run_error_collapses_whitespace_and_truncates() -> None:
+    assert _sanitize_run_error("  not   registered\nwith AgentOS  ") == "not registered with AgentOS"
+    long = "x" * 400
+    cleaned = _sanitize_run_error(long)
+    assert len(cleaned) == 300
+    assert cleaned.endswith("…")
 
 
 def test_run_status_error_posts_system_alert_not_raw_error_text(
@@ -323,6 +387,11 @@ def test_run_status_error_posts_system_alert_not_raw_error_text(
     assert messages[1]["content_type"] == "system_alert"
     assert "401" not in messages[1]["content"]
     assert "Broken Agent" in messages[1]["content"]
+
+    traces = client.get("/api/v1/runs", headers=auth_headers).json()
+    detail = client.get(f"/api/v1/runs/{traces[0]['id']}", headers=auth_headers).json()
+    agent_spans = [s for s in detail["spans"] if s["span_type"] == "agent_run"]
+    assert "401" in (agent_spans[0]["error_message"] or "")
 
 
 def test_fallback_used_when_primary_hits_retryable_error(

@@ -246,6 +246,9 @@
 				{/if}
 			</span>
 		</div>
+		{#if node.span.error_message}
+			<p class="text-[13px] text-danger">{node.span.error_message}</p>
+		{/if}
 		{#if node.span.tool_calls.length > 0}
 			<div class="flex flex-col gap-1 pl-4">
 				{#each node.span.tool_calls as call (call.id)}

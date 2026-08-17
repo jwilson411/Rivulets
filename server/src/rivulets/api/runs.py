@@ -96,6 +96,8 @@ class RunSpanOut(BaseModel):
     started_at: str
     completed_at: str | None
     duration_ms: int | None
+    # #405: sanitized failure reason on error spans; null otherwise.
+    error_message: str | None = None
     # Populated only for span_type == 'agent_run' (entity_id is that
     # run's AgentRun.id) -- empty for every other span type.
     tool_calls: list[ToolCallOut] = []

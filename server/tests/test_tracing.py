@@ -110,6 +110,24 @@ async def test_finish_span_sets_status_and_backfills_entity_id(db_session: Async
     assert span.completed_at is not None
     assert span.duration_ms is not None
     assert span.duration_ms >= 0
+    assert span.error_message is None
+
+
+async def test_finish_span_records_error_message(db_session: AsyncSession) -> None:
+    ctx = await start_trace(
+        db_session, trigger_type="message", label="root", rivulet_id=None, channel_id=None
+    )
+    span_id = await start_span(db_session, ctx, span_type="agent_run", entity_id=None, name="Agent")
+    await finish_span(
+        db_session,
+        span_id,
+        status="error",
+        error_message="Agent 'writer' is not registered with AgentOS",
+    )
+    span = await db_session.get(RunSpan, span_id)
+    assert span is not None
+    assert span.status == "error"
+    assert span.error_message == "Agent 'writer' is not registered with AgentOS"
 
 
 async def test_finish_trace_aggregates_spans_and_marks_completed(db_session: AsyncSession) -> None:
