@@ -10,7 +10,7 @@
 </div>
 
 <p align="center">
-  <img src=".github/assets/readme-hero.png" alt="A Rivulets channel thread showing a human message, an agent reply, a handoff event, and a second agent's reply, with the full workspace sidebar nav" width="820">
+  <img src=".github/assets/readme-hero.png" alt="A Rivulets conversation showing a human message, an agent reply, a handoff event, and a second agent's reply, with the workspace navigation rail, channel sidebar, and participant chips" width="820">
 </p>
 
 ## What is Rivulets?
