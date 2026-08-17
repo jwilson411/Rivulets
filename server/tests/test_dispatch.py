@@ -130,3 +130,64 @@ async def test_llm_fallback_invoked_but_no_match_still_counts_as_invoked() -> No
     result = await engine.dispatch("anything at all", [agent])
     assert result.method is DispatchMethod.NONE
     assert result.llm_invoked is True
+
+
+@pytest.mark.asyncio
+async def test_speaker_is_excluded_from_unsolicited_redispatch() -> None:
+    """An always-rule agent answering a human must not then match its own
+    reply — that's the Assistant self-loop the cycle guard used to catch
+    after the damage was done."""
+    llm_calls: list[list[str]] = []
+
+    async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:
+        llm_calls.append([a.agent_id for a in agents])
+        return LlmFallbackResult(agent_ids=[a.agent_id for a in agents], invoked=True)
+
+    engine = DispatchEngine(llm_fallback=fake_llm)
+    assistant = AgentDispatchInfo(
+        agent_id="asst-1", name="Assistant", rules=[Rule(RuleType.ALWAYS)]
+    )
+    result = await engine.dispatch(
+        "Of course! What task do you need assistance with?",
+        [assistant],
+        speaker_id="asst-1",
+    )
+    assert result.method is DispatchMethod.NONE
+    assert result.agent_ids == []
+    assert llm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_always_teammate_does_not_bounce_on_another_agents_reply() -> None:
+    engine = DispatchEngine()
+    assistant = AgentDispatchInfo(
+        agent_id="asst-1", name="Assistant", rules=[Rule(RuleType.ALWAYS)]
+    )
+    dba = AgentDispatchInfo(
+        agent_id="dba-1",
+        name="DBA",
+        rules=[Rule(RuleType.KEYWORD, ["postgresql"], priority=10)],
+    )
+    # DBA just spoke; Assistant's always rule must not fire on that reply.
+    skipped = await engine.dispatch("schema looks fine", [assistant, dba], speaker_id="dba-1")
+    assert skipped.agent_ids == []
+
+    # A specialist keyword on a teammate still fires (FR-5.6 beyond mentions).
+    joined = await engine.dispatch(
+        "we'll need a postgresql schema for this",
+        [assistant, dba],
+        speaker_id="asst-1",
+    )
+    assert joined.method is DispatchMethod.DETERMINISTIC
+    assert joined.agent_ids == ["dba-1"]
+
+
+@pytest.mark.asyncio
+async def test_mention_can_still_retarget_the_speaker() -> None:
+    engine = DispatchEngine()
+    assistant = AgentDispatchInfo(
+        agent_id="asst-1", name="Assistant", rules=[Rule(RuleType.ALWAYS)]
+    )
+    result = await engine.dispatch("cc @Assistant", [assistant], speaker_id="asst-1")
+    assert result.method is DispatchMethod.MENTION
+    assert result.agent_ids == ["asst-1"]

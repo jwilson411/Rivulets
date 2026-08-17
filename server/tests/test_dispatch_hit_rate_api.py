@@ -145,15 +145,16 @@ def test_hit_rate_llm_fallback_match_counts_as_fallback(
     _send(client, auth_headers, channel_id, "something unrelated entirely")
 
     body = client.get("/api/v1/dispatch/hit-rate", headers=auth_headers).json()
-    # 2 decisions: the human message matches via LLM fallback; the agent's
-    # "OK." reply is re-dispatched and also hits the (always-invoked) fake
-    # fallback, this time matching nobody — both cost money either way.
+    # Human message matches via LLM fallback (a cost). The agent's "OK."
+    # reply is re-dispatched with the speaker excluded and no teammate
+    # left to ask about, so that decision is a free none — not a second
+    # fallback call against an empty roster.
     assert body["total_decisions"] == 2
-    assert body["hit_count"] == 0
-    assert body["fallback_count"] == 2
-    assert body["hit_rate"] == 0.0
-    assert body["fallback_rate"] == 1.0
-    assert body["fallback_warning"] is True
+    assert body["hit_count"] == 1
+    assert body["fallback_count"] == 1
+    assert body["hit_rate"] == 0.5
+    assert body["fallback_rate"] == 0.5
+    assert body["fallback_warning"] is False
     assert {(m["method"], m["count"]) for m in body["by_method"]} == {("llm", 1), ("none", 1)}
 
 

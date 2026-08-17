@@ -85,9 +85,10 @@ async def test_human_message_produces_trace_with_dispatch_and_agent_spans(
     assert trace["trigger_type"] == "message"
     assert trace["rivulet_id"] == rivulet_id
     assert trace["label"] == "hello there"
-    # An "always" rule matches the trigger and re-matches the agent's own
-    # reply (FR-5.6), which the loop guard eventually stops -- so more than
-    # one dispatch_decision/agent_run pair ends up under this one trace.
+    # The agent's reply is still re-dispatched (FR-5.6) so a teammate
+    # @mention can fire, but the speaker is excluded from unsolicited
+    # rematch — so this trace is one dispatch_decision + one agent_run +
+    # the nested no-op re-dispatch, not a self-loop the guard has to stop.
     assert trace["span_count"] > 2
 
     detail = client.get(f"/api/v1/runs/{trace['id']}", headers=auth_headers).json()

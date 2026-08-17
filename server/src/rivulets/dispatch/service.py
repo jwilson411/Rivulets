@@ -4,14 +4,16 @@ dispatcher, invokes matched agents, and persists their replies as rivulet
 messages (FR-4.1, FR-5.2, FR-12.1).
 
 Also recurses: an agent's own reply is itself re-dispatched (FR-5.6,
-AC-014's "Architect mentions @DBA, DBA responds" scenario), which is what
-gives loop-prevention guards (FR-7, dispatch/guards.py) something to
-actually guard against — without recursion, one human message can only
-ever produce one flat round of replies and a loop is structurally
-impossible. Recursion depth is bounded by the guard checks running before
-each invocation, not by a separate depth counter: worst case is
-~guard.turn_limit calls deep, comfortably under Python's recursion limit
-for the FR-7.4-documented range (1-100).
+AC-014's "Architect mentions @DBA, DBA responds" scenario). The speaker
+is excluded from unsolicited re-matching — an `always` agent answering a
+human must not then answer its own "how can I help?" — but an explicit
+@mention or a specialist keyword on a *teammate* still fires. Mention
+and handoff ping-pong is what loop-prevention guards (FR-7,
+dispatch/guards.py) bound; without recursion those loops are
+structurally impossible. Recursion depth is bounded by the guard checks
+running before each invocation, not by a separate depth counter: worst
+case is ~guard.turn_limit calls deep, comfortably under Python's
+recursion limit for the FR-7.4-documented range (1-100).
 
 Handoffs (FR-6) reuse the exact same invoke/error/persist/guard/recurse
 pipeline as ordinary dispatch — `_invoke_agent` and `_handle_handoff` call
@@ -954,7 +956,7 @@ async def _dispatch_and_respond(
     # open write transaction behind it.
     await db.commit()
     engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
-    result = await engine.dispatch(message_content, dispatch_infos)
+    result = await engine.dispatch(message_content, dispatch_infos, speaker_id=from_agent_id)
     # A channel with a team is supposed to answer without an @mention
     # (README, FR-4.1). Mentions / rules / the LLM fallback still win
     # when they match; this only fills the "nobody claimed it" hole, and

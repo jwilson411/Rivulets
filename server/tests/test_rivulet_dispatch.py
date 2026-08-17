@@ -182,6 +182,114 @@ def test_agent_with_no_rules_still_answers_a_human_message(
     assert messages[1]["content"] == "hello back"
 
 
+def test_always_agent_replies_once_to_a_human_message(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Starter Assistant ships with `always` so everyday chat is answered.
+    That must be one reply, not a self-conversation the cycle guard then
+    has to pause — the speaker is excluded from unsolicited re-dispatch.
+    """
+    monkeypatch.setattr(
+        "rivulets.dispatch.service.run_agent",
+        _fake_run_agent("Of course! What task do you need assistance with?"),
+    )
+    agent_id = _create_agent_with_always_rule(client, auth_headers, "Always Helper")
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "I need some assistance with a task."},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["sender_name"] == "Always Helper"
+    rivulet_state = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert rivulet_state["status"] != "paused"
+
+
+def test_two_always_agents_each_reply_once_to_a_human(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Always means 'join the human turn', not 'answer every teammate
+    bounce'. Two always agents used to ping-pong until the cycle guard
+    paused the rivulet."""
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("On it."))
+    first = _create_agent_with_always_rule(client, auth_headers, "Always One")
+    second = _create_agent_with_always_rule(client, auth_headers, "Always Two")
+    channel_id = _create_channel_with_team(client, auth_headers, [first, second])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "hello team"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent", "agent"]
+    assert {m["sender_name"] for m in messages[1:]} == {"Always One", "Always Two"}
+    rivulet_state = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert rivulet_state["status"] != "paused"
+
+
+def test_always_agent_can_still_mention_a_teammate(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-5.6: excluding the speaker from unsolicited rematch must not
+    break Architect-mentions-@DBA. Mentions still fire on the reply."""
+
+    async def fake_run_agent(_db: object, agent_id: str, _message: str, **_kwargs: object) -> Any:
+        # Names are unique in this workspace; look up by the created ids
+        # via the closure below.
+        content = replies[agent_id]
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: content
+        )
+
+    architect = _create_agent_with_always_rule(client, auth_headers, "Architect")
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "DBA",
+            "description": "Database specialist.",
+            "instructions": "Review schemas.",
+            "model": "anthropic:claude-3-5-haiku-latest",
+        },
+        headers=auth_headers,
+    )
+    dba = created.json()["id"]
+    client.patch(
+        f"/api/v1/agents/{dba}/routing-rules",
+        json={"rules": [{"rule_type": "mention_only", "pattern": "", "priority": 0}]},
+        headers=auth_headers,
+    )
+    replies = {
+        architect: "I need a schema review @DBA",
+        dba: "Schema looks fine.",
+    }
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    channel_id = _create_channel_with_team(client, auth_headers, [architect, dba])
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "design the user tables"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert [m["sender_type"] for m in messages] == ["human", "agent", "agent"]
+    assert messages[1]["sender_name"] == "Architect"
+    assert messages[2]["sender_name"] == "DBA"
+    assert messages[2]["content"] == "Schema looks fine."
+    rivulet_state = client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()
+    assert rivulet_state["status"] != "paused"
+
+
 async def test_invalid_regex_rule_does_not_500_dispatch_for_the_whole_team(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,9 +423,7 @@ def test_unregistered_agent_posts_system_alert_and_span_reason(
     put the sanitized exception on the run span."""
 
     def _unregistered(*_args: object, **_kwargs: object) -> Any:
-        raise ValueError(
-            "Agent 'writer' is not registered with AgentOS — call sync_agents() first"
-        )
+        raise ValueError("Agent 'writer' is not registered with AgentOS — call sync_agents() first")
 
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", _unregistered)
     agent_id = _create_agent_with_always_rule(client, auth_headers, "Unregistered Writer")
@@ -347,7 +453,9 @@ def test_unregistered_agent_posts_system_alert_and_span_reason(
 
 
 def test_sanitize_run_error_collapses_whitespace_and_truncates() -> None:
-    assert _sanitize_run_error("  not   registered\nwith AgentOS  ") == "not registered with AgentOS"
+    assert (
+        _sanitize_run_error("  not   registered\nwith AgentOS  ") == "not registered with AgentOS"
+    )
     long = "x" * 400
     cleaned = _sanitize_run_error(long)
     assert len(cleaned) == 300

@@ -10,6 +10,12 @@ AgentOS — per ADR-001, agent execution belongs to AgentOS, not to
 hand-rolled logic in the App Server.
 
 @mentions (FR-4.5) bypass both stages entirely.
+
+On an agent-originated re-dispatch (FR-5.6), pass `speaker_id` so the
+agent that just spoke cannot be selected again by rules or the LLM
+fallback. Mentions still can — `@DBA` in Architect's reply is the
+reason re-dispatch exists. `always` is a human-turn rule ("answer
+everyday chat"), not a license to bounce on every teammate reply.
 """
 
 import re
@@ -18,6 +24,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from rivulets.dispatch.rules import Rule, RuleType, rule_matches
+
+# Rules that may fire on another agent's message. ALWAYS is a human-turn
+# participation flag; MENTION_ONLY never matches here (FR-4.5).
+_UNSOLICITED_RULE_TYPES = frozenset({RuleType.KEYWORD, RuleType.REGEX, RuleType.SEMANTIC})
 
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
 
@@ -73,7 +83,28 @@ class DispatchResult:
 
 
 def _is_mention_only(agent: AgentDispatchInfo) -> bool:
-    return bool(agent.rules) and all(rule.rule_type is RuleType.MENTION_ONLY for rule in agent.rules)
+    return bool(agent.rules) and all(
+        rule.rule_type is RuleType.MENTION_ONLY for rule in agent.rules
+    )
+
+
+def _unsolicited_for_agent_reply(agent: AgentDispatchInfo) -> AgentDispatchInfo | None:
+    """What this teammate may match against another agent's message.
+
+    Always-only / mention-only / no-rule agents sit the bounce out —
+    they answer humans (or an explicit @mention), not every reply.
+    Keyword/regex/semantic specialists can still join (Architect says
+    "postgresql schema", DBA's keyword fires).
+    """
+    kept = [rule for rule in agent.rules if rule.rule_type in _UNSOLICITED_RULE_TYPES]
+    if not kept:
+        return None
+    return AgentDispatchInfo(
+        agent_id=agent.agent_id,
+        name=agent.name,
+        rules=kept,
+        description=agent.description,
+    )
 
 
 class DispatchEngine:
@@ -112,9 +143,30 @@ class DispatchEngine:
                     break
         return matched
 
-    async def dispatch(self, message: str, agents: list[AgentDispatchInfo]) -> DispatchResult:
+    async def dispatch(
+        self,
+        message: str,
+        agents: list[AgentDispatchInfo],
+        *,
+        speaker_id: str | None = None,
+    ) -> DispatchResult:
         if mentioned := self.match_mentions(message, agents):
             return DispatchResult(agent_ids=mentioned, method=DispatchMethod.MENTION)
+
+        if speaker_id is not None:
+            # Recursive re-dispatch of an agent's own reply: never hand the
+            # speaker back to themselves via always/keyword/LLM, and don't
+            # let always-only teammates treat every bounce as a new turn.
+            candidates: list[AgentDispatchInfo] = []
+            for agent in agents:
+                if agent.agent_id == speaker_id:
+                    continue
+                info = _unsolicited_for_agent_reply(agent)
+                if info is not None:
+                    candidates.append(info)
+            if not candidates:
+                return DispatchResult(agent_ids=[], method=DispatchMethod.NONE)
+            agents = candidates
 
         if matched := self.match_deterministic(message, agents):
             return DispatchResult(agent_ids=matched, method=DispatchMethod.DETERMINISTIC)

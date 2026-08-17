@@ -46,22 +46,22 @@ def _create_channel_with_team(
     return channel_id
 
 
-def test_turn_limit_pauses_a_self_triggering_agent(
+def test_turn_limit_pauses_a_self_mentioning_agent(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An 'always' agent replying to its own output is exactly the
-    scenario FR-7.1 exists for: with nothing to stop it, one human message
-    would recurse forever.
+    """FR-7.1 bounds an explicit self-@mention loop. An `always` rule no
+    longer re-matches the speaker's own reply (that used to look like a
+    turn-limit scenario but was just the agent talking to itself).
 
-    A lone self-looping agent produces the same (Loopy, Loopy) pair every
-    time, so cycle detection (default threshold 3) would otherwise trip
-    first at message 4 — cycle_threshold is pushed out of reach here so
-    this test isolates the turn limit specifically.
+    A lone self-mentioning agent produces the same (Loopy, Loopy) pair
+    every time, so cycle detection (default threshold 3) would otherwise
+    trip first at message 4 — cycle_threshold is pushed out of reach here
+    so this test isolates the turn limit specifically.
     """
 
     async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
         return SimpleNamespace(
-            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK."
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "OK @Loopy"
         )
 
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
@@ -71,12 +71,12 @@ def test_turn_limit_pauses_a_self_triggering_agent(
     )
     assert settings.status_code == 200, settings.text
 
-    agent_id = _create_agent(client, auth_headers, "Loopy", "always")
+    agent_id = _create_agent(client, auth_headers, "Loopy", "mention_only")
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
 
     rivulet = client.post(
         f"/api/v1/channels/{channel_id}/rivulets",
-        json={"content": "start"},
+        json={"content": "@Loopy start"},
         headers=auth_headers,
     )
     assert rivulet.status_code == 201, rivulet.text
