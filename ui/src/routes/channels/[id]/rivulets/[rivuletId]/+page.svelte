@@ -3,7 +3,8 @@
 	import { resolve } from '$app/paths';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { channels, type Channel } from '$lib/api/channels';
-	import { teams, type Team } from '$lib/api/teams';
+	import { teams, type Team, type TeamDetail } from '$lib/api/teams';
+	import { agents, type Agent } from '$lib/api/agents';
 	import { workflows, type Workflow } from '$lib/api/workflows';
 	import { runs, type RunTrace } from '$lib/api/runs';
 	import { files as filesApi } from '$lib/api/files';
@@ -11,6 +12,7 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import { agentInkMap, INK_AVATAR, INK_BUBBLE, HUMAN_AVATAR, type AgentInk } from '$lib/ink';
 	import { formatBytes, formatClock } from '$lib/format';
+	import { mentionNamesOf, type MentionCandidate } from '$lib/mentions';
 	import { teamComposerHint } from '$lib/teamRouting';
 	import { renderMarkdown } from '$lib/markdown';
 	import Button from '$lib/ui/Button.svelte';
@@ -27,6 +29,7 @@
 	let rivulet = $state<Rivulet | null>(null);
 	let messages = $state<Message[]>([]);
 	let teamList = $state<Team[]>([]);
+	let teamMembers = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
 	let latestRun = $state<RunTrace | null>(null);
 	let loadError = $state<string | null>(null);
@@ -120,30 +123,54 @@
 	let humanName = $derived(messages.find((m) => m.sender_type === 'human')?.sender_name ?? null);
 
 	let routedTeam = $derived(teamList.find((t) => t.id === channel?.team_id) ?? null);
+	let mentionCandidates = $derived<MentionCandidate[]>(
+		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
+	);
+	let mentionNames = $derived(mentionNamesOf(mentionCandidates));
 	let helper = $derived(
 		routedTeam
-			? `${teamComposerHint(routedTeam.name)} · type / to run a workflow`
+			? `${teamComposerHint(routedTeam.name)} · type @ to mention · type / to run a workflow`
 			: "No team — agents won't answer"
 	);
+
+	async function loadTeamMembers(teamId: string | null) {
+		teamMembers = [];
+		if (!teamId) return;
+		try {
+			const [detail, agentList] = await Promise.all([teams.get(teamId), agents.list()]);
+			teamMembers = (detail as TeamDetail).agent_ids
+				.map((id) => agentList.find((a) => a.id === id))
+				.filter((a): a is Agent => a !== undefined);
+		} catch {
+			// Picker just stays empty — typing the exact name still works.
+		}
+	}
 
 	async function load(rivuletId: string, channelId: string) {
 		loadError = null;
 		try {
-			const [loadedChannel, loadedRivulet, loadedMessages, loadedTeams, loadedWorkflows, loadedRuns] =
-				await Promise.all([
-					channels.get(channelId),
-					rivulets.get(rivuletId),
-					rivulets.listMessages(rivuletId),
-					teams.list().catch(() => [] as Team[]),
-					workflows.list().catch(() => [] as Workflow[]),
-					runs.list({ rivuletId, limit: 1 }).catch(() => [] as RunTrace[])
-				]);
+			const [
+				loadedChannel,
+				loadedRivulet,
+				loadedMessages,
+				loadedTeams,
+				loadedWorkflows,
+				loadedRuns
+			] = await Promise.all([
+				channels.get(channelId),
+				rivulets.get(rivuletId),
+				rivulets.listMessages(rivuletId),
+				teams.list().catch(() => [] as Team[]),
+				workflows.list().catch(() => [] as Workflow[]),
+				runs.list({ rivuletId, limit: 1 }).catch(() => [] as RunTrace[])
+			]);
 			channel = loadedChannel;
 			rivulet = loadedRivulet;
 			messages = loadedMessages;
 			teamList = loadedTeams;
 			workflowList = loadedWorkflows;
 			latestRun = loadedRuns[0] ?? null;
+			await loadTeamMembers(loadedChannel.team_id);
 		} catch {
 			loadError = "Couldn't load this conversation.";
 		}
@@ -347,9 +374,7 @@
 			{title}
 		</div>
 		{#if latestRun?.status === 'running' || latestRun?.status === 'error' || latestRun?.status === 'cancelled'}
-			<p
-				class="mt-2 text-sm {latestRun.status === 'error' ? 'text-danger' : 'text-warn'}"
-			>
+			<p class="mt-2 text-sm {latestRun.status === 'error' ? 'text-danger' : 'text-warn'}">
 				{#if latestRun.status === 'running' && latestRun.span_count === 0}
 					Last run is still marked running with no steps.
 				{:else if latestRun.status === 'running'}
@@ -490,12 +515,12 @@
 											: 'bg-surface dark:bg-surface-dark'}"
 									>
 										<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown escapes all input before building tags -->
-										{@html renderMarkdown(message.content)}
+										{@html renderMarkdown(message.content, mentionNames)}
 									</div>
 								{:else}
 									<div class="msg-md text-base leading-normal text-ink dark:text-ink-dark">
 										<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown escapes all input before building tags -->
-										{@html renderMarkdown(message.content)}
+										{@html renderMarkdown(message.content, mentionNames)}
 									</div>
 								{/if}
 								{#if message.attachments.length > 0}
@@ -569,6 +594,7 @@
 			busy={sending}
 			error={sendError}
 			slashWorkflows={workflowList}
+			{mentionCandidates}
 			onSend={handleReply}
 		/>
 	</div>
@@ -632,5 +658,9 @@
 	.msg-md :global(a) {
 		color: var(--color-accent);
 		text-decoration: underline;
+	}
+	.msg-md :global(.mention) {
+		color: var(--color-accent);
+		font-weight: 600;
 	}
 </style>
