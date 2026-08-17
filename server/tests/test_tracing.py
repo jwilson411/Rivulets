@@ -1,21 +1,24 @@
 """#96: tracing.py's helpers (start_trace/start_span/finish_span/
 finish_trace/prune_old_traces) exercised directly against a DB session --
 the schema-linking behavior that dispatch/service.py and workflows/
-engine.py's instrumentation both build on."""
+engine.py's instrumentation both build on. #414: close_trace /
+reap_stale_traces for leftover 'running' rows."""
 
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.db.models import RunSpan, RunTrace
+from rivulets.db.models import Channel, Rivulet, RunSpan, RunTrace, Workflow, WorkflowRun
 from rivulets.db.session import session_scope
 from rivulets.tracing import (
     TraceContext,
     _retention_tick,  # pyright: ignore[reportPrivateUsage]
+    close_trace,
     finish_span,
     finish_trace,
     prune_old_traces,
+    reap_stale_traces,
     start_span,
     start_trace,
 )
@@ -188,3 +191,126 @@ async def test_retention_tick_commits_deletion(db_session: AsyncSession) -> None
     async with session_scope() as fresh_db:
         remaining_ids = {t.id for t in (await fresh_db.scalars(select(RunTrace))).all()}
     assert old_trace.id not in remaining_ids
+
+
+def _minutes_ago(minutes: int) -> str:
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def test_start_span_increments_trace_span_count(db_session: AsyncSession) -> None:
+    ctx = await start_trace(
+        db_session, trigger_type="message", label="root", rivulet_id=None, channel_id=None
+    )
+    await start_span(
+        db_session, ctx, span_type="dispatch_decision", entity_id="d1", name="dispatch"
+    )
+    await start_span(db_session, ctx, span_type="agent_run", entity_id=None, name="Agent")
+    trace = await db_session.get(RunTrace, ctx.trace_id)
+    assert trace is not None
+    assert trace.span_count == 2
+
+
+async def test_close_trace_cancels_open_spans_and_trace(db_session: AsyncSession) -> None:
+    ctx = await start_trace(
+        db_session, trigger_type="message", label="root", rivulet_id=None, channel_id=None
+    )
+    span_id = await start_span(
+        db_session, ctx, span_type="dispatch_decision", entity_id=None, name="dispatch"
+    )
+    closed = await close_trace(db_session, ctx.trace_id, status="cancelled")
+    assert closed is not None
+    assert closed.status == "cancelled"
+    assert closed.completed_at is not None
+    span = await db_session.get(RunSpan, span_id)
+    assert span is not None
+    assert span.status == "cancelled"
+    assert span.completed_at is not None
+
+
+async def test_finish_trace_does_not_overwrite_a_cancelled_trace(db_session: AsyncSession) -> None:
+    ctx = await start_trace(
+        db_session, trigger_type="message", label="root", rivulet_id=None, channel_id=None
+    )
+    await close_trace(db_session, ctx.trace_id, status="cancelled")
+    await finish_trace(db_session, ctx.trace_id)
+    trace = await db_session.get(RunTrace, ctx.trace_id)
+    assert trace is not None
+    assert trace.status == "cancelled"
+
+
+async def test_reap_stale_traces_fails_old_zero_span_runs(db_session: AsyncSession) -> None:
+    stale = RunTrace(
+        trigger_type="message",
+        label="wedged",
+        started_at=_minutes_ago(30),
+    )
+    fresh = RunTrace(trigger_type="message", label="just started")
+    db_session.add_all([stale, fresh])
+    await db_session.commit()
+
+    reaped = await reap_stale_traces(db_session)
+    await db_session.commit()
+
+    assert reaped == 1
+    assert (await db_session.get(RunTrace, stale.id)).status == "error"  # type: ignore[union-attr]
+    assert (await db_session.get(RunTrace, fresh.id)).status == "running"  # type: ignore[union-attr]
+
+
+async def test_reap_stale_traces_leaves_recent_zero_span_alone(db_session: AsyncSession) -> None:
+    # Under the 5-minute cutoff -- still plausibly the request that just
+    # opened the trace, before its first span.
+    recent = RunTrace(trigger_type="message", label="recent", started_at=_minutes_ago(1))
+    db_session.add(recent)
+    await db_session.commit()
+
+    assert await reap_stale_traces(db_session) == 0
+    assert (await db_session.get(RunTrace, recent.id)).status == "running"  # type: ignore[union-attr]
+
+
+async def test_reap_orphaned_running_traces_on_startup(db_session: AsyncSession) -> None:
+    """Process start: a running trace with spans is leftover from the
+    previous process, so include_orphaned fails it. A workflow pause
+    waiting on a person is the exception."""
+    orphan = await start_trace(
+        db_session, trigger_type="message", label="orphaned", rivulet_id=None, channel_id=None
+    )
+    await start_span(db_session, orphan, span_type="dispatch_decision", entity_id=None, name="d")
+
+    channel = Channel(name="reap-pause")
+    db_session.add(channel)
+    await db_session.flush()
+    rivulet = Rivulet(channel_id=channel.id, created_by="human")
+    workflow = Workflow(name="reap-pause-flow")
+    db_session.add_all([rivulet, workflow])
+    await db_session.flush()
+    paused_run = WorkflowRun(
+        workflow_id=workflow.id,
+        rivulet_id=rivulet.id,
+        triggered_by="human",
+        input_content="hi",
+        status="awaiting_human",
+    )
+    db_session.add(paused_run)
+    await db_session.flush()
+    paused = await start_trace(
+        db_session,
+        trigger_type="message",
+        label="waiting",
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+    )
+    await start_span(
+        db_session,
+        paused,
+        span_type="workflow_run",
+        entity_id=paused_run.id,
+        name="flow",
+    )
+    await db_session.commit()
+
+    reaped = await reap_stale_traces(db_session, include_orphaned=True)
+    await db_session.commit()
+
+    assert reaped == 1
+    assert (await db_session.get(RunTrace, orphan.trace_id)).status == "error"  # type: ignore[union-attr]
+    assert (await db_session.get(RunTrace, paused.trace_id)).status == "running"  # type: ignore[union-attr]

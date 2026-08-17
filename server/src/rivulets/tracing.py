@@ -20,6 +20,13 @@ scheduler.py's run_scheduler_loop pattern (its own plain-asyncio background
 task, started/cancelled in app.py's lifespan) -- traces accumulate
 continuously, unlike backup.py's startup-only snapshot retention, so a
 recurring poll loop is the closer precedent.
+
+#414: a trace can be left `status='running'` forever when the process
+dies after `start_trace` committed (a 500, a container restart) and
+never reaches `finish_trace`. `reap_stale_traces` fails those leftovers
+-- zero-span traces after a short timeout, and (on process start) every
+other running trace that isn't a workflow pause waiting on a person.
+`close_trace` is the same close used by POST /runs/{id}/cancel.
 """
 
 import asyncio
@@ -31,7 +38,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.db.base import utcnow_iso
-from rivulets.db.models import RunSpan, RunTrace
+from rivulets.db.models import RunSpan, RunTrace, WorkflowRun
 from rivulets.db.session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -39,9 +46,14 @@ logger = logging.getLogger(__name__)
 _LABEL_MAX_LEN = 80
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ERROR_STATUSES = {"error", "failed"}
+_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
 
 RETENTION_POLL_INTERVAL_SECONDS = 3600
 DEFAULT_RETENTION_DAYS = 30
+# A first span is written as soon as dispatch/a workflow starts real work.
+# Longer than this with no spans means start_trace committed and the
+# process never got further -- not a live run (#414).
+STALE_ZERO_SPAN_MINUTES = 5
 
 
 @dataclass(frozen=True)
@@ -117,6 +129,12 @@ async def start_span(
         name=name,
     )
     db.add(span)
+    # span_count is otherwise only written at finish_trace, so a still-
+    # running trace listed in the UI would always say "0 steps" even after
+    # work had started. Increment here so the list stays honest mid-run.
+    trace = await db.get(RunTrace, ctx.trace_id)
+    if trace is not None:
+        trace.span_count += 1
     await db.flush()
     return span.id
 
@@ -158,6 +176,30 @@ async def finish_span(
     span.duration_ms = _duration_ms(span.started_at, completed_at)
 
 
+async def _aggregate_trace(db: AsyncSession, trace: RunTrace) -> tuple[int, bool]:
+    """Writes span_count/cost/tokens from this trace's RunSpan rows.
+    Returns (span_count, any_span_errored)."""
+    stats = (
+        await db.execute(
+            select(
+                func.count(RunSpan.id),
+                func.sum(RunSpan.cost_usd),
+                func.sum(RunSpan.total_tokens),
+            ).where(RunSpan.trace_id == trace.id)
+        )
+    ).one()
+    span_count, total_cost_usd, total_tokens = stats
+    has_error = await db.scalar(
+        select(func.count(RunSpan.id)).where(
+            RunSpan.trace_id == trace.id, RunSpan.status.in_(_ERROR_STATUSES)
+        )
+    )
+    trace.span_count = span_count or 0
+    trace.total_cost_usd = float(total_cost_usd) if total_cost_usd is not None else None
+    trace.total_tokens = int(total_tokens or 0)
+    return trace.span_count, bool(has_error)
+
+
 async def finish_trace(db: AsyncSession, trace_id: str | None) -> None:
     """No-op when `trace_id` is None. Aggregates this trace's own RunSpan
     rows into its denormalized span_count/total_cost_usd/total_tokens, and
@@ -166,34 +208,97 @@ async def finish_trace(db: AsyncSession, trace_id: str | None) -> None:
     top-level dispatch_and_respond/run_workflow call returns. A trace whose
     root workflow_run paused never reaches this call at all (the root
     entry point's own call already returned once the pause happened) and
-    is deliberately left 'running' -- see RunTrace's docstring."""
+    is deliberately left 'running' -- see RunTrace's docstring.
+
+    Also a no-op when the trace is already terminal: a user cancel or the
+    #414 reaper may have closed it while the original request was still
+    in flight, and that close wins rather than being overwritten back to
+    completed."""
     if trace_id is None:
         return
     trace = await db.get(RunTrace, trace_id)
-    if trace is None:
+    if trace is None or trace.status in _TERMINAL_STATUSES:
         return
 
-    stats = (
-        await db.execute(
-            select(
-                func.count(RunSpan.id),
-                func.sum(RunSpan.cost_usd),
-                func.sum(RunSpan.total_tokens),
-            ).where(RunSpan.trace_id == trace_id)
-        )
-    ).one()
-    span_count, total_cost_usd, total_tokens = stats
-    has_error = await db.scalar(
-        select(func.count(RunSpan.id)).where(
-            RunSpan.trace_id == trace_id, RunSpan.status.in_(_ERROR_STATUSES)
-        )
-    )
-
-    trace.span_count = span_count or 0
-    trace.total_cost_usd = float(total_cost_usd) if total_cost_usd is not None else None
-    trace.total_tokens = int(total_tokens or 0)
+    _, has_error = await _aggregate_trace(db, trace)
     trace.status = "error" if has_error else "completed"
     trace.completed_at = utcnow_iso()
+
+
+async def close_trace(db: AsyncSession, trace_id: str, *, status: str) -> RunTrace | None:
+    """Force-close a still-running trace (user cancel, or the #414 reaper).
+    Open spans are finished with the same status so the detail view doesn't
+    leave steps 'running' under a closed parent. No-op (returns the row)
+    when the trace is already terminal; None if it doesn't exist."""
+    trace = await db.get(RunTrace, trace_id)
+    if trace is None:
+        return None
+    if trace.status in _TERMINAL_STATUSES:
+        return trace
+    open_spans = (
+        await db.scalars(
+            select(RunSpan).where(RunSpan.trace_id == trace_id, RunSpan.completed_at.is_(None))
+        )
+    ).all()
+    for span in open_spans:
+        await finish_span(db, span.id, status=status)
+    await _aggregate_trace(db, trace)
+    trace.status = status
+    trace.completed_at = utcnow_iso()
+    return trace
+
+
+async def _paused_workflow_trace_ids(db: AsyncSession) -> set[str]:
+    """Traces whose workflow_run span points at a WorkflowRun still waiting
+    on a person -- the one 'running' leftover that is not a crash (#414 /
+    RunTrace's pause/resume gap)."""
+    rows = await db.scalars(
+        select(RunSpan.trace_id)
+        .join(WorkflowRun, WorkflowRun.id == RunSpan.entity_id)
+        .where(RunSpan.span_type == "workflow_run", WorkflowRun.status == "awaiting_human")
+    )
+    return set(rows.all())
+
+
+async def reap_stale_traces(db: AsyncSession, *, include_orphaned: bool = False) -> int:
+    """Fail traces left 'running' with no work happening (#414).
+
+    Always: a running trace with no RunSpan rows older than
+    STALE_ZERO_SPAN_MINUTES -- start_trace committed, then the request
+    died before any step.
+
+    `include_orphaned=True` (process start): also fail every other
+    running trace that isn't a workflow pause waiting on a person. The
+    previous process is gone, so nothing is still executing them.
+
+    Returns the number of traces closed.
+    """
+    paused_ids = await _paused_workflow_trace_ids(db)
+    to_close: list[str] = []
+
+    cutoff = (datetime.now(UTC) - timedelta(minutes=STALE_ZERO_SPAN_MINUTES)).strftime(_ISO_FORMAT)
+    has_span = select(RunSpan.id).where(RunSpan.trace_id == RunTrace.id).exists()
+    zero_span_ids = (
+        await db.scalars(
+            select(RunTrace.id).where(
+                RunTrace.status == "running",
+                RunTrace.started_at < cutoff,
+                ~has_span,
+            )
+        )
+    ).all()
+    to_close.extend(tid for tid in zero_span_ids if tid not in paused_ids)
+
+    if include_orphaned:
+        orphan_ids = (
+            await db.scalars(select(RunTrace.id).where(RunTrace.status == "running"))
+        ).all()
+        already = set(to_close)
+        to_close.extend(tid for tid in orphan_ids if tid not in paused_ids and tid not in already)
+
+    for tid in to_close:
+        await close_trace(db, tid, status="error")
+    return len(to_close)
 
 
 async def prune_old_traces(db: AsyncSession, *, retention_days: int) -> int:
@@ -231,10 +336,17 @@ async def run_retention_loop() -> None:
 async def _retention_tick() -> None:
     """One retention poll: its own `session_scope()`, matching workflows/
     scheduler.py's `_tick()` -- pulled out of `run_retention_loop` so tests
-    can drive a single tick directly instead of the infinite loop."""
+    can drive a single tick directly instead of the infinite loop.
+
+    Also reaps zero-span leftovers (#414) so a 500 that never restarts
+    the process still gets cleaned without waiting for someone to open
+    the Runs page (list_runs reaps lazily too)."""
     async with session_scope() as db:
+        reaped = await reap_stale_traces(db)
         deleted = await prune_old_traces(db, retention_days=DEFAULT_RETENTION_DAYS)
         await db.commit()
+        if reaped:
+            logger.info("Reaped %d stale running trace(s)", reaped)
         if deleted:
             logger.info(
                 "Pruned %d run trace(s) older than %d days", deleted, DEFAULT_RETENTION_DAYS
