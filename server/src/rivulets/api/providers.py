@@ -6,12 +6,15 @@ OS keychain via security/credentials.py (or its encrypted-SQLite fallback,
 `provider_config.api_key_ref` reference is ever persisted or returned.
 """
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from rivulets.agentos import sync_agents
+from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.models import AUTO_MODEL, resolve_default_provider
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.db.base import uuid7
@@ -22,6 +25,8 @@ from rivulets.security.credentials import (
     is_keyring_available,
     store_provider_key,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -117,6 +122,14 @@ async def add_provider(
     db.add(provider)
     await db.commit()
     await db.refresh(provider)
+    # A provider key is what Auto-mode / Docker-locked agents were
+    # missing at registration time. Rebuild now so chat works without
+    # requiring another login (#404).
+    try:
+        await sync_agents(db)
+        await record_registration_flags(db)
+    except Exception:
+        logger.warning("Failed to register agents after adding a provider", exc_info=True)
     return provider
 
 
@@ -136,6 +149,12 @@ async def update_provider(
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
     await db.commit()
     await db.refresh(provider)
+    if body.api_key is not None:
+        try:
+            await sync_agents(db)
+            await record_registration_flags(db)
+        except Exception:
+            logger.warning("Failed to register agents after updating a provider", exc_info=True)
     return provider
 
 

@@ -168,6 +168,38 @@ describe('channels/[id]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
+	it('banners instead of Routes to when the routed team is unregistered', async () => {
+		const assistant: Agent = {
+			id: 'agent-1',
+			name: 'Assistant',
+			description: 'Generalist',
+			instructions: 'Help.',
+			model: 'auto',
+			fallback_models: [],
+			approved_for_unattended_tools: false,
+			agentos_agent_id: null
+		};
+		seed({
+			channel: { ...generalChannel, team_id: 'team-1' },
+			teams: [supportTeam]
+		});
+		vi.mocked(teams.get).mockResolvedValue({ ...supportTeam, agent_ids: ['agent-1'] });
+		vi.mocked(agents.list).mockResolvedValue([assistant]);
+
+		render(ChannelPage);
+
+		await expect
+			.element(page.getByText(/Agents aren't ready to run on this node/))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText("Agents aren't ready to run — sign out and back in"))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Routes to Support')).not.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.not.toBeInTheDocument();
+	});
+
 	it('warns in the helper line when the channel has no team', async () => {
 		seed();
 
@@ -338,7 +370,7 @@ describe('channels/[id]/+page.svelte', () => {
 			model: 'auto',
 			fallback_models: [],
 			approved_for_unattended_tools: false,
-			agentos_agent_id: null
+			agentos_agent_id: 'agent-1'
 		};
 		seed({
 			channel: { ...generalChannel, team_id: 'team-1' },

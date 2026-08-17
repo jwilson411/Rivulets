@@ -58,6 +58,87 @@ async def test_run_agent_raises_when_unregistered(db_session: AsyncSession) -> N
     reset_agentos_for_testing()
 
 
+async def test_sync_agents_registers_without_a_model_when_keys_are_locked(
+    db_session: AsyncSession,
+) -> None:
+    """#404: Docker startup calls sync_agents before login unlocks the
+    credential store. Skipping those agents left dispatch matching a DB
+    row that run_agent then refused. They must still land in the
+    registry (model=None) so a later invoke can resolve the key."""
+    from rivulets.agentos.models import AUTO_MODEL
+    from rivulets.agentos.service import get_agentos, sync_agents
+    from rivulets.db.models import Agent
+    from rivulets.security.session import get_session_key_store
+
+    db_session.add(
+        Agent(
+            id="agent-locked",
+            name="Assistant",
+            description="starter",
+            instructions="Be helpful.",
+            model=AUTO_MODEL,
+        )
+    )
+    await db_session.commit()
+    get_session_key_store().clear()
+
+    await sync_agents(db_session)
+
+    registered = [a for a in (get_agentos().agents or []) if a.id == "agent-locked"]
+    assert len(registered) == 1
+    assert registered[0].model is None
+
+
+async def test_run_agent_resolves_model_when_registered_without_one(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent registered before login (model=None) must pick up a model
+    on the first invoke instead of raising 'not registered'."""
+    from agno.models.openai import OpenAIChat
+
+    from rivulets.agentos.service import get_agentos
+    from rivulets.db.models import Agent
+
+    reset_agentos_for_testing()
+    init_agentos()
+    db_session.add(
+        Agent(
+            id="agent-1",
+            name="Assistant",
+            description="starter",
+            instructions="Be helpful.",
+            model="openai:gpt-4o-mini",
+        )
+    )
+    await db_session.commit()
+    placeholder = AgnoAgent(id="agent-1", name="Assistant")
+    placeholder.arun = _scripted_arun(  # pyright: ignore[reportUnknownMemberType]
+        [RunCompletedEvent(content="Hello")]
+    )
+    get_agentos().agents = [placeholder]  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def fake_resolve(_db: AsyncSession, _row: Agent) -> OpenAIChat:
+        return OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+
+    monkeypatch.setattr("rivulets.agentos.service._resolve_agent_model", fake_resolve)
+
+    original_deep_copy = placeholder.deep_copy
+
+    def spying_deep_copy(*, update: Any = None) -> AgnoAgent:
+        clone = original_deep_copy(update=update)
+        clone.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+            [RunCompletedEvent(content="Hello")]
+        )
+        return clone
+
+    placeholder.deep_copy = spying_deep_copy  # pyright: ignore[reportAttributeAccessIssue]
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+    assert result.status is RunStatus.completed
+    assert result.content == "Hello"
+    reset_agentos_for_testing()
+
+
 async def test_run_agent_resyncs_once_if_missing_from_registry(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -53,6 +53,28 @@ def test_list_agents_empty_then_populated(client: TestClient, auth_headers: dict
     assert "DBA" in {a["name"] for a in listed}
 
 
+def test_list_agents_overlays_live_registry_after_process_restart(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#404: the DB column still says registered after a restart; the
+    list endpoint must report the empty in-process registry instead."""
+    from rivulets.agentos.service import get_agentos
+
+    added = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-test"},
+        headers=auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    ready = client.get("/api/v1/agents", headers=auth_headers).json()
+    assert any(agent["agentos_agent_id"] for agent in ready)
+
+    get_agentos().agents = []
+    listed = client.get("/api/v1/agents", headers=auth_headers).json()
+    assert listed
+    assert all(agent["agentos_agent_id"] is None for agent in listed)
+
+
 def test_get_agent_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/agents/nonexistent", headers=auth_headers)
     assert response.status_code == 404
