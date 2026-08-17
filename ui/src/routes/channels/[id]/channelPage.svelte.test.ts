@@ -9,6 +9,7 @@ import ChannelPage from './+page.svelte';
 import { channels, type Channel } from '$lib/api/channels';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams, type Team } from '$lib/api/teams';
+import { agents, type Agent } from '$lib/api/agents';
 import { files as filesApi } from '$lib/api/files';
 import { workflows as workflowsApi } from '$lib/api/workflows';
 import { runs, type RunTrace } from '$lib/api/runs';
@@ -43,7 +44,7 @@ vi.mock('$lib/api/teams', () => ({
 }));
 
 vi.mock('$lib/api/agents', () => ({
-	agents: { list: vi.fn() }
+	agents: { list: vi.fn(), getRoutingRules: vi.fn() }
 }));
 
 vi.mock('$lib/api/workflows', () => ({
@@ -194,7 +195,9 @@ describe('channels/[id]/+page.svelte', () => {
 		await page.getByRole('menuitem', { name: 'Support' }).click();
 
 		expect(channels.update).toHaveBeenCalledWith('chan-1', { team_id: 'team-1' });
-		await expect.element(page.getByText('Routes to Support')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.toBeInTheDocument();
 	});
 
 	it('shows a plain-language error when changing the team fails', async () => {
@@ -324,5 +327,54 @@ describe('channels/[id]/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Send' }).click();
 
 		await expect.element(page.getByText("Couldn't send that. Try again.")).toBeInTheDocument();
+	});
+
+	it('shows When to speak for the routed team agents', async () => {
+		const assistant: Agent = {
+			id: 'agent-1',
+			name: 'Assistant',
+			description: 'Generalist',
+			instructions: 'Help.',
+			model: 'auto',
+			fallback_models: [],
+			approved_for_unattended_tools: false,
+			agentos_agent_id: null
+		};
+		seed({
+			channel: { ...generalChannel, team_id: 'team-1' },
+			teams: [supportTeam]
+		});
+		vi.mocked(teams.get).mockResolvedValue({ ...supportTeam, agent_ids: ['agent-1'] });
+		vi.mocked(agents.list).mockResolvedValue([assistant]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([
+			{ id: 'rule-1', rule_type: 'always', pattern: '', priority: 0 }
+		]);
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('When to speak: Assistant always')).toBeInTheDocument();
+	});
+
+	it('says nobody picked this up when the latest run completed with no tokens', async () => {
+		const silentRun: RunTrace = {
+			id: 'trace-none',
+			trigger_type: 'message',
+			label: 'How are you all doing today?',
+			rivulet_id: 'riv-1',
+			channel_id: 'chan-1',
+			status: 'completed',
+			span_count: 1,
+			total_cost_usd: null,
+			total_tokens: 0,
+			started_at: new Date().toISOString(),
+			completed_at: new Date().toISOString()
+		};
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		vi.mocked(runs.list).mockResolvedValue([silentRun]);
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('Nobody picked this up.')).toBeInTheDocument();
 	});
 });

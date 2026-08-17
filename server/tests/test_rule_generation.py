@@ -93,6 +93,19 @@ async def test_generate_routing_rules_returns_empty_with_no_provider(
     assert rules == []
 
 
+async def test_generate_routing_rules_assistant_is_always_without_llm(
+    db_session: AsyncSession,
+) -> None:
+    """#406: do not infer specialist keywords for the starter generalist."""
+    rules = await generate_routing_rules(
+        db_session,
+        "Assistant",
+        "A generalist assistant for everyday questions.",
+        "Be helpful.",
+    )
+    assert rules == [("always", "", 0)]
+
+
 async def test_generate_routing_rules_returns_empty_when_generator_fails(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

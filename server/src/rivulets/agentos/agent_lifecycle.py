@@ -138,8 +138,20 @@ async def generate_and_store_routing_rules(db: AsyncSession, agent: Agent) -> No
     (which imports this module) -- deferring to call time, well after
     both packages are fully loaded, sidesteps any import-order risk
     the same way _handle_run_workflow_trigger's lazy `rivulets.workflows`
-    import does in dispatch/service.py."""
+    import does in dispatch/service.py.
+
+    Leaves an explicit always/mention_only rule alone (#406): those are
+    owner-set "When to speak" choices, not something the generator should
+    overwrite with inferred keywords on the next description edit."""
     from rivulets.dispatch.rule_generation import generate_routing_rules
+
+    existing = list(
+        (
+            await db.scalars(select(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent.id))
+        ).all()
+    )
+    if existing and all(row.rule_type in {"always", "mention_only"} for row in existing):
+        return
 
     rules = await generate_routing_rules(db, agent.name, agent.description, agent.instructions)
     await replace_routing_rules(db, agent.id, rules)

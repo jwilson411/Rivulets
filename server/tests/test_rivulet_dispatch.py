@@ -247,7 +247,11 @@ def test_mention_invokes_agent_regardless_of_rules(
     ignored_messages = client.get(
         f"/api/v1/rivulets/{ignored_id}/messages", headers=auth_headers
     ).json()
-    assert [m["sender_type"] for m in ignored_messages] == ["human"]
+    assert [m["sender_type"] for m in ignored_messages] == ["human", "system"]
+    assert ignored_messages[1]["content_type"] == "system_alert"
+    assert "Nobody on Test Team picked this up" in ignored_messages[1]["content"]
+    assert "@MentionOnly" in ignored_messages[1]["content"]
+    assert "When to speak" in ignored_messages[1]["content"]
 
     rivulet = client.post(
         f"/api/v1/channels/{channel_id}/rivulets",
