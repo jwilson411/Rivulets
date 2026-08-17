@@ -73,6 +73,10 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
             "a clarifying question when the request is ambiguous, and hand off to a "
             "specialist teammate (Coder, Researcher, Writer) when their focus fits better."
         ),
+        # #422: a small safe chat set so the Tools picker isn't an empty
+        # wall of unchecked names. None of these are in
+        # SENSITIVE_BUILTIN_TOOL_NAMES / BUILTIN_TOOL_SCOPES.
+        tool_names=("web_search", "read_attached_file", "search_knowledge_base"),
     ),
     _StarterAgent(
         name="Coder",

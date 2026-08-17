@@ -162,6 +162,77 @@ describe('agents/+page.svelte', () => {
 		]);
 	});
 
+	it('groups agent tools with display names and descriptions (#422)', async () => {
+		seed();
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-search',
+				name: 'web_search',
+				description: 'Search the web via Brave Search and return titles, URLs, and snippets.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Web search',
+				group: 'chat'
+			},
+			{
+				id: 'tool-http',
+				name: 'http_request',
+				description: 'Make an HTTP request and return the response status and truncated body.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'sensitive_tools:manage',
+				available: true,
+				display_name: 'HTTP request',
+				group: 'chat'
+			},
+			{
+				id: 'tool-py',
+				name: 'execute_python',
+				description: 'Execute Python code in a sandboxed environment.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'sensitive_tools:manage',
+				available: true,
+				display_name: 'Execute Python',
+				group: 'files'
+			},
+			{
+				id: 'tool-pref',
+				name: 'update_agent_peer_preference',
+				description: 'Set which machine this agent prefers to run on.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: 'agents_teams:manage',
+				available: true,
+				display_name: 'Update agent peer preference',
+				group: 'workspace_admin'
+			}
+		]);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('More options').click();
+
+		await expect.element(page.getByText('No tools until you pick some.')).toBeInTheDocument();
+		await expect.element(page.getByText('Chat', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('Files', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('Workspace admin', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByRole('checkbox', { name: /Web search/ })).toBeInTheDocument();
+		await expect.element(page.getByRole('checkbox', { name: /HTTP request/ })).toBeInTheDocument();
+		await expect
+			.element(
+				page.getByText('Search the web via Brave Search and return titles, URLs, and snippets.')
+			)
+			.toBeInTheDocument();
+		await expect.element(page.getByText('web_search', { exact: true })).not.toBeInTheDocument();
+	});
+
 	it('opens an agent card into the edit sheet with its extras fetched just-in-time', async () => {
 		seed();
 

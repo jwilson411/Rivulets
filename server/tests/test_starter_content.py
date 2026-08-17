@@ -73,16 +73,24 @@ async def test_seed_starter_agents_assigns_expected_tools(db_session: AsyncSessi
     assistant = (
         await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
     ).scalar_one()
-    result = await db_session.execute(select(AgentTool).where(AgentTool.agent_id == assistant.id))
-    assert result.scalars().all() == []
+    result = await db_session.execute(
+        select(Tool.name)
+        .join(AgentTool, AgentTool.tool_id == Tool.id)
+        .where(AgentTool.agent_id == assistant.id)
+    )
+    assert set(result.scalars().all()) == {
+        "web_search",
+        "read_attached_file",
+        "search_knowledge_base",
+    }
 
 
 async def test_seed_starter_agents_grants_sensitive_tools_scope(db_session: AsyncSession) -> None:
     """#344: Coder (execute_python, write_file) and Researcher (http_request)
     are seeded with sensitive builtin tools assigned, but assignment alone
     isn't eligibility (#188/#240) -- without a matching AgentToolScope grant
-    those tools silently never resolve. Assistant/Writer have no tool
-    assignments at all, so they get no scope grant either."""
+    those tools silently never resolve. Assistant's #422 chat set and
+    Writer have no scoped tools, so they get no scope grant either."""
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
@@ -141,6 +149,12 @@ async def test_seed_starter_agents_sensitive_tools_actually_resolve(
 
     assert {"read_file", "write_file", "list_files", "execute_python"} <= coder_tool_names
     assert {"web_search", "http_request"} <= researcher_tool_names
+
+    assistant = (
+        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
+    ).scalar_one()
+    assistant_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, assistant)}
+    assert {"web_search", "read_attached_file", "search_knowledge_base"} <= assistant_tool_names
 
 
 async def test_seed_starter_agents_without_builtin_tools_still_creates_agents(
