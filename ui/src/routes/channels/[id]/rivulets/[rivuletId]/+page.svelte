@@ -444,11 +444,16 @@
 
 	async function handleResume() {
 		const rivuletId = page.params.rivuletId!;
+		const wasPaused = rivulet?.status === 'paused';
 		resuming = true;
 		resumeError = null;
 		try {
 			rivulet = await rivulets.resume(rivuletId);
 			messages = await rivulets.listMessages(rivuletId);
+			// Loop-guard resume continues dispatch in the background — show
+			// Routing… the same way Send does so the thread isn't silent
+			// until the first SSE event arrives.
+			if (wasPaused && !liveMessage) liveMessage = routingLive();
 		} catch {
 			resumeError =
 				rivulet?.status === 'closed'
