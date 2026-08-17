@@ -41,6 +41,7 @@ export type CredentialStorageBackend = 'keychain' | 'fallback';
 
 export const providers = {
 	list: () => api.get<Provider[]>('/providers', auth.token ?? undefined),
+	get: (id: string) => api.get<Provider>(`/providers/${id}`, auth.token ?? undefined),
 	create: (body: ProviderCreateInput) =>
 		api.post<Provider>('/providers', body, auth.token ?? undefined),
 	update: (id: string, patch: { label?: string; api_key?: string; base_url?: string }) =>

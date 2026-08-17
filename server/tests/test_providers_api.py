@@ -11,6 +11,8 @@ keychain failure in this test environment.
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import ProviderConfig
+from rivulets.db.session import session_scope
 from rivulets.security.credentials import CredentialStoreError
 from rivulets.security.credentials import store_provider_key as real_store_provider_key
 
@@ -70,12 +72,18 @@ def test_add_provider_success_never_returns_raw_key(
     assert body["provider"] == "openai"
     assert body["label"] == "OpenAI"
     assert body["base_url"] == "https://api.openai.com/v1"
-    assert body["is_default"] is False
+    assert body["is_default"] is True
     assert "api_key" not in body
     assert "sk-super-secret" not in response.text
 
     listed = client.get("/api/v1/providers", headers=auth_headers)
     assert len(listed.json()) == 1
+    assert listed.json()[0]["id"] == body["id"]
+    assert listed.json()[0]["is_default"] is True
+
+    fetched = client.get(f"/api/v1/providers/{body['id']}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert fetched.json() == listed.json()[0]
 
 
 def test_add_provider_credential_store_failure_returns_500(
@@ -96,6 +104,57 @@ def test_add_provider_credential_store_failure_returns_500(
 
     listed = client.get("/api/v1/providers", headers=auth_headers)
     assert listed.json() == []
+
+
+def test_get_provider_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.get("/api/v1/providers/nonexistent", headers=auth_headers)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Provider not found"
+
+
+async def test_list_and_get_heal_legacy_only_key(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Pre-#424 rows defaulted is_default to false even when they were
+    the only key — list/get heal that so the API matches Auto-mode."""
+    created = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-x"},
+        headers=auth_headers,
+    )
+    provider_id = created.json()["id"]
+
+    async with session_scope() as db:
+        row = await db.get(ProviderConfig, provider_id)
+        assert row is not None
+        row.is_default = False
+        await db.commit()
+
+    listed = client.get("/api/v1/providers", headers=auth_headers)
+    assert listed.status_code == 200
+    assert listed.json()[0]["id"] == provider_id
+    assert listed.json()[0]["is_default"] is True
+
+    fetched = client.get(f"/api/v1/providers/{provider_id}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert fetched.json() == listed.json()[0]
+
+
+def test_second_provider_is_not_automatically_default(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    first = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-1"},
+        headers=auth_headers,
+    )
+    second = client.post(
+        "/api/v1/providers",
+        json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-2"},
+        headers=auth_headers,
+    )
+    assert first.json()["is_default"] is True
+    assert second.json()["is_default"] is False
 
 
 def test_update_provider_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -195,6 +254,31 @@ def test_remove_provider_success(client: TestClient, auth_headers: dict[str, str
 
     listed = client.get("/api/v1/providers", headers=auth_headers)
     assert listed.json() == []
+
+
+def test_remove_default_promotes_remaining_provider(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    _delete_starter_agents(client, auth_headers)
+    first = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-1"},
+        headers=auth_headers,
+    )
+    second = client.post(
+        "/api/v1/providers",
+        json={"provider": "anthropic", "label": "Anthropic", "api_key": "sk-2"},
+        headers=auth_headers,
+    )
+    first_id = first.json()["id"]
+    second_id = second.json()["id"]
+
+    deleted = client.delete(f"/api/v1/providers/{first_id}", headers=auth_headers)
+    assert deleted.status_code == 204
+
+    remaining = client.get(f"/api/v1/providers/{second_id}", headers=auth_headers)
+    assert remaining.status_code == 200
+    assert remaining.json()["is_default"] is True
 
 
 def test_remove_provider_in_use_by_agent_is_blocked(

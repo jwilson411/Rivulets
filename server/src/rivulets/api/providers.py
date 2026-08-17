@@ -94,12 +94,41 @@ async def _get_or_404(db: DbSession, provider_id: str) -> ProviderConfig:
     return provider
 
 
+async def _ensure_default(db: DbSession) -> None:
+    """If providers exist but none is marked default, mark the first one.
+
+    The column defaults to false and add_provider used to leave it that
+    way, so a workspace's only key could list as `is_default: false`
+    even though resolve_default_provider already treats it as the default
+    (#424).
+    """
+    result = await db.execute(select(ProviderConfig))
+    configs = list(result.scalars().all())
+    if not configs or any(c.is_default for c in configs):
+        return
+    configs[0].is_default = True
+    await db.commit()
+
+
 @router.get("", response_model=list[ProviderOut])
 async def list_providers(
     db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> list[ProviderConfig]:
+    await _ensure_default(db)
     result = await db.execute(select(ProviderConfig))
     return list(result.scalars().all())
+
+
+@router.get("/{provider_id}", response_model=ProviderOut)
+async def get_provider(
+    provider_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> ProviderConfig:
+    # Registered after /credential-storage so that literal path isn't
+    # swallowed as an id (#424).
+    provider = await _get_or_404(db, provider_id)
+    await _ensure_default(db)
+    await db.refresh(provider)
+    return provider
 
 
 @router.post("", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
@@ -112,12 +141,16 @@ async def add_provider(
     except CredentialStoreError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
 
+    existing_default = await db.scalar(
+        select(ProviderConfig.id).where(ProviderConfig.is_default.is_(True))
+    )
     provider = ProviderConfig(
         id=provider_id,
         provider=body.provider,
         label=body.label,
         api_key_ref=api_key_ref,
         base_url=body.base_url,
+        is_default=existing_default is None,
     )
     db.add(provider)
     await db.commit()
@@ -184,6 +217,9 @@ async def remove_provider(
                 f"Agent '{auto_agent.name}' is in Auto mode, which resolves against the "
                 "default provider — set a different default provider before removing this one.",
             )
+    was_default = provider.is_default
     delete_provider_key(provider.api_key_ref)
     await db.delete(provider)
     await db.commit()
+    if was_default:
+        await _ensure_default(db)
