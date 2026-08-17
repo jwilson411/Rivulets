@@ -145,10 +145,14 @@ def test_keyword_rule_agent_responds_to_new_rivulet(
     assert messages[1]["content"] == "OK, doing that now."
 
 
-def test_agent_with_no_rules_does_not_respond(
+def test_agent_with_no_rules_still_answers_a_human_message(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("should not appear"))
+    """A team assigned to a channel must answer without an @mention.
+    Starter / freshly-created agents often have no generated rules yet
+    (and the LLM fallback prefers routing to nobody); the default
+    teammate is what makes 'hello' still get a reply."""
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("hello back"))
     created = client.post(
         "/api/v1/agents",
         json={
@@ -170,7 +174,9 @@ def test_agent_with_no_rules_does_not_respond(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert [m["sender_type"] for m in messages] == ["human"]
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["sender_name"] == "Silent Agent"
+    assert messages[1]["content"] == "hello back"
 
 
 async def test_invalid_regex_rule_does_not_500_dispatch_for_the_whole_team(
@@ -204,9 +210,10 @@ async def test_invalid_regex_rule_does_not_500_dispatch_for_the_whole_team(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    # The human message always lands; the landmine rule doesn't match, so
-    # no agent responds -- but critically, nothing 500s.
-    assert [m["sender_type"] for m in messages] == ["human"]
+    # The landmine regex is treated as no-match (not a 500). The default
+    # teammate then still answers the human message.
+    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert messages[1]["content"] == "OK, doing that."
 
 
 def test_mention_invokes_agent_regardless_of_rules(
@@ -230,6 +237,17 @@ def test_mention_invokes_agent_regardless_of_rules(
         headers=auth_headers,
     )
     channel_id = _create_channel_with_team(client, auth_headers, [agent_id])
+
+    ignored = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "hello, is anyone there?"},
+        headers=auth_headers,
+    )
+    ignored_id = ignored.json()["id"]
+    ignored_messages = client.get(
+        f"/api/v1/rivulets/{ignored_id}/messages", headers=auth_headers
+    ).json()
+    assert [m["sender_type"] for m in ignored_messages] == ["human"]
 
     rivulet = client.post(
         f"/api/v1/channels/{channel_id}/rivulets",

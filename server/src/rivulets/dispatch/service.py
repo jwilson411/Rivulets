@@ -105,7 +105,12 @@ from rivulets.db.session import begin_immediate, session_scope
 from rivulets.dispatch.approvals import create_or_get_pending_approval
 from rivulets.dispatch.budgets import BudgetAlert, budget_alert_text, check_budget_caps
 from rivulets.dispatch.complexity_classifier import classify_tier
-from rivulets.dispatch.engine import AgentDispatchInfo, DispatchEngine
+from rivulets.dispatch.engine import (
+    AgentDispatchInfo,
+    DispatchEngine,
+    DispatchMethod,
+    DispatchResult,
+)
 from rivulets.dispatch.guards import (
     get_or_create_guard_state,
     record_agent_message,
@@ -949,6 +954,18 @@ async def _dispatch_and_respond(
     await db.commit()
     engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
     result = await engine.dispatch(message_content, dispatch_infos)
+    # A channel with a team is supposed to answer without an @mention
+    # (README, FR-4.1). Mentions / rules / the LLM fallback still win
+    # when they match; this only fills the "nobody claimed it" hole, and
+    # only for a human message — applying it to recursive agent replies
+    # would make the default teammate bounce on every response.
+    if not result.agent_ids and from_agent_id is None:
+        if default_id := engine.pick_default_teammate(dispatch_infos):
+            result = DispatchResult(
+                agent_ids=[default_id],
+                method=DispatchMethod.DEFAULT,
+                llm_invoked=result.llm_invoked,
+            )
     # R-4 dispatcher hit-rate tracking (#31): one row per routing decision,
     # recursive re-dispatches (FR-5.6) included — each is its own invocation
     # of the same two-stage pipeline and can independently hit the LLM

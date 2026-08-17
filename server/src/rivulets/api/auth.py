@@ -33,6 +33,16 @@ half of FR-9.5's "changes sync automatically when connectivity resumes":
 publish_entity_change queues on the way out, this is what actually
 retries the queue.
 
+The same "can't start any earlier" constraint applies to AgentOS
+registration. `sync_agents()` at app startup (app.py) cannot resolve
+provider keys stored in the encrypted-SQLite fallback (Docker / no OS
+keychain — security/credentials.py), because that store is unlocked by
+`credential_store_key`, which only exists after this login. Agents
+skipped then stay unregistered until something rebuilds the registry;
+dispatch still matches them from the DB and `run_agent` then no-ops
+with "not registered with AgentOS". So every successful login rebuilds
+the registry *after* the session keys are set.
+
 Rate limited per security-and-dr.md's documented "5 attempts per minute
 per IP" (security/rate_limit.py) — checked before any credential work
 happens, so a flood of mnemonic guesses is capped regardless of whether
@@ -149,7 +159,10 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
         # there's no dedicated install wizard yet, so this doubles as it).
         await seed_starter_agents(db)
         await seed_starter_teams(db)
-        await sync_agents(db)
+        # Do not sync_agents() here: session keys are not set yet, so any
+        # agent whose model key lives in the credential-store fallback
+        # would be skipped. The post-unlock sync below is the one that
+        # actually registers them.
     elif not keys.verify_workspace_key(workspace_key, workspace.key_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect recovery phrase")
 
@@ -163,6 +176,14 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     session_store.set_p2p_psk(p2p_psk)
     session_store.set_credential_store_key(credential_store_key)
     session_store.set_webhook_secret_key(webhook_secret_key)
+
+    # Now that the credential store is unlocked, rebuild AgentOS from the
+    # DB. Per-agent resolve failures are swallowed inside sync_agents
+    # (NFR-2.4); a total failure here must not fail login.
+    try:
+        await sync_agents(db)
+    except Exception:
+        logger.warning("Failed to register agents after login", exc_info=True)
 
     try:
         # workspace_fingerprint, not workspace.id: the DB row's id is a

@@ -110,6 +110,16 @@ async def test_llm_fallback_not_invoked_reports_none_without_cost() -> None:
     assert result.llm_invoked is False
 
 
+def test_default_teammate_prefers_assistant_and_skips_mention_only() -> None:
+    engine = DispatchEngine()
+    silent = _mention_only_agent()
+    dba = _dba_agent()
+    assistant = AgentDispatchInfo(agent_id="asst-1", name="Assistant", rules=[])
+    assert engine.pick_default_teammate([silent, dba, assistant]) == "asst-1"
+    assert engine.pick_default_teammate([silent, dba]) == "dba-1"
+    assert engine.pick_default_teammate([silent]) is None
+
+
 @pytest.mark.asyncio
 async def test_llm_fallback_invoked_but_no_match_still_counts_as_invoked() -> None:
     async def fake_llm(message: str, agents: list[AgentDispatchInfo]) -> LlmFallbackResult:

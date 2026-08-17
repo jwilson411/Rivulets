@@ -53,6 +53,10 @@ class DispatchMethod(StrEnum):
     MENTION = "mention"
     DETERMINISTIC = "deterministic"
     LLM = "llm"
+    # Human message, nothing else matched, someone on the team still
+    # needs to answer (README: no @mention required). Not used for
+    # agent-to-agent recursion — that would ping-pong forever.
+    DEFAULT = "default"
     NONE = "none"
 
 
@@ -68,6 +72,10 @@ class DispatchResult:
     llm_invoked: bool = False
 
 
+def _is_mention_only(agent: AgentDispatchInfo) -> bool:
+    return bool(agent.rules) and all(rule.rule_type is RuleType.MENTION_ONLY for rule in agent.rules)
+
+
 class DispatchEngine:
     def __init__(self, llm_fallback: LlmFallback | None = None) -> None:
         self._llm_fallback = llm_fallback
@@ -77,6 +85,20 @@ class DispatchEngine:
         if not mentioned_names:
             return []
         return [a.agent_id for a in agents if a.name.lower() in mentioned_names]
+
+    def pick_default_teammate(self, agents: list[AgentDispatchInfo]) -> str | None:
+        """Who should answer a human message that missed every mention,
+        rule, and LLM-fallback pick. Mention-only agents opted out of
+        unsolicited dispatch. Prefer a teammate named Assistant (the
+        starter generalist); otherwise the first remaining teammate.
+        """
+        eligible = [a for a in agents if not _is_mention_only(a)]
+        if not eligible:
+            return None
+        for agent in eligible:
+            if agent.name.lower() == "assistant":
+                return agent.agent_id
+        return eligible[0].agent_id
 
     def match_deterministic(self, message: str, agents: list[AgentDispatchInfo]) -> list[str]:
         matched: list[str] = []

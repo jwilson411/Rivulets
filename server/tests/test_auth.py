@@ -10,7 +10,7 @@ import jwt as pyjwt
 import pytest
 from fastapi.testclient import TestClient
 
-from rivulets.agentos.service import init_agentos, reset_agentos_for_testing
+from rivulets.agentos.service import get_agentos, init_agentos, reset_agentos_for_testing
 from rivulets.app import create_app
 from rivulets.config import Settings, get_settings
 from rivulets.db.session import get_engine, init_db, make_engine, override_engine
@@ -267,6 +267,37 @@ def test_login_seeds_starter_agents_and_team_on_first_workspace_creation(
 
     teams = client.get("/api/v1/teams", headers=headers).json()
     assert [team["name"] for team in teams] == ["Starter Team"]
+
+
+def test_login_reregisters_agents_after_session_unlocks_credentials(client: TestClient) -> None:
+    """Startup sync_agents() cannot resolve provider keys stored in the
+    encrypted fallback (Docker / no OS keychain) because the credential
+    store is locked until login. After a restart the in-process AgentOS
+    registry is empty; the next login must rebuild it or dispatch will
+    match agents from the DB and then silently fail with 'not registered'.
+    """
+    mnemonic = keys.generate_mnemonic()
+    first = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    headers = {"Authorization": f"Bearer {first.json()['token']}"}
+
+    added = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-test"},
+        headers=headers,
+    )
+    assert added.status_code == 201, added.text
+
+    # Simulate a process restart: AgentOS is in-memory and empty again,
+    # even though the DB still has the starter roster + a usable provider.
+    get_agentos().agents = []
+
+    second = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    assert second.status_code == 200, second.text
+
+    registered_ids = {agent.id for agent in (get_agentos().agents or [])}
+    listed = client.get("/api/v1/agents", headers=headers).json()
+    assert {agent["id"] for agent in listed} <= registered_ids
+    assert len(registered_ids) >= 4
 
 
 def test_second_login_does_not_reseed_starter_content(client: TestClient) -> None:

@@ -184,6 +184,11 @@ async def sync_agents(db: AsyncSession) -> None:
     # assigning our narrower list[AgnoAgent] as an error even though it's a
     # safe subset at runtime.
     agent_os.agents = agno_agents  # pyright: ignore[reportAttributeAccessIssue]
+    logger.info(
+        "Registered %d/%d agents with AgentOS",
+        len(agno_agents),
+        len(rows),
+    )
 
 
 async def _run_structured(
@@ -264,10 +269,21 @@ async def run_agent(
     instead — see that function's docstring for why.
     """
     agent_os = get_agentos()
-    agno_agent = next(
-        (a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent) and a.id == agent_id),
-        None,
-    )
+
+    def _lookup() -> AgnoAgent | None:
+        return next(
+            (a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent) and a.id == agent_id),
+            None,
+        )
+
+    agno_agent = _lookup()
+    if agno_agent is None:
+        # Startup registration often skips every agent: Docker/fallback
+        # provider keys cannot be decrypted until login unlocks the
+        # credential store. A later login (or adding a provider) may
+        # have made them resolvable since the last sync_agents() call.
+        await sync_agents(db)
+        agno_agent = _lookup()
     if agno_agent is None:
         raise ValueError(
             f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"

@@ -160,10 +160,11 @@ def test_hit_rate_llm_fallback_match_counts_as_fallback(
 def test_hit_rate_llm_fallback_no_match_still_counts_as_fallback(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fallback ran (and cost money) even though nobody matched, so no
-    agent was invoked and there's no recursive re-dispatch — exactly one
-    decision. `method` alone reports "none" here, same as "fallback never
-    configured" would, which is exactly why `llm_invoked` exists."""
+    """The fallback ran (and cost money) even though it picked nobody.
+    The default teammate then takes the human message; that invoke is
+    unmocked here so it fails before recursion, leaving exactly one
+    decision. `method` is "default" (not "none") — `llm_invoked` is
+    still what marks the fallback as a cost event."""
     monkeypatch.setattr(
         "rivulets.dispatch.service.build_llm_fallback", _fake_llm_fallback(match_when=None)
     )
@@ -175,7 +176,7 @@ def test_hit_rate_llm_fallback_no_match_still_counts_as_fallback(
     assert body["total_decisions"] == 1
     assert body["fallback_count"] == 1
     assert body["hit_count"] == 0
-    assert body["by_method"] == [{"method": "none", "count": 1}]
+    assert body["by_method"] == [{"method": "default", "count": 1}]
 
 
 async def test_hit_rate_range_excludes_older_decisions(

@@ -224,7 +224,34 @@
 			liveMessage.status = 'streaming';
 		});
 
-		source.addEventListener('agent_message', () => {
+		source.addEventListener('agent_message', (event) => {
+			// Persist the reply into `messages` before dropping the live
+			// bubble — otherwise the streamed text vanishes until the
+			// post-POST refetch lands (show / blink away / show again).
+			const data = JSON.parse((event as MessageEvent).data) as {
+				agent_id?: string;
+				agent_name?: string;
+				message_id?: string;
+				content?: string;
+			};
+			if (data.message_id && !messages.some((m) => m.id === data.message_id)) {
+				const persisted: Message = {
+					id: data.message_id,
+					rivulet_id: rivuletId,
+					sender_type: 'agent',
+					sender_id: data.agent_id ?? liveMessage?.agentId ?? null,
+					sender_name: data.agent_name ?? liveMessage?.agentName ?? 'Agent',
+					content: data.content ?? liveMessage?.content ?? '',
+					content_type: 'text',
+					created_at: new Date().toISOString(),
+					attachments: [],
+					model_used: null,
+					tier: null,
+					executed_node_id: null,
+					served_model: null
+				};
+				messages = [...messages, persisted];
+			}
 			liveMessage = null;
 		});
 
