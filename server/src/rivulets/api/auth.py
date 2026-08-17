@@ -63,6 +63,7 @@ from rivulets.agentos import sync_agents
 from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.starter_content import (
     ensure_assistant_always_rule,
+    repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
 )
@@ -190,6 +191,14 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
         await ensure_assistant_always_rule(db)
     except Exception:
         logger.warning("Failed to ensure Assistant always-rule after login", exc_info=True)
+
+    # #410: drop landmine regex rows (invalid / catch-all) left by earlier
+    # generators; backfill starter specialists with keywords the sheet
+    # can actually show.
+    try:
+        await repair_generated_routing_rules(db)
+    except Exception:
+        logger.warning("Failed to repair generated routing rules after login", exc_info=True)
 
     # Now that the credential store is unlocked, rebuild AgentOS from the
     # DB and rewrite agentos_agent_id from the live registry (#404).

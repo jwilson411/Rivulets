@@ -14,6 +14,7 @@
 	import Icon from '$lib/ui/Icon.svelte';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import StatusPill from '$lib/ui/StatusPill.svelte';
+	import { extraSpeakRules, keywordList } from '$lib/teamRouting';
 	import ModelPicker from './ModelPicker.svelte';
 
 	// Agent sheet (06-screens.md → Agent sheet, mockup 1j). Everyday fields
@@ -71,25 +72,33 @@
 	let peerTag = $state(untrack(() => initialPeerTag));
 	let unattendedApproved = $state(untrack(() => agent?.approved_for_unattended_tools ?? false));
 
-	// "When to speak" — one exclusive rule (copy deck: Always / Only when
-	// mentioned / When the message includes…).
+	// "When to speak" — one exclusive owner choice (copy deck: Always /
+	// Only when mentioned / When the message includes…). Generated regex
+	// used to hide behind rules[0] (#410); keywords from every
+	// keyword/semantic row are merged into the field, leftover regex
+	// listed underneath.
 	function initialRuleType(): RuleType {
 		const rules = untrack(() => initialRules);
 		if (rules.some((rule) => rule.rule_type === 'always')) return 'always';
 		if (rules.some((rule) => rule.rule_type === 'mention_only')) return 'mention_only';
-		return rules[0]?.rule_type ?? 'mention_only';
+		if (
+			rules.some(
+				(rule) =>
+					rule.rule_type === 'keyword' ||
+					rule.rule_type === 'semantic' ||
+					rule.rule_type === 'regex'
+			)
+		) {
+			return 'keyword';
+		}
+		return 'mention_only';
 	}
 	function initialKeywords(): string {
-		const rule = untrack(() => initialRules[0]);
-		if (rule?.rule_type !== 'keyword') return '';
-		try {
-			return (JSON.parse(rule.pattern) as string[]).join(', ');
-		} catch {
-			return rule.pattern;
-		}
+		return keywordList(untrack(() => initialRules)).join(', ');
 	}
 	let ruleType = $state<RuleType>(initialRuleType());
 	let keywords = $state(initialKeywords());
+	const hiddenRegexRules = extraSpeakRules(untrack(() => initialRules));
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -117,7 +126,20 @@
 				.split(',')
 				.map((k) => k.trim())
 				.filter(Boolean);
-			return [{ rule_type: 'keyword', pattern: JSON.stringify(list), priority: 10 }];
+			const extras = hiddenRegexRules.map((rule) => ({
+				rule_type: rule.rule_type,
+				pattern: rule.pattern,
+				priority: rule.priority
+			}));
+			if (list.length === 0 && extras.length === 0) {
+				return [{ rule_type: 'mention_only', pattern: '', priority: 10 }];
+			}
+			const next: { rule_type: RuleType; pattern: string; priority?: number }[] = [];
+			if (list.length > 0) {
+				next.push({ rule_type: 'keyword', pattern: JSON.stringify(list), priority: 10 });
+			}
+			next.push(...extras);
+			return next;
 		}
 		return [{ rule_type: ruleType, pattern: '', priority: 10 }];
 	}
@@ -309,6 +331,23 @@
 					aria-label="Keywords, separated by commas"
 					class={inputClass}
 				/>
+			{/if}
+			{#if hiddenRegexRules.length > 0}
+				<div class="flex flex-col gap-1.5">
+					<span class="text-[13px] font-medium text-muted dark:text-muted-dark">
+						Also matches these generated patterns
+					</span>
+					<ul class="flex flex-col gap-1">
+						{#each hiddenRegexRules as rule (rule.id)}
+							<li
+								class="break-all font-mono text-[13px] text-ink dark:text-ink-dark"
+								data-testid="generated-regex-rule"
+							>
+								{rule.pattern}
+							</li>
+						{/each}
+					</ul>
+				</div>
 			{/if}
 		</div>
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { describeSpeakRule, teamComposerHint, teamSpeakSummary } from './teamRouting';
+import {
+	describeSpeakRule,
+	extraSpeakRules,
+	keywordList,
+	teamComposerHint,
+	teamSpeakSummary
+} from './teamRouting';
 import type { RoutingRule } from '$lib/api/agents';
 
 function rule(rule_type: RoutingRule['rule_type'], pattern = ''): RoutingRule {
@@ -30,6 +36,22 @@ describe('describeSpeakRule', () => {
 		expect(describeSpeakRule([rule('keyword', '["retry", "eval"]')])).toBe(
 			'keywords: retry, eval'
 		);
+	});
+
+	it('merges keyword and semantic rows so later rules are not hidden', () => {
+		expect(
+			keywordList([
+				{ id: 'r1', rule_type: 'regex', pattern: 'https?://\\S+', priority: 8 },
+				{ id: 'r2', rule_type: 'keyword', pattern: '["draft", "rewrite"]', priority: 5 },
+				{ id: 'r3', rule_type: 'semantic', pattern: '["prose"]', priority: 3 }
+			])
+		).toEqual(['draft', 'rewrite', 'prose']);
+		expect(
+			extraSpeakRules([
+				{ id: 'r1', rule_type: 'regex', pattern: 'https?://\\S+', priority: 8 },
+				{ id: 'r2', rule_type: 'keyword', pattern: '["draft"]', priority: 5 }
+			]).map((rule) => rule.pattern)
+		).toEqual(['https?://\\S+']);
 	});
 });
 

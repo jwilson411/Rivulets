@@ -158,6 +158,38 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByRole('button', { name: 'Save' })).toBeInTheDocument();
 	});
 
+	it('surfaces every generated rule, not just the first row', async () => {
+		// #410: a high-priority regex used to hide later keywords.
+		seed();
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([
+			{
+				id: 'rule-regex',
+				rule_type: 'regex',
+				pattern: '(?i)(\\\\d{5}-\\\\d{4}|[a-zA-Z]{2,})',
+				priority: 8
+			},
+			{
+				id: 'rule-kw',
+				rule_type: 'keyword',
+				pattern: JSON.stringify(['draft', 'rewrite', 'prose']),
+				priority: 5
+			}
+		]);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Writer/ }).click();
+
+		await expect.element(page.getByLabelText('Keywords, separated by commas')).toHaveValue(
+			'draft, rewrite, prose'
+		);
+		await expect
+			.element(page.getByText('Also matches these generated patterns'))
+			.toBeInTheDocument();
+		await expect.element(page.getByTestId('generated-regex-rule')).toHaveTextContent(
+			'(?i)(\\\\d{5}-\\\\d{4}|[a-zA-Z]{2,})'
+		);
+	});
+
 	it('saves a keyword "when to speak" rule from the sheet', async () => {
 		seed();
 		vi.mocked(agents.update).mockResolvedValueOnce(assistant);

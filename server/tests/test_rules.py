@@ -4,7 +4,13 @@ nothing creates a MENTION_ONLY or SEMANTIC rule and calls rule_matches on it
 directly (mention-only agents are only ever invoked through the separate
 @mention path, never through rule matching itself)."""
 
-from rivulets.dispatch.rules import Rule, RuleType, is_valid_regex, rule_matches
+from rivulets.dispatch.rules import (
+    Rule,
+    RuleType,
+    is_overly_broad_regex,
+    is_valid_regex,
+    rule_matches,
+)
 
 _BAD_REGEX = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"  # #366: bad char range \w-
 
@@ -27,6 +33,17 @@ def test_invalid_regex_rule_never_raises_and_treated_as_no_match() -> None:
 def test_is_valid_regex() -> None:
     assert is_valid_regex(r"ORD-\d+") is True
     assert is_valid_regex(_BAD_REGEX) is False
+
+
+def test_is_overly_broad_regex() -> None:
+    """#410: Writer's 'word + number' landmine matches garbage chat;
+    a ticket-id or URL pattern must still be allowed."""
+    writer_catchall = r"(?i)(\d{5}-\d{4}|[a-zA-Z]{2,}\s?\d{1,3})"
+    assert is_overly_broad_regex(writer_catchall) is True
+    assert is_overly_broad_regex(r".*") is True
+    assert is_overly_broad_regex(r"ORD-\d+") is False
+    assert is_overly_broad_regex(r"https?://[^\s]+") is False
+    assert is_overly_broad_regex(_BAD_REGEX) is False
 
 
 def test_mention_only_rule_never_matches_via_rule_matching() -> None:

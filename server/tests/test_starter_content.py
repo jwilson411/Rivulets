@@ -8,6 +8,7 @@ from rivulets.agentos.starter_content import (
     _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     ensure_assistant_always_rule,
+    repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
 )
@@ -21,6 +22,7 @@ from rivulets.db.models import (
     TeamAgent,
     Tool,
 )
+from rivulets.dispatch.rule_generation import starter_keyword_rule
 
 _STARTER_AGENT_NAMES = {starter.name for starter in _STARTER_AGENTS}
 
@@ -274,3 +276,121 @@ async def test_ensure_assistant_always_rule_leaves_mention_only_alone(
         ).scalars()
     )
     assert [(rule.rule_type, rule.pattern) for rule in rules] == [("mention_only", "")]
+
+
+async def test_seed_starter_specialists_get_keyword_rules(db_session: AsyncSession) -> None:
+    """#410: Writer/Researcher/Coder ship with real keywords, not a
+    hidden LLM regex the sheet cannot show."""
+    await seed_builtin_tools(db_session)
+    await seed_starter_agents(db_session)
+
+    for name in ("Writer", "Researcher", "Coder"):
+        agent = (await db_session.execute(select(Agent).where(Agent.name == name))).scalar_one()
+        rules = list(
+            (
+                await db_session.execute(
+                    select(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent.id)
+                )
+            ).scalars()
+        )
+        assert [(rule.rule_type, rule.pattern, rule.priority) for rule in rules] == [
+            starter_keyword_rule(name)
+        ]
+
+
+async def test_repair_drops_invalid_and_broad_regex_and_backfills(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    writer = Agent(
+        name="Writer",
+        description="Drafts prose.",
+        instructions="Write well.",
+        model=AUTO_MODEL,
+    )
+    researcher = Agent(
+        name="Researcher",
+        description="Finds things.",
+        instructions="Search.",
+        model=AUTO_MODEL,
+    )
+    db_session.add_all([writer, researcher])
+    await db_session.flush()
+    db_session.add(
+        AgentRoutingRule(
+            agent_id=writer.id,
+            rule_type="regex",
+            pattern=r"(?i)(\d{5}-\d{4}|[a-zA-Z]{2,}\s?\d{1,3})",
+            priority=5,
+        )
+    )
+    db_session.add(
+        AgentRoutingRule(
+            agent_id=researcher.id,
+            rule_type="regex",
+            pattern=r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)",
+            priority=5,
+        )
+    )
+    await db_session.commit()
+
+    await repair_generated_routing_rules(db_session)
+
+    writer_rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == writer.id)
+            )
+        ).scalars()
+    )
+    researcher_rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == researcher.id)
+            )
+        ).scalars()
+    )
+    assert [(rule.rule_type, rule.pattern, rule.priority) for rule in writer_rules] == [
+        starter_keyword_rule("Writer")
+    ]
+    assert [(rule.rule_type, rule.pattern, rule.priority) for rule in researcher_rules] == [
+        starter_keyword_rule("Researcher")
+    ]
+
+
+async def test_repair_leaves_mention_only_and_specific_regex_alone(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    writer = Agent(name="Writer", description="Drafts.", instructions="Write.", model=AUTO_MODEL)
+    tickets = Agent(
+        name="Tickets", description="Tracks tickets.", instructions="Track.", model=AUTO_MODEL
+    )
+    db_session.add_all([writer, tickets])
+    await db_session.flush()
+    db_session.add(
+        AgentRoutingRule(agent_id=writer.id, rule_type="mention_only", pattern="", priority=10)
+    )
+    db_session.add(
+        AgentRoutingRule(agent_id=tickets.id, rule_type="regex", pattern=r"ORD-\d+", priority=8)
+    )
+    await db_session.commit()
+
+    await repair_generated_routing_rules(db_session)
+
+    writer_rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == writer.id)
+            )
+        ).scalars()
+    )
+    ticket_rules = list(
+        (
+            await db_session.execute(
+                select(AgentRoutingRule).where(AgentRoutingRule.agent_id == tickets.id)
+            )
+        ).scalars()
+    )
+    assert [(rule.rule_type, rule.pattern) for rule in writer_rules] == [("mention_only", "")]
+    assert [(rule.rule_type, rule.pattern) for rule in ticket_rules] == [("regex", r"ORD-\d+")]

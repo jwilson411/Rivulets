@@ -6,15 +6,14 @@ Dispatcher model selection follows OQ-2: a workspace-level override,
 falling back to the workspace's default provider (or its first configured
 one), mapped to that provider's designated cheap model. If no provider is
 configured at all — or the LLM call fails for any reason — this returns
-an empty rule list rather than raising (NFR-2.4): the agent still gets
-created, it just responds to @mentions only until rules are set manually
-or generation is retried (e.g. by editing the agent, which regenerates
-per FR-3.4).
+an empty rule list rather than raising (NFR-2.4), except for the named
+starter specialists, which fall back to a few real keywords (#410). The
+agent still gets created either way.
 """
 
 import json
 import logging
-from typing import Literal
+from typing import Literal, cast
 
 from agno.agent import Agent as AgnoAgent
 from agno.models.base import Model
@@ -23,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import resolve_default_provider, resolve_model
 from rivulets.db.models import WorkspaceSetting
-from rivulets.dispatch.rules import is_valid_regex
+from rivulets.dispatch.rules import is_overly_broad_regex, is_valid_regex
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +38,15 @@ _INSTRUCTIONS = """You generate deterministic message-routing rules for a chat-b
 multi-agent system. Given an agent's name, description, and instructions, output 1-5
 rules that would reliably match messages this agent should handle.
 
-Favor keyword rules for concrete domain terms the agent's users would actually type.
-Use semantic rules for paraphrased trigger phrases that don't share exact wording with
-the keywords. Use regex sparingly, only for structured patterns like ticket numbers or
-file extensions. Do not be overly broad — only match messages genuinely relevant to
-this agent's stated purpose, not everything vaguely nearby."""
+Favor keyword rules: 3-8 distinctive words or short phrases a user would actually type
+for this agent's job. Do not use generic role words (specialist, expert, assistant,
+agent, coder) unless they are this agent's real domain.
+
+Use regex only for a specific structured token (ticket id, order number, file
+extension). Never emit a regex that would match ordinary chat, random tokens, or
+"any word plus a number". Prefer a keyword like "https://" over a home-grown URL
+regex. Do not be overly broad — only match messages genuinely relevant to this
+agent's stated purpose."""
 
 RuleType = Literal["keyword", "regex", "semantic"]
 
@@ -69,18 +72,75 @@ class GeneratedRoutingRules(BaseModel):
 
 StoredRule = tuple[str, str, int]  # (rule_type, pattern, priority) — AgentRoutingRule shape
 
+# #410: starter specialists get a few real keywords instead of an LLM
+# catch-all. Mention still works regardless. Assistant is `always` above.
+_STARTER_KEYWORDS: dict[str, list[str]] = {
+    "coder": ["code", "debug", "implement", "refactor", "stack trace"],
+    "researcher": ["research", "look up", "sources", "https://", "http://"],
+    "writer": ["draft", "rewrite", "proofread", "copyedit", "prose"],
+}
+
+_GENERIC_KEYWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "is",
+        "it",
+        "this",
+        "that",
+        "agent",
+        "assistant",
+        "specialist",
+        "expert",
+    }
+)
+
+
+def starter_keyword_rule(name: str) -> StoredRule | None:
+    keywords = _STARTER_KEYWORDS.get(name.lower())
+    if not keywords:
+        return None
+    return "keyword", json.dumps(keywords), 10
+
+
+def _useful_keywords(keywords: list[str]) -> list[str]:
+    useful: list[str] = []
+    seen: set[str] = set()
+    for raw in keywords:
+        text = raw.strip()
+        if len(text) < 2:
+            continue
+        key = text.lower()
+        if key in _GENERIC_KEYWORDS or key in seen:
+            continue
+        seen.add(key)
+        useful.append(text)
+    return useful
+
 
 def _to_stored_rule(generated: GeneratedRule) -> StoredRule | None:
-    """Returns None for a regex rule the model produced that doesn't
-    actually compile (#366) -- same re.compile check service.py's
-    _parse_routing_rule already applies to the update_agent_routing_rules
-    tool path, applied here so a landmine pattern never reaches the DB in
-    the first place and bricks every future dispatch on this agent."""
+    """Returns None for a regex that doesn't compile (#366) or that would
+    match ordinary chat (#410), and for keyword/semantic lists that
+    collapse to nothing useful. Semantic is stored as keyword — matching
+    is the same substring check today, and the agent sheet can show it."""
     if generated.rule_type == "regex":
         if not is_valid_regex(generated.regex):
             return None
+        if is_overly_broad_regex(generated.regex):
+            return None
         return "regex", generated.regex, generated.priority
-    return generated.rule_type, json.dumps(generated.keywords), generated.priority
+    keywords = _useful_keywords(generated.keywords)
+    if not keywords:
+        return None
+    return "keyword", json.dumps(keywords), generated.priority
 
 
 async def pick_dispatcher_model(db: AsyncSession) -> str | None:
@@ -126,9 +186,11 @@ async def generate_routing_rules(
     if name.lower() == "assistant":
         return [_ASSISTANT_ALWAYS]
 
+    curated = starter_keyword_rule(name)
+
     provider_model = await pick_dispatcher_model(db)
     if provider_model is None:
-        return []
+        return [curated] if curated is not None else []
 
     prompt = f"Agent name: {name}\nDescription: {description}\nInstructions: {instructions}"
     try:
@@ -136,15 +198,49 @@ async def generate_routing_rules(
         generated = await _run_generator(model, prompt)
     except Exception:
         logger.warning("Routing rule generation failed for agent %r", name, exc_info=True)
-        return []
+        return [curated] if curated is not None else []
 
     if generated is None:
-        return []
+        return [curated] if curated is not None else []
     stored: list[StoredRule] = []
     for r in generated.rules:
         rule = _to_stored_rule(r)
         if rule is None:
-            logger.warning("Dropping invalid generated regex rule for agent %r: %r", name, r.regex)
+            logger.warning(
+                "Dropping unusable generated %s rule for agent %r: %r",
+                r.rule_type,
+                name,
+                r.regex if r.rule_type == "regex" else r.keywords,
+            )
             continue
         stored.append(rule)
-    return stored
+    if not stored:
+        return [curated] if curated is not None else []
+    return _collapse_keyword_rules(stored)
+
+
+def _collapse_keyword_rules(rules: list[StoredRule]) -> list[StoredRule]:
+    """One keyword row the sheet can show in full, plus any surviving
+    regex. Multiple keyword/semantic rows used to hide behind rule[0]."""
+    merged: list[str] = []
+    others: list[StoredRule] = []
+    keyword_priority: int | None = None
+    for rule_type, pattern, priority in rules:
+        if rule_type != "keyword":
+            others.append((rule_type, pattern, priority))
+            continue
+        keyword_priority = priority if keyword_priority is None else max(keyword_priority, priority)
+        try:
+            parsed = json.loads(pattern)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            for item in cast(list[object], parsed):
+                if isinstance(item, str):
+                    merged.append(item)
+    useful = _useful_keywords(merged)
+    collapsed: list[StoredRule] = []
+    if useful:
+        collapsed.append(("keyword", json.dumps(useful), keyword_priority or 10))
+    collapsed.extend(others)
+    return collapsed
