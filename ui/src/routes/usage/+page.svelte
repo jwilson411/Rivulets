@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { usage, type Usage, type UsageRange } from '$lib/api/usage';
 	import { agentInk, INK_SWATCH } from '$lib/ink';
+	import { formatModelLabel } from '$lib/modelCatalog';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
 
@@ -146,13 +147,13 @@
 
 			<div class="mb-3 text-sm font-semibold text-ink dark:text-ink-dark">By model</div>
 			<div class="flex flex-col gap-2.5">
-				{#each data.by_model as row (row.model + (row.tier ?? ''))}
+				{#each data.by_model as row (row.model)}
 					<div class="flex items-center gap-3">
 						<span
-							class="w-40 flex-none truncate font-mono text-[13px] text-ink dark:text-ink-dark"
+							class="w-40 flex-none truncate text-[15px] text-ink dark:text-ink-dark"
 							title={row.model}
 						>
-							{row.model}
+							{formatModelLabel(row.model)}
 						</span>
 						<div class="h-3 flex-1 overflow-hidden rounded-full bg-line dark:bg-line-dark">
 							<div
