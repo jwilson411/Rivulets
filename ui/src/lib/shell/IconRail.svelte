@@ -10,7 +10,8 @@
 
 	// 72px icon rail (04-information-architecture.md → Chrome): House,
 	// Hash, Inbox (pending badge), Grid ("More" sheet), avatar menu at the
-	// bottom. Desktop only — MobileTabs is the phone equivalent.
+	// bottom. Desktop only — MobileTabs is the phone equivalent, and
+	// MoreSheet carries Account because this rail is `hidden` below md.
 	let {
 		onOpenMore,
 		onOpenAccount
