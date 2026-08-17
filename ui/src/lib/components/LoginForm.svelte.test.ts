@@ -37,6 +37,11 @@ vi.mock('$lib/api/auth.svelte', () => ({
 // each one is a unique, unambiguous locator target in the rendered grid.
 const STUB_PHRASE = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima';
 
+// A real 12-word BIP-39 phrase (same fixture as e2e/smoke.e2e.ts). Used
+// wherever Enter workspace has to enable — #421 gates submit on this check.
+const VALID_PHRASE =
+	'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
 vi.mock('bip39', () => ({
 	generateMnemonic: vi.fn(() => STUB_PHRASE)
 }));
@@ -85,15 +90,21 @@ describe('LoginForm.svelte', () => {
 		await expect.element(page.getByText('Your session ended — unlock again.')).toBeInTheDocument();
 	});
 
-	it('disables the submit button until a mnemonic is entered', async () => {
+	it('disables submit until the phrase is 12 BIP-39 words (#421)', async () => {
 		render(LoginForm);
 		await openPhraseEntry();
 
 		const button = page.getByRole('button', { name: 'Enter workspace' });
+		const input = page.getByLabelText('Workspace recovery phrase');
 		await expect.element(button).toBeDisabled();
 
-		await page.getByLabelText('Workspace recovery phrase').fill('a b c');
+		await input.fill('asdf qwer zxcv random junk words here not valid');
+		await expect.element(button).toBeDisabled();
 
+		await input.fill('one two three four five six seven eight nine ten eleven twelve');
+		await expect.element(button).toBeDisabled();
+
+		await input.fill(VALID_PHRASE);
 		await expect.element(button).toBeEnabled();
 	});
 
@@ -103,10 +114,10 @@ describe('LoginForm.svelte', () => {
 		await openPhraseEntry();
 		const input = page.getByLabelText('Workspace recovery phrase');
 
-		await input.fill('  apple banana cherry  ');
+		await input.fill(`  ${VALID_PHRASE}  `);
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
+		expect(auth.login).toHaveBeenCalledWith(VALID_PHRASE, undefined, undefined);
 		expect(auth.forgetOwnerStay).toHaveBeenCalledOnce();
 		expect(auth.rememberOwnerStay).not.toHaveBeenCalled();
 		await expect.element(input).toHaveValue('');
@@ -126,11 +137,11 @@ describe('LoginForm.svelte', () => {
 			.element(page.getByText('Stores your recovery phrase in this browser', { exact: false }))
 			.toBeInTheDocument();
 
-		await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
+		await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', undefined, undefined);
-		expect(auth.rememberOwnerStay).toHaveBeenCalledWith('apple banana cherry', undefined);
+		expect(auth.login).toHaveBeenCalledWith(VALID_PHRASE, undefined, undefined);
+		expect(auth.rememberOwnerStay).toHaveBeenCalledWith(VALID_PHRASE, undefined);
 		expect(auth.forgetOwnerStay).not.toHaveBeenCalled();
 	});
 
@@ -154,11 +165,11 @@ describe('LoginForm.svelte', () => {
 		const passphraseInput = page.getByLabelText('Passphrase');
 		await expect.element(passphraseInput).toHaveAttribute('type', 'password');
 
-		await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
+		await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
 		await passphraseInput.fill('extra word');
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-		expect(auth.login).toHaveBeenCalledWith('apple banana cherry', 'extra word', undefined);
+		expect(auth.login).toHaveBeenCalledWith(VALID_PHRASE, 'extra word', undefined);
 	});
 
 	it('shows the error message and keeps the input when login fails', async () => {
@@ -167,11 +178,11 @@ describe('LoginForm.svelte', () => {
 		await openPhraseEntry();
 		const input = page.getByLabelText('Workspace recovery phrase');
 
-		await input.fill('wrong words here');
+		await input.fill(VALID_PHRASE);
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
-		await expect.element(input).toHaveValue('wrong words here');
+		await expect.element(input).toHaveValue(VALID_PHRASE);
 	});
 
 	it('shows a generic message when login rejects with something other than an Error', async () => {
@@ -179,7 +190,7 @@ describe('LoginForm.svelte', () => {
 		render(LoginForm);
 		await openPhraseEntry();
 
-		await page.getByLabelText('Workspace recovery phrase').fill('whatever');
+		await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
 		await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 		await expect.element(page.getByText('Login failed')).toBeInTheDocument();
@@ -358,7 +369,7 @@ describe('LoginForm.svelte', () => {
 			render(LoginForm);
 			await openPhraseEntry();
 
-			await page.getByLabelText('Workspace recovery phrase').fill('wrong words here');
+			await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			await expect.element(page.getByText('Incorrect recovery phrase')).toBeInTheDocument();
@@ -370,7 +381,7 @@ describe('LoginForm.svelte', () => {
 			render(LoginForm);
 			await openPhraseEntry();
 
-			await page.getByLabelText('Workspace recovery phrase').fill('apple banana cherry');
+			await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			const tokenInput = page.getByLabelText('Setup token');
@@ -379,11 +390,7 @@ describe('LoginForm.svelte', () => {
 			await tokenInput.fill('correct-token');
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
-			expect(auth.login).toHaveBeenLastCalledWith(
-				'apple banana cherry',
-				undefined,
-				'correct-token'
-			);
+			expect(auth.login).toHaveBeenLastCalledWith(VALID_PHRASE, undefined, 'correct-token');
 		});
 
 		it('reveals a setup-token field on the generated-phrase screen too', async () => {
