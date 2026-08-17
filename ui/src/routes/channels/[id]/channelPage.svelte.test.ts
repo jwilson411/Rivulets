@@ -434,6 +434,56 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect.element(page.getByText('Nobody picked this up.')).toBeInTheDocument();
 	});
 
+	it('shows a +N disc and lists every member in the team menu when the team has more than four (#423)', async () => {
+		const five: Agent[] = ['Assistant', 'Coder', 'Researcher', 'Writer', 'New Test Agent'].map(
+			(name, i) => ({
+				id: `agent-${i + 1}`,
+				name,
+				description: '',
+				instructions: '',
+				model: 'auto',
+				fallback_models: [],
+				approved_for_unattended_tools: false,
+				agentos_agent_id: `agent-${i + 1}`
+			})
+		);
+		seed({
+			channel: { ...generalChannel, team_id: 'team-1' },
+			teams: [supportTeam]
+		});
+		vi.mocked(teams.get).mockResolvedValue({
+			...supportTeam,
+			agent_ids: five.map((a) => a.id)
+		});
+		vi.mocked(agents.list).mockResolvedValue(five);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.toBeInTheDocument();
+
+		await expect
+			.element(page.getByRole('button', { name: 'Mention Assistant' }))
+			.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Mention Writer' })).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Mention New Test Agent' }))
+			.not.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: '+1 more: New Test Agent' }))
+			.toBeInTheDocument();
+
+		await page
+			.getByRole('button', { name: /Support/ })
+			.first()
+			.click();
+		await expect.element(page.getByRole('menuitem', { name: '@Assistant' })).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('menuitem', { name: '@New Test Agent' }))
+			.toBeInTheDocument();
+	});
+
 	it('opens an @mention picker for team agents and inserts from a member disc', async () => {
 		const assistant: Agent = {
 			id: 'agent-1',
