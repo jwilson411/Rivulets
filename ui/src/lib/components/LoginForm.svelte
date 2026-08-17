@@ -13,6 +13,7 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import { ApiError } from '$lib/api/client';
 	import { initials } from '$lib/ink';
+	import { isUnlockPhraseReady } from '$lib/mnemonic';
 	import Icon from '$lib/ui/Icon.svelte';
 
 	// Set by +layout.svelte's auth gate when it swaps back to LoginForm
@@ -102,8 +103,11 @@
 		}
 	}
 
+	const canSubmitPhrase = $derived(!loggingIn && isUnlockPhraseReady(mnemonic));
+
 	async function handleLogin(event: SubmitEvent) {
 		event.preventDefault();
+		if (!isUnlockPhraseReady(mnemonic)) return;
 		if (await performLogin(mnemonic, passphrase)) {
 			mnemonic = '';
 			passphrase = '';
@@ -358,7 +362,7 @@
 			{@render staySignedInField()}
 			<button
 				type="submit"
-				disabled={loggingIn || !mnemonic.trim()}
+				disabled={!canSubmitPhrase}
 				class="flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
 			>
 				{loggingIn ? 'Unlocking…' : 'Enter workspace'}
