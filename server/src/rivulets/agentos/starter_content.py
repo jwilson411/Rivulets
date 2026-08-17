@@ -22,8 +22,9 @@ agentos/models.py's UnknownProviderError, swallowed per-agent by
 sync_agents()), which is expected and fine.
 
 #406: Assistant is seeded with an `always` routing rule so everyday
-channel chat ("How are you all doing today?") is answered. Specialists
-keep narrower generated rules.
+channel chat ("How are you all doing today?") is answered.
+#410: specialists get a few real keywords at seed time (not an LLM
+catch-all or an invalid URL regex) so the sheet can show them.
 
 #344: seed_starter_agents also grants each starter the AgentToolScope(s)
 its assigned tools need (BUILTIN_TOOL_SCOPES, #188) -- without this,
@@ -49,7 +50,7 @@ from rivulets.db.models import (
     TeamAgent,
     Tool,
 )
-from rivulets.sync.publish import publish_current_state
+from rivulets.sync.publish import publish_current_state, publish_tombstone
 
 
 @dataclass(frozen=True)
@@ -120,8 +121,19 @@ _STARTER_TEAM_DESCRIPTION = (
 _ASSISTANT_NAME = "Assistant"
 # #406: everyday chat in a routed channel is supposed to get an answer
 # without an @mention. The generalist is the one teammate that should
-# take those messages; specialists keep narrower generated rules.
+# take those messages; specialists get curated keywords (#410).
 _ASSISTANT_ALWAYS_RULE: tuple[str, str, int] = ("always", "", 0)
+_MATCHING_RULE_TYPES = frozenset({"keyword", "regex", "semantic", "always"})
+
+
+def _starter_routing_rule(name: str) -> tuple[str, str, int] | None:
+    if name == _ASSISTANT_NAME:
+        return _ASSISTANT_ALWAYS_RULE
+    # Lazy: dispatch/__init__.py pulls service.py; don't import that at
+    # module load (same cycle agent_lifecycle.py already dodges).
+    from rivulets.dispatch.rule_generation import starter_keyword_rule
+
+    return starter_keyword_rule(name)
 
 
 async def seed_starter_agents(db: AsyncSession) -> None:
@@ -166,8 +178,9 @@ async def seed_starter_agents(db: AsyncSession) -> None:
         # advertise them working out of the box.
         for scope in required_scopes:
             db.add(AgentToolScope(agent_id=agent.id, scope=scope))
-        if starter.name == _ASSISTANT_NAME:
-            rule_type, pattern, priority = _ASSISTANT_ALWAYS_RULE
+        seeded = _starter_routing_rule(starter.name)
+        if seeded is not None:
+            rule_type, pattern, priority = seeded
             db.add(
                 AgentRoutingRule(
                     agent_id=agent.id,
@@ -179,6 +192,7 @@ async def seed_starter_agents(db: AsyncSession) -> None:
 
     await db.commit()
     await ensure_assistant_always_rule(db)
+    await repair_generated_routing_rules(db)
 
 
 async def ensure_assistant_always_rule(db: AsyncSession) -> None:
@@ -208,6 +222,57 @@ async def ensure_assistant_always_rule(db: AsyncSession) -> None:
     await db.commit()
     await db.refresh(row)
     await publish_current_state(db, "agent_routing_rule", row.id)
+
+
+async def repair_generated_routing_rules(db: AsyncSession) -> None:
+    """#410: drop invalid or catch-all regex rows left by earlier
+    generators. If a starter specialist then has nothing that can match,
+    give it the curated keywords the sheet can show. Leaves mention-only
+    and always (and any remaining useful rules) alone. Idempotent."""
+    from rivulets.dispatch.rule_generation import starter_keyword_rule
+    from rivulets.dispatch.rules import is_overly_broad_regex, is_valid_regex
+
+    agents = list((await db.scalars(select(Agent))).all())
+    tombstone_ids: list[str] = []
+    added_rows: list[AgentRoutingRule] = []
+    for agent in agents:
+        rules = list(
+            (
+                await db.scalars(
+                    select(AgentRoutingRule).where(AgentRoutingRule.agent_id == agent.id)
+                )
+            ).all()
+        )
+        surviving: list[AgentRoutingRule] = []
+        for rule in rules:
+            if rule.rule_type == "regex" and (
+                not is_valid_regex(rule.pattern) or is_overly_broad_regex(rule.pattern)
+            ):
+                tombstone_ids.append(rule.id)
+                await db.delete(rule)
+                continue
+            surviving.append(rule)
+        if any(rule.rule_type == "mention_only" for rule in surviving):
+            continue
+        if any(rule.rule_type in _MATCHING_RULE_TYPES for rule in surviving):
+            continue
+        curated = starter_keyword_rule(agent.name)
+        if curated is None:
+            continue
+        rule_type, pattern, priority = curated
+        row = AgentRoutingRule(
+            agent_id=agent.id, rule_type=rule_type, pattern=pattern, priority=priority
+        )
+        db.add(row)
+        added_rows.append(row)
+    if not tombstone_ids and not added_rows:
+        return
+    await db.commit()
+    for row in added_rows:
+        await db.refresh(row)
+        await publish_current_state(db, "agent_routing_rule", row.id)
+    for old_id in tombstone_ids:
+        await publish_tombstone(db, "agent_routing_rule", old_id)
 
 
 async def seed_starter_teams(db: AsyncSession) -> None:

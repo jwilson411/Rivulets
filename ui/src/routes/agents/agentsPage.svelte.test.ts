@@ -243,6 +243,35 @@ describe('agents/+page.svelte', () => {
 		]);
 	});
 
+	it('surfaces a leftover generated regex with the keyword list (#410)', async () => {
+		seed();
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([
+			{
+				id: 'rule-regex',
+				rule_type: 'regex',
+				pattern: '(?i)(\\d{5}-\\d{4}|[a-zA-Z]{2,})',
+				priority: 8
+			},
+			{
+				id: 'rule-kw',
+				rule_type: 'keyword',
+				pattern: JSON.stringify(['draft', 'rewrite', 'prose']),
+				priority: 5
+			}
+		]);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Writer/ }).click();
+
+		await expect.element(page.getByText('Keep the current rules')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('When the message includes draft, rewrite, prose'))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText('When the message matches (?i)(\\d{5}-\\d{4}|[a-zA-Z]{2,})'))
+			.toBeInTheDocument();
+	});
+
 	it('saves a keyword "when to speak" rule from the sheet', async () => {
 		seed();
 		vi.mocked(agents.update).mockResolvedValueOnce(assistant);

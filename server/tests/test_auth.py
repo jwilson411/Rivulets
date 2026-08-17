@@ -272,6 +272,11 @@ def test_login_seeds_starter_agents_and_team_on_first_workspace_creation(
     rules = client.get(f"/api/v1/agents/{assistant_id}/routing-rules", headers=headers).json()
     assert [rule["rule_type"] for rule in rules] == ["always"]
 
+    writer_id = next(agent["id"] for agent in agents if agent["name"] == "Writer")
+    writer_rules = client.get(f"/api/v1/agents/{writer_id}/routing-rules", headers=headers).json()
+    assert writer_rules[0]["rule_type"] == "keyword"
+    assert "draft" in writer_rules[0]["pattern"]
+
 
 def test_login_reregisters_after_restart_with_locked_fallback(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

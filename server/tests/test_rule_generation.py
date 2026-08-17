@@ -11,6 +11,7 @@ from rivulets.dispatch.rule_generation import (
     _to_stored_rule,  # pyright: ignore[reportPrivateUsage]
     generate_routing_rules,
     pick_dispatcher_model,
+    starter_keyword_rule,
 )
 
 
@@ -41,6 +42,39 @@ def test_to_stored_rule_rejects_invalid_regex() -> None:
     (e.g. a bad character range) -- it must be dropped, not persisted."""
     bad = r"\b(https?://[\w-]+(\.[\w-]+)+(\/[\w- ./?%&=]*)?)"
     stored = _to_stored_rule(GeneratedRule(rule_type="regex", regex=bad, priority=6))
+    assert stored is None
+
+
+def test_to_stored_rule_rejects_overly_broad_regex() -> None:
+    """#410: a compiling catch-all must not be persisted either."""
+    broad = r"(?i)(\d{5}-\d{4}|[a-zA-Z]{2,}\s?\d{1,3})"
+    stored = _to_stored_rule(GeneratedRule(rule_type="regex", regex=broad, priority=6))
+    assert stored is None
+
+
+def test_to_stored_rule_semantic_becomes_visible_keyword() -> None:
+    stored = _to_stored_rule(
+        GeneratedRule(rule_type="semantic", keywords=["look this up"], priority=4)
+    )
+    assert stored == ("keyword", json.dumps(["look this up"]), 4)
+
+
+def test_starter_writer_keywords_do_not_match_garbage() -> None:
+    """#410: the live repro (`xqzplm wibble-frob 9f3k`) must not
+    dispatch the starter Writer."""
+    from rivulets.dispatch.rules import Rule, RuleType, rule_matches
+
+    stored = starter_keyword_rule("Writer")
+    assert stored is not None
+    rule = Rule(RuleType.KEYWORD, json.loads(stored[1]))
+    assert rule_matches(rule, "xqzplm wibble-frob 9f3k") is False
+    assert rule_matches(rule, "please rewrite this draft") is True
+
+
+def test_to_stored_rule_drops_generic_keywords() -> None:
+    stored = _to_stored_rule(
+        GeneratedRule(rule_type="keyword", keywords=["specialist", "expert", ""], priority=5)
+    )
     assert stored is None
 
 
@@ -144,9 +178,7 @@ async def test_generate_routing_rules_converts_generator_output(
     rules = await generate_routing_rules(
         db_session, "DBA", "Handles database questions", "You are a DBA."
     )
-    assert len(rules) == 2
-    assert rules[0] == ("keyword", json.dumps(["database", "SQL"]), 10)
-    assert rules[1][0] == "semantic"
+    assert rules == [("keyword", json.dumps(["database", "SQL", "help with a query"]), 10)]
 
 
 async def test_generate_routing_rules_drops_invalid_regex_rule(
@@ -179,6 +211,48 @@ async def test_generate_routing_rules_drops_invalid_regex_rule(
     )
     assert len(rules) == 1
     assert rules[0][0] == "keyword"
+    assert json.loads(rules[0][1]) == ["docs"]
+
+
+async def test_generate_routing_rules_starter_uses_curated_without_provider(
+    db_session: AsyncSession,
+) -> None:
+    """#410: starter specialists must not sit with zero rules (or wait
+    for a catch-all LLM regex) just because no provider is configured."""
+    writer = await generate_routing_rules(db_session, "Writer", "Drafts prose.", "Write well.")
+    assert writer == [starter_keyword_rule("Writer")]
+    researcher = await generate_routing_rules(
+        db_session, "Researcher", "Finds things.", "Search the web."
+    )
+    assert researcher == [starter_keyword_rule("Researcher")]
+    assert "https://" in json.loads(researcher[0][1])
+
+
+async def test_generate_routing_rules_falls_back_when_only_broad_regex(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_session.add(ProviderConfig(provider="anthropic", label="Anthropic", api_key_ref="ref-1"))
+    await db_session.commit()
+
+    async def fake_resolve_model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def fake_run_generator(*_args: object, **_kwargs: object) -> GeneratedRoutingRules:
+        return GeneratedRoutingRules(
+            rules=[
+                GeneratedRule(
+                    rule_type="regex",
+                    regex=r"(?i)(\d{5}-\d{4}|[a-zA-Z]{2,}\s?\d{1,3})",
+                    priority=5,
+                )
+            ]
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.rule_generation.resolve_model", fake_resolve_model)
+    monkeypatch.setattr("rivulets.dispatch.rule_generation._run_generator", fake_run_generator)
+
+    rules = await generate_routing_rules(db_session, "Writer", "Drafts prose.", "Write well.")
+    assert rules == [starter_keyword_rule("Writer")]
 
 
 def test_agent_creation_stores_generated_rules_end_to_end(

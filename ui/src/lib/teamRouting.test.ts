@@ -49,6 +49,15 @@ describe('describeSpeakRule', () => {
 	it('summarizes keyword lists', () => {
 		expect(describeSpeakRule([rule('keyword', '["retry", "eval"]')])).toBe('keywords: retry, eval');
 	});
+
+	it('merges every keyword row so later lists are not hidden (#410)', () => {
+		expect(
+			describeSpeakRule([
+				{ id: 'r1', rule_type: 'keyword', pattern: '["draft", "rewrite"]', priority: 5 },
+				{ id: 'r2', rule_type: 'keyword', pattern: '["prose"]', priority: 3 }
+			])
+		).toBe('keywords: draft, rewrite, prose');
+	});
 });
 
 describe('speakChoiceFromRules', () => {
@@ -89,6 +98,15 @@ describe('describeSpeakRulesList', () => {
 				{ id: 'r2', rule_type: 'semantic', pattern: '["write prose"]', priority: 5 }
 			])
 		).toEqual(['When the message is about write prose', 'When the message includes help']);
+	});
+
+	it('includes a leftover generated regex so it is not hidden behind rule[0] (#410)', () => {
+		expect(
+			describeSpeakRulesList([
+				{ id: 'r1', rule_type: 'regex', pattern: 'https?://\\S+', priority: 8 },
+				{ id: 'r2', rule_type: 'keyword', pattern: '["draft"]', priority: 5 }
+			])
+		).toEqual(['When the message matches https?://\\S+', 'When the message includes draft']);
 	});
 });
 

@@ -70,15 +70,13 @@ export function describeSpeakRule(rules: RoutingRule[]): string {
 	if (rules.some((rule) => rule.rule_type === 'always')) return 'always';
 	if (rules.length === 0) return 'no rule yet';
 	if (rules.every((rule) => rule.rule_type === 'mention_only')) return 'only when @mentioned';
-	const keyword = rules.find((rule) => rule.rule_type === 'keyword');
-	if (keyword) {
-		const words = parseRulePhrases(keyword.pattern);
-		if (words.length > 0) {
-			const shown = words.slice(0, 3);
-			const extra = words.length > 3 ? '…' : '';
-			return `keywords: ${shown.join(', ')}${extra}`;
-		}
-		return 'keywords';
+	const words = rules
+		.filter((rule) => rule.rule_type === 'keyword')
+		.flatMap((rule) => parseRulePhrases(rule.pattern));
+	if (words.length > 0) {
+		const shown = words.slice(0, 3);
+		const extra = words.length > 3 ? '…' : '';
+		return `keywords: ${shown.join(', ')}${extra}`;
 	}
 	return 'custom rule';
 }

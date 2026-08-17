@@ -47,6 +47,33 @@ def is_valid_regex(pattern: str) -> bool:
     return True
 
 
+# Everyday / garbage messages a specialist must not claim. A generated
+# regex that hits any of these is a catch-all (Writer's "word + number"
+# landmine matched `xqzplm wibble-frob 9f3k` — #410).
+_BROAD_REGEX_PROBES: tuple[str, ...] = (
+    "xqzplm wibble-frob 9f3k",
+    "How are you all doing today?",
+    "ok thanks",
+    "hello",
+    "yes",
+)
+
+
+def is_overly_broad_regex(pattern: str) -> bool:
+    """True when `pattern` compiles but would fire on ordinary chat or
+    nonsense. Invalid patterns are *not* broad — call is_valid_regex
+    first (#366). Used on the generate path so a catch-all never lands
+    in the DB; the HTTP/tool update paths still accept an owner-authored
+    wide regex."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        return False
+    if compiled.search(""):
+        return True
+    return any(compiled.search(probe) is not None for probe in _BROAD_REGEX_PROBES)
+
+
 def rule_matches(rule: Rule, message: str) -> bool:
     """Evaluate a single rule against a message. Pure and side-effect free
     so the dispatcher can run this over N agents' rules in-process, in
