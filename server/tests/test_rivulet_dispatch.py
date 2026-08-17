@@ -19,6 +19,7 @@ from rivulets.dispatch.service import (
     _resolve_remote_peer,  # pyright: ignore[reportPrivateUsage]
     _sanitize_run_error,  # pyright: ignore[reportPrivateUsage]
 )
+from tests.conftest import delete_starter_assistant
 
 
 def _fake_run_agent(content: str) -> Any:
@@ -91,6 +92,7 @@ def _create_agent_with_fallback(
 def _create_channel_with_team(
     client: TestClient, headers: dict[str, str], agent_ids: list[str]
 ) -> str:
+    delete_starter_assistant(client, headers)
     team = client.post("/api/v1/teams", json={"name": "Test Team"}, headers=headers)
     assert team.status_code == 201, team.text
     team_id = team.json()["id"]
@@ -599,6 +601,7 @@ def test_fallback_not_used_for_non_retryable_error(
 def test_channel_with_no_team_gets_no_dispatch(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
+    delete_starter_assistant(client, auth_headers)
     channel = client.post("/api/v1/channels", json={"name": "no-team"}, headers=auth_headers)
     channel_id = channel.json()["id"]
 

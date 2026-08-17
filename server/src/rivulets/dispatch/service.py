@@ -119,7 +119,16 @@ from rivulets.dispatch.guards import (
     record_agent_message,
     reset_guard_state,
 )
+from rivulets.dispatch.history import with_conversation_history
 from rivulets.dispatch.llm_fallback import build_llm_fallback
+from rivulets.dispatch.orchestration import (
+    TEAM_ENGAGED_CONTENT_TYPE,
+    apply_orchestrator_lock,
+    find_orchestrator_id,
+    is_team_engaged,
+    load_orchestrator,
+    merge_orchestrator,
+)
 from rivulets.dispatch.rules import Rule, RuleType, is_valid_regex
 from rivulets.security import keys
 from rivulets.security.credentials import delete_secret
@@ -200,6 +209,31 @@ async def _load_team_dispatch_agents(
             )
         )
     return pairs
+
+
+async def _load_dispatch_roster(
+    db: AsyncSession, channel: Channel
+) -> list[tuple[Agent, AgentDispatchInfo]]:
+    """Team members plus the workspace Assistant, who is always on the
+    roster regardless of team assignment or When to speak."""
+    team_agents = (
+        await _load_team_dispatch_agents(db, channel.team_id) if channel.team_id is not None else []
+    )
+    return merge_orchestrator(team_agents, await load_orchestrator(db))
+
+
+def _find_engage_team_call(run_output: RunOutput) -> str | None:
+    """Look for `engage_team(reason)` in a completed run. Same loose
+    parsing as _find_handoff_call — a missing/non-string reason is
+    treated as no call."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "engage_team":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        reason = args.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
 
 
 def _find_handoff_call(run_output: RunOutput) -> tuple[str, str] | None:
@@ -940,15 +974,14 @@ async def _dispatch_and_respond(
     elif guard_state.paused:
         return []  # FR-7.1/7.2/7.3: silent until a human reactivates
 
-    if channel.team_id is None:
-        return []
-
-    team_agents = await _load_team_dispatch_agents(db, channel.team_id)
+    team_agents = await _load_dispatch_roster(db, channel)
     if not team_agents:
         return []
 
     agent_by_id = {agent.id: agent for agent, _ in team_agents}
     dispatch_infos = [info for _, info in team_agents]
+    orchestrator_id = find_orchestrator_id(team_agents)
+    team_engaged = await is_team_engaged(db, rivulet.id)
 
     # #237: engine.dispatch can itself invoke an LLM (its own hybrid-
     # routing fallback) -- commit whatever's pending (e.g. a freshly
@@ -969,6 +1002,14 @@ async def _dispatch_and_respond(
                 method=DispatchMethod.DEFAULT,
                 llm_invoked=result.llm_invoked,
             )
+    # Locked threads: only Assistant (and explicit @mentions) may speak
+    # until engage_team / handoff / the human unlocks the roster.
+    result = apply_orchestrator_lock(
+        result,
+        team_engaged=team_engaged,
+        from_agent_id=from_agent_id,
+        orchestrator_id=orchestrator_id,
+    )
     # R-4 dispatcher hit-rate tracking (#31): one row per routing decision,
     # recursive re-dispatches (FR-5.6) included — each is its own invocation
     # of the same two-stage pipeline and can independently hit the LLM
@@ -1047,6 +1088,7 @@ async def _dispatch_and_respond(
                 team_agents,
                 from_agent_id=from_agent_id,
                 from_agent_name=from_agent_name,
+                triggering_message_id=triggering_message_id,
                 trace_ctx=agent_trace_ctx,
             )
         )
@@ -1143,9 +1185,7 @@ async def invoke_agent_remotely(request: AgentDispatchRequest) -> None:
         if rivulet.agentos_session_id is None:
             rivulet.agentos_session_id = rivulet.id  # FR-12.2: one AgentOS session per rivulet
 
-        team_agents = (
-            await _load_team_dispatch_agents(db, channel.team_id) if channel.team_id else []
-        )
+        team_agents = await _load_dispatch_roster(db, channel)
         new_messages = await _invoke_agent(
             db,
             rivulet,
@@ -1156,6 +1196,7 @@ async def invoke_agent_remotely(request: AgentDispatchRequest) -> None:
             team_agents,
             from_agent_id=request.from_agent_id,
             from_agent_name=request.from_agent_name,
+            triggering_message_id=request.triggering_message_id,
         )
         await db.commit()
         for message in new_messages:
@@ -1423,6 +1464,7 @@ async def _invoke_agent(
     *,
     from_agent_id: str | None,
     from_agent_name: str | None,
+    triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     """Run one agent, persist its reply (or a failure notice), update
@@ -1432,6 +1474,9 @@ async def _invoke_agent(
     since both need the identical run/error/persist/guard/recurse pipeline.
     """
     new_messages: list[Message] = []
+    prompt = await with_conversation_history(
+        db, rivulet.id, message_content, exclude_message_id=triggering_message_id
+    )
 
     # #237: BEGIN IMMEDIATE takes SQLite's write lock for this section up
     # front (see db/session.py's begin_immediate) so a concurrent
@@ -1541,7 +1586,7 @@ async def _invoke_agent(
         db,
         rivulet.agentos_session_id,
         agent,
-        message_content,
+        prompt,
         on_token,
         on_status,
         model_used=model_used,
@@ -1719,6 +1764,22 @@ async def _invoke_agent(
                 team_agents,
                 target_name,
                 handoff_context,
+                triggering_message_id=triggering_message_id,
+                trace_ctx=child_trace_ctx,
+            )
+        )
+
+    engage_reason = _find_engage_team_call(run_output)
+    if engage_reason is not None:
+        new_messages.extend(
+            await _handle_engage_team(
+                db,
+                rivulet,
+                channel,
+                guard_state,
+                agent,
+                engage_reason,
+                triggering_message_id=triggering_message_id,
                 trace_ctx=child_trace_ctx,
             )
         )
@@ -1736,6 +1797,7 @@ async def _invoke_agent(
         content,
         from_agent_id=agent.id,
         from_agent_name=agent.name,
+        triggering_message_id=message.id,
         trace_ctx=child_trace_ctx,
     )
     new_messages.extend(recursive_messages)
@@ -2034,6 +2096,7 @@ async def _handle_handoff(
     target_agent_name: str,
     context: str,
     *,
+    triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
     """FR-6.1/6.3: post the visible handoff message, then invoke the named
@@ -2080,9 +2143,85 @@ async def _handle_handoff(
         team_agents,
         from_agent_id=from_agent.id,
         from_agent_name=from_agent.name,
+        triggering_message_id=triggering_message_id,
         trace_ctx=trace_ctx,
     )
     messages.extend(target_messages)
+    return messages
+
+
+async def _latest_human_message(db: AsyncSession, rivulet_id: str) -> Message | None:
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.rivulet_id == rivulet_id,
+            Message.sender_type == "human",
+            Message.content_type == "text",
+        )
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def post_team_engaged_message(
+    db: AsyncSession, rivulet: Rivulet, *, actor_name: str, reason: str
+) -> Message | None:
+    """Persist the unlock marker. Returns None if the team is already
+    engaged so a second click / second tool call is a no-op."""
+    if await is_team_engaged(db, rivulet.id):
+        return None
+    message = Message(
+        rivulet_id=rivulet.id,
+        sender_type="system",
+        sender_name="system",
+        content=f"@{actor_name} engaged the team: {reason}",
+        content_type=TEAM_ENGAGED_CONTENT_TYPE,
+    )
+    db.add(message)
+    await db.flush()
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "team_engaged", "actor": actor_name, "reason": reason, "message": message.content},
+    )
+    await db.commit()
+    return message
+
+
+async def _handle_engage_team(
+    db: AsyncSession,
+    rivulet: Rivulet,
+    channel: Channel,
+    guard_state: RivuletGuardState,
+    agent: Agent,
+    reason: str,
+    *,
+    triggering_message_id: str | None = None,
+    trace_ctx: TraceContext | None = None,
+) -> list[Message]:
+    """Unlock specialists and re-dispatch the last human turn so they
+    can actually join, instead of waiting for the next message."""
+    engaged = await post_team_engaged_message(db, rivulet, actor_name=agent.name, reason=reason)
+    if engaged is None:
+        return []
+    messages: list[Message] = [engaged]
+    last_human = await _latest_human_message(db, rivulet.id)
+    if last_human is None or not last_human.content:
+        return messages
+    # Speaker is the orchestrator, so they are excluded from rematch;
+    # the last human text is now evaluated against an unlocked roster.
+    follow_up = await dispatch_and_respond(
+        db,
+        rivulet,
+        channel,
+        last_human.content,
+        from_agent_id=agent.id,
+        from_agent_name=agent.name,
+        triggering_message_id=triggering_message_id or last_human.id,
+        trace_ctx=trace_ctx,
+    )
+    messages.extend(follow_up)
     return messages
 
 

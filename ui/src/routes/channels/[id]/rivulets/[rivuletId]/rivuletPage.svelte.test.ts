@@ -68,6 +68,7 @@ vi.mock('$lib/api/rivulets', () => ({
 		listMessages: vi.fn(),
 		postMessage: vi.fn(),
 		resume: vi.fn(),
+		engageTeam: vi.fn(),
 		close: vi.fn()
 	}
 }));
@@ -280,6 +281,37 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		// rivulet has no explicit title) and as the human message body.
 		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 		await expect.element(page.getByText('On it')).toBeInTheDocument();
+	});
+
+	it('lets the human unlock a locked team', async () => {
+		seed([humanMessage]);
+		vi.mocked(rivulets.engageTeam).mockResolvedValueOnce({
+			...humanMessage,
+			id: 'msg-engage',
+			sender_type: 'system',
+			sender_name: 'system',
+			content: '@Test User engaged the team: Enough context',
+			content_type: 'team_engaged'
+		});
+		vi.mocked(rivulets.listMessages)
+			.mockResolvedValueOnce([humanMessage])
+			.mockResolvedValueOnce([
+				humanMessage,
+				{
+					...humanMessage,
+					id: 'msg-engage',
+					sender_type: 'system',
+					sender_name: 'system',
+					content: '@Test User engaged the team: Enough context',
+					content_type: 'team_engaged'
+				}
+			]);
+
+		render(RivuletPage);
+		await expect.element(page.getByText('Assistant is gathering context.')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Engage team' }).click();
+		expect(rivulets.engageTeam).toHaveBeenCalledWith('riv-1');
+		await expect.element(page.getByText('Team engaged', { exact: false })).toBeInTheDocument();
 	});
 
 	it('sends a reply via rivulets.postMessage and refetches messages', async () => {

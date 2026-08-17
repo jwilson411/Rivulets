@@ -5,9 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.starter_content import (
+    _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
+    _LEGACY_ASSISTANT_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     ensure_assistant_always_rule,
+    ensure_assistant_orchestrator_instructions,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
@@ -208,6 +211,50 @@ async def test_seed_starter_teams_without_agents_creates_empty_team(
     ).scalar_one()
     result = await db_session.execute(select(TeamAgent).where(TeamAgent.team_id == team.id))
     assert result.scalars().all() == []
+
+
+async def test_seed_starter_assistant_is_orchestrator(db_session: AsyncSession) -> None:
+    await seed_builtin_tools(db_session)
+    await seed_starter_agents(db_session)
+    assistant = (
+        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
+    ).scalar_one()
+    assert assistant.instructions == _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
+
+
+async def test_ensure_assistant_orchestrator_upgrades_legacy_prompt(
+    db_session: AsyncSession,
+) -> None:
+    assistant = Agent(
+        name="Assistant",
+        description="A generalist assistant for everyday questions, brainstorming, planning, and "
+        "quick tasks that don't need a specialist.",
+        instructions=_LEGACY_ASSISTANT_INSTRUCTIONS,
+        model=AUTO_MODEL,
+    )
+    db_session.add(assistant)
+    await db_session.commit()
+
+    await ensure_assistant_orchestrator_instructions(db_session)
+    await db_session.refresh(assistant)
+    assert assistant.instructions == _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
+
+
+async def test_ensure_assistant_orchestrator_leaves_custom_prompt(
+    db_session: AsyncSession,
+) -> None:
+    assistant = Agent(
+        name="Assistant",
+        description="Mine.",
+        instructions="Do not change this.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(assistant)
+    await db_session.commit()
+
+    await ensure_assistant_orchestrator_instructions(db_session)
+    await db_session.refresh(assistant)
+    assert assistant.instructions == "Do not change this."
 
 
 async def test_seed_starter_assistant_gets_always_rule(db_session: AsyncSession) -> None:

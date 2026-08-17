@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.api.rivulets import _attach_files  # pyright: ignore[reportPrivateUsage]
 from rivulets.db.models import Channel, File, Message, Rivulet
+from tests.conftest import delete_starter_assistant
 
 
 def _create_channel(client: TestClient, headers: dict[str, str]) -> str:
+    delete_starter_assistant(client, headers)
     channel = client.post("/api/v1/channels", json={"name": "attachments-test"}, headers=headers)
     assert channel.status_code == 201, channel.text
     return channel.json()["id"]

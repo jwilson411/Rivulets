@@ -53,6 +53,9 @@ def _create_agent_with_keyword_rule(client: TestClient, headers: dict[str, str],
 def _create_channel_with_team(
     client: TestClient, headers: dict[str, str], agent_ids: list[str]
 ) -> str:
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, headers)
     team = client.post("/api/v1/teams", json={"name": "Hit Rate Test Team"}, headers=headers)
     assert team.status_code == 201, team.text
     team_id = team.json()["id"]

@@ -63,18 +63,45 @@ class _StarterAgent:
     tool_names: tuple[str, ...] = ()
 
 
+_ASSISTANT_NAME = "Assistant"
+# Kept so ensure_assistant_orchestrator_instructions can upgrade workspaces
+# still running the original generalist prompt without overwriting a
+# human-edited one.
+_LEGACY_ASSISTANT_INSTRUCTIONS = (
+    "You are a helpful, general-purpose assistant. Answer clearly and directly, ask "
+    "a clarifying question when the request is ambiguous, and hand off to a "
+    "specialist teammate (Coder, Researcher, Writer) when their focus fits better."
+)
+_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
+    "You are the orchestrator for this channel. You are always present, even when "
+    "the human did not add you to the team. The rest of the team stays quiet until "
+    "you engage them or the human @mentions someone.\n"
+    "\n"
+    "Your job:\n"
+    "- Answer everyday questions yourself when you can.\n"
+    "- Ask one clarifying question when the request is ambiguous. Do not engage "
+    "the team while you are still waiting on that answer.\n"
+    "- When the request is clear and a specialist (Coder, Researcher, Writer, or "
+    "another teammate) should take it, call engage_team with a short reason, or "
+    "handoff to that teammate by name with the context they need.\n"
+    "- Never pretend you lack the conversation so far — you are given the channel "
+    "history with every turn."
+)
+_ASSISTANT_ORCHESTRATOR_DESCRIPTION = (
+    "The channel orchestrator — always present, gathers context from the human, "
+    "and decides when the rest of the team should join."
+)
+_LEGACY_ASSISTANT_DESCRIPTION = (
+    "A generalist assistant for everyday questions, brainstorming, planning, and "
+    "quick tasks that don't need a specialist."
+)
+
+
 _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
     _StarterAgent(
         name="Assistant",
-        description=(
-            "A generalist assistant for everyday questions, brainstorming, planning, and "
-            "quick tasks that don't need a specialist."
-        ),
-        instructions=(
-            "You are a helpful, general-purpose assistant. Answer clearly and directly, ask "
-            "a clarifying question when the request is ambiguous, and hand off to a "
-            "specialist teammate (Coder, Researcher, Writer) when their focus fits better."
-        ),
+        description=_ASSISTANT_ORCHESTRATOR_DESCRIPTION,
+        instructions=_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,
         # #422: a small safe chat set so the Tools picker isn't an empty
         # wall of unchecked names. None of these are in
         # SENSITIVE_BUILTIN_TOOL_NAMES / BUILTIN_TOOL_SCOPES.
@@ -124,7 +151,6 @@ _STARTER_TEAM_NAME = "Starter Team"
 _STARTER_TEAM_DESCRIPTION = (
     "The default agent roster seeded on workspace creation — edit or replace freely."
 )
-_ASSISTANT_NAME = "Assistant"
 # #406: everyday chat in a routed channel is supposed to get an answer
 # without an @mention. The generalist is the one teammate that should
 # take those messages; specialists get curated keywords (#410).
@@ -198,6 +224,7 @@ async def seed_starter_agents(db: AsyncSession) -> None:
 
     await db.commit()
     await ensure_assistant_always_rule(db)
+    await ensure_assistant_orchestrator_instructions(db)
     await repair_generated_routing_rules(db)
 
 
@@ -228,6 +255,29 @@ async def ensure_assistant_always_rule(db: AsyncSession) -> None:
     await db.commit()
     await db.refresh(row)
     await publish_current_state(db, "agent_routing_rule", row.id)
+
+
+async def ensure_assistant_orchestrator_instructions(db: AsyncSession) -> None:
+    """Upgrade the seeded Assistant prompt to the orchestrator wording
+    when the owner has not customized it. Idempotent. Does not touch a
+    rewritten description or instructions."""
+    assistant = await db.scalar(select(Agent).where(Agent.name == _ASSISTANT_NAME))
+    if assistant is None:
+        return
+    changed = False
+    if assistant.instructions == _LEGACY_ASSISTANT_INSTRUCTIONS:
+        assistant.instructions = _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
+        assistant.vector_clock += 1
+        changed = True
+    if assistant.description == _LEGACY_ASSISTANT_DESCRIPTION:
+        assistant.description = _ASSISTANT_ORCHESTRATOR_DESCRIPTION
+        if not changed:
+            assistant.vector_clock += 1
+        changed = True
+    if not changed:
+        return
+    await db.commit()
+    await publish_current_state(db, "agent", assistant.id)
 
 
 async def repair_generated_routing_rules(db: AsyncSession) -> None:

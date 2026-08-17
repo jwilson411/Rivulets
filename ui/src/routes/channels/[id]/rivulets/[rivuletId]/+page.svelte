@@ -14,7 +14,7 @@
 	import { agentInkMap, INK_AVATAR, INK_BUBBLE, HUMAN_AVATAR, type AgentInk } from '$lib/ink';
 	import { formatBytes, formatClock } from '$lib/format';
 	import { mentionNamesOf, type MentionCandidate } from '$lib/mentions';
-	import { teamComposerHint } from '$lib/teamRouting';
+	import { isTeamEngaged, lockedTeamComposerHint, teamComposerHint } from '$lib/teamRouting';
 	import { renderMarkdown } from '$lib/markdown';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
@@ -39,6 +39,8 @@
 	let sendError = $state<string | null>(null);
 	let resuming = $state(false);
 	let resumeError = $state<string | null>(null);
+	let engaging = $state(false);
+	let engageError = $state<string | null>(null);
 	let confirmingArchive = $state(false);
 	let archiveBusy = $state(false);
 	let archiveError = $state<string | null>(null);
@@ -160,20 +162,30 @@
 		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
 	);
 	let mentionNames = $derived(mentionNamesOf(mentionCandidates));
+	let teamEngaged = $derived(isTeamEngaged(messages));
 	let helper = $derived(
-		routedTeam
-			? `${teamComposerHint(routedTeam.name)} · type @ to mention · type / to run a workflow`
-			: "No team — agents won't answer"
+		!teamEngaged
+			? `${lockedTeamComposerHint()} · type @ to mention someone anyway`
+			: routedTeam
+				? `${teamComposerHint(routedTeam.name)} · type @ to mention · type / to run a workflow`
+				: 'Assistant is listening'
 	);
 
 	async function loadTeamMembers(teamId: string | null) {
 		teamMembers = [];
-		if (!teamId) return;
 		try {
-			const [detail, agentList] = await Promise.all([teams.get(teamId), agents.list()]);
-			teamMembers = (detail as TeamDetail).agent_ids
-				.map((id) => agentList.find((a) => a.id === id))
-				.filter((a): a is Agent => a !== undefined);
+			const agentList = await agents.list();
+			const byId = new Map(agentList.map((agent) => [agent.id, agent]));
+			if (teamId) {
+				const detail = (await teams.get(teamId)) as TeamDetail;
+				teamMembers = detail.agent_ids
+					.map((id) => byId.get(id))
+					.filter((a): a is Agent => a !== undefined);
+			}
+			const assistant = agentList.find((agent) => agent.name.toLowerCase() === 'assistant');
+			if (assistant && !teamMembers.some((member) => member.id === assistant.id)) {
+				teamMembers = [assistant, ...teamMembers];
+			}
 		} catch {
 			// Picker just stays empty — typing the exact name still works.
 		}
@@ -442,6 +454,21 @@
 		}
 	}
 
+	async function handleEngageTeam() {
+		const rivuletId = page.params.rivuletId!;
+		engaging = true;
+		engageError = null;
+		try {
+			await rivulets.engageTeam(rivuletId);
+			messages = await rivulets.listMessages(rivuletId);
+			if (!liveMessage) liveMessage = routingLive();
+		} catch {
+			engageError = "Couldn't engage the team. Try again.";
+		} finally {
+			engaging = false;
+		}
+	}
+
 	async function handleResume() {
 		const rivuletId = page.params.rivuletId!;
 		const wasPaused = rivulet?.status === 'paused';
@@ -569,6 +596,25 @@
 				<p class="mt-2 text-sm text-danger">{resumeError}</p>
 			{/if}
 		</div>
+	{:else if !teamEngaged && rivulet}
+		<div class="px-4 pt-5 md:px-10">
+			<div
+				class="flex flex-wrap items-center gap-3.5 rounded-xl border border-line bg-surface px-5 py-4 dark:border-line-dark dark:bg-surface-dark"
+			>
+				<span class="text-[15px] font-semibold text-ink dark:text-ink-dark">
+					Assistant is gathering context.
+				</span>
+				<span class="text-sm text-muted dark:text-muted-dark">
+					Other agents stay quiet until the team is engaged. @mention someone to call them in now.
+				</span>
+				<Button variant="secondary" class="ml-auto" onclick={handleEngageTeam} disabled={engaging}>
+					{engaging ? 'Engaging…' : 'Engage team'}
+				</Button>
+			</div>
+			{#if engageError}
+				<p class="mt-2 text-sm text-danger">{engageError}</p>
+			{/if}
+		</div>
 	{/if}
 
 	<div bind:this={scroller} class="flex-1 overflow-y-auto px-4 py-7 md:px-10">
@@ -590,6 +636,14 @@
 							<span class="flex-1 border-t-2 border-dashed border-agent-b opacity-50"></span>
 							<span class="text-[13px] whitespace-nowrap text-muted dark:text-muted-dark">
 								<strong class="text-agent-b">Handed off</strong> · {message.content}
+							</span>
+							<span class="flex-1 border-t-2 border-dashed border-agent-b opacity-50"></span>
+						</div>
+					{:else if message.content_type === 'team_engaged'}
+						<div class="flex items-center gap-3.5 px-4 md:px-11">
+							<span class="flex-1 border-t-2 border-dashed border-agent-b opacity-50"></span>
+							<span class="text-[13px] whitespace-nowrap text-muted dark:text-muted-dark">
+								<strong class="text-agent-b">Team engaged</strong> · {message.content}
 							</span>
 							<span class="flex-1 border-t-2 border-dashed border-agent-b opacity-50"></span>
 						</div>

@@ -63,6 +63,7 @@ from rivulets.agentos import sync_agents
 from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.starter_content import (
     ensure_assistant_always_rule,
+    ensure_assistant_orchestrator_instructions,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
@@ -189,8 +190,11 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     # mention-only.
     try:
         await ensure_assistant_always_rule(db)
+        await ensure_assistant_orchestrator_instructions(db)
     except Exception:
-        logger.warning("Failed to ensure Assistant always-rule after login", exc_info=True)
+        logger.warning(
+            "Failed to ensure Assistant orchestrator defaults after login", exc_info=True
+        )
 
     # #410: drop landmine regex rows (invalid / catch-all) left by earlier
     # generators; backfill starter specialists with keywords the sheet

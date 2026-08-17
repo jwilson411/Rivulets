@@ -14,6 +14,16 @@ export function teamComposerHint(teamName: string): string {
 	return `${teamName} answers when a rule or @mention matches`;
 }
 
+export function lockedTeamComposerHint(): string {
+	return 'Assistant is gathering context — the rest of the team stays quiet until engaged';
+}
+
+export function isTeamEngaged(messages: { content_type: string }[]): boolean {
+	return messages.some(
+		(message) => message.content_type === 'team_engaged' || message.content_type === 'handoff'
+	);
+}
+
 // #411: a new room should land on Starter Team when it exists, otherwise
 // the first team in the list — never "No team" by accident.
 export function defaultChannelTeamId(teamList: { id: string; name: string }[]): string | null {

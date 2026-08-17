@@ -215,7 +215,7 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 
 		await expect
-			.element(page.getByText("No team — agents won't answer").first())
+			.element(page.getByText(/Assistant is gathering context/).first())
 			.toBeInTheDocument();
 	});
 
@@ -236,9 +236,7 @@ describe('channels/[id]/+page.svelte', () => {
 		await page.getByRole('menuitem', { name: 'Support' }).click();
 
 		expect(channels.update).toHaveBeenCalledWith('chan-1', { team_id: 'team-1' });
-		await expect
-			.element(page.getByText('Support answers when a rule or @mention matches'))
-			.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: /Support/ }).first()).toBeInTheDocument();
 	});
 
 	it('shows a plain-language error when changing the team fails', async () => {
@@ -460,7 +458,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.element(page.getByText(/Assistant is gathering context/).first())
 			.toBeInTheDocument();
 
 		await expect
@@ -505,7 +503,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.element(page.getByText(/Assistant is gathering context/).first())
 			.toBeInTheDocument();
 
 		const input = page.getByPlaceholder('Start a conversation…');
