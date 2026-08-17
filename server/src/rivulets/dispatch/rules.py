@@ -5,7 +5,9 @@
 - semantic: trigger if the message contains any of `pattern` trigger phrases
   (a cheap substring heuristic today; upgradeable to embedding similarity
   without changing the Rule shape)
-- always: the agent responds to every message (e.g. an orchestrator)
+- always: the agent responds to every *human* message (e.g. a generalist
+  or orchestrator). Recursive re-dispatch of another agent's reply does
+  not rematch `always` — that would bounce forever.
 - mention_only: the agent only responds to an explicit @mention, never via
   dispatch matching
 """

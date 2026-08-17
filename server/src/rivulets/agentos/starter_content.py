@@ -22,7 +22,9 @@ agentos/models.py's UnknownProviderError, swallowed per-agent by
 sync_agents()), which is expected and fine.
 
 #406: Assistant is seeded with an `always` routing rule so everyday
-channel chat ("How are you all doing today?") is answered.
+channel chat ("How are you all doing today?") is answered. Dispatch
+treats `always` as a human-turn rule — the speaker is not re-matched
+on their own reply, so this does not become a self-loop.
 #410: specialists get a few real keywords at seed time (not an LLM
 catch-all or an invalid URL regex) so the sheet can show them.
 
