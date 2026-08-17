@@ -42,7 +42,12 @@ vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn(), update: vi.fn() }
 }));
 vi.mock('$lib/api/rivulets', () => ({
-	rivulets: { listForChannel: vi.fn(), listMessages: vi.fn(), create: vi.fn() }
+	rivulets: {
+		listForChannel: vi.fn(),
+		listMessages: vi.fn(),
+		create: vi.fn(),
+		postMessage: vi.fn()
+	}
 }));
 vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn(), create: vi.fn() } }));
@@ -216,5 +221,36 @@ describe('routes/+page.svelte (Home)', () => {
 
 		expect(rivulets.create).toHaveBeenCalledWith('chan-1', 'Hello team', []);
 		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-2');
+	});
+
+	it('omits archived conversations from Recent conversations', async () => {
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([
+			{ ...rivulet, id: 'riv-closed', status: 'closed', title: 'Old archived thread' }
+		]);
+		vi.mocked(rivulets.listMessages).mockResolvedValue([
+			{ ...messages[0], rivulet_id: 'riv-closed', content: 'Old archived thread' }
+		]);
+
+		render(HomePage);
+
+		await expect.element(page.getByText('No conversations yet.')).toBeInTheDocument();
+		await expect.element(page.getByText('Old archived thread')).not.toBeInTheDocument();
+	});
+
+	it('continues the last conversation in the picked channel', async () => {
+		seedComplete();
+		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(messages[0]);
+
+		render(HomePage);
+		await expect.element(page.getByText('Recent conversations')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Continue last' }).click();
+		await page.getByPlaceholder('Reply to the last conversation…').fill('Following up');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-1', 'Following up', []);
+		expect(rivulets.create).not.toHaveBeenCalled();
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-1');
 	});
 });

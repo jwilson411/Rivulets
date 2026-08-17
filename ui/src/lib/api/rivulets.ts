@@ -64,5 +64,7 @@ export const rivulets = {
 			{ content, files: fileIds },
 			auth.token ?? undefined
 		),
-	resume: (id: string) => api.post<Rivulet>(`/rivulets/${id}/resume`, {}, auth.token ?? undefined)
+	resume: (id: string) => api.post<Rivulet>(`/rivulets/${id}/resume`, {}, auth.token ?? undefined),
+	// #412: DELETE is a soft archive (status=closed), not a destroy.
+	close: (id: string) => api.delete<void>(`/rivulets/${id}`, auth.token ?? undefined)
 };

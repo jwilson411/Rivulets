@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { channels, type Channel } from '$lib/api/channels';
@@ -19,6 +20,7 @@
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
 	import StreamBar from '$lib/ui/StreamBar.svelte';
 
 	// Rivulet page (06-screens.md → Rivulet, mockups 1g/2o): the full
@@ -37,6 +39,9 @@
 	let sendError = $state<string | null>(null);
 	let resuming = $state(false);
 	let resumeError = $state<string | null>(null);
+	let confirmingArchive = $state(false);
+	let archiveBusy = $state(false);
+	let archiveError = $state<string | null>(null);
 	let downloadError = $state<string | null>(null);
 	let scroller = $state<HTMLDivElement | null>(null);
 	// Issue #10: this node's own node_id, fetched once, so a remotely
@@ -352,9 +357,27 @@
 			rivulet = await rivulets.resume(rivuletId);
 			messages = await rivulets.listMessages(rivuletId);
 		} catch {
-			resumeError = "Couldn't resume this conversation. Try again.";
+			resumeError =
+				rivulet?.status === 'closed'
+					? "Couldn't unarchive this conversation. Try again."
+					: "Couldn't resume this conversation. Try again.";
 		} finally {
 			resuming = false;
+		}
+	}
+
+	async function handleArchive() {
+		const rivuletId = page.params.rivuletId!;
+		archiveBusy = true;
+		archiveError = null;
+		try {
+			await rivulets.close(rivuletId);
+			confirmingArchive = false;
+			goto(resolve('/channels/[id]', { id: page.params.id! }));
+		} catch {
+			archiveError = "Couldn't archive this conversation. Try again.";
+		} finally {
+			archiveBusy = false;
 		}
 	}
 </script>
@@ -368,10 +391,17 @@
 			<Icon name="back" class="h-4 w-4" />
 			{channel ? `#${channel.name}` : 'Back'}
 		</a>
-		<div
-			class="max-w-[68ch] font-display text-xl leading-snug font-semibold text-ink dark:text-ink-dark"
-		>
-			{title}
+		<div class="flex items-start justify-between gap-4">
+			<div
+				class="max-w-[68ch] font-display text-xl leading-snug font-semibold text-ink dark:text-ink-dark"
+			>
+				{title}
+			</div>
+			{#if rivulet && rivulet.status !== 'closed'}
+				<Button variant="secondary" size="md" onclick={() => (confirmingArchive = true)}>
+					Archive
+				</Button>
+			{/if}
 		</div>
 		{#if latestRun?.status === 'running' || latestRun?.status === 'error' || latestRun?.status === 'cancelled'}
 			<p class="mt-2 text-sm {latestRun.status === 'error' ? 'text-danger' : 'text-warn'}">
@@ -408,7 +438,23 @@
 		{/if}
 	</header>
 
-	{#if rivulet?.status === 'paused'}
+	{#if rivulet?.status === 'closed'}
+		<div class="px-4 pt-5 md:px-10">
+			<div
+				class="flex flex-wrap items-center gap-3.5 rounded-xl border border-line bg-surface px-5 py-4 dark:border-line-dark dark:bg-surface-dark"
+			>
+				<span class="text-[15px] font-semibold text-ink dark:text-ink-dark">
+					This conversation is archived.
+				</span>
+				<Button variant="secondary" class="ml-auto" onclick={handleResume} disabled={resuming}>
+					{resuming ? 'Unarchiving…' : 'Unarchive'}
+				</Button>
+			</div>
+			{#if resumeError}
+				<p class="mt-2 text-sm text-danger">{resumeError}</p>
+			{/if}
+		</div>
+	{:else if rivulet?.status === 'paused'}
 		<div class="px-4 pt-5 md:px-10">
 			<div
 				class="flex flex-wrap items-center gap-3.5 rounded-xl border border-warn-line bg-warn-soft px-5 py-4 dark:border-warn-line-dark dark:bg-warn-soft-dark"
@@ -587,18 +633,37 @@
 		{/if}
 	</div>
 
-	<div class="px-4 pb-24 md:px-10 md:pb-7">
-		<StreamBar
-			placeholder="Reply to this conversation…"
-			{helper}
-			busy={sending}
-			error={sendError}
-			slashWorkflows={workflowList}
-			{mentionCandidates}
-			onSend={handleReply}
-		/>
-	</div>
+	{#if rivulet?.status !== 'closed'}
+		<div class="px-4 pb-24 md:px-10 md:pb-7">
+			<StreamBar
+				placeholder="Reply to this conversation…"
+				{helper}
+				busy={sending}
+				error={sendError}
+				slashWorkflows={workflowList}
+				{mentionCandidates}
+				onSend={handleReply}
+			/>
+		</div>
+	{/if}
 </div>
+
+{#if confirmingArchive}
+	<Sheet title="Archive this conversation?" onClose={() => (confirmingArchive = false)} width={480}>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			It leaves the channel list. You can find it under Archived and restore it.
+		</p>
+		{#if archiveError}
+			<p class="text-sm text-danger">{archiveError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingArchive = false)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleArchive} disabled={archiveBusy}>
+				{archiveBusy ? 'Archiving…' : 'Archive'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
 
 <style>
 	/* Markdown inside chat messages: readable, not a blog. */

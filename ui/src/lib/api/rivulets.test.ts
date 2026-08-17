@@ -95,4 +95,14 @@ describe('rivulets', () => {
 		expect(init.method).toBe('POST');
 		expect(init.body).toBe(JSON.stringify({}));
 	});
+
+	it('close() DELETEs /rivulets/:id', async () => {
+		const fetchMock = mockFetch(null, 204);
+
+		await rivulets.close('r1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/rivulets/r1');
+		expect(init.method).toBe('DELETE');
+	});
 });
