@@ -14,6 +14,7 @@ import { channels, type Channel } from '$lib/api/channels';
 import { files as filesApi } from '$lib/api/files';
 import { teams } from '$lib/api/teams';
 import { workflows } from '$lib/api/workflows';
+import { runs } from '$lib/api/runs';
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -61,6 +62,10 @@ vi.mock('$lib/api/teams', () => ({
 
 vi.mock('$lib/api/workflows', () => ({
 	workflows: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/runs', () => ({
+	runs: { list: vi.fn() }
 }));
 
 vi.mock('$lib/api/sync', () => ({
@@ -233,6 +238,7 @@ function seed(messages: Message[], rivulet: Rivulet = activeRivulet) {
 	vi.mocked(rivulets.listMessages).mockResolvedValue(messages);
 	vi.mocked(teams.list).mockResolvedValue([]);
 	vi.mocked(workflows.list).mockResolvedValue([]);
+	vi.mocked(runs.list).mockResolvedValue([]);
 }
 
 afterEach(() => {
@@ -319,6 +325,31 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		// clearing liveMessage without inserting the row is what made
 		// replies blink away until the post-POST refetch.
 		await expect.element(page.getByText('Looking...')).toBeInTheDocument();
+	});
+
+	it('says so in the header when the latest run is still running with no steps', async () => {
+		seed([humanMessage, agentMessage]);
+		vi.mocked(runs.list).mockResolvedValue([
+			{
+				id: 'trace-1',
+				trigger_type: 'message',
+				label: 'Kickoff message',
+				rivulet_id: 'riv-1',
+				channel_id: 'chan-1',
+				status: 'running',
+				span_count: 0,
+				total_cost_usd: null,
+				total_tokens: 0,
+				started_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+				completed_at: null
+			}
+		]);
+
+		render(RivuletPage);
+
+		await expect
+			.element(page.getByText('Last run is still marked running with no steps.'))
+			.toBeInTheDocument();
 	});
 
 	it('shows a quiet error with a retry when the conversation fails to load', async () => {

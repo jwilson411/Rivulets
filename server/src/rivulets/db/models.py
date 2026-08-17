@@ -1323,9 +1323,14 @@ class RunTrace(Base):
     `resume_workflow` docstring): tracing intentionally doesn't span a
     pause/resume boundary, so a resumed run's remaining node executions
     aren't added as spans, and this trace is left open rather than closed
-    prematurely. Retention (tracing.py's prune loop) sweeps these up by
-    `started_at` age regardless of status, so a stuck-open trace doesn't
-    accumulate forever."""
+    prematurely. A third case -- leftover from a 500 / container restart
+    that never reached finish_trace (#414) -- is not left running:
+    tracing.py's reap_stale_traces fails zero-span leftovers after a
+    short timeout and, on process start, every other running trace that
+    isn't that pause/resume gap. POST /runs/{id}/cancel is the same close
+    for a human. Retention (tracing.py's prune loop) still sweeps by
+    `started_at` age regardless of status, so even a paused-open trace
+    doesn't accumulate forever."""
 
     __tablename__ = "run_trace"
     __table_args__ = (Index("idx_run_trace_started", "started_at"),)
@@ -1339,7 +1344,9 @@ class RunTrace(Base):
     channel_id: Mapped[str | None] = mapped_column(
         ForeignKey("channel.id", ondelete="SET NULL"), default=None
     )
-    status: Mapped[str] = mapped_column(default="running")  # 'running' | 'completed' | 'error'
+    status: Mapped[str] = mapped_column(
+        default="running"
+    )  # 'running' | 'completed' | 'error' | 'cancelled'
     span_count: Mapped[int] = mapped_column(default=0)
     total_cost_usd: Mapped[float | None] = mapped_column(default=None)
     total_tokens: Mapped[int] = mapped_column(default=0)

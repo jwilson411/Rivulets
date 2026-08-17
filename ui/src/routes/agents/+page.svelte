@@ -131,12 +131,13 @@
 	<label
 		class="mb-5 flex h-12 items-center gap-2.5 rounded-lg border border-line bg-surface px-4 focus-within:border-accent dark:border-line-dark dark:bg-surface-dark dark:focus-within:border-accent-dark"
 	>
+		<span class="sr-only">Search agents</span>
 		<Icon name="search" class="h-[18px] w-[18px] flex-none text-muted dark:text-muted-dark" />
 		<input
 			type="search"
 			bind:value={search}
 			placeholder="Search agents"
-			class="min-w-0 flex-1 bg-transparent text-base text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
+			class="min-w-0 flex-1 appearance-none bg-transparent text-base text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
 		/>
 	</label>
 

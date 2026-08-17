@@ -1,5 +1,5 @@
-"""Unified run tracing (#96): read-only views over the RunTrace/RunSpan
-rows tracing.py records alongside AgentRun/DispatchDecision/WorkflowRun/
+"""Unified run tracing (#96): views over the RunTrace/RunSpan rows
+tracing.py records alongside AgentRun/DispatchDecision/WorkflowRun/
 WorkflowNodeRun -- a workspace-wide "what's actually happening/happened"
 list (`GET /runs`, mirroring api/workflows.py's `GET /workflows/runs/
 failed` cross-entity shape) and a single trace's full span tree
@@ -7,9 +7,11 @@ failed` cross-entity shape) and a single trace's full span tree
 node-runs`'s parent/child listing).
 
 Local telemetry, same as the tables it links (RunTrace's own docstring) --
-nothing here is created or mutated through this router; it's populated
-entirely by tracing.py's start_trace/start_span/finish_span/finish_trace
-calls threaded through dispatch/service.py and workflows/engine.py.
+traces are created by tracing.py's start_trace/start_span/finish_span/
+finish_trace calls threaded through dispatch/service.py and workflows/
+engine.py. #414 adds the one mutation: `POST /runs/{trace_id}/cancel`
+(and a lazy reap on the list endpoint) so a leftover 'running' row from
+a 500 / restart isn't stuck on the Runs page until 30-day retention.
 
 #100: an 'agent_run' span's `tool_calls` is populated from ToolCallLog
 (agentos/tool_audit.py), joined on here rather than living in RunSpan
@@ -42,6 +44,7 @@ from sqlalchemy import select
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_session_claims
 from rivulets.db.models import RunSpan, RunTrace, ToolCallLog
+from rivulets.tracing import close_trace, reap_stale_traces
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -104,13 +107,28 @@ class RunTraceDetailOut(RunTraceOut):
 
 @router.get("", response_model=list[RunTraceOut])
 async def list_runs(
-    db: DbSession, _: CurrentWorkspaceId, limit: int = _DEFAULT_LIST_LIMIT
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    limit: int = _DEFAULT_LIST_LIMIT,
+    channel_id: str | None = None,
+    rivulet_id: str | None = None,
 ) -> list[RunTrace]:
-    """Most recent traces, newest first."""
+    """Most recent traces, newest first.
+
+    Reaps zero-span leftovers (#414) before reading so a Runs page load
+    never shows a days-old "Running · 0 steps" row that the hourly
+    retention tick hasn't reached yet. `channel_id` / `rivulet_id` let
+    the channel and thread cards fetch just their own latest run."""
+    reaped = await reap_stale_traces(db)
+    if reaped:
+        await db.commit()
+    query = select(RunTrace)
+    if channel_id is not None:
+        query = query.where(RunTrace.channel_id == channel_id)
+    if rivulet_id is not None:
+        query = query.where(RunTrace.rivulet_id == rivulet_id)
     result = await db.execute(
-        select(RunTrace)
-        .order_by(RunTrace.started_at.desc())
-        .limit(max(1, min(limit, _MAX_LIST_LIMIT)))
+        query.order_by(RunTrace.started_at.desc()).limit(max(1, min(limit, _MAX_LIST_LIMIT)))
     )
     return list(result.scalars().all())
 
@@ -157,3 +175,19 @@ async def get_run(
         for row in span_rows
     ]
     return RunTraceDetailOut(**RunTraceOut.model_validate(trace).model_dump(), spans=spans)
+
+
+@router.post("/{trace_id}/cancel", response_model=RunTraceOut)
+async def cancel_run(trace_id: str, db: DbSession, _: CurrentWorkspaceId) -> RunTrace:
+    """#414: close a still-running trace from the Runs page. Does not
+    abort an in-flight LLM call -- it marks the row so it stops reading
+    as Running. A later finish_trace from that request is a no-op."""
+    trace = await db.get(RunTrace, trace_id)
+    if trace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Run not found")
+    if trace.status != "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Run is no longer running")
+    closed = await close_trace(db, trace_id, status="cancelled")
+    assert closed is not None
+    await db.commit()
+    return closed

@@ -29,10 +29,20 @@ describe('runs', () => {
 		const fetchMock = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }));
 		vi.stubGlobal('fetch', fetchMock);
 
-		await runs.list(10);
+		await runs.list({ limit: 10 });
 
 		const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/v1/runs?limit=10');
+	});
+
+	it('passes channel and rivulet filters through as query params', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await runs.list({ channelId: 'chan-1', rivuletId: 'riv-1' });
+
+		const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/runs?channel_id=chan-1&rivulet_id=riv-1');
 	});
 
 	it('fetches one trace by id', async () => {
@@ -68,5 +78,16 @@ describe('runs', () => {
 		const result = await runs.get('trace-1');
 
 		expect(result).toEqual(payload);
+	});
+
+	it('cancel() POSTs /runs/:id/cancel', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		await runs.cancel('trace-1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/runs/trace-1/cancel');
+		expect(init.method).toBe('POST');
 	});
 });

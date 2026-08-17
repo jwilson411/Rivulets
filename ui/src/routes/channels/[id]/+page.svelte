@@ -7,6 +7,7 @@
 	import { teams, type Team, type TeamDetail } from '$lib/api/teams';
 	import { agents, type Agent } from '$lib/api/agents';
 	import { workflows, type Workflow } from '$lib/api/workflows';
+	import { runs, type RunTrace } from '$lib/api/runs';
 	import { files as filesApi } from '$lib/api/files';
 	import { agentInk, INK_AVATAR } from '$lib/ink';
 	import { formatClock } from '$lib/format';
@@ -33,6 +34,7 @@
 	let teamList = $state<Team[]>([]);
 	let teamMembers = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
+	let latestRunByRivulet = $state<Record<string, RunTrace>>({});
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	let teamMenuOpen = $state(false);
@@ -81,16 +83,23 @@
 		loading = true;
 		loadError = null;
 		try {
-			const [loadedChannel, loadedRivulets, loadedTeams, loadedWorkflows] = await Promise.all([
-				channels.get(channelId),
-				rivulets.listForChannel(channelId),
-				teams.list().catch(() => [] as Team[]),
-				workflows.list().catch(() => [] as Workflow[])
-			]);
+			const [loadedChannel, loadedRivulets, loadedTeams, loadedWorkflows, loadedRuns] =
+				await Promise.all([
+					channels.get(channelId),
+					rivulets.listForChannel(channelId),
+					teams.list().catch(() => [] as Team[]),
+					workflows.list().catch(() => [] as Workflow[]),
+					runs.list({ channelId, limit: 200 }).catch(() => [] as RunTrace[])
+				]);
 			channel = loadedChannel;
 			rivuletList = [...loadedRivulets].sort((a, b) => b.created_at.localeCompare(a.created_at));
 			teamList = loadedTeams;
 			workflowList = loadedWorkflows;
+			const latest: Record<string, RunTrace> = {};
+			for (const trace of loadedRuns) {
+				if (trace.rivulet_id && !latest[trace.rivulet_id]) latest[trace.rivulet_id] = trace;
+			}
+			latestRunByRivulet = latest;
 			await Promise.all([loadPreviews(rivuletList), loadTeamMembers(loadedChannel.team_id)]);
 		} catch {
 			loadError = "Couldn't load conversations.";
@@ -139,9 +148,24 @@
 	}
 
 	function dotClass(rivulet: Rivulet, index: number): string {
-		if (rivulet.status === 'paused') return 'bg-warn';
+		const latest = latestRunByRivulet[rivulet.id];
+		if (latest?.status === 'error') return 'bg-danger';
+		if (latest?.status === 'running' || rivulet.status === 'paused') return 'bg-warn';
 		if (index === 0) return 'breath bg-accent dark:bg-accent-dark';
 		return 'bg-line dark:bg-line-dark';
+	}
+
+	function latestRunNote(rivuletId: string): string | null {
+		const latest = latestRunByRivulet[rivuletId];
+		if (!latest) return null;
+		if (latest.status === 'running') {
+			return latest.span_count === 0
+				? 'Last run is stuck — no steps recorded.'
+				: 'A run is still in progress.';
+		}
+		if (latest.status === 'error') return 'Last run failed.';
+		if (latest.status === 'cancelled') return 'Last run was cancelled.';
+		return null;
 	}
 </script>
 
@@ -232,6 +256,7 @@
 			<div class="flex flex-col gap-4">
 				{#each rivuletList as rivulet, i (rivulet.id)}
 					{@const preview = previews[rivulet.id]}
+					{@const runNote = latestRunNote(rivulet.id)}
 					<a
 						href={resolve('/channels/[id]/rivulets/[rivuletId]', {
 							id: page.params.id!,
@@ -246,7 +271,16 @@
 							>
 								{preview?.title ?? '…'}
 							</span>
-							{#if rivulet.status === 'paused'}
+							{#if runNote}
+								<span
+									class="block truncate text-[15px] {latestRunByRivulet[rivulet.id]?.status ===
+									'error'
+										? 'text-danger'
+										: 'text-warn'}"
+								>
+									{runNote}
+								</span>
+							{:else if rivulet.status === 'paused'}
 								<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
 									Paused — waiting on a person.
 								</span>

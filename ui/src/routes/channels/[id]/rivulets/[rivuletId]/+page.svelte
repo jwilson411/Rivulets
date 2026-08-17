@@ -5,6 +5,7 @@
 	import { channels, type Channel } from '$lib/api/channels';
 	import { teams, type Team } from '$lib/api/teams';
 	import { workflows, type Workflow } from '$lib/api/workflows';
+	import { runs, type RunTrace } from '$lib/api/runs';
 	import { files as filesApi } from '$lib/api/files';
 	import { sync } from '$lib/api/sync';
 	import { auth } from '$lib/api/auth.svelte';
@@ -26,6 +27,7 @@
 	let messages = $state<Message[]>([]);
 	let teamList = $state<Team[]>([]);
 	let workflowList = $state<Workflow[]>([]);
+	let latestRun = $state<RunTrace | null>(null);
 	let loadError = $state<string | null>(null);
 	let sending = $state(false);
 	let sendError = $state<string | null>(null);
@@ -126,19 +128,21 @@
 	async function load(rivuletId: string, channelId: string) {
 		loadError = null;
 		try {
-			const [loadedChannel, loadedRivulet, loadedMessages, loadedTeams, loadedWorkflows] =
+			const [loadedChannel, loadedRivulet, loadedMessages, loadedTeams, loadedWorkflows, loadedRuns] =
 				await Promise.all([
 					channels.get(channelId),
 					rivulets.get(rivuletId),
 					rivulets.listMessages(rivuletId),
 					teams.list().catch(() => [] as Team[]),
-					workflows.list().catch(() => [] as Workflow[])
+					workflows.list().catch(() => [] as Workflow[]),
+					runs.list({ rivuletId, limit: 1 }).catch(() => [] as RunTrace[])
 				]);
 			channel = loadedChannel;
 			rivulet = loadedRivulet;
 			messages = loadedMessages;
 			teamList = loadedTeams;
 			workflowList = loadedWorkflows;
+			latestRun = loadedRuns[0] ?? null;
 		} catch {
 			loadError = "Couldn't load this conversation.";
 		}
@@ -341,6 +345,21 @@
 		>
 			{title}
 		</div>
+		{#if latestRun?.status === 'running' || latestRun?.status === 'error' || latestRun?.status === 'cancelled'}
+			<p
+				class="mt-2 text-sm {latestRun.status === 'error' ? 'text-danger' : 'text-warn'}"
+			>
+				{#if latestRun.status === 'running' && latestRun.span_count === 0}
+					Last run is still marked running with no steps.
+				{:else if latestRun.status === 'running'}
+					A run is still in progress.
+				{:else if latestRun.status === 'error'}
+					Last run failed.
+				{:else}
+					Last run was cancelled.
+				{/if}
+			</p>
+		{/if}
 		{#if humanName || participants.length}
 			<div class="mt-3.5 flex flex-wrap gap-2">
 				{#if humanName}
