@@ -408,12 +408,20 @@ async def update_agent(
         await _check_tool_assignment_authorized(db, body.tool_ids, claims)
     if body.name is not None and body.name != agent.name:
         await _check_name_available(db, body.name)
-    rule_regen_fields = {"description", "instructions"}
     updates = body.model_dump(
         exclude_unset=True, exclude={"tool_ids", "team_ids", "fallback_models", "output_schema"}
     )
-    needs_rule_regen = rule_regen_fields & updates.keys()
-    old_instructions, old_model = agent.instructions, agent.model
+    # #447: the sheet always resends description + instructions. Regen
+    # only when those values actually changed — presence of the keys
+    # used to wipe keyword/custom When to speak on a no-op Save.
+    old_description, old_instructions, old_model = (
+        agent.description,
+        agent.instructions,
+        agent.model,
+    )
+    needs_rule_regen = ("description" in updates and updates["description"] != old_description) or (
+        "instructions" in updates and updates["instructions"] != old_instructions
+    )
 
     for field, value in updates.items():
         setattr(agent, field, value)

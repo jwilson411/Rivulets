@@ -244,16 +244,17 @@ describe('routes/+page.svelte (Home)', () => {
 
 		const lastCard = page.getByRole('link', { name: /Yesterday standup notes/ });
 		await expect.element(lastCard).toBeInTheDocument();
-		const composer = page.getByPlaceholder('Start a conversation…');
-		await expect.element(composer).toBeInTheDocument();
+		const dock = page.getByRole('region', { name: 'Start a conversation' });
+		await expect.element(dock).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Continue last' })).toBeInTheDocument();
 
 		const scroller = lastCard.element().closest('.overflow-y-auto');
 		if (scroller instanceof HTMLElement) {
 			scroller.scrollTop = scroller.scrollHeight;
 		}
 		const cardBox = lastCard.element().getBoundingClientRect();
-		const composerBox = composer.element().getBoundingClientRect();
-		expect(cardBox.bottom).toBeLessThanOrEqual(composerBox.top + 1);
+		const dockBox = dock.element().getBoundingClientRect();
+		expect(cardBox.bottom).toBeLessThanOrEqual(dockBox.top + 1);
 	});
 
 	it('keeps channel chips on one scrolling row instead of wrapping (#418)', async () => {
