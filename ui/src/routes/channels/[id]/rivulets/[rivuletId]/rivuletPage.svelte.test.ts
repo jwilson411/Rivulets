@@ -309,8 +309,16 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 
 		await expect.element(page.getByText('Looking...')).toBeInTheDocument();
 
-		source.emit('agent_message', {});
-		await expect.element(page.getByText('Looking...')).not.toBeInTheDocument();
+		source.emit('agent_message', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			message_id: 'msg-live',
+			content: 'Looking...'
+		});
+		// The streamed text must stay visible as a persisted bubble —
+		// clearing liveMessage without inserting the row is what made
+		// replies blink away until the post-POST refetch.
+		await expect.element(page.getByText('Looking...')).toBeInTheDocument();
 	});
 
 	it('shows a quiet error with a retry when the conversation fails to load', async () => {

@@ -58,6 +58,34 @@ async def test_run_agent_raises_when_unregistered(db_session: AsyncSession) -> N
     reset_agentos_for_testing()
 
 
+async def test_run_agent_resyncs_once_if_missing_from_registry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A message after login (or after a provider is added) should not
+    stay silent just because startup skipped registration."""
+    reset_agentos_for_testing()
+    init_agentos()
+    agent = AgnoAgent(id="agent-1", name="Test Agent")
+    agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [RunCompletedEvent(content="Hello")]
+    )
+    sync_calls = 0
+
+    async def fake_sync(_db: AsyncSession) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        get_agentos().agents = [agent]  # pyright: ignore[reportAttributeAccessIssue]
+
+    monkeypatch.setattr("rivulets.agentos.service.sync_agents", fake_sync)
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert sync_calls == 1
+    assert result.status is RunStatus.completed
+    assert result.content == "Hello"
+    reset_agentos_for_testing()
+
+
 async def test_run_agent_returns_completed_output_on_terminal_event(
     db_session: AsyncSession, registered_agent: AgnoAgent
 ) -> None:
