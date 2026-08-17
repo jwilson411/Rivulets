@@ -51,9 +51,9 @@ from rivulets.api.deps import (
 )
 from rivulets.api.files import publish_file_change
 from rivulets.db.models import Channel, File, Human, Message, Rivulet
+from rivulets.db.session import session_scope
 from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
-from rivulets.db.session import session_scope
 from rivulets.streaming import publish, subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
 from rivulets.tracing import TraceContext, close_trace, finish_trace, start_trace
@@ -200,13 +200,23 @@ async def _run_message_dispatch(
     content: str,
     file_ids: list[str],
     trace_id: str,
+    from_agent_id: str | None = None,
+    from_agent_name: str | None = None,
+    resume_fallback: bool = False,
 ) -> None:
     """Background half of create_rivulet/post_message (#413). The request
     already committed the human message and opened the RunTrace; this
     opens its own session so the request-scoped one can close with the
     response. Failures after the 201 can't become HTTP errors — persist
     a system_alert and fail the trace so the thinking row has something
-    to be replaced by."""
+    to be replaced by.
+
+    Resume of a loop-guard pause reuses this with `from_agent_id` set to
+    the last speaker so @mentions (and keyword specialists) continue the
+    same agent-to-agent turn. `resume_fallback` retries as a human-triggered
+    dispatch when that speaker-excluded pass matches nobody — a single
+    always-rule agent paused on the turn limit still has someone to answer.
+    """
     try:
         async with session_scope() as db:
             rivulet = await db.get(Rivulet, rivulet_id)
@@ -228,10 +238,22 @@ async def _run_message_dispatch(
                 rivulet,
                 channel,
                 content,
+                from_agent_id=from_agent_id,
+                from_agent_name=from_agent_name,
                 triggering_message_id=message_id,
                 trace_ctx=trace_ctx,
                 attached_files=attached_files,
             )
+            if resume_fallback and from_agent_id is not None and not agent_messages:
+                agent_messages = await dispatch_and_respond(
+                    db,
+                    rivulet,
+                    channel,
+                    content,
+                    triggering_message_id=message_id,
+                    trace_ctx=trace_ctx,
+                    attached_files=attached_files,
+                )
             await finish_trace(db, trace_ctx.trace_id)
             await db.commit()
             await db.refresh(rivulet)
@@ -276,6 +298,9 @@ def _schedule_message_dispatch(
     content: str,
     file_ids: list[str],
     trace_id: str,
+    from_agent_id: str | None = None,
+    from_agent_name: str | None = None,
+    resume_fallback: bool = False,
 ) -> None:
     _publish_routing(rivulet_id)
     background_tasks.add_task(
@@ -286,6 +311,9 @@ def _schedule_message_dispatch(
         content,
         file_ids,
         trace_id,
+        from_agent_id,
+        from_agent_name,
+        resume_fallback,
     )
 
 
@@ -552,16 +580,42 @@ async def post_message(
     return _to_message_out(message, attached_files)
 
 
+async def _latest_agent_text_message(db: DbSession, rivulet_id: str) -> Message | None:
+    """The last agent reply in this thread — what a loop-guard pause
+    interrupted. Resume re-dispatches this so the next teammate actually
+    speaks; without it, Resume only flipped status and the conversation
+    sat idle until a human typed."""
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.rivulet_id == rivulet_id,
+            Message.sender_type == "agent",
+            Message.content_type == "text",
+        )
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 @router.post("/rivulets/{rivulet_id}/resume", response_model=RivuletOut)
-async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> Rivulet:
+async def resume_rivulet(
+    rivulet_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    background_tasks: BackgroundTasks,
+) -> Rivulet:
     """FR-7.5's explicit "Resume" affordance — equivalent to what posting
     any message already does, for when a human just wants to clear a
-    pause without saying anything yet. Refuses if a workflow is paused
-    here (#83): unlike a loop-guard pause, a 'human_input' node's pause
-    isn't clearable without an actual reply value to feed it as output --
-    flipping Rivulet.status back to 'active' without one would hide the
-    paused banner while the WorkflowRun stayed 'awaiting_human' underneath,
-    leaving the human with no visible way back to it."""
+    pause without saying anything yet. A loop-guard pause (cycle / turn
+    limit / timeout) also re-dispatches the last agent message so the
+    conversation actually continues; unarchive (#412) does not. Refuses
+    if a workflow is paused here (#83): unlike a loop-guard pause, a
+    'human_input' node's pause isn't clearable without an actual reply
+    value to feed it as output -- flipping Rivulet.status back to
+    'active' without one would hide the paused banner while the
+    WorkflowRun stayed 'awaiting_human' underneath, leaving the human
+    with no visible way back to it."""
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
     # Also the unarchive path for a closed rivulet (#412) — flipping
     # status back to active is the same write, and a closed conversation
@@ -572,12 +626,42 @@ async def resume_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) 
             status.HTTP_400_BAD_REQUEST,
             "A workflow is waiting on a reply here — reply with a message instead of resuming",
         )
+    was_paused = rivulet.status == "paused"
+    last_agent = await _latest_agent_text_message(db, rivulet_id) if was_paused else None
     rivulet.status = "active"
     guard_state = await get_or_create_guard_state(db, rivulet_id)
     reset_guard_state(guard_state)
     await db.commit()
     await db.refresh(rivulet)
     await _publish_rivulet_change(db, rivulet)
+
+    if (
+        was_paused
+        and last_agent is not None
+        and last_agent.sender_id is not None
+        and last_agent.content
+    ):
+        channel = await _get_channel_or_404(db, rivulet.channel_id)
+        trace_ctx = await start_trace(
+            db,
+            trigger_type="message",
+            label=last_agent.content,
+            rivulet_id=rivulet.id,
+            channel_id=channel.id,
+        )
+        await db.commit()
+        _schedule_message_dispatch(
+            background_tasks,
+            rivulet_id=rivulet.id,
+            channel_id=channel.id,
+            message_id=last_agent.id,
+            content=last_agent.content,
+            file_ids=[],
+            trace_id=trace_ctx.trace_id,
+            from_agent_id=last_agent.sender_id,
+            from_agent_name=last_agent.sender_name,
+            resume_fallback=True,
+        )
     return rivulet
 
 

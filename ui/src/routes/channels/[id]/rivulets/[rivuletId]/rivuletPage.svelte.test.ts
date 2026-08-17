@@ -362,6 +362,7 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Resume' }).click();
 
 		expect(rivulets.resume).toHaveBeenCalledWith('riv-1');
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
 	});
 
 	it('renders streamed agent tokens live with the streaming caret', async () => {

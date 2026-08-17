@@ -171,6 +171,49 @@ def test_cycle_detection_pauses_two_agents_mentioning_each_other(
     assert rivulet_state["status"] == "paused"
 
 
+def test_resume_continues_a_two_agent_loop(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume after cycle detection must re-dispatch the last agent
+    message. Clearing `paused` alone left the thread idle — the button
+    looked like it worked, then nothing spoke."""
+    agent_a = _create_agent(client, auth_headers, "AgentA", "mention_only")
+    agent_b = _create_agent(client, auth_headers, "AgentB", "mention_only")
+
+    async def fake_run_agent(
+        _db: object, agent_id: str, _message: str, *_args: object, **_kwargs: object
+    ) -> Any:
+        content = "ping @AgentB" if agent_id == agent_a else "ping @AgentA"
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: content
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    channel_id = _create_channel_with_team(client, auth_headers, [agent_a, agent_b])
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "@AgentA kick things off"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    before = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert before[-1]["sender_type"] == "system"
+    assert "loop" in before[-1]["content"].lower()
+    paused_agent_count = sum(1 for m in before if m["sender_type"] == "agent")
+
+    resumed = client.post(f"/api/v1/rivulets/{rivulet_id}/resume", headers=auth_headers)
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "active"
+
+    after = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    new_agent = [m for m in after[len(before) :] if m["sender_type"] == "agent"]
+    assert len(new_agent) > 0
+    assert sum(1 for m in after if m["sender_type"] == "agent") > paused_agent_count
+
+
 def test_timeout_pauses_when_configured_to_zero_minutes(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
