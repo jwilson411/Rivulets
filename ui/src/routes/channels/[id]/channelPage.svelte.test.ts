@@ -370,6 +370,21 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect.element(page.getByText("Couldn't send that. Try again.")).toBeInTheDocument();
 	});
 
+	it('shows Routing… while the create request is in flight (#413)', async () => {
+		seed();
+		vi.mocked(rivulets.create).mockImplementation(() => new Promise(() => {}));
+
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
+			.toBeInTheDocument();
+
+		await page.getByPlaceholder('Start a conversation…').fill('@Assistant ping');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
+	});
+
 	it('shows When to speak for the routed team agents', async () => {
 		const assistant: Agent = {
 			id: 'agent-1',

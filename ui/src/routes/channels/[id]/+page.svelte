@@ -191,6 +191,9 @@
 				);
 				return true;
 			}
+			// #413: create returns as soon as the human message is committed;
+			// dispatch continues in the background. The rivulet page picks up
+			// Routing… from the still-running trace / SSE.
 			const created = await rivulets.create(channelId, text, fileIds);
 			goto(
 				resolve('/channels/[id]/rivulets/[rivuletId]', { id: channelId, rivuletId: created.id })
@@ -466,6 +469,16 @@
 				<FilterChip selected={continueLast} onclick={() => (continueLast = true)}>
 					Continue last
 				</FilterChip>
+			</div>
+		{/if}
+		{#if posting}
+			<div class="mb-3 flex items-center gap-2 pl-1 text-sm">
+				<span
+					class="flex h-6 items-center gap-1.5 rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
+				>
+					<span class="breath h-1.5 w-1.5 rounded-full bg-current"></span>
+					Routing…
+				</span>
 			</div>
 		{/if}
 		<StreamBar

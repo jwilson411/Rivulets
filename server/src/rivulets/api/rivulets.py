@@ -1,10 +1,11 @@
 """Rivulets & messages (FR-5), including the SSE stream (api-design.md#sse-protocol).
 
-Posting a message runs the real dispatcher (dispatch/service.py) against
-the channel's team and persists any matched agents' replies in the same
-request, publishing SSE events as it goes (FR-12.3) — a client with the
-stream endpoint open sees agent_token/agent_message/system_alert/error
-events live, in the same request cycle that's doing the dispatching.
+Posting a message persists the human row and returns it immediately
+(#413). Dispatch (dispatch/service.py) continues as a BackgroundTask
+against a fresh session so the HTTP response is not the wait — a client
+with the stream endpoint open sees dispatch_status/agent_status/
+agent_token/agent_message/system_alert/error events live while that
+background round runs, instead of only after POST returns.
 
 Before that, both message-posting endpoints below check whether the
 content is a `/workflow-name <input>` trigger (#24,
@@ -37,7 +38,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -52,9 +53,10 @@ from rivulets.api.files import publish_file_change
 from rivulets.db.models import Channel, File, Human, Message, Rivulet
 from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
-from rivulets.streaming import subscribe, unsubscribe
+from rivulets.db.session import session_scope
+from rivulets.streaming import publish, subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
-from rivulets.tracing import finish_trace, start_trace
+from rivulets.tracing import TraceContext, close_trace, finish_trace, start_trace
 from rivulets.workflows import (
     find_awaiting_workflow_run,
     find_triggered_workflow,
@@ -183,6 +185,110 @@ async def _publish_message_change(db: DbSession, message: Message) -> None:
     await publish_current_state(db, "message", message.id)
 
 
+def _publish_routing(rivulet_id: str) -> None:
+    """SSE so a client already on the thread sees a status row before any
+    agent is chosen — agent_status then replaces this once dispatch
+    matches someone. #413: without this, the only signal is the POST
+    hanging, and Thinking… never paints on the common path."""
+    publish(rivulet_id, "dispatch_status", {"status": "routing"})
+
+
+async def _run_message_dispatch(
+    rivulet_id: str,
+    channel_id: str,
+    message_id: str,
+    content: str,
+    file_ids: list[str],
+    trace_id: str,
+) -> None:
+    """Background half of create_rivulet/post_message (#413). The request
+    already committed the human message and opened the RunTrace; this
+    opens its own session so the request-scoped one can close with the
+    response. Failures after the 201 can't become HTTP errors — persist
+    a system_alert and fail the trace so the thinking row has something
+    to be replaced by."""
+    try:
+        async with session_scope() as db:
+            rivulet = await db.get(Rivulet, rivulet_id)
+            channel = await db.get(Channel, channel_id)
+            if rivulet is None or channel is None:
+                logger.error(
+                    "Background dispatch aborted — rivulet %s or channel %s missing",
+                    rivulet_id,
+                    channel_id,
+                )
+                return
+            attached_files: list[File] = []
+            if file_ids:
+                result = await db.execute(select(File).where(File.id.in_(file_ids)))
+                attached_files = list(result.scalars().all())
+            trace_ctx = TraceContext(trace_id=trace_id, parent_span_id=None)
+            agent_messages = await dispatch_and_respond(
+                db,
+                rivulet,
+                channel,
+                content,
+                triggering_message_id=message_id,
+                trace_ctx=trace_ctx,
+                attached_files=attached_files,
+            )
+            await finish_trace(db, trace_ctx.trace_id)
+            await db.commit()
+            await db.refresh(rivulet)
+            await _publish_rivulet_change(db, rivulet)
+            for agent_message in agent_messages:
+                await _publish_message_change(db, agent_message)
+    except Exception:
+        logger.exception("Background dispatch failed for rivulet %s", rivulet_id)
+        try:
+            async with session_scope() as db:
+                await close_trace(db, trace_id, status="error")
+                alert = Message(
+                    rivulet_id=rivulet_id,
+                    sender_type="system",
+                    sender_name="system",
+                    content="Something went wrong while routing that message.",
+                    content_type="system_alert",
+                )
+                db.add(alert)
+                await db.flush()
+                publish(
+                    rivulet_id,
+                    "system_alert",
+                    {"type": "dispatch_failed", "message": alert.content},
+                )
+                await db.commit()
+                await _publish_message_change(db, alert)
+        except Exception:
+            logger.exception(
+                "Failed to record a dispatch failure for rivulet %s / trace %s",
+                rivulet_id,
+                trace_id,
+            )
+
+
+def _schedule_message_dispatch(
+    background_tasks: BackgroundTasks,
+    *,
+    rivulet_id: str,
+    channel_id: str,
+    message_id: str,
+    content: str,
+    file_ids: list[str],
+    trace_id: str,
+) -> None:
+    _publish_routing(rivulet_id)
+    background_tasks.add_task(
+        _run_message_dispatch,
+        rivulet_id,
+        channel_id,
+        message_id,
+        content,
+        file_ids,
+        trace_id,
+    )
+
+
 def _to_attachment_out(file_row: File) -> AttachmentOut:
     return AttachmentOut(
         file_id=file_row.id,
@@ -245,9 +351,10 @@ async def create_rivulet(
     db: DbSession,
     _: CurrentWorkspaceId,
     human_id: CurrentHumanId,
+    background_tasks: BackgroundTasks,
 ) -> Rivulet:
     """Posting to the channel creates a rivulet with the human message as its
-    root (FR-5.1), then dispatches it to the channel's team (FR-4.1)."""
+    root (FR-5.1), then schedules dispatch to the channel's team (FR-4.1)."""
     channel = await _get_channel_or_404(db, channel_id)
     human = await _get_human_or_404(db, human_id)
     rivulet = Rivulet(channel_id=channel_id, created_by="human")
@@ -306,24 +413,22 @@ async def create_rivulet(
     for file_row in attached_files:
         await publish_file_change(db, file_row)
 
+    # Open the run before returning so the rivulet page can show Routing…
+    # from latestRun.status === 'running' even if it mounts after this
+    # response and misses the dispatch_status SSE event (#413).
     trace_ctx = await start_trace(
         db, trigger_type="message", label=body.content, rivulet_id=rivulet.id, channel_id=channel.id
     )
-    agent_messages = await dispatch_and_respond(
-        db,
-        rivulet,
-        channel,
-        body.content,
-        triggering_message_id=human_message.id,
-        trace_ctx=trace_ctx,
-        attached_files=attached_files,
-    )
-    await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
-    await db.refresh(rivulet)
-    await _publish_rivulet_change(db, rivulet)  # dispatch can pause the rivulet as a side effect
-    for agent_message in agent_messages:
-        await _publish_message_change(db, agent_message)
+    _schedule_message_dispatch(
+        background_tasks,
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+        message_id=human_message.id,
+        content=body.content,
+        file_ids=[file_row.id for file_row in attached_files],
+        trace_id=trace_ctx.trace_id,
+    )
     return rivulet
 
 
@@ -354,6 +459,7 @@ async def post_message(
     db: DbSession,
     _: CurrentWorkspaceId,
     human_id: CurrentHumanId,
+    background_tasks: BackgroundTasks,
 ) -> MessageOut:
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
     if rivulet.status == "closed":
@@ -428,28 +534,21 @@ async def post_message(
         await publish_file_change(db, file_row)
 
     # dispatch_and_respond resets RivuletGuardState on every human-triggered
-    # call (FR-7.5) before dispatching.
+    # call (FR-7.5) before dispatching — that now happens in the
+    # BackgroundTask, after this 201 goes out (#413).
     trace_ctx = await start_trace(
         db, trigger_type="message", label=body.content, rivulet_id=rivulet.id, channel_id=channel.id
     )
-    agent_messages = await dispatch_and_respond(
-        db,
-        rivulet,
-        channel,
-        body.content,
-        triggering_message_id=message.id,
-        trace_ctx=trace_ctx,
-        attached_files=attached_files,
-    )
-    await finish_trace(db, trace_ctx.trace_id)
     await db.commit()
-    # dispatch can pause the rivulet (a loop guard tripping) as a side
-    # effect, so its state needs republishing here too, not just from the
-    # explicit resume/close endpoints below.
-    await db.refresh(rivulet)
-    await _publish_rivulet_change(db, rivulet)
-    for agent_message in agent_messages:
-        await _publish_message_change(db, agent_message)
+    _schedule_message_dispatch(
+        background_tasks,
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+        message_id=message.id,
+        content=body.content,
+        file_ids=[file_row.id for file_row in attached_files],
+        trace_id=trace_ctx.trace_id,
+    )
     return _to_message_out(message, attached_files)
 
 
@@ -504,8 +603,10 @@ async def stream_rivulet(
     happen, not just the first one, so this never sends a terminal event
     of its own; the generator only exits on client disconnect.
 
-    Emits agent_status, agent_token, agent_message, handoff, system_alert,
-    error, and done (dispatch/service.py). agent_status (#30) covers an
+    Emits dispatch_status, agent_status, agent_token, agent_message,
+    handoff, system_alert, error, and done (dispatch/service.py).
+    dispatch_status (#413) is the pre-match "Routing…" signal published
+    as soon as the human message is committed. agent_status (#30) covers an
     agent's "thinking" / "executing_tool" / "waiting_for_handoff" states
     between invocation and its first streamed token or persisted message —
     tool calls get their status via that event's `detail` (tool name only,
