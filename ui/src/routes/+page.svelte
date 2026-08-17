@@ -156,8 +156,8 @@
 	}
 </script>
 
-<div class="flex h-full flex-col">
-	<div class="flex items-baseline justify-between px-4 pt-8 md:px-10">
+<div class="relative flex h-full min-h-0 flex-col overflow-hidden">
+	<div class="flex flex-none items-baseline justify-between px-4 pt-8 md:px-10">
 		<h1 class="font-display text-[32px] font-semibold text-ink dark:text-ink-dark">Home</h1>
 		<span class="text-sm text-muted dark:text-muted-dark">
 			{auth.displayName} · {isOwner ? 'Owner' : 'Guest'}
@@ -173,8 +173,11 @@
 			<SetupCards {providerList} {channelList} onProviderAdded={load} />
 		</div>
 	{:else}
-		<SectionLabel class="px-4 pt-6 text-sm md:px-10">Recent conversations</SectionLabel>
-		<div class="flex-1 overflow-y-auto px-4 py-4 md:px-10">
+		<SectionLabel class="flex-none px-4 pt-6 text-sm md:px-10">Recent conversations</SectionLabel>
+		<!-- #418: composer is docked over this pane. Padding is last-card
+		     clearance for the chip row + Stream Bar + helper; the phone
+		     value is larger so scroll-to-end still clears the tab bar. -->
+		<div class="min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-52 md:px-10 md:pb-40">
 			{#if agentsNotReady}
 				<ErrorBanner
 					class="mb-4"
@@ -247,16 +250,22 @@
 			{/if}
 		</div>
 
-		<div class="px-4 pb-24 md:px-10 md:pb-7">
+		<div
+			class="absolute inset-x-0 bottom-0 z-10 bg-paper px-4 pt-3 pb-3 md:px-10 md:pb-7 dark:bg-paper-dark"
+		>
 			{#if activeChannels.length > 0}
-				<div class="mb-3 flex flex-wrap gap-2">
+				<div
+					class="mb-3 flex min-w-0 [scrollbar-width:none] flex-nowrap gap-2 overflow-x-scroll [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+					role="toolbar"
+					aria-label="Post to channel"
+				>
 					{#each activeChannels as channel (channel.id)}
 						{@const selected = selectedChannel?.id === channel.id}
 						<button
 							type="button"
 							onclick={() => (selectedChannelId = channel.id)}
 							aria-pressed={selected}
-							class="inline-flex h-8 items-center rounded-full px-3.5 text-sm {selected
+							class="inline-flex h-8 shrink-0 items-center rounded-full px-3.5 text-sm whitespace-nowrap {selected
 								? 'border border-accent bg-accent-soft font-semibold text-accent dark:border-accent-dark dark:bg-accent-soft-dark dark:text-accent-dark'
 								: 'border border-line bg-surface font-medium text-muted dark:border-line-dark dark:bg-surface-dark dark:text-muted-dark'}"
 						>

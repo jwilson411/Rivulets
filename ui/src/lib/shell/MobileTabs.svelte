@@ -20,49 +20,51 @@
 </script>
 
 <nav
-	class="flex h-16 flex-none items-stretch border-t border-line bg-surface md:hidden dark:border-line-dark dark:bg-surface-dark"
+	class="flex-none border-t border-line bg-surface pb-[env(safe-area-inset-bottom,0px)] md:hidden dark:border-line-dark dark:bg-surface-dark"
 	aria-label="Main"
 >
-	<a
-		href={resolve('/')}
-		class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(isActive('/'))}"
-	>
-		<Icon name="home" class="h-6 w-6" />
-		<span class="text-[11px] font-medium">Home</span>
-	</a>
-	<a
-		href={resolve('/channels')}
-		class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(
-			isActive('/channels')
-		)}"
-	>
-		<Icon name="hash" class="h-6 w-6" />
-		<span class="text-[11px] font-medium">Channels</span>
-	</a>
-	<a
-		href={resolve('/approvals')}
-		class="relative flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(
-			isActive('/approvals')
-		)}"
-	>
-		<span class="relative">
-			<Icon name="inbox" class="h-6 w-6" />
-			{#if approvalsBadge.count}
-				<span
-					class="absolute -top-1 -right-2 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-semibold text-white"
-				>
-					{approvalsBadge.count}
-				</span>
-			{/if}
-		</span>
-		<span class="text-[11px] font-medium">Approvals</span>
-	</a>
-	<button
-		type="button"
-		onclick={onOpenMore}
-		class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(false)}"
-	>
-		<Icon name="grid" class="h-6 w-6" />
-		<span class="text-[11px] font-medium">More</span>
-	</button>
+	<div class="flex h-16 items-stretch">
+		<a
+			href={resolve('/')}
+			class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(isActive('/'))}"
+		>
+			<Icon name="home" class="h-6 w-6" />
+			<span class="text-[11px] font-medium">Home</span>
+		</a>
+		<a
+			href={resolve('/channels')}
+			class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(
+				isActive('/channels')
+			)}"
+		>
+			<Icon name="hash" class="h-6 w-6" />
+			<span class="text-[11px] font-medium">Channels</span>
+		</a>
+		<a
+			href={resolve('/approvals')}
+			class="relative flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(
+				isActive('/approvals')
+			)}"
+		>
+			<span class="relative">
+				<Icon name="inbox" class="h-6 w-6" />
+				{#if approvalsBadge.count}
+					<span
+						class="absolute -top-1 -right-2 flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-semibold text-white"
+					>
+						{approvalsBadge.count}
+					</span>
+				{/if}
+			</span>
+			<span class="text-[11px] font-medium">Approvals</span>
+		</a>
+		<button
+			type="button"
+			onclick={onOpenMore}
+			class="flex flex-1 flex-col items-center justify-center gap-0.5 {tabClass(false)}"
+		>
+			<Icon name="grid" class="h-6 w-6" />
+			<span class="text-[11px] font-medium">More</span>
+		</button>
+	</div>
 </nav>
