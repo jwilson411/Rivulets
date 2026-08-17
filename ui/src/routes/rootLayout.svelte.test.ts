@@ -66,6 +66,11 @@ vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
 vi.mock('$lib/api/approvals', () => ({ approvals: { list: vi.fn() } }));
+vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn().mockResolvedValue([]) } }));
+vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn().mockResolvedValue([]) } }));
+vi.mock('$lib/api/mcpServers', () => ({
+	mcpServers: { list: vi.fn().mockResolvedValue([]) }
+}));
 
 function childrenSnippet(text: string) {
 	return createRawSnippet(() => ({
@@ -195,6 +200,26 @@ describe('routes/+layout.svelte', () => {
 			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
+	});
+
+	it('exposes Account from More so phone chrome can sign out without the rail (#417)', async () => {
+		authState.isAuthenticated = true;
+		authState.humanId = 'human-1';
+		authState.displayName = 'Riley';
+		authState.grant = 'owner';
+		const { channels } = await import('$lib/api/channels');
+		const { approvals } = await import('$lib/api/approvals');
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(approvals.list).mockResolvedValue([]);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		await page.getByRole('button', { name: 'More' }).first().click();
+
+		await expect.element(page.getByRole('dialog', { name: 'More' })).toBeInTheDocument();
+		await expect.element(page.getByText('Account')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+		await expect.element(page.getByRole('group', { name: 'Theme' })).toBeInTheDocument();
 	});
 
 	it('renders routed children directly on an /invite/ route, bypassing auth entirely', async () => {
