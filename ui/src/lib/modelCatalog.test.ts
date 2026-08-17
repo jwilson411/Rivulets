@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { AUTO_MODEL, AUTO_MODEL_VALUE, CUSTOM_MODEL_VALUE, MODEL_CATALOG } from './modelCatalog';
+import {
+	AUTO_MODEL,
+	AUTO_MODEL_VALUE,
+	CUSTOM_MODEL_VALUE,
+	formatModelLabel,
+	MODEL_CATALOG
+} from './modelCatalog';
 import type { ProviderKind } from './api/providers';
 
 const PROVIDER_KINDS: ProviderKind[] = [
@@ -63,5 +69,17 @@ describe('sentinel values', () => {
 		const allIds = PROVIDER_KINDS.flatMap((kind) => MODEL_CATALOG[kind].map((option) => option.id));
 		expect(allIds).not.toContain(AUTO_MODEL_VALUE);
 		expect(allIds).not.toContain(CUSTOM_MODEL_VALUE);
+	});
+});
+
+describe('formatModelLabel', () => {
+	it('uses the catalog short name, without the picker qualifier', () => {
+		expect(formatModelLabel('openai:gpt-4o-mini')).toBe('GPT-4o mini');
+		expect(formatModelLabel('anthropic:claude-3-5-haiku-latest')).toBe('Claude 3.5 Haiku');
+	});
+
+	it('falls back to the model id when the catalog has no entry', () => {
+		expect(formatModelLabel('openai_compatible:local-llama')).toBe('local-llama');
+		expect(formatModelLabel('unknown-bare-id')).toBe('unknown-bare-id');
 	});
 });
