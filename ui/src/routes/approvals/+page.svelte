@@ -1,156 +1,156 @@
 <script lang="ts">
-	import { ApiError } from '$lib/api/client';
 	import { approvals, type PendingApproval } from '$lib/api/approvals';
 	import { auth } from '$lib/api/auth.svelte';
-	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+	import { approvalsBadge } from '$lib/approvalsBadge.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import FilterChip from '$lib/ui/FilterChip.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
 
-	const approvalFilters: ListFilter<PendingApproval>[] = [
-		{
-			id: 'status',
-			label: 'Status',
-			options: [
-				{ value: 'pending', label: 'Pending' },
-				{ value: 'approved', label: 'Approved' },
-				{ value: 'rejected', label: 'Rejected' }
-			],
-			predicate: (approval, value) => approval.status === value
-		},
-		{
-			id: 'source_type',
-			label: 'Source',
-			options: [
-				{ value: 'schedule', label: 'Schedule' },
-				{ value: 'budget', label: 'Budget' },
-				{ value: 'tool_guardrail', label: 'Unattended tool use' }
-			],
-			predicate: (approval, value) => approval.source_type === value
-		}
-	];
+	// Approvals (06-screens.md → Approvals, mockup 1h): one inbox for
+	// anything that needs a human's OK — an agent-created schedule (#93), a
+	// tripped spend cap (#97), or blocked unattended tool use (#100).
+	// Guests see the list read-only (2q); deciding is owner-only.
+
+	type StatusFilter = 'waiting' | 'done' | 'all';
+	type SourceFilter = PendingApproval['source_type'] | null;
 
 	const sourceLabels: Record<PendingApproval['source_type'], string> = {
 		schedule: 'Schedule',
-		budget: 'Budget',
-		tool_guardrail: 'Unattended tool use'
+		budget: 'Spend',
+		tool_guardrail: 'Tools'
 	};
 
 	let approvalList = $state<PendingApproval[]>([]);
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	let rowError = $state<Record<string, string | null>>({});
 	let actingId = $state<string | null>(null);
+	let statusFilter = $state<StatusFilter>('waiting');
+	let sourceFilter = $state<SourceFilter>(null);
+
+	let waitingCount = $derived(approvalList.filter((a) => a.status === 'pending').length);
+	let visible = $derived(
+		approvalList.filter((a) => {
+			if (statusFilter === 'waiting' && a.status !== 'pending') return false;
+			if (statusFilter === 'done' && a.status === 'pending') return false;
+			if (sourceFilter && a.source_type !== sourceFilter) return false;
+			return true;
+		})
+	);
 
 	async function refresh() {
 		loadError = null;
 		try {
 			approvalList = await approvals.list();
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load approvals';
+		} catch {
+			loadError = "Couldn't load approvals.";
+		} finally {
+			loading = false;
 		}
 	}
 
 	refresh();
 
-	async function handleApprove(id: string) {
+	async function decide(id: string, action: 'approve' | 'reject') {
 		rowError[id] = null;
 		actingId = id;
 		try {
-			await approvals.approve(id);
+			if (action === 'approve') await approvals.approve(id);
+			else await approvals.reject(id);
 			await refresh();
-		} catch (err) {
-			rowError[id] = err instanceof ApiError ? err.message : 'Failed to approve';
-		} finally {
-			actingId = null;
-		}
-	}
-
-	async function handleReject(id: string) {
-		rowError[id] = null;
-		actingId = id;
-		try {
-			await approvals.reject(id);
-			await refresh();
-		} catch (err) {
-			rowError[id] = err instanceof ApiError ? err.message : 'Failed to reject';
+			await approvalsBadge.refresh();
+		} catch {
+			rowError[id] = action === 'approve' ? "Couldn't approve that." : "Couldn't reject that.";
 		} finally {
 			actingId = null;
 		}
 	}
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Approvals</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			One inbox for anything that needs a human's OK before it happens (#102) — an agent-created
-			schedule (#93), a budget cap that's been exceeded (#97), or an agent blocked from using a
-			sensitive tool unattended (#100).
-		</p>
-	</header>
+<div class="mx-auto max-w-[820px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<h1 class="mb-5 font-display text-[32px] font-semibold text-ink dark:text-ink-dark">Needs you</h1>
 
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+	<div class="mb-7 flex flex-wrap gap-2">
+		<FilterChip selected={statusFilter === 'waiting'} onclick={() => (statusFilter = 'waiting')}>
+			Waiting{waitingCount ? ` · ${waitingCount}` : ''}
+		</FilterChip>
+		<FilterChip selected={statusFilter === 'done'} onclick={() => (statusFilter = 'done')}>
+			Done
+		</FilterChip>
+		<FilterChip selected={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>
+			All
+		</FilterChip>
+		<span class="mx-1 hidden w-px self-stretch bg-line sm:block dark:bg-line-dark"></span>
+		{#each Object.entries(sourceLabels) as [value, label] (value)}
+			<FilterChip
+				selected={sourceFilter === value}
+				onclick={() =>
+					(sourceFilter =
+						sourceFilter === value ? null : (value as PendingApproval['source_type']))}
+			>
+				{label}
+			</FilterChip>
+		{/each}
+	</div>
+
+	{#if loading}
+		<SkeletonCards count={2} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if visible.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">
+			{statusFilter === 'waiting' ? "You're clear. Nothing is waiting." : 'Nothing here yet.'}
+		</p>
 	{:else}
-		<FilterableList
-			items={approvalList}
-			getKey={(approval) => approval.id}
-			filters={approvalFilters}
-			emptyMessage="Nothing waiting on approval."
-			noMatchMessage="No approvals match the selected filters."
-		>
-			{#snippet item(approval)}
-				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					<div class="flex items-start justify-between gap-3">
-						<div class="min-w-0">
-							<p class="font-medium text-ink dark:text-ink-dark">
-								{approval.title}
-								<span
-									class="ml-2 rounded-sm bg-neutral-200/60 px-2 py-0.5 text-xs text-neutral-700 dark:bg-white/10 dark:text-neutral-300"
-								>
-									{sourceLabels[approval.source_type]}
-								</span>
-							</p>
-							<p class="mt-1 text-sm text-neutral-600 dark:text-neutral-400">{approval.detail}</p>
-						</div>
-						{#if approval.status === 'pending'}
-							{#if auth.grant === 'owner'}
-								<div class="flex flex-none items-center gap-2">
-									<button
-										type="button"
-										onclick={() => handleApprove(approval.id)}
-										disabled={actingId === approval.id}
-										class="rounded-md bg-agent-cyan px-2.5 py-1 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-									>
-										Approve
-									</button>
-									<button
-										type="button"
-										onclick={() => handleReject(approval.id)}
-										disabled={actingId === approval.id}
-										class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink hover:bg-neutral-200/60 disabled:opacity-50 dark:border-white/15 dark:text-ink-dark dark:hover:bg-white/5"
-									>
-										Reject
-									</button>
-								</div>
-							{:else}
-								<span class="flex-none text-xs text-neutral-500 italic">Owner access required</span>
-							{/if}
-						{:else}
-							<span
-								class="flex-none rounded-sm px-2 py-0.5 text-xs font-medium {approval.status ===
-								'approved'
-									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-									: 'bg-neutral-200/60 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
-							>
-								{approval.status}
-							</span>
-						{/if}
+		<div class="flex flex-col gap-4">
+			{#each visible as approval (approval.id)}
+				<div
+					class="rounded-2xl border border-line bg-surface px-7 py-6 dark:border-line-dark dark:bg-surface-dark"
+				>
+					<div class="mb-2 flex items-center gap-2.5">
+						<span class="text-sm font-semibold text-ink dark:text-ink-dark">{approval.title}</span>
+						<StatusPill tone={approval.source_type === 'budget' ? 'danger' : 'warn'}>
+							{sourceLabels[approval.source_type]}
+						</StatusPill>
 					</div>
-					{#if rowError[approval.id]}
-						<p class="mt-2 text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-							{rowError[approval.id]}
-						</p>
+					<p class="mb-5 text-base leading-normal text-ink dark:text-ink-dark">
+						{approval.detail}
+					</p>
+					{#if approval.status === 'pending'}
+						{#if auth.grant === 'owner'}
+							<div class="flex items-center justify-between gap-3">
+								<Button
+									variant="destructive"
+									disabled={actingId === approval.id}
+									onclick={() => decide(approval.id, 'reject')}
+								>
+									Reject
+								</Button>
+								<Button
+									disabled={actingId === approval.id}
+									class="px-8"
+									onclick={() => decide(approval.id, 'approve')}
+								>
+									Approve
+								</Button>
+							</div>
+						{:else}
+							<p class="text-[15px] text-muted italic dark:text-muted-dark">
+								Only the workspace owner can approve.
+							</p>
+						{/if}
+					{:else}
+						<StatusPill tone={approval.status === 'approved' ? 'accent' : 'neutral'}>
+							{approval.status === 'approved' ? 'Approved' : 'Rejected'}
+						</StatusPill>
 					{/if}
-				</li>
-			{/snippet}
-		</FilterableList>
+					{#if rowError[approval.id]}
+						<p class="mt-3 text-sm text-danger">{rowError[approval.id]}</p>
+					{/if}
+				</div>
+			{/each}
+		</div>
 	{/if}
 </div>

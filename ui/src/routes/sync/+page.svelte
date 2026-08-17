@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { ApiError } from '$lib/api/client';
 	import { auth } from '$lib/api/auth.svelte';
 	import OwnerOnly from '$lib/components/OwnerOnly.svelte';
 	import {
@@ -9,16 +8,30 @@
 		type SyncConflict,
 		type SyncStatus
 	} from '$lib/api/sync';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import SectionLabel from '$lib/ui/SectionLabel.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
+
+	// Sync (06-screens.md → Sync, mockup 2m, owner only): This machine /
+	// Other machines / Conflicts. Coordinator term & score and capability
+	// labels hide behind "Advanced" — never in the everyday view. The word
+	// "multiaddr" never appears in copy (banned list) — it's a sync address.
 
 	let status = $state<SyncStatus | null>(null);
 	let coordinator = $state<CoordinatorStatus | null>(null);
 	let conflicts = $state<SyncConflict[]>([]);
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	let reclaiming = $state(false);
 	let reclaimError = $state<string | null>(null);
 
-	let connectAddress = $state('');
 	let connecting = $state(false);
+	let connectAddress = $state('');
+	let connectBusy = $state(false);
 	let connectError = $state<string | null>(null);
 	let rowError = $state<string | null>(null);
 	let resolvingId = $state<string | null>(null);
@@ -39,8 +52,10 @@
 				sync.getCapabilities()
 			]);
 			capabilitiesDraft = myCapabilities.join(', ');
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load sync status';
+		} catch {
+			loadError = "Couldn't load sync status.";
+		} finally {
+			loading = false;
 		}
 	}
 
@@ -54,8 +69,8 @@
 		reclaiming = true;
 		try {
 			coordinator = await sync.reclaimCoordinator();
-		} catch (err) {
-			reclaimError = err instanceof ApiError ? err.message : 'Failed to reclaim coordinator';
+		} catch {
+			reclaimError = "Couldn't take over scheduled work. Try again.";
 		} finally {
 			reclaiming = false;
 		}
@@ -72,8 +87,8 @@
 		try {
 			const result = await sync.setCapabilities(tags);
 			myCapabilities = result.capabilities;
-		} catch (err) {
-			capabilitiesError = err instanceof ApiError ? err.message : 'Failed to save capabilities';
+		} catch {
+			capabilitiesError = "Couldn't save the labels. Try again.";
 		} finally {
 			savingCapabilities = false;
 		}
@@ -83,15 +98,16 @@
 		event.preventDefault();
 		connectError = null;
 		if (!connectAddress.trim()) return;
-		connecting = true;
+		connectBusy = true;
 		try {
 			await sync.connect(connectAddress.trim());
 			connectAddress = '';
-			await refresh();
-		} catch (err) {
-			connectError = err instanceof ApiError ? err.message : 'Failed to connect';
-		} finally {
 			connecting = false;
+			await refresh();
+		} catch {
+			connectError = "Couldn't reach that machine. Check the address and try again.";
+		} finally {
+			connectBusy = false;
 		}
 	}
 
@@ -105,8 +121,8 @@
 		try {
 			await sync.disconnect(peer.peer_id);
 			await refresh();
-		} catch (err) {
-			rowError = err instanceof ApiError ? err.message : 'Failed to disconnect';
+		} catch {
+			rowError = "Couldn't disconnect that machine. Try again.";
 		}
 	}
 
@@ -116,8 +132,8 @@
 		try {
 			await sync.resolveConflict(conflict.id, keep);
 			await refresh();
-		} catch (err) {
-			rowError = err instanceof ApiError ? err.message : 'Failed to resolve conflict';
+		} catch {
+			rowError = "Couldn't resolve that conflict. Try again.";
 		} finally {
 			resolvingId = null;
 		}
@@ -146,258 +162,271 @@
 {#if auth.grant !== 'owner'}
 	<OwnerOnly title="Sync" />
 {:else}
-	<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-		<header>
-			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Sync</h1>
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				P2P sync status, connected peers, and conflicts that need a decision (FR-9.6). Nodes on the
-				same workspace find each other automatically over the local network — manual connect below
-				is the fallback for nodes on different networks (FR-9.3).
-			</p>
-		</header>
+	<div class="mx-auto max-w-[720px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+		<h1 class="mb-7 font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Sync</h1>
 
-		{#if loadError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+		{#if loading}
+			<SkeletonCards count={2} />
+		{:else if loadError}
+			<ErrorBanner message={loadError} onRetry={refresh} />
 		{:else if status}
-			<section
-				class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
+			<SectionLabel class="mb-2.5">This machine</SectionLabel>
+			<div
+				class="mb-3 flex min-h-16 items-center gap-3 rounded-xl border border-line bg-surface px-4.5 dark:border-line-dark dark:bg-surface-dark"
 			>
-				<div class="flex items-center justify-between">
-					<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Status</h2>
-					<span
-						class="rounded-sm px-2 py-0.5 text-xs {status.running
-							? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-							: 'bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400'}"
-					>
-						{status.running ? 'running' : 'not running'}
-					</span>
+				<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">
+					{status.node_id ? shortId(status.node_id) : 'this machine'}
+				</span>
+				<StatusPill tone={status.running ? 'accent' : 'neutral'} class="ml-auto">
+					{status.running ? 'Syncing' : 'Not running'}
+				</StatusPill>
+			</div>
+			{#if status.own_addresses.length > 0}
+				<div class="mb-6 flex flex-col gap-2">
+					<p class="text-[13px] leading-normal text-muted dark:text-muted-dark">
+						This machine's sync address — paste it into "Connect a machine" on the other device to
+						pair them manually.
+					</p>
+					{#each status.own_addresses as address (address)}
+						<div class="flex items-center gap-2.5">
+							<code
+								class="flex h-12 min-w-0 flex-1 items-center overflow-hidden rounded-lg border border-line bg-surface px-4 font-mono text-xs text-ink dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
+							>
+								<span class="truncate">{address}</span>
+							</code>
+							<Button
+								variant="secondary"
+								class="flex-none"
+								onclick={() => handleCopyAddress(address)}
+							>
+								{copiedAddress === address ? 'Copied' : 'Copy'}
+							</Button>
+						</div>
+					{/each}
 				</div>
-				{#if status.node_id}
-					<p class="font-mono text-xs text-neutral-500">node: {status.node_id}</p>
-				{/if}
-
-				<form onsubmit={handleSetCapabilities} class="flex gap-2 pt-2">
-					<input
-						type="text"
-						bind:value={capabilitiesDraft}
-						placeholder="My capabilities (e.g. gpu, cpu-heavy)"
-						class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					/>
-					<button
-						type="submit"
-						disabled={savingCapabilities}
-						class="shrink-0 rounded-md border border-ink/15 px-4 py-2 text-sm font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-					>
-						{savingCapabilities ? 'Saving…' : 'Save capabilities'}
-					</button>
-				</form>
-				{#if capabilitiesError}
-					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
-						{capabilitiesError}
-					</p>
-				{/if}
-
-				{#if status.own_addresses.length > 0}
-					<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
-						<p class="text-xs text-neutral-500">
-							Your sync address — paste this into the "Connect to a node" field on the
-							<strong>other</strong> device to pair with it manually (e.g. over Tailscale or another network
-							peers can't auto-discover each other on).
-						</p>
-						{#each status.own_addresses as address (address)}
-							<div class="flex items-center gap-2">
-								<code class="min-w-0 flex-1 truncate text-xs text-ink dark:text-ink-dark"
-									>{address}</code
-								>
-								<button
-									type="button"
-									onclick={() => handleCopyAddress(address)}
-									class="shrink-0 rounded-md border border-ink/15 px-3 py-1 text-xs font-medium text-ink dark:border-white/15 dark:text-ink-dark"
-								>
-									{copiedAddress === address ? 'Copied' : 'Copy'}
-								</button>
-							</div>
-						{/each}
-					</div>
-				{/if}
-
-				<form onsubmit={handleConnect} class="flex flex-col gap-1 pt-2">
-					<p class="text-xs text-neutral-500">
-						Connect to a node — paste the sync address copied from the other device here.
-					</p>
-					<div class="flex gap-2">
-						<input
-							type="text"
-							bind:value={connectAddress}
-							placeholder="Multiaddr (e.g. /ip4/1.2.3.4/tcp/5000/p2p/12D3Koo...)"
-							class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-						<button
-							type="submit"
-							disabled={connecting || !status.running}
-							class="shrink-0 rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-						>
-							{connecting ? 'Connecting…' : 'Connect'}
-						</button>
-					</div>
-				</form>
-				{#if connectError}
-					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
-				{/if}
-
-				{#if status.peers.length === 0}
-					<p class="text-sm text-neutral-500 italic">No peers connected.</p>
-				{:else}
-					<ul class="flex flex-col gap-2">
-						{#each status.peers as peer (peer.peer_id)}
-							<li
-								class="flex items-center justify-between rounded-md border border-ink/12 px-3 py-2 dark:border-white/10"
-							>
-								<div>
-									<p class="font-mono text-xs text-ink dark:text-ink-dark">
-										{shortId(peer.peer_id)}
-									</p>
-									<p class="font-mono text-xs text-neutral-500">{peer.address}</p>
-									{#if peer.capabilities.length > 0}
-										<p class="font-mono text-xs text-neutral-500">
-											{peer.capabilities.join(', ')}
-										</p>
-									{/if}
-								</div>
-								<button
-									onclick={() => handleDisconnect(peer)}
-									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-								>
-									Disconnect
-								</button>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</section>
-
-			{#if coordinator && coordinator.running}
-				<section
-					class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-				>
-					<div class="flex items-center justify-between">
-						<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Coordinator</h2>
-						{#if coordinator.coordinator_id}
-							<span
-								class="rounded-sm px-2 py-0.5 text-xs {coordinator.is_self
-									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-									: 'bg-neutral-200 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400'}"
-							>
-								{coordinator.is_self ? 'this node' : shortId(coordinator.coordinator_id)}
-							</span>
-						{/if}
-					</div>
-					<p class="text-sm text-neutral-600 dark:text-neutral-400">
-						A spec-weighted election (#101) picks one peer to own workspace-singleton work (e.g.
-						scheduled jobs) so it doesn't run redundantly on every peer at once. Failover is
-						automatic; failback to a returning higher-spec peer is not — use reclaim below if you
-						want it back explicitly.
-					</p>
-					<p class="font-mono text-xs text-neutral-500">
-						term {coordinator.term} · this node's score {coordinator.self_score.toFixed(1)}
-					</p>
-					{#if !coordinator.is_self}
-						<button
-							onclick={handleReclaim}
-							disabled={reclaiming}
-							class="self-start rounded-md border border-ink/15 px-4 py-2 text-sm font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-						>
-							{reclaiming ? 'Reclaiming…' : 'Reclaim coordinator'}
-						</button>
-					{/if}
-					{#if reclaimError}
-						<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{reclaimError}</p>
-					{/if}
-				</section>
 			{/if}
 
-			<section class="flex flex-col gap-3">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">
-					Conflicts {conflicts.length > 0 ? `(${conflicts.length})` : ''}
-				</h2>
-				{#if rowError}
-					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{rowError}</p>
-				{/if}
-				{#if conflicts.length === 0}
-					<p class="text-sm text-neutral-500 italic">
-						No unresolved conflicts — concurrent edits to the same entity on two disconnected nodes
-						show up here.
-					</p>
-				{:else}
-					<ul class="flex flex-col gap-3">
-						{#each conflicts as conflict (conflict.id)}
-							<li
-								class="rounded-lg border border-agent-magenta-300 p-4 dark:border-agent-magenta-800/60"
+			<SectionLabel class="mb-2.5">Other machines</SectionLabel>
+			{#if rowError}
+				<p class="mb-2 text-sm text-danger">{rowError}</p>
+			{/if}
+			{#if status.peers.length === 0}
+				<p class="mb-4 text-[15px] text-muted dark:text-muted-dark">
+					No other machines connected. Machines on the same network find each other on their own.
+				</p>
+			{:else}
+				<div class="mb-4 flex flex-col gap-2">
+					{#each status.peers as peer (peer.peer_id)}
+						<div
+							class="flex min-h-16 flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4.5 py-2 dark:border-line-dark dark:bg-surface-dark"
+						>
+							<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">
+								{shortId(peer.peer_id)}
+							</span>
+							<span class="truncate font-mono text-xs text-muted dark:text-muted-dark">
+								{peer.address}
+							</span>
+							<StatusPill tone="accent" live class="ml-auto">Connected</StatusPill>
+							<button
+								type="button"
+								onclick={() => handleDisconnect(peer)}
+								class="flex-none text-sm font-medium text-danger hover:underline"
 							>
-								<div class="mb-3 flex items-center justify-between">
-									<p class="text-sm font-medium text-ink dark:text-ink-dark">
-										{conflict.entity_type}
-										<span class="ml-1 font-mono text-xs text-neutral-500"
-											>{shortId(conflict.entity_id)}</span
-										>
-									</p>
-									<p class="text-xs text-neutral-500">from {shortId(conflict.remote_node_id)}</p>
-								</div>
+								Disconnect
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+			<Button class="mb-8" onclick={() => (connecting = true)} disabled={!status.running}>
+				Connect a machine
+			</Button>
 
-								<div class="overflow-x-auto">
-									<table class="w-full text-left text-xs">
-										<thead>
-											<tr class="text-neutral-500">
-												<th class="pr-3 pb-1 font-normal">Field</th>
-												<th class="pr-3 pb-1 font-normal">Local (this node)</th>
-												<th class="pb-1 font-normal">Remote ({shortId(conflict.remote_node_id)})</th
+			<SectionLabel class="mb-2.5">Conflicts</SectionLabel>
+			{#if conflicts.length === 0}
+				<p class="mb-8 text-[15px] text-muted dark:text-muted-dark">No conflicts.</p>
+			{:else}
+				<div class="mb-8 flex flex-col gap-4">
+					{#each conflicts as conflict (conflict.id)}
+						<div
+							class="rounded-2xl border border-warn-line bg-surface px-6 py-5 dark:border-warn-line-dark dark:bg-surface-dark"
+						>
+							<div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+								<p class="text-[15px] font-semibold text-ink dark:text-ink-dark">
+									{conflict.entity_type}
+									<span class="ml-1 font-mono text-xs font-normal text-muted dark:text-muted-dark">
+										{shortId(conflict.entity_id)}
+									</span>
+								</p>
+								<p class="text-[13px] text-muted dark:text-muted-dark">
+									edited here and on {shortId(conflict.remote_node_id)}
+								</p>
+							</div>
+							<div class="mb-4 overflow-x-auto">
+								<table class="w-full text-left text-[13px]">
+									<thead>
+										<tr class="text-muted dark:text-muted-dark">
+											<th class="pr-3 pb-1.5 font-normal">Field</th>
+											<th class="pr-3 pb-1.5 font-normal">This machine</th>
+											<th class="pb-1.5 font-normal">The other machine</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each conflictKeys(conflict) as key (key)}
+											{@const localVal = conflict.local_snapshot[key]}
+											{@const remoteVal = conflict.remote_snapshot[key]}
+											{@const differs = JSON.stringify(localVal) !== JSON.stringify(remoteVal)}
+											<tr class="border-t border-line dark:border-line-dark">
+												<td class="py-1.5 pr-3 text-muted dark:text-muted-dark">{key}</td>
+												<td
+													class="py-1.5 pr-3 font-mono {differs
+														? 'font-medium text-ink dark:text-ink-dark'
+														: 'text-muted dark:text-muted-dark'}"
 												>
+													{displayValue(localVal)}
+												</td>
+												<td
+													class="py-1.5 font-mono {differs
+														? 'font-medium text-ink dark:text-ink-dark'
+														: 'text-muted dark:text-muted-dark'}"
+												>
+													{displayValue(remoteVal)}
+												</td>
 											</tr>
-										</thead>
-										<tbody>
-											{#each conflictKeys(conflict) as key (key)}
-												{@const localVal = conflict.local_snapshot[key]}
-												{@const remoteVal = conflict.remote_snapshot[key]}
-												{@const differs = JSON.stringify(localVal) !== JSON.stringify(remoteVal)}
-												<tr class="border-t border-ink/10 dark:border-white/10">
-													<td class="py-1 pr-3 text-neutral-500">{key}</td>
-													<td
-														class="py-1 pr-3 font-mono {differs
-															? 'text-ink dark:text-ink-dark'
-															: 'text-neutral-500'}">{displayValue(localVal)}</td
-													>
-													<td
-														class="py-1 font-mono {differs
-															? 'text-ink dark:text-ink-dark'
-															: 'text-neutral-500'}">{displayValue(remoteVal)}</td
-													>
-												</tr>
-											{/each}
-										</tbody>
-									</table>
-								</div>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+							<div class="flex flex-wrap justify-end gap-3">
+								<Button
+									variant="secondary"
+									disabled={resolvingId === conflict.id}
+									onclick={() => handleResolve(conflict, 'local')}
+								>
+									Keep this machine
+								</Button>
+								<Button
+									disabled={resolvingId === conflict.id}
+									onclick={() => handleResolve(conflict, 'remote')}
+								>
+									Keep the other machine
+								</Button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
 
-								<div class="mt-3 flex gap-2">
-									<button
-										onclick={() => handleResolve(conflict, 'local')}
-										disabled={resolvingId === conflict.id}
-										class="rounded-md border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-									>
-										Keep local
-									</button>
-									<button
-										onclick={() => handleResolve(conflict, 'remote')}
-										disabled={resolvingId === conflict.id}
-										class="rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-									>
-										Keep remote
-									</button>
-								</div>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</section>
+			<details>
+				<summary
+					class="flex cursor-pointer items-center gap-2 text-[15px] font-medium text-ink dark:text-ink-dark"
+				>
+					<Icon name="chevron-right" class="h-4 w-4 text-muted dark:text-muted-dark" />
+					Advanced
+				</summary>
+				<div class="mt-4 flex flex-col gap-5 pl-6">
+					{#if coordinator && coordinator.running}
+						<div class="flex flex-col gap-2">
+							<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+								Scheduled work runs on
+							</span>
+							<p class="text-sm leading-normal text-muted dark:text-muted-dark">
+								One machine owns schedules and other workspace-wide jobs so they don't run twice.
+								Right now that's
+								{coordinator.is_self
+									? 'this machine'
+									: coordinator.coordinator_id
+										? shortId(coordinator.coordinator_id)
+										: 'undecided'}.
+								<span class="font-mono text-xs">
+									(term {coordinator.term} · this machine's score {coordinator.self_score.toFixed(
+										1
+									)})
+								</span>
+							</p>
+							{#if !coordinator.is_self}
+								<Button
+									variant="secondary"
+									size="md"
+									class="self-start"
+									onclick={handleReclaim}
+									disabled={reclaiming}
+								>
+									{reclaiming ? 'Taking over…' : 'Run scheduled work here'}
+								</Button>
+							{/if}
+							{#if reclaimError}
+								<p class="text-sm text-danger">{reclaimError}</p>
+							{/if}
+						</div>
+					{/if}
+					<form onsubmit={handleSetCapabilities} class="flex flex-col gap-2">
+						<label
+							class="text-sm font-semibold text-ink dark:text-ink-dark"
+							for="sync-capabilities"
+						>
+							This machine's labels
+						</label>
+						<p class="text-[13px] text-muted dark:text-muted-dark">
+							Agents with a preferred machine run where the matching label is advertised — e.g.
+							"gpu".
+						</p>
+						<div class="flex gap-2.5">
+							<input
+								id="sync-capabilities"
+								type="text"
+								bind:value={capabilitiesDraft}
+								placeholder="gpu, cpu-heavy"
+								class="h-12 min-w-0 flex-1 rounded-lg border border-line bg-surface px-4 font-mono text-sm text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+							/>
+							<Button
+								variant="secondary"
+								class="flex-none"
+								type="submit"
+								disabled={savingCapabilities}
+							>
+								{savingCapabilities ? 'Saving…' : 'Save'}
+							</Button>
+						</div>
+						{#if capabilitiesError}
+							<p class="text-sm text-danger">{capabilitiesError}</p>
+						{/if}
+					</form>
+				</div>
+			</details>
 		{/if}
 	</div>
+{/if}
+
+{#if connecting}
+	<Sheet title="Connect a machine" onClose={() => (connecting = false)} width={480}>
+		<form id="sync-connect-form" onsubmit={handleConnect} class="flex flex-col gap-2">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="sync-address">
+				Sync address
+			</label>
+			<p class="text-[13px] leading-normal text-muted dark:text-muted-dark">
+				On the other machine, open Sync and copy its address, then paste it here.
+			</p>
+			<input
+				id="sync-address"
+				type="text"
+				bind:value={connectAddress}
+				placeholder="/ip4/…"
+				class="h-12 rounded-lg border border-line bg-surface px-4 font-mono text-xs text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+			/>
+			{#if connectError}
+				<p class="text-sm text-danger">{connectError}</p>
+			{/if}
+		</form>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (connecting = false)}>Cancel</Button>
+			<Button
+				disabled={connectBusy || !connectAddress.trim()}
+				onclick={() =>
+					(document.getElementById('sync-connect-form') as HTMLFormElement).requestSubmit()}
+			>
+				{connectBusy ? 'Connecting…' : 'Connect'}
+			</Button>
+		{/snippet}
+	</Sheet>
 {/if}

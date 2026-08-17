@@ -1,9 +1,6 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts and
-// Sidebar.svelte.test.ts for the $app/state + $app/paths mocking pattern
-// route components need). This route reads its channel id from
-// `page.params.id` (SvelteKit's $app/state), so that's mocked alongside
-// the $lib/api/* modules it calls. $lib/ink and $lib/format are real,
-// unmocked utility modules -- no network I/O, safe to exercise as-is.
+// Browser-mode component test for the Channel page (06-screens.md →
+// Channel, mockup 1f): thread cards, the team chip menu, and the Stream
+// Bar that CREATES a conversation (never a channel-root transcript).
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -13,10 +10,14 @@ import { channels, type Channel } from '$lib/api/channels';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams, type Team } from '$lib/api/teams';
 import { files as filesApi } from '$lib/api/files';
+import { workflows as workflowsApi } from '$lib/api/workflows';
+import { goto } from '$app/navigation';
 
 vi.mock('$app/state', () => ({
 	page: { params: { id: 'chan-1' }, url: new URL('http://localhost/channels/chan-1') }
 }));
+
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 vi.mock('$app/paths', () => ({
 	resolve: (path: string, params?: Record<string, string>) => {
@@ -37,7 +38,15 @@ vi.mock('$lib/api/rivulets', () => ({
 }));
 
 vi.mock('$lib/api/teams', () => ({
-	teams: { list: vi.fn() }
+	teams: { list: vi.fn(), get: vi.fn() }
+}));
+
+vi.mock('$lib/api/agents', () => ({
+	agents: { list: vi.fn() }
+}));
+
+vi.mock('$lib/api/workflows', () => ({
+	workflows: { list: vi.fn() }
 }));
 
 vi.mock('$lib/api/files', () => ({
@@ -96,87 +105,119 @@ const agentMessage: Message = {
 	served_model: null
 };
 
+function seed(overrides?: { channel?: Channel; rivulets?: Rivulet[]; teams?: Team[] }) {
+	vi.mocked(channels.get).mockResolvedValue(overrides?.channel ?? generalChannel);
+	vi.mocked(rivulets.listForChannel).mockResolvedValue(overrides?.rivulets ?? []);
+	vi.mocked(teams.list).mockResolvedValue(overrides?.teams ?? []);
+	vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, agentMessage]);
+	vi.mocked(workflowsApi.list).mockResolvedValue([]);
+}
+
 afterEach(() => {
 	vi.clearAllMocks();
 });
 
 describe('channels/[id]/+page.svelte', () => {
-	it('loads the channel by page.params.id and shows a rivulet preview', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([kickoffRivulet]);
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, agentMessage]);
+	it('loads the channel by page.params.id and shows a thread card', async () => {
+		seed({ rivulets: [kickoffRivulet] });
 
 		render(ChannelPage);
 
 		expect(channels.get).toHaveBeenCalledWith('chan-1');
 		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
-		await expect.element(page.getByText('1 rivulet')).toBeInTheDocument();
+		await expect.element(page.getByText('1 conversation', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText(/Researcher/)).toBeInTheDocument();
 	});
 
-	it('shows the empty state when the channel has no rivulets', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
+	it('shows the empty state when the channel has no conversations', async () => {
+		seed();
 
 		render(ChannelPage);
 
-		await expect.element(page.getByText('No rivulets yet — start one below.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
 	});
 
-	it('changes the routed team via channels.update', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(channels.update).mockResolvedValueOnce({ ...generalChannel, team_id: 'team-1' });
+	it('warns in the helper line when the channel has no team', async () => {
+		seed();
 
 		render(ChannelPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
 
-		await page.getByRole('combobox').selectOptions('team-1');
+		await expect
+			.element(page.getByText("No team — agents won't answer").first())
+			.toBeInTheDocument();
+	});
+
+	it('changes the routed team via the team chip menu', async () => {
+		seed({ teams: [supportTeam] });
+		vi.mocked(channels.update).mockResolvedValueOnce({ ...generalChannel, team_id: 'team-1' });
+		vi.mocked(teams.get).mockResolvedValue({ ...supportTeam, agent_ids: [] });
+
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
+
+		await page
+			.getByRole('button', { name: /No team/ })
+			.first()
+			.click();
+		await page.getByRole('menuitem', { name: 'Support' }).click();
 
 		expect(channels.update).toHaveBeenCalledWith('chan-1', { team_id: 'team-1' });
-		await expect.element(page.getByText('routes to', { exact: false })).toBeInTheDocument();
+		await expect.element(page.getByText('Routes to Support')).toBeInTheDocument();
 	});
 
-	it('posts a new rivulet via rivulets.create and clears the composer', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel)
-			.mockResolvedValueOnce([])
-			.mockResolvedValueOnce([kickoffRivulet]);
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+	it('shows a plain-language error when changing the team fails', async () => {
+		seed({ teams: [supportTeam] });
+		vi.mocked(channels.update).mockRejectedValueOnce(new Error('boom'));
+
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
+
+		await page
+			.getByRole('button', { name: /No team/ })
+			.first()
+			.click();
+		await page.getByRole('menuitem', { name: 'Support' }).click();
+
+		await expect
+			.element(page.getByText("Couldn't change the team. Try again."))
+			.toBeInTheDocument();
+	});
+
+	it('posting creates a conversation and opens it — never a channel transcript', async () => {
+		seed();
 		vi.mocked(rivulets.create).mockResolvedValueOnce(kickoffRivulet);
 
 		render(ChannelPage);
-		const input = page.getByPlaceholder(/Start a rivulet/);
+		const input = page.getByPlaceholder('Start a conversation…');
 		await expect.element(input).toBeInTheDocument();
 
 		await input.fill('Kickoff message');
 		await page.getByRole('button', { name: 'Send' }).click();
 
 		expect(rivulets.create).toHaveBeenCalledWith('chan-1', 'Kickoff message', []);
-		await expect.element(input).toHaveValue('');
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-1');
 	});
 
-	it('shows an error when the channel fails to load', async () => {
-		vi.mocked(channels.get).mockRejectedValueOnce(new Error('Failed to load channel'));
+	it('shows a quiet error with retry when the channel fails to load', async () => {
+		vi.mocked(channels.get).mockRejectedValueOnce(new Error('boom'));
 		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
 		vi.mocked(teams.list).mockResolvedValue([]);
+		vi.mocked(workflowsApi.list).mockResolvedValue([]);
 
 		render(ChannelPage);
 
-		await expect.element(page.getByText('Failed to load channel')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load conversations.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 
-	it('shows the channel description when set', async () => {
-		vi.mocked(channels.get).mockResolvedValue({
-			...generalChannel,
-			description: 'General discussion'
-		});
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
+	it('shows the channel description in the header when set', async () => {
+		seed({ channel: { ...generalChannel, description: 'General discussion' } });
 
 		render(ChannelPage);
 
@@ -185,27 +226,13 @@ describe('channels/[id]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
-	it('shows an error when changing the team fails', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([supportTeam]);
-		vi.mocked(channels.update).mockRejectedValueOnce(new Error('Failed to change team'));
-
-		render(ChannelPage);
-		await expect.element(page.getByText('Support')).toBeInTheDocument();
-
-		await page.getByRole('combobox').selectOptions('team-1');
-
-		await expect.element(page.getByText('Failed to change team')).toBeInTheDocument();
-	});
-
-	it('adds a pending file via the file input and removes it', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
+	it('adds a pending file via the attach input and removes it', async () => {
+		seed();
 
 		const { container } = await render(ChannelPage);
-		await expect.element(page.getByText('No rivulets yet — start one below.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
 		await page
@@ -219,12 +246,7 @@ describe('channels/[id]/+page.svelte', () => {
 	});
 
 	it('uploads pending files before posting and includes their ids', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel)
-			.mockResolvedValueOnce([])
-			.mockResolvedValueOnce([kickoffRivulet]);
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage]);
+		seed();
 		vi.mocked(filesApi.upload).mockResolvedValue({
 			file_id: 'file-1',
 			content_hash: 'hash',
@@ -235,7 +257,9 @@ describe('channels/[id]/+page.svelte', () => {
 		vi.mocked(rivulets.create).mockResolvedValueOnce(kickoffRivulet);
 
 		const { container } = await render(ChannelPage);
-		await expect.element(page.getByText('No rivulets yet — start one below.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
 		await page
@@ -243,37 +267,34 @@ describe('channels/[id]/+page.svelte', () => {
 			.upload(new File(['hello'], 'notes.txt', { type: 'text/plain' }));
 		await expect.element(page.getByText('notes.txt')).toBeInTheDocument();
 
-		await page.getByPlaceholder(/Start a rivulet/).fill('Kickoff message');
+		await page.getByPlaceholder('Start a conversation…').fill('Kickoff message');
 		await page.getByRole('button', { name: 'Send' }).click();
 
 		expect(filesApi.upload).toHaveBeenCalledTimes(1);
 		expect(rivulets.create).toHaveBeenCalledWith('chan-1', 'Kickoff message', ['file-1']);
 	});
 
-	it('does nothing when the form is submitted with no message and no pending files', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
+	it('does nothing when Send is pressed with no message and no pending files', async () => {
+		seed();
 
-		const { container } = await render(ChannelPage);
-		await expect.element(page.getByText('No rivulets yet — start one below.')).toBeInTheDocument();
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Start the first conversation in #general.'))
+			.toBeInTheDocument();
 
-		const form = container.querySelector('form')!;
-		form.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+		await page.getByRole('button', { name: 'Send' }).click();
 
 		expect(rivulets.create).not.toHaveBeenCalled();
 	});
 
-	it('shows an error when posting a new rivulet fails', async () => {
-		vi.mocked(channels.get).mockResolvedValue(generalChannel);
-		vi.mocked(rivulets.listForChannel).mockResolvedValue([]);
-		vi.mocked(teams.list).mockResolvedValue([]);
-		vi.mocked(rivulets.create).mockRejectedValueOnce(new Error('Failed to send message'));
+	it('shows a plain-language error when posting fails', async () => {
+		seed();
+		vi.mocked(rivulets.create).mockRejectedValueOnce(new Error('boom'));
 
 		render(ChannelPage);
-		await page.getByPlaceholder(/Start a rivulet/).fill('Kickoff message');
+		await page.getByPlaceholder('Start a conversation…').fill('Kickoff message');
 		await page.getByRole('button', { name: 'Send' }).click();
 
-		await expect.element(page.getByText('Failed to send message')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't send that. Try again.")).toBeInTheDocument();
 	});
 });

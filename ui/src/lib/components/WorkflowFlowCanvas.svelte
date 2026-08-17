@@ -91,27 +91,29 @@
 		ondragover={handleDragOver}
 		ondrop={handleDrop}
 	>
-		<SvelteFlow
-			{nodes}
-			{edges}
-			{nodeTypes}
-			fitView
-			nodesDraggable={!readOnly}
-			nodesConnectable={!readOnly}
-			{colorMode}
-			bind:viewport
-			onnodeclick={(e) => onnodeclick(e.node.id)}
-			onnodedragstop={(e) =>
-				onnodesmoved(
-					e.nodes.map((n) => ({ id: n.id, positionX: n.position.x, positionY: n.position.y }))
-				)}
-			{onconnect}
-			onedgeclick={(e) => onedgeclick(e.edge.id)}
-		>
-			<Background />
-			<Controls showLock={false} />
-			<MiniMap />
-		</SvelteFlow>
+		<div class="canvas-fill">
+			<SvelteFlow
+				{nodes}
+				{edges}
+				{nodeTypes}
+				fitView
+				nodesDraggable={!readOnly}
+				nodesConnectable={!readOnly}
+				{colorMode}
+				bind:viewport
+				onnodeclick={(e) => onnodeclick(e.node.id)}
+				onnodedragstop={(e) =>
+					onnodesmoved(
+						e.nodes.map((n) => ({ id: n.id, positionX: n.position.x, positionY: n.position.y }))
+					)}
+				{onconnect}
+				onedgeclick={(e) => onedgeclick(e.edge.id)}
+			>
+				<Background />
+				<Controls showLock={false} />
+				<MiniMap />
+			</SvelteFlow>
+		</div>
 	</div>
 </div>
 
@@ -126,10 +128,20 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
+		/* A hard floor so the board still has room when the parent chain
+		   can't provide a height (component tests never load Tailwind;
+		   percentage heights resolve to auto without it). */
+		min-height: 480px;
 	}
 	.canvas-pane {
 		position: relative;
 		min-height: 0;
 		flex: 1 1 auto;
+	}
+	/* Absolute fill so SvelteFlow's own 100% sizing resolves against a
+	   definite box even when the pane's height comes from flex. */
+	.canvas-fill {
+		position: absolute;
+		inset: 0;
 	}
 </style>

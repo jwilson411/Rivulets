@@ -10,23 +10,35 @@
 		type JudgeType
 	} from '$lib/api/evals';
 	import { auth } from '$lib/api/auth.svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { timeAgo } from '$lib/format';
-	import Icon from '$lib/components/Icon.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
+
+	// Evals (06-screens.md → Evals, mockup 2f): suite cards with a 48px Run
+	// button; cases open in a sheet; judge types in plain language — "Exact
+	// text", "Contains", "A model grades it", "A specific tool was used".
 
 	const JUDGE_TYPE_LABELS: Record<JudgeType, string> = {
-		exact: 'Exact match',
-		substring: 'Contains text',
-		llm_judge: 'LLM judge (rubric)',
-		structural: 'Tool call check'
+		exact: 'Exact text',
+		substring: 'Contains',
+		llm_judge: 'A model grades it',
+		structural: 'A specific tool was used'
 	};
 
 	let suiteList = $state<EvalSuite[]>([]);
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
+	let lastRunBySuite = $state<Record<string, EvalRun | null>>({});
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	// Agents / workflows a guest's suite writes would 403 against.
-	let scopedAgentIds = $state<Set<string>>(new Set());
-	let scopedWorkflowIds = $state<Set<string>>(new Set());
+	let scopedAgentIds = new SvelteSet<string>();
+	let scopedWorkflowIds = new SvelteSet<string>();
 
 	// #355: the server 403s an invite-grant suite create/run against an
 	// unpublished workflow (owner-only draft runs), so don't offer drafts
@@ -65,8 +77,16 @@
 			suiteList = loadedSuites;
 			agentList = loadedAgents;
 			workflowList = loadedWorkflows;
+			// Latest result per suite drives the card's pass/fail pill.
+			const lastRuns = await Promise.all(
+				loadedSuites.map(async (suite) => {
+					const runList = await evals.listRuns(suite.id).catch(() => [] as EvalRun[]);
+					return [suite.id, runList[0] ?? null] as const;
+				})
+			);
+			lastRunBySuite = Object.fromEntries(lastRuns);
 			if (auth.grant !== 'owner') {
-				const nextScopedAgents = new Set<string>();
+				const nextScopedAgents = new SvelteSet<string>();
 				await Promise.all(
 					loadedAgents.map(async (agent) => {
 						try {
@@ -82,7 +102,7 @@
 						loadedSuites.map((suite) => suite.workflow_id).filter((id): id is string => id !== null)
 					)
 				];
-				const nextScopedWorkflows = new Set<string>();
+				const nextScopedWorkflows = new SvelteSet<string>();
 				await Promise.all(
 					workflowIds.map(async (id) => {
 						try {
@@ -97,18 +117,32 @@
 						}
 					})
 				);
-				scopedAgentIds = nextScopedAgents;
-				scopedWorkflowIds = nextScopedWorkflows;
+				scopedAgentIds.clear();
+				for (const id of nextScopedAgents) scopedAgentIds.add(id);
+				scopedWorkflowIds.clear();
+				for (const id of nextScopedWorkflows) scopedWorkflowIds.add(id);
 			} else {
-				scopedAgentIds = new Set();
-				scopedWorkflowIds = new Set();
+				scopedAgentIds.clear();
+				scopedWorkflowIds.clear();
 			}
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load eval suites';
+		} catch {
+			loadError = "Couldn't load evals.";
+		} finally {
+			loading = false;
 		}
 	}
 
 	refresh();
+
+	function subjectLabel(suite: EvalSuite): string {
+		return suite.subject_type === 'agent' ? suite.subject_name : `/${suite.subject_name}`;
+	}
+
+	function lastRunTone(run: EvalRun): 'accent' | 'warn' | 'danger' {
+		if (run.pass_count === run.case_count) return 'accent';
+		if (run.fail_count > 0 && run.pass_count === 0) return 'danger';
+		return 'warn';
+	}
 
 	// --- Suite creation ---
 
@@ -143,7 +177,7 @@
 			showCreateSuite = false;
 			await refresh();
 		} catch (err) {
-			createSuiteError = err instanceof Error ? err.message : 'Failed to create eval suite';
+			createSuiteError = err instanceof Error ? err.message : "Couldn't create the suite.";
 		} finally {
 			createSuiteBusy = false;
 		}
@@ -154,17 +188,19 @@
 		if (suite && suiteSubjectGated(suite)) return;
 		try {
 			await evals.deleteSuite(suiteId);
+			casesSuite = null;
 			await refresh();
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to delete eval suite';
+		} catch {
+			loadError = "Couldn't delete that suite.";
 		}
 	}
 
-	// --- Case management (one suite expanded at a time) ---
+	// --- Cases (open in a sheet) ---
 
-	let expandedCasesSuiteId = $state<string | null>(null);
-	let casesBySuite = $state<Record<string, EvalCase[]>>({});
+	let casesSuite = $state<EvalSuite | null>(null);
+	let caseList = $state<EvalCase[]>([]);
 	let casesError = $state<string | null>(null);
+	let confirmingSuiteDelete = $state(false);
 
 	let showAddCase = $state(false);
 	let caseNameDraft = $state('');
@@ -177,18 +213,15 @@
 	let addCaseBusy = $state(false);
 	let addCaseError = $state<string | null>(null);
 
-	async function toggleCases(suiteId: string) {
-		if (expandedCasesSuiteId === suiteId) {
-			expandedCasesSuiteId = null;
-			return;
-		}
-		expandedCasesSuiteId = suiteId;
-		showAddCase = false;
+	async function openCases(suite: EvalSuite) {
 		casesError = null;
+		showAddCase = false;
+		confirmingSuiteDelete = false;
 		try {
-			casesBySuite[suiteId] = await evals.listCases(suiteId);
-		} catch (err) {
-			casesError = err instanceof Error ? err.message : 'Failed to load cases';
+			caseList = await evals.listCases(suite.id);
+			casesSuite = suite;
+		} catch {
+			loadError = "Couldn't load that suite's cases.";
 		}
 	}
 
@@ -204,21 +237,21 @@
 		addCaseError = null;
 	}
 
-	async function handleAddCase(suiteId: string) {
-		if (!caseNameDraft.trim() || !caseInputDraft.trim()) return;
+	async function handleAddCase() {
+		if (!casesSuite || !caseNameDraft.trim() || !caseInputDraft.trim()) return;
 		let expectedToolArgs: Record<string, unknown> | undefined;
 		if (caseJudgeTypeDraft === 'structural' && caseToolArgsDraft.trim()) {
 			try {
 				expectedToolArgs = JSON.parse(caseToolArgsDraft) as Record<string, unknown>;
 			} catch {
-				addCaseError = 'Expected tool args must be valid JSON (or left blank).';
+				addCaseError = 'Expected tool inputs must be valid JSON, or left blank.';
 				return;
 			}
 		}
 		addCaseBusy = true;
 		addCaseError = null;
 		try {
-			await evals.createCase(suiteId, {
+			await evals.createCase(casesSuite.id, {
 				name: caseNameDraft.trim(),
 				input_content: caseInputDraft,
 				judge_type: caseJudgeTypeDraft,
@@ -231,22 +264,23 @@
 				expected_tool_args: expectedToolArgs
 			});
 			showAddCase = false;
-			casesBySuite[suiteId] = await evals.listCases(suiteId);
+			caseList = await evals.listCases(casesSuite.id);
 			await refresh();
 		} catch (err) {
-			addCaseError = err instanceof Error ? err.message : 'Failed to add case';
+			addCaseError = err instanceof Error ? err.message : "Couldn't add that case.";
 		} finally {
 			addCaseBusy = false;
 		}
 	}
 
-	async function handleDeleteCase(suiteId: string, caseId: string) {
+	async function handleDeleteCase(caseId: string) {
+		if (!casesSuite) return;
 		try {
-			await evals.deleteCase(suiteId, caseId);
-			casesBySuite[suiteId] = await evals.listCases(suiteId);
+			await evals.deleteCase(casesSuite.id, caseId);
+			caseList = await evals.listCases(casesSuite.id);
 			await refresh();
-		} catch (err) {
-			casesError = err instanceof Error ? err.message : 'Failed to delete case';
+		} catch {
+			casesError = "Couldn't remove that case.";
 		}
 	}
 
@@ -256,24 +290,25 @@
 	let runError = $state<Record<string, string | null>>({});
 	let expandedRunsSuiteId = $state<string | null>(null);
 	let runsBySuite = $state<Record<string, EvalRun[]>>({});
+	let casesForResults = $state<Record<string, EvalCase[]>>({});
 	let runsError = $state<string | null>(null);
 	let expandedRunId = $state<string | null>(null);
 	let resultsByRun = $state<Record<string, EvalCaseResult[]>>({});
 	let resultsError = $state<string | null>(null);
 
-	async function handleRunSuite(suiteId: string) {
-		const suite = suiteList.find((item) => item.id === suiteId);
-		if (suite && suiteRunGated(suite)) return;
-		runBusy[suiteId] = true;
-		runError[suiteId] = null;
+	async function handleRunSuite(suite: EvalSuite) {
+		if (suiteRunGated(suite)) return;
+		runBusy[suite.id] = true;
+		runError[suite.id] = null;
 		try {
-			await evals.run(suiteId);
-			expandedRunsSuiteId = suiteId;
-			runsBySuite[suiteId] = await evals.listRuns(suiteId);
-		} catch (err) {
-			runError[suiteId] = err instanceof Error ? err.message : 'Failed to run eval suite';
+			await evals.run(suite.id);
+			expandedRunsSuiteId = suite.id;
+			runsBySuite[suite.id] = await evals.listRuns(suite.id);
+			lastRunBySuite[suite.id] = runsBySuite[suite.id][0] ?? null;
+		} catch {
+			runError[suite.id] = "Couldn't run that suite. Try again.";
 		} finally {
-			runBusy[suiteId] = false;
+			runBusy[suite.id] = false;
 		}
 	}
 
@@ -286,8 +321,9 @@
 		runsError = null;
 		try {
 			runsBySuite[suiteId] = await evals.listRuns(suiteId);
-		} catch (err) {
-			runsError = err instanceof Error ? err.message : 'Failed to load run history';
+			casesForResults[suiteId] = await evals.listCases(suiteId).catch(() => [] as EvalCase[]);
+		} catch {
+			runsError = "Couldn't load run history.";
 		}
 	}
 
@@ -301,431 +337,436 @@
 		resultsError = null;
 		try {
 			resultsByRun[runId] = await evals.listResults(suiteId, runId);
-		} catch (err) {
-			resultsError = err instanceof Error ? err.message : 'Failed to load results';
+		} catch {
+			resultsError = "Couldn't load results.";
 		}
 	}
 
-	function resultStatusClass(status: string): string {
-		if (status === 'passed')
-			return 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400';
-		if (status === 'failed')
-			return 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400';
-		return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400';
-	}
-
-	function runSummaryClass(run: EvalRun): string {
-		if (run.pass_count === run.case_count) {
-			return 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400';
-		}
-		if (run.fail_count > 0) {
-			return 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400';
-		}
-		return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400';
-	}
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
+	const areaClass =
+		'rounded-lg border border-line bg-surface px-4 py-3 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header class="flex items-start justify-between gap-4">
-		<div>
-			<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Evals</h1>
-			<p class="text-sm text-neutral-600 dark:text-neutral-400">
-				Regression-test suites for agents and workflows — a fixed set of inputs, each judged against
-				an expected outcome, so a behavior change shows up as a failing case instead of a human
-				happening to notice a bad reply.
-			</p>
-		</div>
-		<button
-			onclick={openCreateSuite}
-			class="shrink-0 rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white hover:bg-agent-cyan-600"
-		>
-			+ New suite
-		</button>
-	</header>
+<div class="mx-auto max-w-[720px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-6 flex items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Evals</h1>
+		<Button onclick={openCreateSuite}>
+			<Icon name="plus" class="h-[18px] w-[18px]" />
+			New suite
+		</Button>
+	</div>
 
-	{#if showCreateSuite}
-		<div class="flex flex-col gap-2 rounded-lg border border-ink/12 p-4 dark:border-white/10">
-			<label class="flex flex-col gap-1 text-xs text-neutral-500">
-				Name
-				<input
-					type="text"
-					bind:value={suiteNameDraft}
-					placeholder="greeting-regressions"
-					class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				/>
-			</label>
-			<label class="flex flex-col gap-1 text-xs text-neutral-500">
-				Description
-				<input
-					type="text"
-					bind:value={suiteDescriptionDraft}
-					placeholder="optional"
-					class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-				/>
-			</label>
-			<div class="flex gap-4 text-xs text-neutral-500">
-				<label class="flex items-center gap-1.5">
-					<input
-						type="radio"
-						name="subject-type"
-						value="agent"
-						checked={suiteSubjectType === 'agent'}
-						onchange={() => {
-							suiteSubjectType = 'agent';
-							suiteSubjectId = '';
-						}}
-					/>
-					Agent
-				</label>
-				<label class="flex items-center gap-1.5">
-					<input
-						type="radio"
-						name="subject-type"
-						value="workflow"
-						checked={suiteSubjectType === 'workflow'}
-						onchange={() => {
-							suiteSubjectType = 'workflow';
-							suiteSubjectId = '';
-						}}
-					/>
-					Workflow
-				</label>
-			</div>
-			<select
-				bind:value={suiteSubjectId}
-				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-			>
-				<option value="" disabled>
-					{suiteSubjectType === 'agent' ? 'Select an agent…' : 'Select a workflow…'}
-				</option>
-				{#if suiteSubjectType === 'agent'}
-					{#each selectableAgents as agent (agent.id)}
-						<option value={agent.id}>{agent.name}</option>
-					{/each}
-				{:else}
-					{#each selectableWorkflows as workflow (workflow.id)}
-						<option value={workflow.id}>
-							/{workflow.name}{workflow.published ? '' : ' (draft)'}
-						</option>
-					{/each}
-				{/if}
-			</select>
-			{#if createSuiteError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createSuiteError}</p>
-			{/if}
-			<div class="flex gap-3">
-				<button
-					onclick={handleCreateSuite}
-					disabled={createSuiteBusy || !suiteNameDraft.trim() || !suiteSubjectId}
-					class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-				>
-					{createSuiteBusy ? 'Creating…' : 'Create suite'}
-				</button>
-				<button
-					onclick={() => (showCreateSuite = false)}
-					class="text-sm text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-				>
-					Cancel
-				</button>
-			</div>
-		</div>
-	{/if}
-
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else if suiteList.length === 0 && !showCreateSuite}
-		<p class="text-sm text-neutral-500 italic">
-			No eval suites yet — create one to start catching regressions.
+	{#if loading}
+		<SkeletonCards count={2} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if suiteList.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">
+			No eval suites yet. A suite is a fixed set of inputs judged against expected outcomes, so a
+			behavior change shows up as a failing case.
 		</p>
 	{:else}
-		<ul class="flex flex-col gap-3">
+		<div class="flex flex-col gap-4">
 			{#each suiteList as suite (suite.id)}
-				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					<div class="flex items-start justify-between gap-3">
-						<div>
-							<p class="flex items-center gap-2 font-medium text-ink dark:text-ink-dark">
-								<Icon name="flask" class="h-4 w-4 flex-none text-neutral-500" />
-								{suite.name}
-							</p>
-							<p class="text-xs text-neutral-500">
-								{suite.subject_type === 'agent' ? '' : '/'}{suite.subject_name}
-								· {suite.case_count} case{suite.case_count === 1 ? '' : 's'}
-							</p>
-							{#if suite.description}
-								<p class="mt-1 text-xs text-neutral-500">{suite.description}</p>
-							{/if}
-						</div>
-						<div class="flex flex-none items-center gap-2">
-							{#if !suiteRunGated(suite)}
-								<button
-									onclick={() => handleRunSuite(suite.id)}
-									disabled={runBusy[suite.id] || suite.case_count === 0}
-									class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-								>
-									{runBusy[suite.id] ? 'Running…' : 'Run'}
-								</button>
-							{/if}
-							{#if !suiteSubjectGated(suite)}
-								<button
-									onclick={() => handleDeleteSuite(suite.id)}
-									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-								>
-									Delete
-								</button>
-							{/if}
-						</div>
+				{@const lastRun = lastRunBySuite[suite.id]}
+				<div
+					class="rounded-2xl border border-line bg-surface px-7 py-6 dark:border-line-dark dark:bg-surface-dark"
+				>
+					<div class="mb-1.5 flex flex-wrap items-center gap-3">
+						<span class="text-lg font-semibold text-ink dark:text-ink-dark">{suite.name}</span>
+						{#if lastRun}
+							<StatusPill tone={lastRunTone(lastRun)}>
+								{lastRun.pass_count}/{lastRun.case_count} passed
+							</StatusPill>
+						{/if}
+					</div>
+					<p class="mb-5 text-[15px] text-muted dark:text-muted-dark">
+						Targets {suite.subject_type === 'agent' ? 'agent' : 'workflow'}
+						<span
+							class="rounded-md bg-paper px-1.5 py-0.5 font-mono text-[13px] dark:bg-paper-dark"
+						>
+							{subjectLabel(suite)}
+						</span>
+						· {suite.case_count} case{suite.case_count === 1 ? '' : 's'}
+					</p>
+
+					<div class="flex flex-wrap items-center gap-4">
+						{#if !suiteRunGated(suite)}
+							<Button
+								class="px-8"
+								disabled={runBusy[suite.id] || suite.case_count === 0}
+								onclick={() => handleRunSuite(suite)}
+							>
+								{runBusy[suite.id] ? 'Running…' : 'Run'}
+							</Button>
+						{/if}
+						<button
+							type="button"
+							onclick={() => openCases(suite)}
+							class="text-[15px] font-semibold text-accent hover:underline dark:text-accent-dark"
+						>
+							Cases
+						</button>
+						<button
+							type="button"
+							onclick={() => toggleRuns(suite.id)}
+							class="text-[15px] font-semibold text-accent hover:underline dark:text-accent-dark"
+						>
+							{expandedRunsSuiteId === suite.id ? 'Hide history' : 'History'}
+						</button>
 					</div>
 					{#if runError[suite.id]}
-						<p class="mt-2 text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-							{runError[suite.id]}
-						</p>
-					{/if}
-
-					<div class="mt-3 flex gap-4 text-xs">
-						<button
-							onclick={() => toggleCases(suite.id)}
-							class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							{expandedCasesSuiteId === suite.id ? 'Hide cases' : 'Manage cases'}
-						</button>
-						<button
-							onclick={() => toggleRuns(suite.id)}
-							class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							{expandedRunsSuiteId === suite.id ? 'Hide runs' : 'Run history'}
-						</button>
-					</div>
-
-					{#if expandedCasesSuiteId === suite.id}
-						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
-							{#if casesError}
-								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-									{casesError}
-								</p>
-							{:else if !casesBySuite[suite.id]}
-								<p class="text-xs text-neutral-500">Loading cases…</p>
-							{:else if casesBySuite[suite.id].length === 0 && !showAddCase}
-								<p class="text-xs text-neutral-500">No cases yet.</p>
-							{:else}
-								<ul class="flex flex-col gap-1.5">
-									{#each casesBySuite[suite.id] as evalCase (evalCase.id)}
-										<li
-											class="flex items-center justify-between gap-2 rounded-md border border-ink/10 px-2.5 py-1.5 text-xs dark:border-white/10"
-										>
-											<div>
-												<span class="font-medium text-ink dark:text-ink-dark">{evalCase.name}</span>
-												<span
-													class="ml-1.5 rounded-sm bg-neutral-200/60 px-1.5 py-0.5 text-[11px] text-neutral-700 dark:bg-white/10 dark:text-neutral-300"
-												>
-													{JUDGE_TYPE_LABELS[evalCase.judge_type]}
-												</span>
-											</div>
-											<button
-												onclick={() => handleDeleteCase(suite.id, evalCase.id)}
-												class="text-neutral-500 hover:text-agent-magenta-600"
-											>
-												Remove
-											</button>
-										</li>
-									{/each}
-								</ul>
-							{/if}
-
-							{#if showAddCase}
-								<div
-									class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10"
-								>
-									<label class="flex flex-col gap-1 text-xs text-neutral-500">
-										Case name
-										<input
-											type="text"
-											bind:value={caseNameDraft}
-											class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-										/>
-									</label>
-									<label class="flex flex-col gap-1 text-xs text-neutral-500">
-										Input
-										<textarea
-											bind:value={caseInputDraft}
-											rows="2"
-											class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-										></textarea>
-									</label>
-									<label class="flex flex-col gap-1 text-xs text-neutral-500">
-										Judge
-										<select
-											bind:value={caseJudgeTypeDraft}
-											class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-										>
-											<option value="exact">Exact match</option>
-											<option value="substring">Contains text</option>
-											<option value="llm_judge">LLM judge (rubric)</option>
-											{#if suite.subject_type === 'agent'}
-												<option value="structural">Tool call check</option>
-											{/if}
-										</select>
-									</label>
-									{#if caseJudgeTypeDraft === 'exact' || caseJudgeTypeDraft === 'substring'}
-										<label class="flex flex-col gap-1 text-xs text-neutral-500">
-											Expected output
-											<textarea
-												bind:value={caseExpectedOutputDraft}
-												rows="2"
-												class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-											></textarea>
-										</label>
-									{:else if caseJudgeTypeDraft === 'llm_judge'}
-										<label class="flex flex-col gap-1 text-xs text-neutral-500">
-											Rubric
-											<textarea
-												bind:value={caseRubricDraft}
-												rows="2"
-												placeholder="The reply should acknowledge the request and offer a next step."
-												class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-											></textarea>
-										</label>
-									{:else if caseJudgeTypeDraft === 'structural'}
-										<label class="flex flex-col gap-1 text-xs text-neutral-500">
-											Expected tool name
-											<input
-												type="text"
-												bind:value={caseToolNameDraft}
-												placeholder="search"
-												class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-											/>
-										</label>
-										<label class="flex flex-col gap-1 text-xs text-neutral-500">
-											Expected args (JSON, optional — leave blank to only check the tool was called)
-											<input
-												type="text"
-												bind:value={caseToolArgsDraft}
-												placeholder={'{"query": "cats"}'}
-												class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-											/>
-										</label>
-									{/if}
-									{#if addCaseError}
-										<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-											{addCaseError}
-										</p>
-									{/if}
-									<div class="flex gap-3">
-										<button
-											onclick={() => handleAddCase(suite.id)}
-											disabled={addCaseBusy || !caseNameDraft.trim() || !caseInputDraft.trim()}
-											class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-										>
-											{addCaseBusy ? 'Adding…' : 'Add case'}
-										</button>
-										<button
-											onclick={() => (showAddCase = false)}
-											class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-										>
-											Cancel
-										</button>
-									</div>
-								</div>
-							{:else}
-								<button
-									onclick={openAddCase}
-									class="self-start text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									+ Add case
-								</button>
-							{/if}
-						</div>
+						<p class="mt-3 text-sm text-danger">{runError[suite.id]}</p>
 					{/if}
 
 					{#if expandedRunsSuiteId === suite.id}
-						<div class="mt-3 flex flex-col gap-2 border-t border-ink/10 pt-3 dark:border-white/10">
+						<div class="mt-5 border-t border-line pt-4 dark:border-line-dark">
 							{#if runsError}
-								<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-									{runsError}
-								</p>
+								<p class="text-sm text-danger">{runsError}</p>
 							{:else if !runsBySuite[suite.id]}
-								<p class="text-xs text-neutral-500">Loading runs…</p>
+								<div class="breath h-3 w-1/2 rounded-full bg-line dark:bg-line-dark"></div>
 							{:else if runsBySuite[suite.id].length === 0}
-								<p class="text-xs text-neutral-500">No runs yet — click "Run" to try this suite.</p>
+								<p class="text-sm text-muted dark:text-muted-dark">No runs yet.</p>
 							{:else}
-								<ul class="flex flex-col gap-2">
+								<div class="flex flex-col gap-2">
 									{#each runsBySuite[suite.id] as run (run.id)}
-										<li class="rounded-lg border border-ink/12 dark:border-white/10">
+										<div class="rounded-xl border border-line dark:border-line-dark">
 											<button
 												type="button"
 												onclick={() => toggleRunResults(suite.id, run.id)}
-												class="flex w-full items-center justify-between px-3 py-2 text-left text-xs"
+												class="flex h-12 w-full items-center gap-3 px-4 text-left"
 											>
-												<span class="flex items-center gap-2 text-ink dark:text-ink-dark">
-													<Icon
-														name="chevron"
-														class="h-3 w-3 flex-none text-neutral-500 transition-transform duration-150 {expandedRunId ===
-														run.id
-															? 'rotate-90'
-															: ''}"
-													/>
+												<Icon
+													name="chevron-right"
+													class="h-3.5 w-3.5 flex-none text-muted transition-transform duration-150 dark:text-muted-dark {expandedRunId ===
+													run.id
+														? 'rotate-90'
+														: ''}"
+												/>
+												<span class="text-sm text-ink dark:text-ink-dark">
 													{timeAgo(run.started_at)}
 												</span>
-												<span class="rounded-sm px-2 py-0.5 {runSummaryClass(run)}">
+												<StatusPill tone={lastRunTone(run)} class="ml-auto h-[22px] text-xs">
 													{run.pass_count}/{run.case_count} passed
-												</span>
+												</StatusPill>
 											</button>
 											{#if expandedRunId === run.id}
-												<div class="border-t border-ink/10 px-3 py-2 dark:border-white/10">
+												<div class="border-t border-line px-4 py-3 dark:border-line-dark">
 													{#if resultsError}
-														<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-															{resultsError}
-														</p>
+														<p class="text-sm text-danger">{resultsError}</p>
 													{:else if !resultsByRun[run.id]}
-														<p class="text-xs text-neutral-500">Loading results…</p>
+														<div
+															class="breath h-3 w-1/2 rounded-full bg-line dark:bg-line-dark"
+														></div>
 													{:else}
-														<ul class="flex flex-col gap-2">
+														<div class="flex flex-col gap-3">
 															{#each resultsByRun[run.id] as result (result.id)}
 																{@const caseName =
-																	casesBySuite[suite.id]?.find((c) => c.id === result.case_id)
+																	casesForResults[suite.id]?.find((c) => c.id === result.case_id)
 																		?.name ?? 'Deleted case'}
-																<li class="flex flex-col gap-1 text-xs">
-																	<div class="flex items-center gap-2">
+																<div class="flex flex-col gap-1 text-sm">
+																	<div class="flex items-center gap-2.5">
 																		<span
-																			class="rounded-sm px-1.5 py-0.5 {resultStatusClass(
-																				result.status
-																			)}"
-																		>
-																			{result.status}
+																			class="h-2 w-2 rounded-full {result.status === 'passed'
+																				? 'bg-accent dark:bg-accent-dark'
+																				: result.status === 'failed'
+																					? 'bg-danger'
+																					: 'bg-warn'}"
+																		></span>
+																		<span class="font-medium text-ink dark:text-ink-dark">
+																			{caseName}
 																		</span>
-																		<span class="text-neutral-500">{caseName}</span>
 																		{#if result.score !== null}
-																			<span class="text-neutral-500"
-																				>score {result.score.toFixed(2)}</span
-																			>
+																			<span class="text-[13px] text-muted dark:text-muted-dark">
+																				score {result.score.toFixed(2)}
+																			</span>
 																		{/if}
 																	</div>
 																	{#if result.actual_output}
-																		<p class="text-neutral-600 dark:text-neutral-400">
+																		<p class="pl-4.5 text-muted dark:text-muted-dark">
 																			{result.actual_output}
 																		</p>
 																	{/if}
 																	{#if result.judge_reasoning}
-																		<p class="text-neutral-500 italic">{result.judge_reasoning}</p>
+																		<p
+																			class="pl-4.5 text-[13px] text-muted italic dark:text-muted-dark"
+																		>
+																			{result.judge_reasoning}
+																		</p>
 																	{/if}
 																	{#if result.error_message}
-																		<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
+																		<p class="pl-4.5 text-[13px] text-danger">
 																			{result.error_message}
 																		</p>
 																	{/if}
-																</li>
+																</div>
 															{/each}
-														</ul>
+														</div>
 													{/if}
 												</div>
 											{/if}
-										</li>
+										</div>
 									{/each}
-								</ul>
+								</div>
 							{/if}
 						</div>
 					{/if}
-				</li>
+				</div>
 			{/each}
-		</ul>
+		</div>
 	{/if}
 </div>
+
+{#if showCreateSuite}
+	<Sheet title="New suite" onClose={() => (showCreateSuite = false)} width={480}>
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="suite-name">
+					Name
+				</label>
+				<input
+					id="suite-name"
+					type="text"
+					bind:value={suiteNameDraft}
+					placeholder="retry-coverage"
+					class={inputClass}
+				/>
+			</div>
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="suite-desc">
+					What it checks
+				</label>
+				<input
+					id="suite-desc"
+					type="text"
+					bind:value={suiteDescriptionDraft}
+					placeholder="Optional"
+					class={inputClass}
+				/>
+			</div>
+			<div class="flex flex-col gap-2">
+				<span class="text-sm font-semibold text-ink dark:text-ink-dark">Targets</span>
+				<div class="flex gap-2">
+					<button
+						type="button"
+						onclick={() => {
+							suiteSubjectType = 'agent';
+							suiteSubjectId = '';
+						}}
+						aria-pressed={suiteSubjectType === 'agent'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {suiteSubjectType ===
+						'agent'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						An agent
+					</button>
+					<button
+						type="button"
+						onclick={() => {
+							suiteSubjectType = 'workflow';
+							suiteSubjectId = '';
+						}}
+						aria-pressed={suiteSubjectType === 'workflow'}
+						class="flex h-12 flex-1 items-center justify-center rounded-lg text-[15px] {suiteSubjectType ===
+						'workflow'
+							? 'border-2 border-accent bg-accent-soft font-semibold text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'
+							: 'border border-line font-medium text-muted dark:border-line-dark dark:text-muted-dark'}"
+					>
+						A workflow
+					</button>
+				</div>
+				<select bind:value={suiteSubjectId} aria-label="Target" class={inputClass}>
+					<option value="" disabled>
+						{suiteSubjectType === 'agent' ? 'Choose an agent…' : 'Choose a workflow…'}
+					</option>
+					{#if suiteSubjectType === 'agent'}
+						{#each selectableAgents as agent (agent.id)}
+							<option value={agent.id}>{agent.name}</option>
+						{/each}
+					{:else}
+						{#each selectableWorkflows as workflow (workflow.id)}
+							<option value={workflow.id}>
+								/{workflow.name}{workflow.published ? '' : ' (draft)'}
+							</option>
+						{/each}
+					{/if}
+				</select>
+			</div>
+			{#if createSuiteError}
+				<p class="text-sm text-danger">{createSuiteError}</p>
+			{/if}
+		</div>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (showCreateSuite = false)}>Cancel</Button>
+			<Button
+				disabled={createSuiteBusy || !suiteNameDraft.trim() || !suiteSubjectId}
+				onclick={handleCreateSuite}
+			>
+				{createSuiteBusy ? 'Creating…' : 'Create suite'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if casesSuite && !confirmingSuiteDelete}
+	<Sheet title="{casesSuite.name} — cases" onClose={() => (casesSuite = null)}>
+		{#if casesError}
+			<p class="text-sm text-danger">{casesError}</p>
+		{/if}
+		{#if caseList.length === 0 && !showAddCase}
+			<p class="text-[15px] text-muted dark:text-muted-dark">No cases yet.</p>
+		{:else}
+			<div class="flex flex-col gap-2">
+				{#each caseList as evalCase (evalCase.id)}
+					<div
+						class="flex min-h-12 items-center gap-3 rounded-lg border border-line px-4 dark:border-line-dark"
+					>
+						<span class="text-[15px] text-ink dark:text-ink-dark">{evalCase.name}</span>
+						<span class="ml-auto text-[13px] text-muted dark:text-muted-dark">
+							{JUDGE_TYPE_LABELS[evalCase.judge_type]}
+						</span>
+						<button
+							type="button"
+							onclick={() => handleDeleteCase(evalCase.id)}
+							class="text-sm font-medium text-danger hover:underline"
+						>
+							Remove
+						</button>
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		{#if showAddCase}
+			<div class="flex flex-col gap-4 rounded-xl border border-line p-4 dark:border-line-dark">
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-name">
+						Case name
+					</label>
+					<input id="case-name" type="text" bind:value={caseNameDraft} class={inputClass} />
+				</div>
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-input">
+						Input
+					</label>
+					<textarea id="case-input" rows="2" bind:value={caseInputDraft} class={areaClass}
+					></textarea>
+				</div>
+				<div class="flex flex-col gap-2">
+					<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-judge">
+						How it's judged
+					</label>
+					<select id="case-judge" bind:value={caseJudgeTypeDraft} class={inputClass}>
+						<option value="exact">Exact text</option>
+						<option value="substring">Contains</option>
+						<option value="llm_judge">A model grades it</option>
+						{#if casesSuite.subject_type === 'agent'}
+							<option value="structural">A specific tool was used</option>
+						{/if}
+					</select>
+				</div>
+				{#if caseJudgeTypeDraft === 'exact' || caseJudgeTypeDraft === 'substring'}
+					<div class="flex flex-col gap-2">
+						<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-expected">
+							Expected reply
+						</label>
+						<textarea
+							id="case-expected"
+							rows="2"
+							bind:value={caseExpectedOutputDraft}
+							class={areaClass}></textarea>
+					</div>
+				{:else if caseJudgeTypeDraft === 'llm_judge'}
+					<div class="flex flex-col gap-2">
+						<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-rubric">
+							What a good reply looks like
+						</label>
+						<textarea
+							id="case-rubric"
+							rows="2"
+							bind:value={caseRubricDraft}
+							placeholder="The reply should acknowledge the request and offer a next step."
+							class={areaClass}></textarea>
+					</div>
+				{:else if caseJudgeTypeDraft === 'structural'}
+					<div class="flex flex-col gap-2">
+						<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-tool">
+							Tool that must be used
+						</label>
+						<input
+							id="case-tool"
+							type="text"
+							bind:value={caseToolNameDraft}
+							placeholder="web_search"
+							class="{inputClass} font-mono text-sm"
+						/>
+					</div>
+					<div class="flex flex-col gap-2">
+						<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="case-tool-args">
+							Expected inputs (JSON, optional)
+						</label>
+						<input
+							id="case-tool-args"
+							type="text"
+							bind:value={caseToolArgsDraft}
+							placeholder={'{"query": "cats"}'}
+							class="{inputClass} font-mono text-sm"
+						/>
+					</div>
+				{/if}
+				{#if addCaseError}
+					<p class="text-sm text-danger">{addCaseError}</p>
+				{/if}
+				<div class="flex justify-end gap-3">
+					<Button variant="secondary" size="md" onclick={() => (showAddCase = false)}>Cancel</Button
+					>
+					<Button
+						size="md"
+						disabled={addCaseBusy || !caseNameDraft.trim() || !caseInputDraft.trim()}
+						onclick={handleAddCase}
+					>
+						{addCaseBusy ? 'Adding…' : 'Add case'}
+					</Button>
+				</div>
+			</div>
+		{:else}
+			<Button variant="secondary" size="md" class="self-start" onclick={openAddCase}>
+				<Icon name="plus" class="h-4 w-4" />
+				Add case
+			</Button>
+		{/if}
+
+		{#snippet footer()}
+			{#if !suiteSubjectGated(casesSuite!)}
+				<button
+					type="button"
+					onclick={() => (confirmingSuiteDelete = true)}
+					class="mr-auto text-[15px] font-medium text-danger hover:underline"
+				>
+					Delete suite
+				</button>
+			{/if}
+			<Button variant="secondary" onclick={() => (casesSuite = null)}>Close</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if casesSuite && confirmingSuiteDelete}
+	<Sheet
+		title="Delete {casesSuite.name}?"
+		onClose={() => (confirmingSuiteDelete = false)}
+		width={480}
+	>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Its cases and run history go with it.
+		</p>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingSuiteDelete = false)}>Cancel</Button>
+			<Button variant="destructive" onclick={() => handleDeleteSuite(casesSuite!.id)}>
+				Delete suite
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}

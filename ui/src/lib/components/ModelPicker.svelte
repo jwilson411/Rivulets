@@ -85,7 +85,7 @@
 	<select
 		value={selectValue}
 		onchange={handleSelectChange}
-		class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+		class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 	>
 		<option value="" disabled selected={selectValue === ''}>Select a model…</option>
 		{#if showAuto}
@@ -105,12 +105,12 @@
 			type="text"
 			bind:value={customText}
 			placeholder="model_name (e.g. claude-3-5-haiku-latest)"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="h-12 rounded-lg border border-line bg-surface px-4 font-mono text-sm text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		/>
 	{/if}
 	{#if providers.length === 0}
-		<p class="text-xs text-neutral-500">
-			No providers configured yet — add one under Providers first.
+		<p class="text-[13px] text-muted dark:text-muted-dark">
+			No providers yet — add one under Providers first.
 		</p>
 	{/if}
 </div>

@@ -1,79 +1,46 @@
 <script lang="ts">
-	import {
-		agents,
-		type Agent,
-		type AgentVersion,
-		type RoutingRule,
-		type RuleType
-	} from '$lib/api/agents';
+	import { agents, type Agent, type AgentVersion, type RoutingRule } from '$lib/api/agents';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import { tools as toolsApi, type Tool } from '$lib/api/tools';
-	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
-	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
+	import { agentInk, INK_AVATAR } from '$lib/ink';
+	import AgentSheet from '$lib/components/AgentSheet.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import Disc from '$lib/ui/Disc.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+
+	// Agents (06-screens.md → Agents, mockup 1i): cards, not a form. All
+	// configuration lives in the Agent sheet — the list page never shows
+	// routing radios or advanced fields.
 
 	let agentList = $state<Agent[]>([]);
 	let providerList = $state<Provider[]>([]);
 	let teamList = $state<TeamDetail[]>([]);
 	let toolList = $state<Tool[]>([]);
 	let scopeCatalog = $state<string[]>([]);
-	let rulesByAgent = $state<Record<string, RoutingRule[]>>({});
-	let versionsByAgent = $state<Record<string, AgentVersion[]>>({});
-	// #344: what's currently assigned/granted -- fetched per-agent the same
-	// way routing rules/peer preference/versions are, since neither
-	// AgentOut nor Tool carries the reverse mapping.
-	let toolIdsByAgent = $state<Record<string, string[]>>({});
-	let scopesByAgent = $state<Record<string, string[]>>({});
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
+	let search = $state('');
 
-	// Team detail (not just the summary teams.list() returns) is the only
-	// way to know which agents are on a team, needed for the "on a
-	// team" / "not on a team" filter below.
-	const teamAgentIds = $derived(new Set(teamList.flatMap((t) => t.agent_ids)));
+	// Sheet state: null = closed, 'new' = create, otherwise the agent id
+	// being edited (with its per-agent extras fetched just-in-time).
+	let sheetOpen = $state<'new' | string | null>(null);
+	let sheetAgent = $state<Agent | null>(null);
+	let sheetRules = $state<RoutingRule[]>([]);
+	let sheetToolIds = $state<string[]>([]);
+	let sheetScopes = $state<string[]>([]);
+	let sheetPeerTag = $state('');
+	let sheetVersions = $state<AgentVersion[]>([]);
+	let sheetKey = $state(0);
 
-	const agentFilters = $derived<ListFilter<Agent>[]>([
-		{
-			id: 'team',
-			label: 'Team',
-			options: [
-				{ value: 'yes', label: 'On a team' },
-				{ value: 'no', label: 'Not on a team' }
-			],
-			predicate: (agent, value) =>
-				value === 'yes' ? teamAgentIds.has(agent.id) : !teamAgentIds.has(agent.id)
-		}
-	]);
+	let visible = $derived(
+		agentList.filter((a) => a.name.toLowerCase().includes(search.trim().toLowerCase()))
+	);
 
-	let creating = $state(false);
-	let createError = $state<string | null>(null);
-	let createFormKey = $state(0);
-
-	let editingAgentId = $state<string | null>(null);
-	let updating = $state(false);
-	let updateError = $state<string | null>(null);
-
-	let keywordDrafts = $state<Record<string, string>>({});
-	let actionError = $state<string | null>(null);
-
-	let peerPreferenceDrafts = $state<Record<string, string>>({});
-
-	// Draft rule-type selection per agent, driving the exclusive radio group
-	// below. Kept separate from `rulesByAgent` so picking a different type
-	// doesn't apply anything until the user confirms via applyRuleType.
-	let ruleTypeDrafts = $state<Record<string, RuleType>>({});
-
-	const RULE_TYPE_LABELS: Partial<Record<RuleType, string>> = {
-		always: 'Always respond',
-		mention_only: '@mention only',
-		keyword: 'Keyword match'
-	};
-
-	function activeRuleType(agentId: string): RuleType {
-		return rulesByAgent[agentId]?.[0]?.rule_type ?? 'mention_only';
-	}
-
-	function ruleTypeLabel(type: RuleType): string {
-		return RULE_TYPE_LABELS[type] ?? type;
+	function teamsFor(agentId: string): TeamDetail[] {
+		return teamList.filter((t) => t.agent_ids.includes(agentId));
 	}
 
 	async function refresh() {
@@ -89,495 +56,159 @@
 					providersApi.list().catch(() => []),
 					teamsApi.list(),
 					toolsApi.list(),
-					toolsApi.listScopes()
+					toolsApi.listScopes().catch(() => [])
 				]);
 			agentList = loadedAgents;
 			providerList = loadedProviders;
 			toolList = loadedTools;
 			scopeCatalog = loadedScopes;
 			teamList = await Promise.all(teamSummaries.map((t) => teamsApi.get(t.id)));
-			const entries = await Promise.all(
-				agentList.map(async (a) => [a.id, await agents.getRoutingRules(a.id)] as const)
-			);
-			rulesByAgent = Object.fromEntries(entries);
-			ruleTypeDrafts = Object.fromEntries(
-				entries.map(([id, rules]) => [id, rules[0]?.rule_type ?? 'mention_only'])
-			);
-			for (const [id, rules] of entries) {
-				if (rules[0]?.rule_type === 'keyword' && keywordDrafts[id] === undefined) {
-					try {
-						keywordDrafts[id] = (JSON.parse(rules[0].pattern) as string[]).join(', ');
-					} catch {
-						keywordDrafts[id] = rules[0].pattern;
-					}
-				}
-			}
-			const preferenceEntries = await Promise.all(
-				agentList.map(
-					async (a) => [a.id, (await agents.getPeerPreference(a.id)).capability_tag ?? ''] as const
-				)
-			);
-			peerPreferenceDrafts = Object.fromEntries(preferenceEntries);
-			const versionEntries = await Promise.all(
-				agentList.map(async (a) => [a.id, await agents.listVersions(a.id)] as const)
-			);
-			versionsByAgent = Object.fromEntries(versionEntries);
-			const toolIdEntries = await Promise.all(
-				agentList.map(async (a) => [a.id, (await agents.getToolIds(a.id)).tool_ids] as const)
-			);
-			toolIdsByAgent = Object.fromEntries(toolIdEntries);
-			const scopeEntries = await Promise.all(
-				agentList.map(async (a) => [a.id, (await agents.getToolScopes(a.id)).scopes] as const)
-			);
-			scopesByAgent = Object.fromEntries(scopeEntries);
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load agents';
+		} catch {
+			loadError = "Couldn't load agents.";
+		} finally {
+			loading = false;
 		}
 	}
 
 	refresh();
 
-	async function handleCreate(values: AgentFormValues) {
-		createError = null;
-		creating = true;
+	function openCreate() {
+		sheetAgent = null;
+		sheetRules = [];
+		sheetToolIds = [];
+		sheetScopes = [];
+		sheetPeerTag = '';
+		sheetVersions = [];
+		sheetKey += 1;
+		sheetOpen = 'new';
+	}
+
+	// Per-agent extras (rules, tools, scopes, versions, peer preference)
+	// aren't on the list payload — fetched just-in-time when a card opens.
+	async function openEdit(agent: Agent) {
 		try {
-			await agents.create(values);
-			createFormKey += 1; // remounts AgentForm so its fields reset
-			await refresh();
-		} catch (err) {
-			createError = err instanceof Error ? err.message : 'Failed to create agent';
-		} finally {
-			creating = false;
+			const [rules, toolIds, scopes, preference, versions] = await Promise.all([
+				agents.getRoutingRules(agent.id).catch(() => [] as RoutingRule[]),
+				agents
+					.getToolIds(agent.id)
+					.then((r) => r.tool_ids)
+					.catch(() => [] as string[]),
+				agents
+					.getToolScopes(agent.id)
+					.then((r) => r.scopes)
+					.catch(() => [] as string[]),
+				agents.getPeerPreference(agent.id).catch(() => ({ capability_tag: null })),
+				agents.listVersions(agent.id).catch(() => [] as AgentVersion[])
+			]);
+			sheetAgent = agent;
+			sheetRules = rules;
+			sheetToolIds = toolIds;
+			sheetScopes = scopes;
+			sheetPeerTag = preference.capability_tag ?? '';
+			sheetVersions = versions;
+			sheetKey += 1;
+			sheetOpen = agent.id;
+		} catch {
+			loadError = "Couldn't open that agent. Try again.";
 		}
 	}
 
-	function startEdit(agentId: string) {
-		updateError = null;
-		editingAgentId = agentId;
-	}
-
-	function cancelEdit() {
-		editingAgentId = null;
-		updateError = null;
-	}
-
-	async function handleUpdate(agentId: string, values: AgentFormValues) {
-		updateError = null;
-		updating = true;
-		try {
-			await agents.update(agentId, values);
-			editingAgentId = null;
-			await refresh();
-		} catch (err) {
-			updateError = err instanceof Error ? err.message : 'Failed to update agent';
-		} finally {
-			updating = false;
-		}
-	}
-
-	async function setRule(agentId: string, ruleType: RuleType, pattern: string) {
-		actionError = null;
-		try {
-			await agents.setRoutingRules(agentId, [{ rule_type: ruleType, pattern, priority: 10 }]);
-			rulesByAgent[agentId] = await agents.getRoutingRules(agentId);
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to update routing rule';
-		}
-	}
-
-	async function setKeywordRule(agentId: string) {
-		const raw = keywordDrafts[agentId]?.trim();
-		if (!raw) return;
-		const keywords = raw
-			.split(',')
-			.map((k) => k.trim())
-			.filter(Boolean);
-		await setRule(agentId, 'keyword', JSON.stringify(keywords));
-	}
-
-	async function applyRuleType(agentId: string) {
-		const type = ruleTypeDrafts[agentId] ?? activeRuleType(agentId);
-		if (type === 'keyword') {
-			await setKeywordRule(agentId);
-		} else {
-			await setRule(agentId, type, '');
-		}
-	}
-
-	async function savePeerPreference(agentId: string) {
-		actionError = null;
-		const tag = peerPreferenceDrafts[agentId]?.trim() || null;
-		try {
-			await agents.setPeerPreference(agentId, tag);
-			peerPreferenceDrafts[agentId] = tag ?? '';
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to update peer preference';
-		}
-	}
-
-	// #100: toggled directly (no separate draft/save step) since it's a
-	// single boolean, unlike peer preference's free-text field above.
-	async function toggleUnattendedApproval(agent: Agent) {
-		actionError = null;
-		const next = !agent.approved_for_unattended_tools;
-		try {
-			await agents.update(agent.id, { approved_for_unattended_tools: next });
-			agent.approved_for_unattended_tools = next;
-		} catch (err) {
-			actionError =
-				err instanceof Error ? err.message : 'Failed to update unattended tool approval';
-		}
-	}
-
-	// #188/#344: toggled directly and PUT immediately, same as
-	// toggleUnattendedApproval above -- PUT /tool-scopes replaces the whole
-	// granted set, so a checkbox flip just recomputes that set from what's
-	// already known to be granted. Owner-only server-side; a non-owner
-	// session sees the resulting 403 via actionError rather than the
-	// control being hidden, matching this file's existing convention.
-	async function toggleScope(agentId: string, scope: string) {
-		actionError = null;
-		const current = scopesByAgent[agentId] ?? [];
-		const next = current.includes(scope) ? current.filter((s) => s !== scope) : [...current, scope];
-		try {
-			scopesByAgent[agentId] = (await agents.setToolScopes(agentId, next)).scopes;
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to update capability scopes';
-		}
-	}
-
-	function toolSummary(toolIds: string[] | undefined): string {
-		if (!toolIds || toolIds.length === 0) return '';
-		const names = toolIds.map((id) => toolList.find((t) => t.id === id)?.name ?? id);
-		return names.join(', ');
-	}
-
-	function ruleSummary(rules: RoutingRule[] | undefined): string {
-		if (!rules || rules.length === 0) return 'No routing rules — only @mention triggers this agent';
-		return rules
-			.map((r) => (r.rule_type === 'keyword' ? `keyword: ${r.pattern}` : r.rule_type))
-			.join(', ');
-	}
-
-	async function handleDelete(agentId: string) {
-		actionError = null;
-		try {
-			await agents.remove(agentId);
-			await refresh();
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to delete agent';
-		}
-	}
-
-	// #104: reverts instructions/model to a prior version and records the
-	// rollback itself as a new version, so history stays diffable.
-	async function handleRollback(agentId: string, version: number) {
-		actionError = null;
-		try {
-			await agents.rollback(agentId, version);
-			await refresh();
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to roll back agent';
-		}
+	async function handleSaved() {
+		sheetOpen = null;
+		await refresh();
 	}
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Agents</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			Agents you create here register with AgentOS automatically (FR-3.2).
-		</p>
-	</header>
-
-	<div
-		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New agent</h2>
-		{#key createFormKey}
-			<AgentForm
-				providers={providerList}
-				tools={toolList}
-				submitLabel="Create agent"
-				busyLabel="Creating…"
-				busy={creating}
-				error={createError}
-				onsubmit={handleCreate}
-			/>
-		{/key}
+<div class="mx-auto max-w-[900px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-6 flex items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Agents</h1>
+		<Button onclick={openCreate}>
+			<Icon name="plus" class="h-[18px] w-[18px]" />
+			New agent
+		</Button>
 	</div>
 
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
-	{:else}
-		{#if actionError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
-		{/if}
-		<FilterableList
-			items={agentList}
-			getKey={(agent) => agent.id}
-			searchPlaceholder="Search agents…"
-			searchPredicate={(agent, q) => agent.name.toLowerCase().includes(q.toLowerCase())}
-			filters={agentFilters}
-			emptyMessage="No agents yet — create one above."
-			noMatchMessage="No agents match your search or filter."
-		>
-			{#snippet item(agent)}
-				<li class="rounded-lg border border-ink/12 p-4 dark:border-white/10">
-					{#if editingAgentId === agent.id}
-						<AgentForm
-							providers={providerList}
-							tools={toolList}
-							initial={{
-								name: agent.name,
-								description: agent.description,
-								instructions: agent.instructions,
-								model: agent.model,
-								fallback_models: agent.fallback_models,
-								output_schema: agent.output_schema ?? null,
-								tool_ids: toolIdsByAgent[agent.id] ?? []
-							}}
-							submitLabel="Save changes"
-							busyLabel="Saving…"
-							busy={updating}
-							error={updateError}
-							onsubmit={(values) => handleUpdate(agent.id, values)}
-							oncancel={cancelEdit}
-						/>
-					{:else}
-						<div class="flex items-start justify-between">
-							<div>
-								<p class="font-medium text-ink dark:text-ink-dark">{agent.name}</p>
-								<p class="text-sm text-neutral-600 dark:text-neutral-400">{agent.description}</p>
-								<p class="mt-1 font-mono text-xs text-neutral-500">{agent.model}</p>
-								{#if agent.fallback_models.length > 0}
-									<p class="font-mono text-xs text-neutral-400">
-										fallback: {agent.fallback_models.join(' → ')}
-									</p>
-								{/if}
-								{#if agent.output_schema}
-									<p class="text-xs text-neutral-400">structured output configured</p>
-								{/if}
-								{#if toolSummary(toolIdsByAgent[agent.id])}
-									<p class="text-xs text-neutral-400">
-										Tools: {toolSummary(toolIdsByAgent[agent.id])}
-									</p>
-								{/if}
-							</div>
-							<div class="flex items-center gap-2">
-								<span
-									class="rounded-sm px-2 py-0.5 text-xs {agent.agentos_agent_id
-										? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-										: 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400'}"
-								>
-									{agent.agentos_agent_id ? 'registered' : 'provider unresolved'}
-								</span>
-								<button
-									onclick={() => startEdit(agent.id)}
-									class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-								>
-									Edit
-								</button>
-								<button
-									onclick={() => handleDelete(agent.id)}
-									class="text-xs text-neutral-500 hover:text-agent-magenta-600"
-								>
-									Delete
-								</button>
-							</div>
-						</div>
-					{/if}
+	<label
+		class="mb-5 flex h-12 items-center gap-2.5 rounded-lg border border-line bg-surface px-4 focus-within:border-accent dark:border-line-dark dark:bg-surface-dark dark:focus-within:border-accent-dark"
+	>
+		<Icon name="search" class="h-[18px] w-[18px] flex-none text-muted dark:text-muted-dark" />
+		<input
+			type="search"
+			bind:value={search}
+			placeholder="Search agents"
+			class="min-w-0 flex-1 bg-transparent text-base text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
+		/>
+	</label>
 
-					<div class="mt-3 border-t border-ink/10 pt-3 dark:border-white/10">
-						<p class="text-xs text-neutral-600 dark:text-neutral-400">
-							Routing: <span class="font-mono">{ruleSummary(rulesByAgent[agent.id])}</span>
-						</p>
-						<div class="mt-2">
-							<p
-								id="rule-type-label-{agent.id}"
-								class="text-xs font-medium text-neutral-600 dark:text-neutral-400"
+	{#if loading}
+		<SkeletonCards count={4} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if visible.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">
+			{search.trim() ? 'No agents match your search.' : 'No agents yet.'}
+		</p>
+	{:else}
+		<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+			{#each visible as agent, i (agent.id)}
+				<button
+					type="button"
+					onclick={() => openEdit(agent)}
+					class="flex gap-3.5 rounded-2xl border border-line bg-surface px-5 py-5 text-left hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
+				>
+					<Disc name={agent.name} colorClass={INK_AVATAR[agentInk(i)]} size={40} />
+					<span class="min-w-0">
+						<span class="mb-0.5 flex items-center gap-2">
+							<span class="truncate text-base font-semibold text-ink dark:text-ink-dark">
+								{agent.name}
+							</span>
+							<span
+								class="flex-none rounded-md bg-paper px-1.5 py-0.5 font-mono text-xs text-muted dark:bg-paper-dark dark:text-muted-dark"
 							>
-								Routing rule (only one can be active at a time)
-							</p>
-							<div
-								role="radiogroup"
-								aria-labelledby="rule-type-label-{agent.id}"
-								class="mt-1 flex flex-wrap items-center gap-3"
-							>
-								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
-									<input
-										type="radio"
-										name="rule-type-{agent.id}"
-										value="always"
-										bind:group={ruleTypeDrafts[agent.id]}
-									/>
-									Always respond
-								</label>
-								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
-									<input
-										type="radio"
-										name="rule-type-{agent.id}"
-										value="mention_only"
-										bind:group={ruleTypeDrafts[agent.id]}
-									/>
-									@mention only
-								</label>
-								<label class="flex items-center gap-1 text-xs text-ink dark:text-ink-dark">
-									<input
-										type="radio"
-										name="rule-type-{agent.id}"
-										value="keyword"
-										bind:group={ruleTypeDrafts[agent.id]}
-									/>
-									Keyword match
-								</label>
-								{#if ruleTypeDrafts[agent.id] === 'keyword'}
-									<input
-										type="text"
-										bind:value={keywordDrafts[agent.id]}
-										placeholder="keyword, keyword, ..."
-										class="w-40 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-									/>
-								{/if}
-							</div>
-							{#if ruleTypeDrafts[agent.id] && ruleTypeDrafts[agent.id] !== activeRuleType(agent.id)}
-								<p
-									class="mt-1 text-xs text-agent-magenta-700 dark:text-agent-magenta-400"
-									role="alert"
+								{agent.model}
+							</span>
+							{#if !agent.agentos_agent_id}
+								<span
+									class="flex-none rounded-full bg-warn-soft px-2 py-0.5 text-xs font-semibold text-warn dark:bg-warn-soft-dark dark:text-warn-ink-dark"
+									title="This agent has no working model provider yet, so it stays silent."
 								>
-									Switching to "{ruleTypeLabel(ruleTypeDrafts[agent.id])}" will replace the current
-									rule ("{ruleTypeLabel(activeRuleType(agent.id))}"). Nothing changes until you
-									apply.
-								</p>
+									Needs a provider
+								</span>
 							{/if}
-							<button
-								onclick={() => applyRuleType(agent.id)}
-								disabled={ruleTypeDrafts[agent.id] === 'keyword' &&
-									!keywordDrafts[agent.id]?.trim()}
-								class="mt-2 rounded-md border border-ink/15 px-2 py-1 text-xs text-ink disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/15 dark:text-ink-dark"
+						</span>
+						<span class="mb-2 block text-[15px] leading-snug text-muted dark:text-muted-dark">
+							{agent.description}
+						</span>
+						{#each teamsFor(agent.id) as team (team.id)}
+							<span
+								class="mr-1.5 inline-flex h-6 items-center rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
 							>
-								Apply routing rule
-							</button>
-						</div>
-						<details class="mt-3">
-							<summary
-								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-							>
-								Advanced: peer capability preference
-							</summary>
-							<div class="mt-2 flex flex-col gap-2">
-								<p class="text-xs text-neutral-500">
-									Only matters when this agent syncs across multiple machines (P2P) — it prefers to
-									run on a peer advertising this capability tag.
-								</p>
-								<div class="flex flex-wrap items-center gap-2">
-									<span class="text-xs text-neutral-500">Preferred peer capability:</span>
-									<input
-										type="text"
-										bind:value={peerPreferenceDrafts[agent.id]}
-										placeholder="e.g. gpu (blank = no preference)"
-										class="w-56 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-xs text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-									/>
-									<button
-										onclick={() => savePeerPreference(agent.id)}
-										class="rounded-md border border-ink/15 px-2 py-1 text-xs text-ink dark:border-white/15 dark:text-ink-dark"
-									>
-										Save
-									</button>
-								</div>
-							</div>
-						</details>
-						<details class="mt-2">
-							<summary
-								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-							>
-								Advanced: unattended sensitive tool use
-							</summary>
-							<div class="mt-2 flex flex-col gap-2">
-								<p class="text-xs text-neutral-500">
-									If this agent has a sensitive tool assigned (runs code, makes outbound HTTP calls,
-									writes files, or queries the DB), it's blocked from using that tool when invoked
-									unattended — a schedule fire or an auto-remediation run, where nobody is watching
-									the tool call happen live. Ordinary chat/slash-command use is never affected by
-									this.
-								</p>
-								<label class="flex items-center gap-2 text-xs text-ink dark:text-ink-dark">
-									<input
-										type="checkbox"
-										checked={agent.approved_for_unattended_tools}
-										onchange={() => toggleUnattendedApproval(agent)}
-									/>
-									Approve this agent's sensitive tools for unattended use
-								</label>
-							</div>
-						</details>
-						<details class="mt-2">
-							<summary
-								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-							>
-								Advanced: capability scopes
-							</summary>
-							<div class="mt-2 flex flex-col gap-2">
-								<p class="text-xs text-neutral-500">
-									Some assigned tools only actually run once this agent holds the matching
-									capability scope below — e.g. an agent needs "sensitive_tools:manage" granted
-									before execute_python/write_file/http_request will resolve, even though they're
-									already assigned. Granting a scope is owner-only.
-								</p>
-								{#if scopeCatalog.length === 0}
-									<p class="text-xs text-neutral-500">No capability scopes defined.</p>
-								{:else}
-									<ul class="flex flex-col gap-1">
-										{#each scopeCatalog as scope (scope)}
-											<li>
-												<label class="flex items-center gap-2 text-xs text-ink dark:text-ink-dark">
-													<input
-														type="checkbox"
-														checked={(scopesByAgent[agent.id] ?? []).includes(scope)}
-														onchange={() => toggleScope(agent.id, scope)}
-													/>
-													<span class="font-mono">{scope}</span>
-												</label>
-											</li>
-										{/each}
-									</ul>
-								{/if}
-							</div>
-						</details>
-						<details class="mt-2">
-							<summary
-								class="cursor-pointer text-xs font-medium text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-							>
-								Instructions/model history
-							</summary>
-							<div class="mt-2 flex flex-col gap-1">
-								{#if versionsByAgent[agent.id]?.length}
-									<ul class="flex flex-col gap-1">
-										{#each versionsByAgent[agent.id] as version (version.version)}
-											<li
-												class="flex items-center justify-between gap-2 text-xs text-neutral-600 dark:text-neutral-400"
-											>
-												<span class="truncate">
-													v{version.version} — {new Date(version.created_at).toLocaleString()} —
-													<span class="font-mono">{version.model}</span>
-												</span>
-												<button
-													onclick={() => handleRollback(agent.id, version.version)}
-													class="shrink-0 text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
-												>
-													Roll back
-												</button>
-											</li>
-										{/each}
-									</ul>
-								{:else}
-									<p class="text-xs text-neutral-500">No history yet.</p>
-								{/if}
-							</div>
-						</details>
-					</div>
-				</li>
-			{/snippet}
-		</FilterableList>
+								{team.name}
+							</span>
+						{/each}
+					</span>
+				</button>
+			{/each}
+		</div>
 	{/if}
 </div>
+
+{#if sheetOpen !== null}
+	{#key sheetKey}
+		<AgentSheet
+			agent={sheetAgent}
+			providers={providerList}
+			tools={toolList}
+			teams={teamList}
+			{scopeCatalog}
+			initialTeamId={sheetAgent ? (teamsFor(sheetAgent.id)[0]?.id ?? null) : null}
+			initialRules={sheetRules}
+			initialToolIds={sheetToolIds}
+			initialScopes={sheetScopes}
+			initialPeerTag={sheetPeerTag}
+			versions={sheetVersions}
+			onClose={() => (sheetOpen = null)}
+			onSaved={handleSaved}
+		/>
+	{/key}
+{/if}

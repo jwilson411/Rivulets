@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=DM+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 @import 'tailwindcss';
 
 /* Manual theme override (issue #13): `dark:` utilities default to
@@ -17,75 +17,77 @@
 	}
 }
 
-/* Design language: "process inks on paper". Agents are assigned a print ink
-   (cyan, magenta, yellow) in join order; the human is the fixed black "ink"
-   plate. See ui/src/lib/ink.ts for the agent -> ink assignment. */
+/* Design language: "Wide Stream" (redesign package 03-design-direction.md).
+   Calm, spacious, confident. Sora for display, DM Sans for UI, IBM Plex
+   Mono for recovery words / slash commands / model ids / filenames only.
+   Agent identity: agent-a/b/c inks assigned in order of first appearance
+   (see ui/src/lib/ink.ts); humans are the fixed ink plate. */
 @theme {
-	--font-serif: 'Source Serif 4', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+	--font-sans: 'DM Sans', system-ui, sans-serif;
+	--font-display: 'Sora', 'DM Sans', system-ui, sans-serif;
+	--font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
-	--color-paper: #f3f2f2;
-	--color-paper-dark: #1b1a19;
-	--color-surface: #eae9e9;
-	--color-surface-dark: #242322;
-	--color-ink: #201e1d;
-	--color-ink-dark: #eae7e7;
+	--color-paper: #f6f7f2;
+	--color-paper-dark: #121513;
+	--color-surface: #ffffff;
+	--color-surface-dark: #1b1f1c;
+	--color-ink: #141816;
+	--color-ink-dark: #eef1ec;
+	--color-muted: #5e6762;
+	--color-muted-dark: #9aa49c;
+	--color-line: #e2e6e0;
+	--color-line-dark: #2a302c;
+	--color-accent: #1f8a70;
+	--color-accent-dark: #3dbaa0;
+	--color-accent-deep: #166a56;
+	--color-accent-soft: #e3f4ee;
+	--color-accent-soft-dark: #1a2e28;
 
-	--color-neutral-50: #fbfafa;
-	--color-neutral-100: #f8f4f4;
-	--color-neutral-200: #eae7e7;
-	--color-neutral-300: #d7d3d3;
-	--color-neutral-400: #bab6b6;
-	--color-neutral-500: #9b9797;
-	--color-neutral-600: #7d7979;
-	--color-neutral-700: #605d5d;
-	--color-neutral-800: #444141;
-	--color-neutral-900: #2d2b2b;
-	--color-neutral-950: #1b1a19;
+	--color-danger: #c23b4a;
+	--color-danger-soft: #fbedef;
+	--color-danger-soft-dark: #33191d;
+	--color-danger-line: #e8c6cb;
+	--color-danger-line-dark: #5c2a31;
+	--color-danger-ink: #7a3540;
+	--color-danger-ink-dark: #e8a7ae;
 
-	/* agent ink #1 — also the interactive/primary accent */
-	--color-agent-cyan: #0088b0;
-	--color-agent-cyan-100: #e9f8ff;
-	--color-agent-cyan-200: #cbeeff;
-	--color-agent-cyan-300: #99e0ff;
-	--color-agent-cyan-400: #62c5ee;
-	--color-agent-cyan-500: #38a6cf;
-	--color-agent-cyan-600: #1186ac;
-	--color-agent-cyan-700: #006786;
-	--color-agent-cyan-800: #004961;
-	--color-agent-cyan-900: #0a303e;
+	--color-warn: #c47b16;
+	--color-warn-soft: #fbf3e6;
+	--color-warn-soft-dark: #33291a;
+	--color-warn-line: #e8d5b0;
+	--color-warn-line-dark: #5c4a2a;
+	--color-warn-ink: #8a6220;
+	--color-warn-ink-dark: #e5c07b;
 
-	/* agent ink #2 — also the dispatcher/handoff accent */
-	--color-agent-magenta: #d6006c;
-	--color-agent-magenta-100: #fff1f4;
-	--color-agent-magenta-200: #ffdee6;
-	--color-agent-magenta-300: #ffc0d0;
-	--color-agent-magenta-400: #ff90b1;
-	--color-agent-magenta-500: #ff458e;
-	--color-agent-magenta-600: #d82071;
-	--color-agent-magenta-700: #aa0b56;
-	--color-agent-magenta-800: #790e3d;
-	--color-agent-magenta-900: #4b1528;
+	/* agent inks, cycled in order of first appearance */
+	--color-agent-a: #1f8a70;
+	--color-agent-b: #3b6fd4;
+	--color-agent-c: #d97706;
+	--color-agent-a-soft: #e3f4ee;
+	--color-agent-b-soft: #edf2fc;
+	--color-agent-c-soft: #fbf3e6;
+	--color-agent-a-soft-dark: #1a2e28;
+	--color-agent-b-soft-dark: #1c2638;
+	--color-agent-c-soft-dark: #33291a;
 
-	/* agent ink #3 — print treatment only, never chrome or copy */
-	--color-agent-yellow-500: #edbb00;
-	--color-agent-yellow-700: #8a6d00;
+	/* Wide Stream radii: md 12 (menu rows, chips), lg 14 (inputs),
+	   xl 16 (buttons, list rows), 2xl 20 (cards), 3xl 24 (Stream Bar) */
+	--radius-md: 12px;
+	--radius-lg: 14px;
+	--radius-xl: 16px;
+	--radius-2xl: 20px;
+	--radius-3xl: 24px;
 
-	--radius-sm: 1px;
-	--radius-md: 2px;
-	--radius-lg: 4px;
-
-	--shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
-	--shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
-	--shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
-
-	/* 5·10·15·20·30·40 print rhythm — replaces Tailwind's default 4px base */
-	--spacing: 5px;
+	--shadow-bar: 0 4px 24px rgba(20, 24, 22, 0.08);
+	--shadow-bar-dark: 0 4px 24px rgba(0, 0, 0, 0.4);
+	--shadow-pop: 0 8px 32px rgba(20, 24, 22, 0.12);
+	--shadow-palette: 0 24px 64px rgba(0, 0, 0, 0.4);
 }
 
 body {
 	background: var(--color-paper);
 	color: var(--color-ink);
-	font-family: var(--font-serif);
+	font-family: var(--font-sans);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -108,22 +110,54 @@ body {
 }
 
 :focus-visible {
-	outline: 2px solid var(--color-agent-cyan);
+	outline: 2px solid var(--color-accent);
 	outline-offset: 2px;
 }
 
-@keyframes riv-flow {
-	to {
-		stroke-dashoffset: -14px;
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme]) :focus-visible {
+		outline-color: var(--color-accent-dark);
 	}
 }
 
-.spine-flowing {
-	animation: riv-flow 1.6s linear infinite;
+:root[data-theme='dark'] :focus-visible {
+	outline-color: var(--color-accent-dark);
+}
+
+/* The design's only two motions: status pills / live dots breathe, and the
+   streaming caret blinks. Nothing else animates. */
+@keyframes breath {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+
+@keyframes caret {
+	0%,
+	49% {
+		opacity: 1;
+	}
+	50%,
+	100% {
+		opacity: 0;
+	}
+}
+
+.breath {
+	animation: breath 1.2s ease-in-out infinite;
+}
+
+.caret-blink {
+	animation: caret 1s step-end infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.spine-flowing {
+	.breath,
+	.caret-blink {
 		animation: none;
 	}
 }

@@ -7,9 +7,9 @@
 	let { title }: { title: string } = $props();
 </script>
 
-<div class="mx-auto flex max-w-2xl flex-col gap-2 px-6 py-8">
-	<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">{title}</h1>
-	<p class="text-sm text-neutral-600 dark:text-neutral-400">
-		This page is only available to the workspace owner — your session doesn't have access to it.
+<div class="mx-auto max-w-[720px] px-4 pt-8 md:px-10">
+	<h1 class="mb-6 font-display text-[28px] font-semibold text-ink dark:text-ink-dark">{title}</h1>
+	<p class="py-6 text-center text-base text-muted dark:text-muted-dark">
+		This is only available to the workspace owner.
 	</p>
 </div>

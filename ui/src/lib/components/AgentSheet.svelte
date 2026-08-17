@@ -1,0 +1,519 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import {
+		agents,
+		type Agent,
+		type AgentVersion,
+		type RoutingRule,
+		type RuleType
+	} from '$lib/api/agents';
+	import type { Provider } from '$lib/api/providers';
+	import type { Tool } from '$lib/api/tools';
+	import type { TeamDetail } from '$lib/api/teams';
+	import Button from '$lib/ui/Button.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
+	import ModelPicker from './ModelPicker.svelte';
+
+	// Agent sheet (06-screens.md → Agent sheet, mockup 1j). Everyday fields
+	// up top; everything else — when to speak, tools, fallbacks, schema,
+	// unattended use, scopes, history — behind "More options" (04's
+	// progressive-disclosure table). The list page never shows routing
+	// radios. Deleting confirms in a nested sheet, never window.confirm.
+	let {
+		agent = null,
+		providers,
+		tools,
+		teams,
+		scopeCatalog,
+		initialTeamId = null,
+		initialRules = [],
+		initialToolIds = [],
+		initialScopes = [],
+		initialPeerTag = '',
+		versions = [],
+		onClose,
+		onSaved
+	}: {
+		agent?: Agent | null;
+		providers: Provider[];
+		tools: Tool[];
+		teams: TeamDetail[];
+		scopeCatalog: string[];
+		initialTeamId?: string | null;
+		initialRules?: RoutingRule[];
+		initialToolIds?: string[];
+		initialScopes?: string[];
+		initialPeerTag?: string;
+		versions?: AgentVersion[];
+		onClose: () => void;
+		onSaved: () => void;
+	} = $props();
+
+	// One-time snapshots: the parent mounts a fresh sheet per open (keyed),
+	// so these deliberately don't track the props live.
+	let name = $state(untrack(() => agent?.name ?? ''));
+	let description = $state(untrack(() => agent?.description ?? ''));
+	let instructions = $state(untrack(() => agent?.instructions ?? ''));
+	let model = $state(untrack(() => agent?.model ?? 'auto'));
+	let teamId = $state<string | null>(untrack(() => initialTeamId));
+	let fallbackModels = $state(
+		untrack(() =>
+			(agent?.fallback_models ?? []).map((m) => ({ id: crypto.randomUUID(), value: m }))
+		)
+	);
+	let outputSchemaText = $state(
+		untrack(() => (agent?.output_schema ? JSON.stringify(agent.output_schema, null, 2) : ''))
+	);
+	let selectedToolIds = $state<string[]>(untrack(() => [...initialToolIds]));
+	let selectedScopes = $state<string[]>(untrack(() => [...initialScopes]));
+	let peerTag = $state(untrack(() => initialPeerTag));
+	let unattendedApproved = $state(untrack(() => agent?.approved_for_unattended_tools ?? false));
+
+	// "When to speak" — one exclusive rule (copy deck: Always / Only when
+	// mentioned / When the message includes…).
+	function initialRuleType(): RuleType {
+		return untrack(() => initialRules[0]?.rule_type ?? 'mention_only');
+	}
+	function initialKeywords(): string {
+		const rule = untrack(() => initialRules[0]);
+		if (rule?.rule_type !== 'keyword') return '';
+		try {
+			return (JSON.parse(rule.pattern) as string[]).join(', ');
+		} catch {
+			return rule.pattern;
+		}
+	}
+	let ruleType = $state<RuleType>(initialRuleType());
+	let keywords = $state(initialKeywords());
+
+	let busy = $state(false);
+	let error = $state<string | null>(null);
+	let confirmingDelete = $state(false);
+	let deleting = $state(false);
+
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
+
+	function toggleTool(toolId: string) {
+		selectedToolIds = selectedToolIds.includes(toolId)
+			? selectedToolIds.filter((id) => id !== toolId)
+			: [...selectedToolIds, toolId];
+	}
+
+	function toggleScope(scope: string) {
+		selectedScopes = selectedScopes.includes(scope)
+			? selectedScopes.filter((s) => s !== scope)
+			: [...selectedScopes, scope];
+	}
+
+	function buildRules(): { rule_type: RuleType; pattern: string; priority?: number }[] {
+		if (ruleType === 'keyword') {
+			const list = keywords
+				.split(',')
+				.map((k) => k.trim())
+				.filter(Boolean);
+			return [{ rule_type: 'keyword', pattern: JSON.stringify(list), priority: 10 }];
+		}
+		return [{ rule_type: ruleType, pattern: '', priority: 10 }];
+	}
+
+	async function save() {
+		if (!name.trim() || !description.trim() || !instructions.trim() || !model.trim()) {
+			error = 'Name, role, instructions, and model are all needed.';
+			return;
+		}
+
+		let output_schema: Record<string, unknown> | null = null;
+		const trimmedSchema = outputSchemaText.trim();
+		if (trimmedSchema) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(trimmedSchema);
+			} catch {
+				error = 'The reply shape must be valid JSON.';
+				return;
+			}
+			if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+				error = 'The reply shape must be a JSON object.';
+				return;
+			}
+			output_schema = parsed as Record<string, unknown>;
+		}
+
+		busy = true;
+		error = null;
+		try {
+			const values = {
+				name: name.trim(),
+				description: description.trim(),
+				instructions: instructions.trim(),
+				model: model.trim(),
+				fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== ''),
+				output_schema,
+				tool_ids: selectedToolIds,
+				team_ids: teamId ? [teamId] : []
+			};
+
+			let saved: Agent;
+			if (agent) {
+				saved = await agents.update(agent.id, {
+					...values,
+					approved_for_unattended_tools: unattendedApproved
+				});
+			} else {
+				saved = await agents.create(values);
+				if (unattendedApproved) {
+					await agents.update(saved.id, { approved_for_unattended_tools: true });
+				}
+			}
+
+			await agents.setRoutingRules(saved.id, buildRules());
+			if (peerTag.trim() || initialPeerTag) {
+				await agents.setPeerPreference(saved.id, peerTag.trim() || null);
+			}
+			// PUT replaces the whole granted set. Owner-only server-side; a
+			// guest who toggled a scope sees the 403 as this sheet's error.
+			if (agent ? selectedScopes.join() !== initialScopes.join() : selectedScopes.length > 0) {
+				await agents.setToolScopes(saved.id, selectedScopes);
+			}
+
+			onSaved();
+		} catch (err) {
+			error = err instanceof Error ? err.message : "Couldn't save this agent. Try again.";
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function handleDelete() {
+		if (!agent) return;
+		deleting = true;
+		error = null;
+		try {
+			await agents.remove(agent.id);
+			onSaved();
+		} catch {
+			error = "Couldn't delete this agent. Try again.";
+			confirmingDelete = false;
+		} finally {
+			deleting = false;
+		}
+	}
+
+	// #104: reverts instructions/model to a prior version and records the
+	// rollback itself as a new version, so history stays diffable.
+	async function handleRollback(version: number) {
+		if (!agent) return;
+		error = null;
+		try {
+			await agents.rollback(agent.id, version);
+			onSaved();
+		} catch {
+			error = "Couldn't roll back. Try again.";
+		}
+	}
+</script>
+
+{#if !confirmingDelete}
+	<Sheet title={agent ? agent.name : 'New agent'} {onClose}>
+		<div class="flex flex-col gap-2">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-name">Name</label>
+			<input
+				id="agent-name"
+				type="text"
+				bind:value={name}
+				placeholder="Writer"
+				class={inputClass}
+			/>
+		</div>
+
+		<div class="flex flex-col gap-2">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-role">
+				What this agent does
+			</label>
+			<input
+				id="agent-role"
+				type="text"
+				bind:value={description}
+				placeholder="Drafts and edits prose."
+				class={inputClass}
+			/>
+		</div>
+
+		<div class="flex flex-col gap-2">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-instructions">
+				How it should behave
+			</label>
+			<textarea
+				id="agent-instructions"
+				rows="6"
+				bind:value={instructions}
+				class="rounded-lg border border-line bg-surface px-4 py-3 text-base leading-normal text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+			></textarea>
+		</div>
+
+		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+			<div class="flex flex-col gap-2">
+				<span class="text-sm font-semibold text-ink dark:text-ink-dark">Model</span>
+				<ModelPicker {providers} bind:value={model} />
+			</div>
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-team"
+					>Team</label
+				>
+				<select
+					id="agent-team"
+					value={teamId ?? ''}
+					onchange={(e) => (teamId = (e.target as HTMLSelectElement).value || null)}
+					class={inputClass}
+				>
+					<option value="">No team</option>
+					{#each teams as team (team.id)}
+						<option value={team.id}>{team.name}</option>
+					{/each}
+				</select>
+			</div>
+		</div>
+
+		<details class="border-t border-line pt-4 dark:border-line-dark">
+			<summary
+				class="flex cursor-pointer items-center gap-2 text-base font-medium text-ink dark:text-ink-dark"
+			>
+				<Icon name="chevron-right" class="h-4 w-4 text-muted dark:text-muted-dark" />
+				More options
+				<span class="text-sm font-normal text-muted dark:text-muted-dark">
+					When to speak · Tools · Fallbacks · Advanced
+				</span>
+			</summary>
+			<div class="mt-5 flex flex-col gap-6">
+				<div class="flex flex-col gap-2.5">
+					<span class="text-sm font-semibold text-ink dark:text-ink-dark">When to speak</span>
+					<div class="flex flex-col gap-2" role="radiogroup" aria-label="When to speak">
+						{#each [{ value: 'always', label: 'Always' }, { value: 'mention_only', label: 'Only when mentioned' }, { value: 'keyword', label: 'When the message includes…' }] as option (option.value)}
+							<label
+								class="flex h-12 cursor-pointer items-center gap-3 rounded-lg border px-4 {ruleType ===
+								option.value
+									? 'border-accent bg-accent-soft dark:border-accent-dark dark:bg-accent-soft-dark'
+									: 'border-line dark:border-line-dark'}"
+							>
+								<input
+									type="radio"
+									name="agent-when"
+									value={option.value}
+									bind:group={ruleType}
+									class="accent-(--color-accent)"
+								/>
+								<span class="text-[15px] text-ink dark:text-ink-dark">{option.label}</span>
+							</label>
+						{/each}
+					</div>
+					{#if ruleType === 'keyword'}
+						<input
+							type="text"
+							bind:value={keywords}
+							placeholder="retry, eval, coverage"
+							aria-label="Keywords, separated by commas"
+							class={inputClass}
+						/>
+					{/if}
+				</div>
+
+				{#if tools.length > 0}
+					<div class="flex flex-col gap-2.5">
+						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Tools</span>
+						<div class="flex flex-col gap-2">
+							{#each tools as tool (tool.id)}
+								<label
+									class="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-line px-4 py-2 dark:border-line-dark"
+								>
+									<input
+										type="checkbox"
+										checked={selectedToolIds.includes(tool.id)}
+										onchange={() => toggleTool(tool.id)}
+										class="accent-(--color-accent)"
+									/>
+									<span class="font-mono text-sm text-ink dark:text-ink-dark">{tool.name}</span>
+									{#if tool.sensitive}
+										<StatusPill tone="warn" class="ml-auto">Sensitive</StatusPill>
+									{/if}
+								</label>
+							{/each}
+						</div>
+						<p class="text-[13px] text-muted dark:text-muted-dark">
+							Sensitive tools need the owner's OK, and some only run once the owner grants the
+							matching permission below.
+						</p>
+					</div>
+				{/if}
+
+				<div class="flex flex-col gap-2.5">
+					<div class="flex items-center justify-between">
+						<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+							Backup models — tried in order if the model above fails
+						</span>
+						<button
+							type="button"
+							onclick={() => fallbackModels.push({ id: crypto.randomUUID(), value: '' })}
+							class="text-sm font-semibold text-accent hover:underline dark:text-accent-dark"
+						>
+							Add
+						</button>
+					</div>
+					{#each fallbackModels as fallback, index (fallback.id)}
+						<div class="flex items-center gap-2">
+							<span class="w-4 text-sm text-muted dark:text-muted-dark">{index + 1}.</span>
+							<div class="flex-1">
+								<ModelPicker {providers} bind:value={fallback.value} showAuto={false} />
+							</div>
+							<button
+								type="button"
+								onclick={() =>
+									(fallbackModels = fallbackModels.filter((f) => f.id !== fallback.id))}
+								aria-label="Remove backup model"
+								class="text-sm text-muted hover:text-danger dark:text-muted-dark"
+							>
+								Remove
+							</button>
+						</div>
+					{/each}
+				</div>
+
+				<details>
+					<summary
+						class="flex cursor-pointer items-center gap-2 text-sm font-semibold text-ink dark:text-ink-dark"
+					>
+						<Icon name="chevron-right" class="h-3.5 w-3.5 text-muted dark:text-muted-dark" />
+						Advanced
+					</summary>
+					<div class="mt-4 flex flex-col gap-5">
+						<div class="flex flex-col gap-2">
+							<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+								Reply shape (JSON)
+							</span>
+							<textarea
+								rows="4"
+								bind:value={outputSchemaText}
+								placeholder="Leave blank for normal replies"
+								class="rounded-lg border border-line bg-surface px-4 py-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+							></textarea>
+							<p class="text-[13px] text-muted dark:text-muted-dark">
+								A JSON Schema object. When set, this agent's replies are constrained to match it.
+							</p>
+						</div>
+
+						<label class="flex cursor-pointer items-start gap-3">
+							<input
+								type="checkbox"
+								bind:checked={unattendedApproved}
+								class="mt-1 accent-(--color-accent)"
+							/>
+							<span class="text-[15px] leading-normal text-ink dark:text-ink-dark">
+								Let this agent use its sensitive tools when nobody is watching
+								<span class="block text-[13px] text-muted dark:text-muted-dark">
+									Applies to schedules and automatic runs. Ordinary chat is never affected.
+								</span>
+							</span>
+						</label>
+
+						{#if scopeCatalog.length > 0}
+							<div class="flex flex-col gap-2">
+								<span class="text-sm font-semibold text-ink dark:text-ink-dark">Permissions</span>
+								{#each scopeCatalog as scope (scope)}
+									<label class="flex cursor-pointer items-center gap-3">
+										<input
+											type="checkbox"
+											checked={selectedScopes.includes(scope)}
+											onchange={() => toggleScope(scope)}
+											class="accent-(--color-accent)"
+										/>
+										<span class="font-mono text-sm text-ink dark:text-ink-dark">{scope}</span>
+									</label>
+								{/each}
+								<p class="text-[13px] text-muted dark:text-muted-dark">
+									Granting a permission is owner-only. Some tools stay inert until their permission
+									is granted.
+								</p>
+							</div>
+						{/if}
+
+						<div class="flex flex-col gap-2">
+							<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-peer-tag">
+								Preferred machine
+							</label>
+							<input
+								id="agent-peer-tag"
+								type="text"
+								bind:value={peerTag}
+								placeholder="e.g. gpu — blank for no preference"
+								class={inputClass}
+							/>
+							<p class="text-[13px] text-muted dark:text-muted-dark">
+								Only matters when this workspace syncs across machines — the agent prefers to run
+								where this label is advertised.
+							</p>
+						</div>
+
+						{#if agent && versions.length > 0}
+							<div class="flex flex-col gap-2">
+								<span class="text-sm font-semibold text-ink dark:text-ink-dark">History</span>
+								{#each versions as version (version.version)}
+									<div
+										class="flex items-center justify-between gap-2 text-sm text-muted dark:text-muted-dark"
+									>
+										<span class="truncate">
+											v{version.version} · {new Date(version.created_at).toLocaleString()} ·
+											<span class="font-mono text-[13px]">{version.model}</span>
+										</span>
+										<button
+											type="button"
+											onclick={() => handleRollback(version.version)}
+											class="flex-none font-semibold text-accent hover:underline dark:text-accent-dark"
+										>
+											Roll back
+										</button>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				</details>
+			</div>
+		</details>
+
+		{#if error}
+			<p class="text-sm text-danger">{error}</p>
+		{/if}
+
+		{#snippet footer()}
+			{#if agent}
+				<button
+					type="button"
+					onclick={() => (confirmingDelete = true)}
+					class="mr-auto text-[15px] font-medium text-danger hover:underline"
+				>
+					Delete agent
+				</button>
+			{/if}
+			<Button variant="secondary" onclick={onClose}>Cancel</Button>
+			<Button onclick={save} disabled={busy}>
+				{busy ? 'Saving…' : agent ? 'Save' : 'Create agent'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if confirmingDelete && agent}
+	<Sheet title="Delete {agent.name}?" onClose={() => (confirmingDelete = false)} width={480}>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Conversations stay. This agent will stop answering.
+		</p>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingDelete = false)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleDelete} disabled={deleting}>
+				{deleting ? 'Deleting…' : 'Delete agent'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}

@@ -120,18 +120,18 @@
 			type="text"
 			bind:value={name}
 			placeholder="Step name"
-			class="min-w-0 flex-1 rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="h-12 min-w-0 flex-1 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		/>
 		{#if lockNodeType}
 			<span
-				class="flex items-center rounded-md border border-ink/15 px-3 py-2 text-sm text-neutral-500 dark:border-white/15"
+				class="flex items-center rounded-lg border border-line px-4 text-[15px] text-muted dark:border-line-dark dark:text-muted-dark"
 			>
 				{NODE_TYPE_LABELS[nodeType]}
 			</span>
 		{:else}
 			<select
 				bind:value={nodeType}
-				class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 			>
 				{#each Object.entries(NODE_TYPE_LABELS) as [value, label] (value)}
 					<option {value}>{label}</option>
@@ -144,7 +144,7 @@
 		<select
 			value={agentId}
 			onchange={handleAgentSelectChange}
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		>
 			<option value="" disabled>Select an agent…</option>
 			{#each agentOptions as agent (agent.id)}
@@ -157,45 +157,45 @@
 			bind:value={template}
 			placeholder="Template — {'{input}'} is replaced with the previous step's output"
 			rows="2"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="rounded-lg border border-line bg-surface px-4 py-3 font-mono text-sm text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		></textarea>
 	{:else if nodeType === 'conditional'}
 		<input
 			type="text"
 			bind:value={contains}
 			placeholder="Stop the run unless the input contains…"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		/>
 	{:else if nodeType === 'summarize'}
-		<p class="text-xs text-neutral-500">
+		<p class="text-[13px] text-muted dark:text-muted-dark">
 			Summarizes the previous step's output with a small model — no configuration needed.
 		</p>
 	{:else if nodeType === 'merge'}
-		<p class="text-xs text-neutral-500">
+		<p class="text-[13px] text-muted dark:text-muted-dark">
 			Combines every branch that joins here into one output — a JSON array by default, or set a
 			template with {'{input0}'}, {'{input1}'}, … placeholders in the step's config.
 		</p>
 	{:else if nodeType === 'human_input'}
-		<p class="text-xs text-neutral-500">
+		<p class="text-[13px] text-muted dark:text-muted-dark">
 			Pauses the run and waits for a reply in the channel — whatever the human types next becomes
 			this step's output, and the rivulet is marked paused until then.
 		</p>
 	{:else if nodeType === 'workflow'}
 		<select
 			bind:value={childWorkflowId}
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+			class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
 		>
 			<option value="" disabled>Select a workflow…</option>
 			{#each workflowOptions as workflow (workflow.id)}
 				<option value={workflow.id}>/{workflow.name}</option>
 			{/each}
 		</select>
-		<p class="text-xs text-neutral-500">
+		<p class="text-[13px] text-muted dark:text-muted-dark">
 			Runs the selected workflow as a nested step; its result becomes this step's output.
 		</p>
 	{/if}
 
-	<div class="flex gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+	<div class="flex gap-3 text-sm text-muted dark:text-muted-dark">
 		<label class="flex items-center gap-1.5">
 			Retries
 			<input
@@ -203,7 +203,7 @@
 				min="0"
 				max="10"
 				bind:value={retryMaxAttempts}
-				class="w-14 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				class="h-10 w-16 rounded-lg border border-line bg-surface px-2 text-center text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
 			/>
 		</label>
 		<label class="flex items-center gap-1.5">
@@ -213,7 +213,7 @@
 				min="0"
 				max="3600"
 				bind:value={retryBackoffSeconds}
-				class="w-16 rounded-md border border-ink/15 bg-transparent px-2 py-1 text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+				class="h-10 w-18 rounded-lg border border-line bg-surface px-2 text-center text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
 			/>
 		</label>
 	</div>
@@ -222,7 +222,7 @@
 		<button
 			type="submit"
 			disabled={busy}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			class="inline-flex h-12 items-center self-start rounded-xl bg-accent px-5 text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
 		>
 			{busy ? busyLabel : submitLabel}
 		</button>
@@ -230,13 +230,13 @@
 			<button
 				type="button"
 				onclick={oncancel}
-				class="text-sm text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
+				class="text-[15px] font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
 			>
 				Cancel
 			</button>
 		{/if}
 	</div>
 	{#if error}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{error}</p>
+		<p class="text-sm text-danger">{error}</p>
 	{/if}
 </form>

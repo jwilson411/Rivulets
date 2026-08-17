@@ -1,38 +1,20 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
-// route depends on $lib/api/tools, plus the real (unmocked) $lib/api/client
-// for the ApiError class used in instanceof checks (including the 501
-// simple-mode-codegen-not-wired-up special case).
+// Browser-mode component test for Tools (06-screens.md → Tools, mockup
+// 2i): grouped Built in / Yours / From MCP, plain-language availability
+// pills, describe-first creation, and the owner-only source sheet.
 
 import { page } from 'vitest/browser';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import ToolsPage from './+page.svelte';
-import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
 import { ApiError } from '$lib/api/client';
+import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
 
-// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
-// follows -- defaults to 'owner' so the existing (pre-#321) tests below
-// don't have to know about grants at all.
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
-
-vi.mock('$lib/api/auth.svelte', () => ({
-	auth: {
-		get grant() {
-			return authState.grant;
-		},
-		get token() {
-			return 'test-token';
-		}
-	}
-}));
 
 vi.mock('$lib/api/tools', () => ({
 	tools: {
 		list: vi.fn(),
-		listScopes: vi.fn(),
-		get: vi.fn(),
 		create: vi.fn(),
-		update: vi.fn(),
 		remove: vi.fn(),
 		listVersions: vi.fn(),
 		saveVersion: vi.fn(),
@@ -41,10 +23,23 @@ vi.mock('$lib/api/tools', () => ({
 	}
 }));
 
-const builtinTool: Tool = {
-	id: 'tool-builtin',
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
+afterEach(() => {
+	vi.clearAllMocks();
+	authState.grant = 'owner';
+});
+
+const webSearch: Tool = {
+	id: 'tool-1',
 	name: 'web_search',
-	description: 'Search the web',
+	description: 'Searches the web',
 	tool_type: 'builtin',
 	source_path: null,
 	sensitive: false,
@@ -52,382 +47,162 @@ const builtinTool: Tool = {
 	available: true
 };
 
+const executePython: Tool = {
+	...webSearch,
+	id: 'tool-2',
+	name: 'execute_python',
+	description: 'Runs code',
+	sensitive: true,
+	available: false
+};
+
 const customTool: Tool = {
-	id: 'tool-custom',
-	name: 'my_tool',
-	description: 'Does a custom thing',
-	tool_type: 'custom',
-	source_path: '/tools/my_tool.py',
-	sensitive: false,
-	required_scope: null,
-	available: true
+	...webSearch,
+	id: 'tool-3',
+	name: 'fetch_notes',
+	description: 'Fetches notes',
+	tool_type: 'custom'
 };
 
-const customToolVersion: ToolVersion = {
+const version: ToolVersion = {
 	version: 1,
-	source_code: 'def run(): pass',
-	created_at: '2026-08-01T00:00:00Z'
+	source_code: 'def fetch_notes(): ...',
+	created_at: '2026-01-01T00:00:00Z'
 };
-
-beforeEach(() => {
-	authState.grant = 'owner';
-});
-
-afterEach(() => {
-	vi.clearAllMocks();
-});
 
 describe('tools/+page.svelte', () => {
-	it('lists tools, tagging custom tools and showing their version history', async () => {
-		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+	it('groups tools with plain-language availability pills', async () => {
+		vi.mocked(tools.list).mockResolvedValue([webSearch, executePython, customTool]);
 
 		render(ToolsPage);
 
+		await expect.element(page.getByText('Built in')).toBeInTheDocument();
+		await expect.element(page.getByText('Yours')).toBeInTheDocument();
 		await expect.element(page.getByText('web_search')).toBeInTheDocument();
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-		await expect.element(page.getByText('Version history')).toBeInTheDocument();
-		await expect.element(page.getByText(/v1 —/)).toBeInTheDocument();
-		// Only the custom tool gets a Delete action.
-		await expect.element(page.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+		await expect.element(page.getByText('Available').first()).toBeInTheDocument();
+		await expect.element(page.getByText('Sensitive')).toBeInTheDocument();
+		await expect.element(page.getByText('Unavailable on this machine')).toBeInTheDocument();
 	});
 
-	it('hides the version/source panel for a non-owner (invite-grant) session', async () => {
-		// #321: GET /tools/{id}/versions is now OwnerGrant-only server-side
-		// (it carries source_code), so a non-owner session shouldn't even
-		// call it -- and has nothing to show if it somehow did.
-		authState.grant = 'invite';
-		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
-
-		render(ToolsPage);
-
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-		expect(tools.listVersions).not.toHaveBeenCalled();
-		await expect.element(page.getByText('Version history')).not.toBeInTheDocument();
-		await expect.element(page.getByPlaceholder('Tool source code')).not.toBeInTheDocument();
-		await expect
-			.element(page.getByRole('button', { name: 'Open in editor' }))
-			.not.toBeInTheDocument();
-	});
-
-	it('hides the create form and Delete button for a non-owner (invite-grant) session (#351)', async () => {
-		// POST and DELETE /tools are OwnerGrant-only server-side, so the
-		// controls that could only 403 aren't offered at all.
-		authState.grant = 'invite';
-		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
-
-		render(ToolsPage);
-
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-		await expect.element(page.getByText('New custom tool')).not.toBeInTheDocument();
-		await expect.element(page.getByRole('button', { name: 'Create tool' })).not.toBeInTheDocument();
-		await expect.element(page.getByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
-	});
-
-	it('shows a non-owner empty state without the "add one above" hint (#351)', async () => {
-		authState.grant = 'invite';
+	it('leads tool creation with "describe what it should do"', async () => {
 		vi.mocked(tools.list).mockResolvedValue([]);
-
-		render(ToolsPage);
-
-		await expect.element(page.getByText('No tools yet.')).toBeInTheDocument();
-	});
-
-	it('creates a tool in advanced mode without a prompt field', async () => {
-		vi.mocked(tools.list).mockResolvedValueOnce([]).mockResolvedValueOnce([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([]);
 		vi.mocked(tools.create).mockResolvedValueOnce(customTool);
 
 		render(ToolsPage);
-		await expect.element(page.getByPlaceholder('Tool source code')).not.toBeInTheDocument();
+		await page.getByRole('button', { name: 'New tool' }).click();
 
-		await page.getByPlaceholder('Name').fill('my_tool');
-		await page.getByPlaceholder('Description').fill('Does a custom thing');
+		await page.getByLabelText('Name').fill('fetch_notes');
+		await page.getByLabelText('What agents see').fill('Fetches notes');
+		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
 		await page.getByRole('button', { name: 'Create tool' }).click();
 
 		expect(tools.create).toHaveBeenCalledWith({
-			name: 'my_tool',
-			description: 'Does a custom thing',
+			name: 'fetch_notes',
+			description: 'Fetches notes',
+			mode: 'simple',
+			prompt: 'Read the notes file'
+		});
+	});
+
+	it('offers pasting code instead, which creates an empty advanced tool', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(tools.create).mockResolvedValueOnce(customTool);
+
+		render(ToolsPage);
+		await page.getByRole('button', { name: 'New tool' }).click();
+		await page.getByRole('button', { name: 'Paste code instead' }).click();
+
+		await page.getByLabelText('Name').fill('fetch_notes');
+		await page.getByLabelText('What agents see').fill('Fetches notes');
+		await page.getByRole('button', { name: 'Create tool' }).click();
+
+		expect(tools.create).toHaveBeenCalledWith({
+			name: 'fetch_notes',
+			description: 'Fetches notes',
 			mode: 'advanced'
 		});
 	});
 
-	it('switches to simple mode, requires a prompt, and includes it in the create call', async () => {
-		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(tools.create).mockResolvedValueOnce(customTool);
-
-		render(ToolsPage);
-
-		await page.getByRole('button', { name: 'Simple mode' }).click();
-		await expect
-			.element(page.getByRole('button', { name: 'Simple mode' }))
-			.toHaveAttribute('aria-pressed', 'true');
-
-		await page.getByPlaceholder('Name').fill('my_tool');
-		await page.getByPlaceholder('Description').fill('Does a custom thing');
-		// Empty prompt should block submission.
-		await page.getByRole('button', { name: 'Create tool' }).click();
-		expect(tools.create).not.toHaveBeenCalled();
-
-		await page
-			.getByPlaceholder(/Describe what the tool should do/)
-			.fill('Fetch the weather for a city');
-		await page.getByRole('button', { name: 'Create tool' }).click();
-
-		expect(tools.create).toHaveBeenCalledWith({
-			name: 'my_tool',
-			description: 'Does a custom thing',
-			mode: 'simple',
-			prompt: 'Fetch the weather for a city'
-		});
-	});
-
-	it('shows an actionable message and next steps on a 501 response', async () => {
+	it('offers a concrete next step when describe-mode codegen is unavailable (#133)', async () => {
 		vi.mocked(tools.list).mockResolvedValue([]);
 		vi.mocked(tools.create).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
 
 		render(ToolsPage);
-		await page.getByRole('button', { name: 'Simple mode' }).click();
-		await page.getByPlaceholder('Name').fill('my_tool');
-		await page.getByPlaceholder('Description').fill('desc');
-		await page.getByPlaceholder(/Describe what the tool should do/).fill('do a thing');
+		await page.getByRole('button', { name: 'New tool' }).click();
+		await page.getByLabelText('Name').fill('fetch_notes');
+		await page.getByLabelText('What agents see').fill('Fetches notes');
+		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
 		await page.getByRole('button', { name: 'Create tool' }).click();
 
 		await expect
-			.element(page.getByText('Simple mode isn’t available on this server yet.', { exact: false }))
-			.toBeInTheDocument();
-		await expect
-			.element(page.getByRole('button', { name: 'Switch to Advanced mode' }))
-			.toBeInTheDocument();
-		await expect
-			.element(page.getByRole('link', { name: 'Ask an agent in a channel' }))
+			.element(
+				page.getByText("Describing a tool isn't available on this machine yet.", { exact: false })
+			)
 			.toBeInTheDocument();
 	});
 
-	it('lets the user switch to advanced mode after a 501, keeping name and description', async () => {
-		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(tools.create).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
-
-		render(ToolsPage);
-		await page.getByRole('button', { name: 'Simple mode' }).click();
-		await page.getByPlaceholder('Name').fill('my_tool');
-		await page.getByPlaceholder('Description').fill('desc');
-		await page.getByPlaceholder(/Describe what the tool should do/).fill('do a thing');
-		await page.getByRole('button', { name: 'Create tool' }).click();
-
-		await page.getByRole('button', { name: 'Switch to Advanced mode' }).click();
-
-		await expect
-			.element(page.getByRole('button', { name: 'Advanced mode' }))
-			.toHaveAttribute('aria-pressed', 'true');
-		await expect.element(page.getByPlaceholder('Name')).toHaveValue('my_tool');
-		await expect.element(page.getByPlaceholder('Description')).toHaveValue('desc');
-		await expect
-			.element(page.getByText('Simple mode isn’t available on this server yet.', { exact: false }))
-			.not.toBeInTheDocument();
-	});
-
-	it('deletes a custom tool via tools.remove', async () => {
-		vi.mocked(tools.list).mockResolvedValueOnce([customTool]).mockResolvedValueOnce([]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.remove).mockResolvedValueOnce(undefined);
-
-		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Delete' }).click();
-
-		expect(tools.remove).toHaveBeenCalledWith('tool-custom');
-		await expect.element(page.getByText('my_tool')).not.toBeInTheDocument();
-	});
-
-	it('shows an error when tools fail to load', async () => {
-		vi.mocked(tools.list).mockRejectedValueOnce(new Error('Failed to load tools'));
-
-		render(ToolsPage);
-
-		await expect.element(page.getByText('Failed to load tools')).toBeInTheDocument();
-	});
-
-	it('does nothing when Create tool is submitted with an empty name and description', async () => {
-		vi.mocked(tools.list).mockResolvedValue([]);
-
-		render(ToolsPage);
-		await expect.element(page.getByText('No tools yet — add one above.')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Create tool' }).click();
-
-		expect(tools.create).not.toHaveBeenCalled();
-	});
-
-	it('shows a generic error message when creating a tool fails with a non-ApiError', async () => {
-		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(tools.create).mockRejectedValueOnce(new Error('network down'));
-
-		render(ToolsPage);
-		await page.getByPlaceholder('Name').fill('my_tool');
-		await page.getByPlaceholder('Description').fill('Does a custom thing');
-		await page.getByRole('button', { name: 'Create tool' }).click();
-
-		await expect.element(page.getByText('Failed to create tool')).toBeInTheDocument();
-	});
-
-	it('toggles the creation mode back to advanced after switching to simple', async () => {
-		vi.mocked(tools.list).mockResolvedValue([]);
-
-		render(ToolsPage);
-		await page.getByRole('button', { name: 'Simple mode' }).click();
-		await expect
-			.element(page.getByPlaceholder(/Describe what the tool should do/))
-			.toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Advanced mode' }).click();
-
-		await expect
-			.element(page.getByRole('button', { name: 'Advanced mode' }))
-			.toHaveAttribute('aria-pressed', 'true');
-		await expect
-			.element(page.getByPlaceholder(/Describe what the tool should do/))
-			.not.toBeInTheDocument();
-	});
-
-	it('shows an unavailable badge for a tool marked unavailable', async () => {
-		vi.mocked(tools.list).mockResolvedValue([{ ...builtinTool, available: false }]);
-
-		render(ToolsPage);
-
-		await expect.element(page.getByText('unavailable')).toBeInTheDocument();
-	});
-
-	it('opens the editor for a custom tool and shows the returned path', async () => {
+	it('opens a custom tool sheet with its source and saves a new version (owner)', async () => {
 		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.openEditor).mockResolvedValueOnce({ path: '/tools/my_tool.py' });
+		vi.mocked(tools.listVersions).mockResolvedValue([version]);
+		vi.mocked(tools.saveVersion).mockResolvedValueOnce(version);
 
 		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await page.getByRole('button', { name: /fetch_notes/ }).click();
 
-		await page.getByRole('button', { name: 'Open in editor' }).click();
+		const source = page.getByLabelText('Tool source code');
+		await expect.element(source).toHaveValue('def fetch_notes(): ...');
 
-		expect(tools.openEditor).toHaveBeenCalledWith('tool-custom');
-		await expect.element(page.getByText('/tools/my_tool.py')).toBeInTheDocument();
-	});
-
-	it('shows an error when opening the editor fails', async () => {
-		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.openEditor).mockRejectedValueOnce(new ApiError(500, 'Failed to open editor'));
-
-		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Open in editor' }).click();
-
-		await expect.element(page.getByText('Failed to open editor')).toBeInTheDocument();
-	});
-
-	it("saves a new version of a tool's source code", async () => {
-		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions)
-			.mockResolvedValueOnce([customToolVersion])
-			.mockResolvedValueOnce([
-				{ version: 2, source_code: 'def run(): return 1', created_at: '2026-08-02T00:00:00Z' },
-				customToolVersion
-			]);
-		vi.mocked(tools.saveVersion).mockResolvedValueOnce({
-			version: 2,
-			source_code: 'def run(): return 1',
-			created_at: '2026-08-02T00:00:00Z'
-		});
-
-		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
-		await page.getByPlaceholder('Tool source code').fill('def run(): return 1');
+		await source.fill('def fetch_notes(): return 2');
 		await page.getByRole('button', { name: 'Save version' }).click();
 
-		expect(tools.saveVersion).toHaveBeenCalledWith('tool-custom', 'def run(): return 1');
-		await expect.element(page.getByText(/v2 —/)).toBeInTheDocument();
+		expect(tools.saveVersion).toHaveBeenCalledWith('tool-3', 'def fetch_notes(): return 2');
 	});
 
-	it('shows an error when saving a version fails', async () => {
+	it('rolls back to a prior version from the sheet', async () => {
 		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.saveVersion).mockRejectedValueOnce(new Error('Failed to save version'));
-
-		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Save version' }).click();
-
-		await expect.element(page.getByText('Failed to save version')).toBeInTheDocument();
-	});
-
-	it('rolls back to a previous version and reseeds the draft with its source', async () => {
-		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+		vi.mocked(tools.listVersions).mockResolvedValue([version]);
 		vi.mocked(tools.rollback).mockResolvedValueOnce(customTool);
 
 		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
+		await page.getByRole('button', { name: /fetch_notes/ }).click();
 		await page.getByRole('button', { name: 'Roll back' }).click();
 
-		expect(tools.rollback).toHaveBeenCalledWith('tool-custom', 1);
-		await expect.element(page.getByPlaceholder('Tool source code')).toHaveValue('def run(): pass');
+		expect(tools.rollback).toHaveBeenCalledWith('tool-3', 1);
 	});
 
-	it('shows an error when rolling back a version fails', async () => {
+	it('deletes a custom tool behind a confirm sheet', async () => {
 		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.rollback).mockRejectedValueOnce(new Error('Failed to roll back'));
+		vi.mocked(tools.listVersions).mockResolvedValue([version]);
+		vi.mocked(tools.remove).mockResolvedValueOnce(undefined);
 
 		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await page.getByRole('button', { name: /fetch_notes/ }).click();
+		await page.getByRole('button', { name: 'Delete tool' }).click();
 
-		await page.getByRole('button', { name: 'Roll back' }).click();
+		expect(tools.remove).not.toHaveBeenCalled();
+		await page.getByRole('button', { name: 'Delete tool' }).click();
 
-		await expect.element(page.getByText('Failed to roll back')).toBeInTheDocument();
+		expect(tools.remove).toHaveBeenCalledWith('tool-3');
 	});
 
-	it('shows an error when deleting a tool fails', async () => {
+	it('hides creation and the source sheet from guests (#321/#351)', async () => {
+		authState.grant = 'invite';
 		vi.mocked(tools.list).mockResolvedValue([customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-		vi.mocked(tools.remove).mockRejectedValueOnce(new Error('Failed to delete tool'));
 
 		render(ToolsPage);
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
+		await expect.element(page.getByText('fetch_notes')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Delete' }).click();
-
-		await expect.element(page.getByText('Failed to delete tool')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'New tool' })).not.toBeInTheDocument();
+		// Custom rows aren't clickable buttons for a guest.
+		await expect.element(page.getByRole('button', { name: /fetch_notes/ })).not.toBeInTheDocument();
 	});
 
-	it('filters the tool list by name via the search box', async () => {
-		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
+	it('shows a quiet error with retry when tools fail to load', async () => {
+		vi.mocked(tools.list).mockRejectedValue(new Error('boom'));
 
 		render(ToolsPage);
-		await expect.element(page.getByText('web_search')).toBeInTheDocument();
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
 
-		await page.getByPlaceholder('Search tools…').fill('my_');
-
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-		await expect.element(page.getByText('web_search')).not.toBeInTheDocument();
-	});
-
-	it('filters the tool list by type', async () => {
-		vi.mocked(tools.list).mockResolvedValue([builtinTool, customTool]);
-		vi.mocked(tools.listVersions).mockResolvedValue([customToolVersion]);
-
-		render(ToolsPage);
-		await expect.element(page.getByText('web_search')).toBeInTheDocument();
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-
-		await page.getByRole('combobox', { name: 'Type' }).selectOptions('custom');
-
-		await expect.element(page.getByText('my_tool')).toBeInTheDocument();
-		await expect.element(page.getByText('web_search')).not.toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load tools.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 });

@@ -1,24 +1,27 @@
 <script lang="ts">
-	// #14: claims a Human identity for this browser session, on top of the
-	// already-authenticated workspace session (see +layout.svelte -- this
-	// renders once auth.isAuthenticated but before auth.humanId is set).
-	// A lightweight session claim, not a separate credential -- anyone
-	// holding the workspace mnemonic can claim any identity here.
+	// Name screen (06-screens.md → Name, mockup 2a). #14: claims a Human
+	// identity for this browser session, on top of the already-authenticated
+	// workspace session (see +layout.svelte -- this renders once
+	// auth.isAuthenticated but before auth.humanId is set). A lightweight
+	// session claim, not a separate credential -- anyone holding the
+	// workspace mnemonic can claim any identity here.
 	import { onMount } from 'svelte';
 	import { auth } from '$lib/api/auth.svelte';
 	import { humans, type Human } from '$lib/api/humans';
+	import { initials } from '$lib/ink';
 
 	let existingHumans = $state<Human[]>([]);
 	let loadError = $state<string | null>(null);
 	let newName = $state('');
+	let showNewName = $state(false);
 	let claiming = $state(false);
 	let claimError = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
 			existingHumans = await humans.list();
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load identities';
+		} catch {
+			loadError = "Couldn't load names. Try again.";
 		}
 	});
 
@@ -27,8 +30,8 @@
 		claiming = true;
 		try {
 			await auth.claimIdentity({ humanId });
-		} catch (err) {
-			claimError = err instanceof Error ? err.message : 'Failed to claim identity';
+		} catch {
+			claimError = "Couldn't continue with that name. Try again.";
 		} finally {
 			claiming = false;
 		}
@@ -41,61 +44,81 @@
 		try {
 			await auth.claimIdentity({ displayName: newName.trim() });
 			newName = '';
-		} catch (err) {
-			claimError = err instanceof Error ? err.message : 'Failed to claim identity';
+		} catch {
+			claimError = "Couldn't continue with that name. Try again.";
 		} finally {
 			claiming = false;
 		}
 	}
 </script>
 
-<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-6">
-	<header>
-		<h1 class="text-2xl font-semibold tracking-tight text-ink dark:text-ink-dark">Who's this?</h1>
-		<p class="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-			Pick an identity for this session — anyone with the workspace phrase can claim any name.
-		</p>
-	</header>
+<main class="mx-auto flex min-h-screen w-full max-w-[480px] flex-col justify-center px-6 py-12">
+	<h1 class="mb-3 font-display text-[32px] leading-tight font-semibold text-ink dark:text-ink-dark">
+		What should we call you?
+	</h1>
+	<p class="mb-8 text-[15px] leading-normal text-muted dark:text-muted-dark">
+		This name shows up on your messages. Anyone with the recovery phrase can use any name.
+	</p>
 
 	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+		<p class="mb-4 text-sm text-danger">{loadError}</p>
 	{/if}
 
 	{#if existingHumans.length > 0}
-		<div class="flex flex-col gap-2">
+		<div class="mb-7 flex flex-col gap-3">
 			{#each existingHumans as human (human.id)}
 				<button
 					type="button"
 					disabled={claiming}
 					onclick={() => continueAs(human.id)}
-					class="rounded-md border border-ink/15 px-4 py-2 text-left text-sm font-medium text-ink transition-colors hover:border-agent-cyan-600 disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
+					class="flex h-16 w-full items-center gap-3.5 rounded-xl border border-line bg-surface px-4.5 text-left hover:border-accent disabled:opacity-50 dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 				>
-					Continue as {human.display_name}
+					<span
+						class="flex h-8 w-8 flex-none items-center justify-center rounded-[12px] bg-ink text-sm font-semibold text-paper dark:bg-ink-dark dark:text-paper-dark"
+					>
+						{initials(human.display_name)}
+					</span>
+					<span class="text-[17px] font-semibold text-ink dark:text-ink-dark">
+						Continue as {human.display_name}
+					</span>
 				</button>
 			{/each}
 		</div>
 	{/if}
 
-	<form onsubmit={claimNew} class="flex flex-col gap-3">
-		<label class="text-sm font-medium text-ink dark:text-ink-dark" for="new-identity-name">
-			{existingHumans.length > 0 ? "Or, I'm someone new" : 'Your name'}
-		</label>
-		<input
-			id="new-identity-name"
-			type="text"
-			bind:value={newName}
-			placeholder="e.g. Ada"
-			class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
+	{#if existingHumans.length === 0 || showNewName}
+		<form onsubmit={claimNew} class="flex flex-col gap-3">
+			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-identity-name">
+				{existingHumans.length > 0 ? "I'm someone new" : 'Your name'}
+			</label>
+			<input
+				id="new-identity-name"
+				type="text"
+				bind:value={newName}
+				placeholder="e.g. Riley"
+				class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark"
+			/>
+			<button
+				type="submit"
+				disabled={claiming || !newName.trim()}
+				class="mt-1 flex h-12 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
+			>
+				{claiming ? 'Joining…' : 'Continue'}
+			</button>
+			{#if claimError}
+				<p class="text-sm text-danger">{claimError}</p>
+			{/if}
+		</form>
+	{:else}
 		<button
-			type="submit"
-			disabled={claiming || !newName.trim()}
-			class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
+			type="button"
+			onclick={() => (showNewName = true)}
+			class="self-start text-sm font-semibold text-accent hover:underline dark:text-accent-dark"
 		>
-			{claiming ? 'Joining…' : 'Continue'}
+			I'm someone new
 		</button>
 		{#if claimError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{claimError}</p>
+			<p class="mt-3 text-sm text-danger">{claimError}</p>
 		{/if}
-	</form>
+	{/if}
 </main>

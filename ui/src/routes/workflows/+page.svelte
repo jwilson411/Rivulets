@@ -1,230 +1,253 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { workflows, type FailedWorkflowRun, type Workflow } from '$lib/api/workflows';
 	import { timeAgo } from '$lib/format';
-	import FilterableList, { type ListFilter } from '$lib/components/FilterableList.svelte';
 	import { auth } from '$lib/api/auth.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import FilterChip from '$lib/ui/FilterChip.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
 
-	const workflowFilters: ListFilter<Workflow>[] = [
-		{
-			id: 'status',
-			label: 'Status',
-			options: [
-				{ value: 'published', label: 'Published' },
-				{ value: 'draft', label: 'Draft' }
-			],
-			predicate: (workflow, value) =>
-				value === 'published' ? workflow.published : !workflow.published
-		}
-	];
+	// Workflows (06-screens.md → Workflows list, mockup 2e): /name is the
+	// title — the workflow name IS the slash command. Failed-run banner up
+	// top with "Open conversation". New workflow opens a name sheet, then
+	// the canvas.
+
+	type Filter = 'all' | 'published' | 'draft';
 
 	let workflowList = $state<Workflow[]>([]);
+	let loading = $state(true);
 	let loadError = $state<string | null>(null);
+	let filter = $state<Filter>('all');
 
 	// #94 (observability layer): failed runs across every workflow, not
 	// just the one a human happens to be looking at -- see
 	// api/workflows.py's list_failed_runs docstring for why this exists.
 	let failedRuns = $state<FailedWorkflowRun[]>([]);
-	let failedRunsError = $state<string | null>(null);
 
-	async function refreshFailedRuns() {
-		failedRunsError = null;
-		try {
-			failedRuns = await workflows.listFailedRuns();
-		} catch (err) {
-			failedRunsError = err instanceof Error ? err.message : 'Failed to load failed runs';
-		}
-	}
-
-	refreshFailedRuns();
-
+	let creating = $state(false);
 	let newName = $state('');
 	let newDescription = $state('');
-	let creating = $state(false);
+	let createBusy = $state(false);
 	let createError = $state<string | null>(null);
 
-	let actionError = $state<string | null>(null);
+	let deletingWorkflow = $state<Workflow | null>(null);
+	let deleteBusy = $state(false);
+	let deleteError = $state<string | null>(null);
+
+	let visible = $derived(
+		workflowList.filter((w) => {
+			if (filter === 'published') return w.published;
+			if (filter === 'draft') return !w.published;
+			return true;
+		})
+	);
 
 	async function refresh() {
 		loadError = null;
 		try {
 			workflowList = await workflows.list();
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load workflows';
+			failedRuns = await workflows.listFailedRuns().catch(() => [] as FailedWorkflowRun[]);
+		} catch {
+			loadError = "Couldn't load workflows.";
+		} finally {
+			loading = false;
 		}
 	}
 
 	refresh();
 
+	function failureFor(workflow: Workflow): FailedWorkflowRun | null {
+		return failedRuns.find((r) => r.workflow_id === workflow.id) ?? null;
+	}
+
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		if (!newName.trim()) return;
+		createBusy = true;
 		createError = null;
-		creating = true;
 		try {
-			await workflows.create({
+			const created = await workflows.create({
 				name: newName.trim(),
 				description: newDescription.trim() || null
 			});
-			newName = '';
-			newDescription = '';
-			await refresh();
-		} catch (err) {
-			createError = err instanceof Error ? err.message : 'Failed to create workflow';
-		} finally {
 			creating = false;
+			goto(resolve('/workflows/[id]', { id: created.id }));
+		} catch (err) {
+			createError = err instanceof Error ? err.message : "Couldn't create the workflow.";
+		} finally {
+			createBusy = false;
 		}
 	}
 
-	const NAME_PATTERN = '[a-z][a-z0-9-]{1,63}';
-
-	async function handleDelete(workflowId: string) {
-		actionError = null;
+	async function handleDelete() {
+		if (!deletingWorkflow) return;
+		deleteBusy = true;
+		deleteError = null;
 		try {
-			await workflows.remove(workflowId);
+			await workflows.remove(deletingWorkflow.id);
+			deletingWorkflow = null;
 			await refresh();
-		} catch (err) {
-			actionError = err instanceof Error ? err.message : 'Failed to delete workflow';
+		} catch {
+			deleteError = "Couldn't delete this workflow. Try again.";
+		} finally {
+			deleteBusy = false;
 		}
 	}
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<header>
-		<h1 class="text-2xl font-semibold text-ink dark:text-ink-dark">Workflows</h1>
-		<p class="text-sm text-neutral-600 dark:text-neutral-400">
-			Saved, reusable chains of agents and utility steps (#24). A new workflow starts as a draft —
-			publish it from the builder to trigger it from any channel with
-			<code class="font-mono">/&#123;name&#125; &lt;input&gt;</code>.
-		</p>
-	</header>
+<div class="mx-auto max-w-[820px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
+	<div class="mb-5 flex items-center justify-between gap-4">
+		<h1 class="font-display text-[28px] font-semibold text-ink dark:text-ink-dark">Workflows</h1>
+		<Button onclick={() => (creating = true)}>
+			<Icon name="plus" class="h-[18px] w-[18px]" />
+			New workflow
+		</Button>
+	</div>
 
-	{#if failedRunsError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{failedRunsError}</p>
-	{:else if failedRuns.length > 0}
-		<section
-			class="bg-agent-magenta-50 dark:bg-agent-magenta-950/20 flex flex-col gap-3 rounded-lg border border-agent-magenta-300 p-4 dark:border-agent-magenta-900/50"
+	{#if failedRuns.length > 0}
+		{@const run = failedRuns[0]}
+		<div
+			class="mb-5 flex flex-wrap items-center gap-3.5 rounded-xl border border-danger-line bg-danger-soft px-5 py-4 dark:border-danger-line-dark dark:bg-danger-soft-dark"
 		>
-			<h2 class="text-sm font-medium text-agent-magenta-800 dark:text-agent-magenta-400">
-				Failed runs ({failedRuns.length})
-			</h2>
-			<ul class="flex flex-col gap-2">
-				{#each failedRuns as run (run.id)}
-					<li class="flex items-start justify-between gap-3 text-sm">
-						<div class="min-w-0 flex-1">
-							<a
-								href={resolve('/workflows/[id]', { id: run.workflow_id })}
-								class="font-medium text-ink hover:underline dark:text-ink-dark"
-							>
-								/{run.workflow_name}
-							</a>
-							{#if run.error_message}
-								<p class="truncate text-neutral-600 dark:text-neutral-400">
-									{run.error_message}
-								</p>
-							{/if}
-						</div>
-						<div class="flex flex-none items-center gap-3 text-xs text-neutral-500">
-							<span>{timeAgo(run.started_at)}</span>
-							<a
-								href={resolve('/channels/[id]/rivulets/[rivuletId]', {
-									id: run.channel_id,
-									rivuletId: run.rivulet_id
-								})}
-								class="text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
-							>
-								View rivulet
-							</a>
-						</div>
-					</li>
-				{/each}
-			</ul>
-		</section>
+			<span class="text-[15px] font-semibold text-danger">Failed runs</span>
+			<span class="min-w-0 flex-1 truncate text-[15px] text-danger-ink dark:text-danger-ink-dark">
+				/{run.workflow_name}{run.error_message ? ` — ${run.error_message}` : ''} · {timeAgo(
+					run.started_at
+				)}
+			</span>
+			<a
+				href={resolve('/channels/[id]/rivulets/[rivuletId]', {
+					id: run.channel_id,
+					rivuletId: run.rivulet_id
+				})}
+				class="inline-flex h-10 flex-none items-center rounded-lg border border-danger bg-surface px-4 text-[15px] font-semibold text-danger dark:bg-surface-dark"
+			>
+				Open conversation
+			</a>
+		</div>
 	{/if}
 
-	<form
-		onsubmit={handleCreate}
-		class="flex flex-col gap-3 rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-	>
-		<h2 class="text-sm font-medium text-ink dark:text-ink-dark">New workflow</h2>
-		<input
-			type="text"
-			bind:value={newName}
-			placeholder="my-workflow"
-			pattern={NAME_PATTERN}
-			title="lowercase letters, numbers, and hyphens, starting with a letter"
-			class="rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		<p class="text-xs text-neutral-500">
-			This becomes a slash command in your channels, e.g. <code class="font-mono"
-				>/{newName.trim() || 'my-workflow'}</code
-			> — lowercase letters, numbers, and hyphens only.
-		</p>
-		<input
-			type="text"
-			bind:value={newDescription}
-			placeholder="Description (optional)"
-			class="rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-		/>
-		{#if createError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{createError}</p>
-		{/if}
-		<button
-			type="submit"
-			disabled={creating || !newName.trim()}
-			class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-		>
-			{creating ? 'Creating…' : 'Create workflow'}
-		</button>
-	</form>
+	<div class="mb-5 flex gap-2">
+		<FilterChip selected={filter === 'all'} onclick={() => (filter = 'all')}>All</FilterChip>
+		<FilterChip selected={filter === 'published'} onclick={() => (filter = 'published')}>
+			Published
+		</FilterChip>
+		<FilterChip selected={filter === 'draft'} onclick={() => (filter = 'draft')}>Draft</FilterChip>
+	</div>
 
-	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+	{#if loading}
+		<SkeletonCards count={2} />
+	{:else if loadError}
+		<ErrorBanner message={loadError} onRetry={refresh} />
+	{:else if visible.length === 0}
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">No workflows yet.</p>
 	{:else}
-		{#if actionError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{actionError}</p>
-		{/if}
-		<FilterableList
-			items={workflowList}
-			getKey={(workflow) => workflow.id}
-			searchPlaceholder="Search workflows…"
-			searchPredicate={(workflow, q) => workflow.name.toLowerCase().includes(q.toLowerCase())}
-			filters={workflowFilters}
-			emptyMessage="No workflows yet — create one above to start chaining agents and steps together."
-			noMatchMessage="No workflows match your search or filter."
-		>
-			{#snippet item(workflow)}
-				<li
-					class="flex items-start justify-between rounded-lg border border-ink/12 p-4 dark:border-white/10"
+		<div class="flex flex-col gap-3">
+			{#each visible as workflow (workflow.id)}
+				{@const failure = failureFor(workflow)}
+				<div
+					class="flex min-h-16 items-center gap-3.5 rounded-2xl border border-line bg-surface px-6 py-5 hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 				>
-					<a href={resolve('/workflows/[id]', { id: workflow.id })} class="min-w-0 flex-1">
-						<p class="flex items-center gap-2 font-medium text-ink dark:text-ink-dark">
-							<span class="text-neutral-500">/</span>{workflow.name}
-							<span
-								class="rounded-sm px-1.5 py-0.5 text-[11px] font-normal {workflow.published
-									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-									: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
-							>
-								{workflow.published ? 'Published' : 'Draft'}
-							</span>
-						</p>
-						{#if workflow.description}
-							<p class="text-sm text-neutral-600 dark:text-neutral-400">
-								{workflow.description}
-							</p>
-						{/if}
-						<p class="mt-1 text-xs text-neutral-500">Updated {timeAgo(workflow.updated_at)}</p>
+					<a
+						href={resolve('/workflows/[id]', { id: workflow.id })}
+						class="flex min-w-0 flex-1 flex-wrap items-center gap-3.5"
+					>
+						<span class="font-mono text-base font-medium text-ink dark:text-ink-dark">
+							/{workflow.name}
+						</span>
+						<StatusPill tone={workflow.published ? 'accent' : 'neutral'}>
+							{workflow.published ? 'Published' : 'Draft'}
+						</StatusPill>
+						<span class="ml-auto text-sm text-muted dark:text-muted-dark">
+							{failure
+								? `Last run failed · ${timeAgo(failure.started_at)}`
+								: `Updated ${timeAgo(workflow.updated_at)}`}
+						</span>
 					</a>
 					{#if auth.grant === 'owner'}
 						<button
-							onclick={() => handleDelete(workflow.id)}
-							class="ml-3 flex-none text-xs text-neutral-500 hover:text-agent-magenta-600"
+							type="button"
+							onclick={() => (deletingWorkflow = workflow)}
+							class="flex-none text-sm font-medium text-muted hover:text-danger dark:text-muted-dark"
 						>
 							Delete
 						</button>
 					{/if}
-				</li>
-			{/snippet}
-		</FilterableList>
+				</div>
+			{/each}
+		</div>
 	{/if}
 </div>
+
+{#if creating}
+	<Sheet title="New workflow" onClose={() => (creating = false)} width={480}>
+		<form id="new-workflow-form" onsubmit={handleCreate} class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-workflow-name">
+					Name
+				</label>
+				<input
+					id="new-workflow-name"
+					type="text"
+					bind:value={newName}
+					placeholder="retry-check"
+					class="h-12 rounded-lg border border-line bg-surface px-4 font-mono text-sm text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+				/>
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					This is also the command: /{newName.trim() || 'retry-check'}
+				</p>
+			</div>
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-workflow-desc">
+					What it does
+				</label>
+				<input
+					id="new-workflow-desc"
+					type="text"
+					bind:value={newDescription}
+					placeholder="Optional"
+					class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+				/>
+			</div>
+			{#if createError}
+				<p class="text-sm text-danger">{createError}</p>
+			{/if}
+		</form>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
+			<Button
+				disabled={createBusy || !newName.trim()}
+				onclick={() =>
+					(document.getElementById('new-workflow-form') as HTMLFormElement).requestSubmit()}
+			>
+				Create workflow
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if deletingWorkflow}
+	<Sheet
+		title="Delete /{deletingWorkflow.name}?"
+		onClose={() => (deletingWorkflow = null)}
+		width={480}
+	>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Its slash command stops working and its runs stop being listed. Conversations stay.
+		</p>
+		{#if deleteError}
+			<p class="text-sm text-danger">{deleteError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (deletingWorkflow = null)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleDelete} disabled={deleteBusy}>
+				{deleteBusy ? 'Deleting…' : 'Delete workflow'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}

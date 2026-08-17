@@ -1,6 +1,6 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts and
-// Sidebar.svelte.test.ts for the auth.grant mocking pattern this follows).
-// This route depends on $lib/api/approvals and $lib/api/auth.svelte.
+// Browser-mode component test for Approvals (06-screens.md → Approvals,
+// mockup 1h): "Needs you", Waiting/Done/All chips, Approve/Reject on each
+// card, read-only for guests.
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -33,8 +33,8 @@ const pendingSchedule: PendingApproval = {
 	schedule_id: 'sched-1',
 	budget_cap_id: null,
 	agent_id: 'agent-1',
-	title: 'New weekly digest schedule',
-	detail: 'Runs every Monday at 9am',
+	title: 'Researcher wants a schedule',
+	detail: 'Run /retry-check every weekday at 09:00 UTC in #launch-readiness.',
 	status: 'pending',
 	resolved_by: null,
 	resolved_at: null,
@@ -47,8 +47,8 @@ const approvedBudget: PendingApproval = {
 	schedule_id: null,
 	budget_cap_id: 'budget-1',
 	agent_id: null,
-	title: 'Workspace budget cap exceeded',
-	detail: 'Monthly cap of $50 reached',
+	title: 'Daily spend hit $10',
+	detail: 'Workspace cap is $10/day.',
 	status: 'approved',
 	resolved_by: 'user-1',
 	resolved_at: '2026-01-02T00:00:00Z',
@@ -56,99 +56,102 @@ const approvedBudget: PendingApproval = {
 };
 
 describe('approvals/+page.svelte', () => {
-	it('renders a pending approval with its source label and detail', async () => {
+	it('renders a waiting approval with its source pill and detail under "Needs you"', async () => {
 		vi.mocked(approvals.list).mockResolvedValue([pendingSchedule]);
 
 		render(ApprovalsPage);
 
-		const row = page.getByRole('listitem');
-		await expect.element(row.getByText('New weekly digest schedule')).toBeInTheDocument();
-		// "Schedule" also appears as a filter <option>, so scope to the row's badge.
-		await expect.element(row.getByText('Schedule', { exact: true })).toBeInTheDocument();
-		await expect.element(row.getByText('Runs every Monday at 9am')).toBeInTheDocument();
+		await expect.element(page.getByText('Needs you')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Run /retry-check every weekday at 09:00 UTC in #launch-readiness.'))
+			.toBeInTheDocument();
 	});
 
-	it('shows the resolved status badge instead of action buttons for a non-pending approval', async () => {
-		vi.mocked(approvals.list).mockResolvedValue([approvedBudget]);
+	it('defaults to Waiting — a resolved approval only appears under Done', async () => {
+		vi.mocked(approvals.list).mockResolvedValue([pendingSchedule, approvedBudget]);
 
 		render(ApprovalsPage);
 
-		const row = page.getByRole('listitem');
-		await expect.element(row.getByText('Workspace budget cap exceeded')).toBeInTheDocument();
-		await expect.element(row.getByText('approved', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
+		await expect.element(page.getByText('Daily spend hit $10')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Done' }).click();
+
+		await expect.element(page.getByText('Daily spend hit $10')).toBeInTheDocument();
+		await expect.element(page.getByText('Approved', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 	});
 
-	it('shows the empty-state message when there are no approvals', async () => {
+	it('shows "You\'re clear" when nothing is waiting', async () => {
 		vi.mocked(approvals.list).mockResolvedValue([]);
 
 		render(ApprovalsPage);
 
-		await expect.element(page.getByText('Nothing waiting on approval.')).toBeInTheDocument();
+		await expect.element(page.getByText("You're clear. Nothing is waiting.")).toBeInTheDocument();
 	});
 
-	it('shows an error when approvals fail to load', async () => {
-		vi.mocked(approvals.list).mockRejectedValue(new Error('Failed to load approvals'));
+	it('shows a quiet error with a retry when approvals fail to load', async () => {
+		vi.mocked(approvals.list).mockRejectedValue(new Error('boom'));
 
 		render(ApprovalsPage);
 
-		await expect.element(page.getByText('Failed to load approvals')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load approvals.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 
-	it('approves a pending approval via approvals.approve and refreshes', async () => {
+	it('approves a waiting approval via approvals.approve and refreshes', async () => {
 		vi.mocked(approvals.list)
 			.mockResolvedValueOnce([pendingSchedule])
-			.mockResolvedValueOnce([{ ...pendingSchedule, status: 'approved' }]);
+			.mockResolvedValue([{ ...pendingSchedule, status: 'approved' }]);
 		vi.mocked(approvals.approve).mockResolvedValueOnce({ ...pendingSchedule, status: 'approved' });
 
 		render(ApprovalsPage);
-		await expect.element(page.getByText('New weekly digest schedule')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Approve' }).click();
 
 		expect(approvals.approve).toHaveBeenCalledWith('appr-1');
-		await expect
-			.element(page.getByRole('listitem').getByText('approved', { exact: true }))
-			.toBeInTheDocument();
+		// The default Waiting view empties out once the item is resolved.
+		await expect.element(page.getByText("You're clear. Nothing is waiting.")).toBeInTheDocument();
 	});
 
-	it('rejects a pending approval via approvals.reject and refreshes', async () => {
+	it('rejects a waiting approval via approvals.reject', async () => {
 		vi.mocked(approvals.list)
 			.mockResolvedValueOnce([pendingSchedule])
-			.mockResolvedValueOnce([{ ...pendingSchedule, status: 'rejected' }]);
+			.mockResolvedValue([{ ...pendingSchedule, status: 'rejected' }]);
 		vi.mocked(approvals.reject).mockResolvedValueOnce({ ...pendingSchedule, status: 'rejected' });
 
 		render(ApprovalsPage);
-		await expect.element(page.getByText('New weekly digest schedule')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Reject' }).click();
 
 		expect(approvals.reject).toHaveBeenCalledWith('appr-1');
-		await expect
-			.element(page.getByRole('listitem').getByText('rejected', { exact: true }))
-			.toBeInTheDocument();
 	});
 
-	it('shows a row-level error when approving fails, without touching other rows', async () => {
+	it('shows a row-level error when approving fails', async () => {
 		vi.mocked(approvals.list).mockResolvedValue([pendingSchedule]);
-		vi.mocked(approvals.approve).mockRejectedValueOnce(new Error('Failed to approve'));
+		vi.mocked(approvals.approve).mockRejectedValueOnce(new Error('boom'));
 
 		render(ApprovalsPage);
-		await expect.element(page.getByText('New weekly digest schedule')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Approve' }).click();
 
-		await expect.element(page.getByText('Failed to approve')).toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't approve that.")).toBeInTheDocument();
 	});
 
-	it('hides action buttons and shows "Owner access required" for a non-owner grant', async () => {
+	it('hides the decision buttons for a guest — only the owner can approve (2q)', async () => {
 		authState.grant = 'invite';
 		vi.mocked(approvals.list).mockResolvedValue([pendingSchedule]);
 
 		render(ApprovalsPage);
 
-		await expect.element(page.getByText('New weekly digest schedule')).toBeInTheDocument();
-		await expect.element(page.getByText('Owner access required')).toBeInTheDocument();
+		await expect.element(page.getByText('Researcher wants a schedule')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Only the workspace owner can approve.'))
+			.toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 	});
 });

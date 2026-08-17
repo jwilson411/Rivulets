@@ -18,13 +18,14 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import type { Connection } from '@xyflow/svelte';
 	import { channels as channelsApi, type Channel } from '$lib/api/channels';
-	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { timeAgo } from '$lib/format';
-	import Icon from '$lib/components/Icon.svelte';
+	import Button from '$lib/ui/Button.svelte';
+	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
+	import StatusPill from '$lib/ui/StatusPill.svelte';
 	import WorkflowNodeForm, {
 		type WorkflowNodeFormValues
 	} from '$lib/components/WorkflowNodeForm.svelte';
-	import AgentForm, { type AgentFormValues } from '$lib/components/AgentForm.svelte';
 	import WorkflowFlowCanvas from '$lib/components/WorkflowFlowCanvas.svelte';
 	import {
 		buildFlowGraph,
@@ -36,13 +37,19 @@
 	import { NODE_TYPE_LABELS } from '$lib/workflowNodeTypes';
 	import { theme } from '$lib/theme.svelte';
 
+	// Workflow canvas (06-screens.md → Workflow canvas, mockup 1k): full
+	// bleed. Schedules and webhooks live in the inspector's Triggers tab,
+	// never above the graph; run history is the Runs tab.
+
+	type InspectorTab = 'step' | 'triggers' | 'runs';
+	let inspectorTab = $state<InspectorTab>('step');
+
 	let workflow = $state<Workflow | null>(null);
 	let nodeList = $state<WorkflowNode[]>([]);
 	let connectionList = $state<WorkflowConnection[]>([]);
 	let agentList = $state<Agent[]>([]);
 	let workflowList = $state<Workflow[]>([]);
 	let channelList = $state<Channel[]>([]);
-	let providerList = $state<Provider[]>([]);
 	let scheduleList = $state<WorkflowSchedule[]>([]);
 	let webhookList = $state<WorkflowWebhook[]>([]);
 	let loadError = $state<string | null>(null);
@@ -56,6 +63,7 @@
 	let nameDraft = $state('');
 	let descriptionDraft = $state('');
 	let renameError = $state<string | null>(null);
+	let renameBusy = $state(false);
 
 	let publishBusy = $state(false);
 	let publishError = $state<string | null>(null);
@@ -69,15 +77,17 @@
 	let addBusy = $state(false);
 	let addError = $state<string | null>(null);
 
-	// #203: inline "create new agent" from either node panel above -- a
-	// sibling section, not nested inside WorkflowNodeForm's own <form> (a
-	// <form> can't contain another <form>). nodeFormRef lets the created
-	// agent be pushed back into whichever panel is open without remounting
-	// it (which would lose the name/config already typed in).
+	// #203: inline "create new agent" from either node panel -- a sibling
+	// section, not nested inside WorkflowNodeForm's own <form>. nodeFormRef
+	// lets the created agent be pushed back into whichever panel is open
+	// without remounting it (which would lose the config already typed in).
 	let nodeFormRef: WorkflowNodeForm | undefined = $state();
 	let creatingAgentForNode = $state(false);
 	let createAgentBusy = $state(false);
 	let createAgentError = $state<string | null>(null);
+	let newAgentName = $state('');
+	let newAgentRole = $state('');
+	let newAgentInstructions = $state('');
 
 	let editingEdgeId = $state<string | null>(null);
 	let edgeDeleteBusy = $state(false);
@@ -107,8 +117,7 @@
 	let nodeRunsError = $state<string | null>(null);
 	// #202: the run currently painted onto the canvas, if any -- only ever
 	// set once that run's node-runs are already in nodeRunsByRun (see
-	// viewRunOnCanvas), so runOverlay below never needs a loading state of
-	// its own.
+	// viewRunOnCanvas), so runOverlay below never needs a loading state.
 	let overlayRunId = $state<string | null>(null);
 
 	function subtitleFor(node: WorkflowNode): string | null {
@@ -128,9 +137,7 @@
 	}
 
 	// #202: null unless a run is currently overlaid on the canvas -- built
-	// from that run's already-loaded node-runs (see viewRunOnCanvas) rather
-	// than fetching separately. `inProgress` gates whether a node the run
-	// hasn't reached yet reads as "pending" or "never reached".
+	// from that run's already-loaded node-runs (see viewRunOnCanvas).
 	const runOverlay = $derived.by(() => {
 		if (!overlayRunId) return null;
 		const run = runList?.find((r) => r.id === overlayRunId);
@@ -139,15 +146,8 @@
 		return buildRunOverlay(nodeRuns, run.status === 'running' || run.status === 'awaiting_human');
 	});
 
-	// #200: passing editingNodeId lets buildFlowGraph highlight a selected
-	// merge node's fan-out ancestor and branch paths -- a no-op unless the
-	// selected node is actually type 'merge' (see buildFlowGraph).
-	// #201: the next-to-last arg gates the canvas drill-in affordance to
-	// nested workflow nodes whose child_workflow_id still resolves to a
-	// real workflow in workflowList -- same source subtitleFor's "Deleted
-	// workflow" fallback already checks.
-	// #202: the last arg paints runOverlay onto the graph when a run is
-	// selected for viewing (see the run-history panel below).
+	// #200/#201/#202: see buildFlowGraph -- merge-branch highlighting, the
+	// nested-workflow drill-in gate, and the run overlay all ride along.
 	const flowGraph = $derived(
 		buildFlowGraph(
 			nodeList,
@@ -160,8 +160,7 @@
 	);
 
 	// #199: whether the edge currently open in the inspector is a loop edge,
-	// so that panel can add the visit-cap explainer only when it's relevant
-	// rather than on every edge.
+	// so that panel can add the visit-cap explainer only when it's relevant.
 	const editingEdgeIsLoop = $derived.by(() => {
 		const edge = connectionList.find((c) => c.id === editingEdgeId);
 		return edge ? isLoopEdge(connectionList, edge) : false;
@@ -173,19 +172,12 @@
 	// live graph a schedule/webhook/slash-command can already fire against.
 	const canEditGraph = $derived(auth.grant === 'owner' || !workflow?.published);
 	// #393 (#356 leftover): a published workflow's name *is* its /{name}
-	// slash command. The server 403s that PATCH for invite-grant sessions,
-	// so don't offer rename once the canvas is already read-only for them.
-	// Drafts stay renameable, same as canEditGraph.
+	// slash command. The server 403s that PATCH for invite-grant sessions.
 	const canRename = $derived(auth.grant === 'owner' || !workflow?.published);
 
 	async function load(workflowId: string) {
 		loadError = null;
 		try {
-			// providersApi.list() is OwnerGrant-only (server-side); the
-			// workflows API has no such gate. An invite grant would otherwise
-			// get a 403 here that fails this entire Promise.all and leaves the
-			// canvas dead-on-arrival. Treat a failed provider fetch as "no
-			// provider catalog" instead.
 			const [
 				loadedWorkflow,
 				loadedNodes,
@@ -194,8 +186,7 @@
 				loadedWorkflows,
 				loadedChannels,
 				loadedSchedules,
-				loadedWebhooks,
-				loadedProviders
+				loadedWebhooks
 			] = await Promise.all([
 				workflows.get(workflowId),
 				workflows.listNodes(workflowId),
@@ -204,8 +195,7 @@
 				workflows.list(),
 				channelsApi.list(),
 				workflows.listSchedules(workflowId),
-				workflows.listWebhooks(workflowId),
-				providersApi.list().catch(() => [])
+				workflows.listWebhooks(workflowId)
 			]);
 			workflow = loadedWorkflow;
 			nodeList = loadedNodes;
@@ -215,9 +205,8 @@
 			channelList = loadedChannels;
 			scheduleList = loadedSchedules;
 			webhookList = loadedWebhooks;
-			providerList = loadedProviders;
-		} catch (err) {
-			loadError = err instanceof Error ? err.message : 'Failed to load workflow';
+		} catch {
+			loadError = "Couldn't load this workflow.";
 		}
 	}
 
@@ -236,6 +225,7 @@
 	async function saveRename() {
 		if (!workflow) return;
 		renameError = null;
+		renameBusy = true;
 		try {
 			workflow = await workflows.update(workflow.id, {
 				name: nameDraft.trim(),
@@ -243,7 +233,9 @@
 			});
 			renaming = false;
 		} catch (err) {
-			renameError = err instanceof Error ? err.message : 'Failed to rename workflow';
+			renameError = err instanceof Error ? err.message : "Couldn't rename this workflow.";
+		} finally {
+			renameBusy = false;
 		}
 	}
 
@@ -255,8 +247,8 @@
 			workflow = workflow.published
 				? await workflows.unpublish(workflow.id)
 				: await workflows.publish(workflow.id);
-		} catch (err) {
-			publishError = err instanceof Error ? err.message : 'Failed to update publish state';
+		} catch {
+			publishError = "Couldn't change the publish state.";
 		} finally {
 			publishBusy = false;
 		}
@@ -265,9 +257,8 @@
 	let remediationBusy = $state(false);
 	let remediationError = $state<string | null>(null);
 
-	// #94 layer 2: saved immediately on selection change, same
-	// "no separate edit mode" pattern togglePublish uses -- `value` is
-	// '' for the "None" option, mapped to null to clear remediation.
+	// #94 layer 2: saved immediately on selection change -- '' is the
+	// "None" option, mapped to null to clear remediation.
 	async function updateRemediation(value: string) {
 		if (!workflow) return;
 		remediationError = null;
@@ -276,8 +267,8 @@
 			workflow = await workflows.update(workflow.id, {
 				on_failure_workflow_id: value || null
 			});
-		} catch (err) {
-			remediationError = err instanceof Error ? err.message : 'Failed to update remediation';
+		} catch {
+			remediationError = "Couldn't save that.";
 		} finally {
 			remediationBusy = false;
 		}
@@ -286,8 +277,7 @@
 	let onCallBusy = $state(false);
 	let onCallError = $state<string | null>(null);
 
-	// #94 layer 3: same immediate-save pattern as updateRemediation --
-	// independently configurable, not a replacement for it.
+	// #94 layer 3: same immediate-save pattern as updateRemediation.
 	async function updateOnCallAgent(value: string) {
 		if (!workflow) return;
 		onCallError = null;
@@ -296,8 +286,8 @@
 			workflow = await workflows.update(workflow.id, {
 				on_call_agent_id: value || null
 			});
-		} catch (err) {
-			onCallError = err instanceof Error ? err.message : 'Failed to update on-call agent';
+		} catch {
+			onCallError = "Couldn't save that.";
 		} finally {
 			onCallBusy = false;
 		}
@@ -313,7 +303,7 @@
 	let schedulePreviewTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Plain-language schedule builder (#131) — generates the cron expression
-	// under the hood; the raw field is still available as "Advanced".
+	// under the hood; the raw field is still available under "Advanced".
 	const WEEKDAY_OPTIONS = [
 		{ value: 1, label: 'Monday' },
 		{ value: 2, label: 'Tuesday' },
@@ -379,7 +369,7 @@
 			} catch (err) {
 				schedulePreview = {
 					next_fire_at: null,
-					error: err instanceof Error ? err.message : 'Failed to preview schedule'
+					error: err instanceof Error ? err.message : "Couldn't preview that schedule."
 				};
 			}
 		}, 400);
@@ -399,7 +389,7 @@
 			showAddSchedule = false;
 			scheduleList = await workflows.listSchedules(workflowId);
 		} catch (err) {
-			scheduleError = err instanceof Error ? err.message : 'Failed to create schedule';
+			scheduleError = err instanceof Error ? err.message : "Couldn't create that schedule.";
 		} finally {
 			scheduleBusy = false;
 		}
@@ -435,8 +425,8 @@
 				enabled: !schedule.enabled
 			});
 			scheduleList = scheduleList.map((s) => (s.id === updated.id ? updated : s));
-		} catch (err) {
-			scheduleError = err instanceof Error ? err.message : 'Failed to update schedule';
+		} catch {
+			scheduleError = "Couldn't change that schedule.";
 		}
 	}
 
@@ -447,8 +437,8 @@
 		try {
 			await workflows.removeSchedule(workflowId, scheduleId);
 			scheduleList = scheduleList.filter((s) => s.id !== scheduleId);
-		} catch (err) {
-			scheduleError = err instanceof Error ? err.message : 'Failed to remove schedule';
+		} catch {
+			scheduleError = "Couldn't remove that schedule.";
 		}
 	}
 
@@ -458,8 +448,7 @@
 	let webhookBusy = $state(false);
 	let webhookError = $state<string | null>(null);
 	// Set only right after create/rotate -- the secret is shown exactly
-	// once (same UX as an invite link) and cleared the moment the human
-	// navigates away from this reveal panel.
+	// once (same UX as an invite link) and cleared when dismissed.
 	let revealedWebhook = $state<WorkflowWebhookCreated | null>(null);
 
 	function webhookTriggerUrl(webhookId: string): string {
@@ -471,10 +460,6 @@
 		webhookChannelDraft = channelList[0]?.id ?? '';
 		webhookNameDraft = '';
 		webhookError = null;
-	}
-
-	function closeAddWebhook() {
-		showAddWebhook = false;
 	}
 
 	async function handleAddWebhook() {
@@ -491,7 +476,7 @@
 			revealedWebhook = created;
 			webhookList = await workflows.listWebhooks(workflowId);
 		} catch (err) {
-			webhookError = err instanceof Error ? err.message : 'Failed to create webhook';
+			webhookError = err instanceof Error ? err.message : "Couldn't create that webhook.";
 		} finally {
 			webhookBusy = false;
 		}
@@ -506,8 +491,8 @@
 				enabled: !webhook.enabled
 			});
 			webhookList = webhookList.map((w) => (w.id === updated.id ? updated : w));
-		} catch (err) {
-			webhookError = err instanceof Error ? err.message : 'Failed to update webhook';
+		} catch {
+			webhookError = "Couldn't change that webhook.";
 		}
 	}
 
@@ -518,8 +503,8 @@
 			const rotated = await workflows.rotateWebhookSecret(workflow.id, webhookId);
 			revealedWebhook = rotated;
 			webhookList = webhookList.map((w) => (w.id === rotated.id ? rotated : w));
-		} catch (err) {
-			webhookError = err instanceof Error ? err.message : 'Failed to rotate secret';
+		} catch {
+			webhookError = "Couldn't rotate that secret.";
 		}
 	}
 
@@ -531,8 +516,8 @@
 			await workflows.removeWebhook(workflowId, webhookId);
 			webhookList = webhookList.filter((w) => w.id !== webhookId);
 			if (revealedWebhook?.id === webhookId) revealedWebhook = null;
-		} catch (err) {
-			webhookError = err instanceof Error ? err.message : 'Failed to remove webhook';
+		} catch {
+			webhookError = "Couldn't remove that webhook.";
 		}
 	}
 
@@ -542,12 +527,13 @@
 		editingEdgeId = null;
 		creatingAgentForNode = false;
 		editingNodeId = nodeId;
+		inspectorTab = 'step';
 	}
 
 	async function handleEditNode(nodeId: string, values: WorkflowNodeFormValues) {
 		if (!workflow) return;
 		if (!canEditGraph) {
-			editError = "Owner access required to edit a published workflow's graph — unpublish it first";
+			editError = "Only the owner can edit a published workflow's board — unpublish it first.";
 			return;
 		}
 		editError = null;
@@ -564,7 +550,7 @@
 			editingNodeId = null;
 			await load(workflow.id);
 		} catch (err) {
-			editError = err instanceof Error ? err.message : 'Failed to update step';
+			editError = err instanceof Error ? err.message : "Couldn't save that step.";
 		} finally {
 			editBusy = false;
 		}
@@ -573,7 +559,7 @@
 	async function handleDeleteNode(nodeId: string) {
 		if (!workflow) return;
 		if (!canEditGraph) {
-			editError = "Owner access required to edit a published workflow's graph — unpublish it first";
+			editError = "Only the owner can edit a published workflow's board — unpublish it first.";
 			return;
 		}
 		editError = null;
@@ -583,7 +569,7 @@
 			editingNodeId = null;
 			await load(workflow.id);
 		} catch (err) {
-			editError = err instanceof Error ? err.message : 'Failed to delete step';
+			editError = err instanceof Error ? err.message : "Couldn't delete that step.";
 		} finally {
 			deleteBusy = false;
 		}
@@ -592,8 +578,7 @@
 	// Dropping a palette entry doesn't create the node immediately -- 'agent'
 	// and 'workflow' node types have a required agent_id/child_workflow_id
 	// the drop itself can't supply, so every type opens the same locked-type
-	// form (at the drop position) rather than special-casing the types that
-	// happen to need no further input.
+	// form (at the drop position).
 	function startAddNode(nodeType: WorkflowNodeType, position: { x: number; y: number }) {
 		if (!canEditGraph) return;
 		addError = null;
@@ -601,6 +586,7 @@
 		editingEdgeId = null;
 		creatingAgentForNode = false;
 		addingNode = { nodeType, x: position.x, y: position.y };
+		inspectorTab = 'step';
 	}
 
 	async function handleAddNode(values: WorkflowNodeFormValues) {
@@ -622,27 +608,34 @@
 			addingNode = null;
 			await load(workflow.id);
 		} catch (err) {
-			addError = err instanceof Error ? err.message : 'Failed to add step';
+			addError = err instanceof Error ? err.message : "Couldn't add that step.";
 		} finally {
 			addBusy = false;
 		}
 	}
 
-	// #203: create an agent inline from either node panel above, without
-	// navigating away and losing the in-progress node draft. Pushes the new
-	// agent's id back into whichever WorkflowNodeForm is open via
-	// nodeFormRef.setAgentId rather than a reactive prop, since that form's
-	// agentId is local state seeded only once from `initial`.
-	async function handleCreateAgentInline(values: AgentFormValues) {
+	// #203: create an agent inline from the step panel, without navigating
+	// away and losing the in-progress node draft. Pushes the new agent's id
+	// back into whichever WorkflowNodeForm is open via nodeFormRef.
+	async function handleCreateAgentInline() {
+		if (!newAgentName.trim() || !newAgentRole.trim() || !newAgentInstructions.trim()) return;
 		createAgentError = null;
 		createAgentBusy = true;
 		try {
-			const created = await agentsApi.create(values);
+			const created = await agentsApi.create({
+				name: newAgentName.trim(),
+				description: newAgentRole.trim(),
+				instructions: newAgentInstructions.trim(),
+				model: 'auto'
+			});
 			agentList = [...agentList, created];
 			nodeFormRef?.setAgentId(created.id);
 			creatingAgentForNode = false;
+			newAgentName = '';
+			newAgentRole = '';
+			newAgentInstructions = '';
 		} catch (err) {
-			createAgentError = err instanceof Error ? err.message : 'Failed to create agent';
+			createAgentError = err instanceof Error ? err.message : "Couldn't create that agent.";
 		} finally {
 			createAgentBusy = false;
 		}
@@ -650,8 +643,7 @@
 
 	// Optimistic local update first so the node doesn't snap back to its
 	// pre-drag position while the PATCH is in flight -- flowGraph is
-	// $derived from nodeList, so this takes effect the moment nodeList
-	// changes, no reload needed.
+	// $derived from nodeList, so this takes effect immediately.
 	async function handleNodesMoved(updates: { id: string; positionX: number; positionY: number }[]) {
 		if (!workflow || !canEditGraph) return;
 		const workflowId = workflow.id;
@@ -676,12 +668,11 @@
 						})
 					)
 				);
-			} catch (err) {
-				nodesMoveError = err instanceof Error ? err.message : 'Failed to save step position';
+			} catch {
+				nodesMoveError = "Couldn't save that step's position.";
 				// Revert only the nodes this gesture moved, back to where they
-				// were before it -- not a full reload, so an unrelated drag
-				// gesture that's still queued behind this one keeps its own
-				// already-applied optimistic position.
+				// were before it -- not a full reload, so an unrelated queued
+				// drag gesture keeps its own already-applied position.
 				nodeList = nodeList.map((n) => {
 					const previous = previousPositions.get(n.id);
 					return previous ? { ...n, ...previous } : n;
@@ -697,6 +688,7 @@
 		editingNodeId = null;
 		addingNode = null;
 		editingEdgeId = edgeId;
+		inspectorTab = 'step';
 		const condition = connectionList.find((c) => c.id === edgeId)?.condition_json ?? null;
 		if (condition && typeof condition.contains === 'string') {
 			editingEdgeCondition = { operator: 'contains', value: condition.contains };
@@ -710,8 +702,7 @@
 	async function handleUpdateEdgeCondition(edgeId: string) {
 		if (!workflow) return;
 		if (!canEditGraph) {
-			conditionError =
-				"Owner access required to edit a published workflow's graph — unpublish it first";
+			conditionError = "Only the owner can edit a published workflow's board — unpublish it first.";
 			return;
 		}
 		if (editingEdgeCondition.operator !== 'none' && !editingEdgeCondition.value.trim()) return;
@@ -726,17 +717,16 @@
 			editingEdgeId = null;
 			await load(workflow.id);
 		} catch (err) {
-			conditionError = err instanceof Error ? err.message : 'Failed to update condition';
+			conditionError = err instanceof Error ? err.message : "Couldn't save that condition.";
 		} finally {
 			conditionBusy = false;
 		}
 	}
 
 	// Svelte Flow's Handle already optimistically draws the new edge the
-	// instant the drag completes (before this even runs) -- reloading
-	// unconditionally, success or failure, is what reconciles that
-	// optimistic edge with the server's real id (on success) or removes it
-	// again (on failure) rather than leaving a phantom edge on screen.
+	// instant the drag completes -- reloading unconditionally reconciles
+	// that optimistic edge with the server's real id (on success) or
+	// removes it again (on failure).
 	async function handleConnect(connection: Connection) {
 		if (!workflow || !canEditGraph) return;
 		const workflowId = workflow.id;
@@ -746,8 +736,8 @@
 				from_node_id: connection.source,
 				to_node_id: connection.target
 			});
-		} catch (err) {
-			connectError = err instanceof Error ? err.message : 'Failed to create connection';
+		} catch {
+			connectError = "Couldn't connect those steps.";
 		} finally {
 			await load(workflowId);
 		}
@@ -757,7 +747,7 @@
 		if (!workflow) return;
 		if (!canEditGraph) {
 			edgeDeleteError =
-				"Owner access required to edit a published workflow's graph — unpublish it first";
+				"Only the owner can edit a published workflow's board — unpublish it first.";
 			return;
 		}
 		edgeDeleteError = null;
@@ -766,8 +756,8 @@
 			await workflows.removeConnection(workflow.id, connectionId);
 			editingEdgeId = null;
 			await load(workflow.id);
-		} catch (err) {
-			edgeDeleteError = err instanceof Error ? err.message : 'Failed to delete connection';
+		} catch {
+			edgeDeleteError = "Couldn't delete that connection.";
 		} finally {
 			edgeDeleteBusy = false;
 		}
@@ -778,9 +768,14 @@
 		runsError = null;
 		try {
 			runList = await workflows.listRuns(workflow.id);
-		} catch (err) {
-			runsError = err instanceof Error ? err.message : 'Failed to load run history';
+		} catch {
+			runsError = "Couldn't load run history.";
 		}
+	}
+
+	function openRunsTab() {
+		inspectorTab = 'runs';
+		if (runList === null) loadRuns();
 	}
 
 	async function toggleRun(runId: string) {
@@ -794,951 +789,945 @@
 		nodeRunsError = null;
 		try {
 			nodeRunsByRun[runId] = await workflows.listNodeRuns(workflow.id, runId);
-		} catch (err) {
-			nodeRunsError = err instanceof Error ? err.message : 'Failed to load step history';
+		} catch {
+			nodeRunsError = "Couldn't load this run's steps.";
 		}
 	}
 
 	// #202: toggles overlaying `runId`'s node statuses onto the canvas.
-	// Only ever called from inside the expanded run panel below, once its
-	// node-runs are already loaded into nodeRunsByRun -- no fetch here.
 	function viewRunOnCanvas(runId: string) {
 		overlayRunId = overlayRunId === runId ? null : runId;
 	}
 
-	function statusClass(status: string): string {
-		if (status === 'completed')
-			return 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400';
-		if (status === 'failed')
-			return 'bg-agent-magenta-100 text-agent-magenta-700 dark:bg-agent-magenta-900/30 dark:text-agent-magenta-400';
-		if (status === 'awaiting_human')
-			return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400';
-		return 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300';
+	function statusTone(status: string): 'accent' | 'danger' | 'warn' | 'neutral' {
+		if (status === 'completed') return 'accent';
+		if (status === 'failed') return 'danger';
+		if (status === 'awaiting_human' || status === 'running') return 'warn';
+		return 'neutral';
+	}
+
+	const inputClass =
+		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark';
+
+	function tabClass(active: boolean): string {
+		return active
+			? 'bg-ink font-semibold text-paper dark:bg-ink-dark dark:text-paper-dark'
+			: 'font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark';
 	}
 </script>
 
-<div class="mx-auto flex max-w-3xl flex-col gap-8 px-6 py-8">
-	<a
-		href={resolve('/workflows')}
-		class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-	>
-		&larr; Workflows
-	</a>
-
+<div class="flex h-full flex-col">
 	{#if loadError}
-		<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{loadError}</p>
+		<div class="p-8">
+			<p class="text-[15px] text-danger">{loadError}</p>
+		</div>
 	{:else if !workflow}
-		<p class="text-sm text-neutral-500">Loading…</p>
+		<div class="p-8">
+			<div class="breath h-4 w-1/3 rounded-full bg-line dark:bg-line-dark"></div>
+		</div>
 	{:else}
-		<header class="flex flex-col gap-2">
-			{#if renaming}
-				<div class="flex flex-col gap-2">
-					<input
-						type="text"
-						bind:value={nameDraft}
-						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-lg font-semibold text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					/>
-					<input
-						type="text"
-						bind:value={descriptionDraft}
-						placeholder="Description"
-						class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-					/>
-					{#if renameError}
-						<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{renameError}</p>
-					{/if}
-					<div class="flex gap-3">
-						<button
-							onclick={saveRename}
-							class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-sm font-semibold text-white hover:bg-agent-cyan-600"
-						>
-							Save
-						</button>
-						<button
-							onclick={() => (renaming = false)}
-							class="text-sm text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-			{:else}
-				<div class="flex items-start justify-between">
-					<div>
-						<h1 class="flex items-center gap-2 text-2xl font-semibold text-ink dark:text-ink-dark">
-							<span class="text-neutral-500">/</span>{workflow.name}
-							<span
-								class="rounded-sm px-1.5 py-0.5 text-xs font-normal {workflow.published
-									? 'bg-agent-cyan-100 text-agent-cyan-700 dark:bg-agent-cyan-900/30 dark:text-agent-cyan-400'
-									: 'bg-neutral-200 text-neutral-700 dark:bg-white/10 dark:text-neutral-300'}"
-							>
-								{workflow.published ? 'Published' : 'Draft'}
-							</span>
-						</h1>
-						{#if workflow.description}
-							<p class="text-sm text-neutral-600 dark:text-neutral-400">{workflow.description}</p>
-						{/if}
-					</div>
-					<div class="flex flex-none items-center gap-2">
-						{#if auth.grant === 'owner'}
-							<button
-								onclick={togglePublish}
-								disabled={publishBusy}
-								class="rounded-md border border-ink/15 px-2.5 py-1 text-xs text-ink disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-							>
-								{#if publishBusy}
-									…
-								{:else}
-									{workflow.published ? 'Unpublish' : 'Publish'}
-								{/if}
-							</button>
-						{/if}
-						{#if canRename}
-							<button
-								onclick={startRename}
-								class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-							>
-								Edit
-							</button>
-						{/if}
-					</div>
-				</div>
-				{#if publishError}
-					<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{publishError}</p>
-				{/if}
-				<p class="font-mono text-xs text-neutral-500">
-					{#if workflow.published}
-						Trigger from any channel: /{workflow.name} &lt;input&gt;
-					{:else}
-						Publish this workflow to trigger it with /{workflow.name} &lt;input&gt;
-					{/if}
-				</p>
+		<header
+			class="flex flex-wrap items-center gap-4 border-b border-line bg-surface px-5 py-4 md:px-8 dark:border-line-dark dark:bg-surface-dark"
+		>
+			<a
+				href={resolve('/workflows')}
+				class="flex items-center gap-2 text-[15px] font-semibold text-accent hover:text-accent-deep dark:text-accent-dark"
+			>
+				<Icon name="back" class="h-4 w-4" />
+				Workflows
+			</a>
+			<span class="font-mono text-base font-medium text-ink dark:text-ink-dark">
+				/{workflow.name}
+			</span>
+			<StatusPill tone={workflow.published ? 'accent' : 'neutral'}>
+				{workflow.published ? 'Published' : 'Draft'}
+			</StatusPill>
+			<span class="ml-auto hidden text-sm text-muted lg:block dark:text-muted-dark">
+				{workflow.published
+					? `Anyone can run this with /${workflow.name} in a channel.`
+					: `Publish to run it with /${workflow.name} in a channel.`}
+			</span>
+			{#if canRename}
+				<button
+					type="button"
+					onclick={startRename}
+					class="text-sm font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+				>
+					Rename
+				</button>
+			{/if}
+			{#if auth.grant === 'owner'}
+				<Button
+					variant={workflow.published ? 'secondary' : 'primary'}
+					onclick={togglePublish}
+					disabled={publishBusy}
+				>
+					{publishBusy ? '…' : workflow.published ? 'Unpublish' : 'Publish'}
+				</Button>
+			{/if}
+			{#if publishError}
+				<p class="w-full text-sm text-danger">{publishError}</p>
 			{/if}
 		</header>
 
-		<section class="flex flex-col gap-2 rounded-lg border border-ink/12 p-4 dark:border-white/10">
-			<h2 class="text-sm font-medium text-ink dark:text-ink-dark">On failure</h2>
-			<p class="text-xs text-neutral-500">
-				Automatically trigger another workflow when a run of this one fails, with the failure's
-				input and error as its input. The original run still shows as failed either way.
-			</p>
-			<select
-				value={workflow.on_failure_workflow_id ?? ''}
-				onchange={(e) => updateRemediation(e.currentTarget.value)}
-				disabled={remediationBusy || auth.grant !== 'owner'}
-				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-			>
-				<option value="">None</option>
-				{#each workflowList as candidate (candidate.id)}
-					<option value={candidate.id}>/{candidate.name}</option>
-				{/each}
-			</select>
-			{#if remediationError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
-					{remediationError}
-				</p>
-			{/if}
+		<div class="flex min-h-0 flex-1">
+			<div class="relative flex min-w-0 flex-1 flex-col">
+				<WorkflowFlowCanvas
+					nodes={flowGraph.nodes}
+					edges={flowGraph.edges}
+					colorMode={theme.preference}
+					onnodeclick={startEditNode}
+					onnodesmoved={handleNodesMoved}
+					onpalettedrop={startAddNode}
+					onconnect={handleConnect}
+					onedgeclick={startEditEdge}
+					readOnly={!canEditGraph}
+				/>
 
-			<h3 class="mt-2 text-sm font-medium text-ink dark:text-ink-dark">On-call agent</h3>
-			<p class="text-xs text-neutral-500">
-				@mention an agent when a run fails, alongside (or instead of) a remediation workflow. It
-				only responds if it's on this channel's team. Leave as "Workspace default" to use the
-				default configured in Settings.
-			</p>
-			<select
-				value={workflow.on_call_agent_id ?? ''}
-				onchange={(e) => updateOnCallAgent(e.currentTarget.value)}
-				disabled={onCallBusy || auth.grant !== 'owner'}
-				class="w-fit rounded-md border border-ink/15 bg-transparent px-2.5 py-1.5 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none disabled:opacity-50 dark:border-white/15 dark:text-ink-dark"
-			>
-				<option value="">Workspace default</option>
-				{#each agentList as agent (agent.id)}
-					<option value={agent.id}>{agent.name}</option>
-				{/each}
-			</select>
-			{#if onCallError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
-					{onCallError}
-				</p>
-			{/if}
-		</section>
-
-		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Schedules</h2>
-				{#if auth.grant === 'owner'}
-					<button
-						onclick={openAddSchedule}
-						class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-					>
-						+ Add schedule
-					</button>
-				{/if}
-			</div>
-			{#if !workflow.published}
-				<p class="text-xs text-neutral-500">
-					Schedules won't fire until this workflow is published.
-				</p>
-			{/if}
-			{#if scheduleError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{scheduleError}</p>
-			{/if}
-			{#if scheduleList.length === 0 && !showAddSchedule}
-				<p class="text-sm text-neutral-500">No schedules configured.</p>
-			{:else}
-				<ul class="flex flex-col gap-2">
-					{#each scheduleList as schedule (schedule.id)}
-						<li
-							class="flex flex-col gap-1 rounded-md border border-ink/12 p-2 text-xs dark:border-white/10"
-						>
-							<div class="flex items-center justify-between">
-								<span class="font-mono text-sm text-ink dark:text-ink-dark">
-									{scheduleTiming(schedule)}
-									{#if schedule.name}
-										<span class="font-sans text-neutral-500">({schedule.name})</span>
-									{/if}
-								</span>
-								<div class="flex items-center gap-2">
-									{#if auth.grant === 'owner'}
-										{#if schedule.enabled || !isSpentOneOff(schedule)}
-											<button
-												onclick={() => toggleScheduleEnabled(schedule)}
-												class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-											>
-												{schedule.enabled ? 'Disable' : 'Enable'}
-											</button>
-										{/if}
-										<button
-											onclick={() => removeSchedule(schedule.id)}
-											class="text-neutral-500 hover:text-agent-magenta-600"
-										>
-											Remove
-										</button>
-									{/if}
-								</div>
-							</div>
-							{#if isPendingAgentApproval(schedule)}
-								<p class="text-amber-700 dark:text-amber-400">
-									⏳ Created by an agent — pending your approval before it can fire
-								</p>
-							{/if}
-							<p class="text-neutral-500">
-								Channel: {channelList.find((c) => c.id === schedule.channel_id)?.name ??
-									'Deleted channel'}
-							</p>
-							{#if schedule.enabled}
-								<p class="text-neutral-500">
-									Next run: {new Date(schedule.next_fire_at).toLocaleString()}
-								</p>
-							{/if}
-							<p class="text-neutral-500">
-								Last fired: {schedule.last_fired_at ? timeAgo(schedule.last_fired_at) : 'never'}
-							</p>
-							{#if !schedule.enabled && schedule.consecutive_failures >= 5}
-								<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
-									Disabled after {schedule.consecutive_failures} consecutive failures
-								</p>
-							{:else if schedule.consecutive_failures > 0}
-								<p class="text-amber-700 dark:text-amber-400">
-									⚠ {schedule.consecutive_failures} consecutive failure{schedule.consecutive_failures ===
-									1
-										? ''
-										: 's'}
-								</p>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-			{#if showAddSchedule}
-				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
-					<div class="flex items-center gap-3 text-xs">
-						<button
-							type="button"
-							onclick={() => (scheduleAdvanced = false)}
-							class={scheduleAdvanced
-								? 'text-neutral-500 hover:text-ink dark:hover:text-ink-dark'
-								: 'font-semibold text-ink dark:text-ink-dark'}
-						>
-							Simple
-						</button>
-						<button
-							type="button"
-							onclick={() => (scheduleAdvanced = true)}
-							class={scheduleAdvanced
-								? 'font-semibold text-ink dark:text-ink-dark'
-								: 'text-neutral-500 hover:text-ink dark:hover:text-ink-dark'}
-						>
-							Advanced (cron)
-						</button>
-					</div>
-					{#if scheduleAdvanced}
-						<label class="flex flex-col gap-1 text-xs text-neutral-500">
-							Cron expression
-							<input
-								type="text"
-								bind:value={scheduleCronDraft}
-								oninput={onCronDraftChange}
-								placeholder="0 9 * * *"
-								class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							/>
-						</label>
-					{:else}
-						<label class="flex flex-col gap-1 text-xs text-neutral-500">
-							Frequency
-							<select
-								bind:value={scheduleFrequencyDraft}
-								onchange={buildCronFromSimple}
-								class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-							>
-								<option value="daily">Every day</option>
-								<option value="weekly">Every week</option>
-								<option value="hourly">Every hour</option>
-							</select>
-						</label>
-						{#if scheduleFrequencyDraft === 'weekly'}
-							<label class="flex flex-col gap-1 text-xs text-neutral-500">
-								Day
-								<select
-									bind:value={scheduleWeekdayDraft}
-									onchange={buildCronFromSimple}
-									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-								>
-									{#each WEEKDAY_OPTIONS as day (day.value)}
-										<option value={day.value}>{day.label}</option>
-									{/each}
-								</select>
-							</label>
-						{/if}
-						{#if scheduleFrequencyDraft === 'hourly'}
-							<label class="flex flex-col gap-1 text-xs text-neutral-500">
-								Minute past the hour
-								<input
-									type="number"
-									min="0"
-									max="59"
-									bind:value={scheduleMinuteDraft}
-									oninput={buildCronFromSimple}
-									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-								/>
-							</label>
-						{:else}
-							<label class="flex flex-col gap-1 text-xs text-neutral-500">
-								Time
-								<input
-									type="time"
-									bind:value={scheduleTimeDraft}
-									onchange={buildCronFromSimple}
-									class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-								/>
-							</label>
-						{/if}
-						<p class="font-mono text-xs text-neutral-500">{scheduleCronDraft}</p>
-					{/if}
-					{#if schedulePreview}
-						{#if schedulePreview.error}
-							<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-								{schedulePreview.error}
-							</p>
-						{:else if schedulePreview.next_fire_at}
-							<p class="text-xs text-neutral-500">
-								Next run: {new Date(schedulePreview.next_fire_at).toLocaleString()}
-							</p>
-						{/if}
-					{/if}
-					<label class="flex flex-col gap-1 text-xs text-neutral-500">
-						Channel
-						<select
-							bind:value={scheduleChannelDraft}
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						>
-							{#each channelList as channel (channel.id)}
-								<option value={channel.id}>{channel.name}</option>
-							{/each}
-						</select>
-					</label>
-					<label class="flex flex-col gap-1 text-xs text-neutral-500">
-						Input
-						<input
-							type="text"
-							bind:value={scheduleInputDraft}
-							placeholder="input passed to the entry step"
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					</label>
-					{#if scheduleError}
-						<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-							{scheduleError}
-						</p>
-					{/if}
-					<div class="flex gap-3">
-						<button
-							onclick={handleAddSchedule}
-							disabled={scheduleBusy || !scheduleCronDraft.trim() || !scheduleChannelDraft}
-							class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-						>
-							{scheduleBusy ? 'Adding…' : 'Add schedule'}
-						</button>
-						<button
-							onclick={closeAddSchedule}
-							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-			{/if}
-		</section>
-
-		<section class="flex flex-col gap-3 rounded-lg border border-ink/12 p-4 dark:border-white/10">
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Webhooks</h2>
-				<button
-					onclick={openAddWebhook}
-					class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-				>
-					+ Add webhook
-				</button>
-			</div>
-			{#if !workflow.published}
-				<p class="text-xs text-neutral-500">
-					Webhooks won't fire until this workflow is published.
-				</p>
-			{/if}
-			<p class="text-xs text-neutral-500">
-				An external system can POST to a webhook's URL to trigger this workflow, signed with its
-				secret (see the docs for the signing headers). Only reachable from outside this machine if
-				you've deliberately exposed it beyond localhost — same caveat as an invite link.
-			</p>
-			{#if webhookError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{webhookError}</p>
-			{/if}
-
-			{#if revealedWebhook}
-				<div
-					class="bg-agent-cyan-50 dark:bg-agent-cyan-950/20 flex flex-col gap-2 rounded-md border border-agent-cyan-600/40 p-3 text-xs"
-				>
-					<p class="font-medium text-ink dark:text-ink-dark">
-						Save this secret now — it won't be shown again.
-					</p>
-					<label class="flex flex-col gap-1 text-neutral-500">
-						URL
-						<input
-							readonly
-							value={webhookTriggerUrl(revealedWebhook.id)}
-							onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					</label>
-					<label class="flex flex-col gap-1 text-neutral-500">
-						Secret
-						<input
-							readonly
-							value={revealedWebhook.secret}
-							onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 font-mono text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					</label>
-					<button
-						onclick={() => (revealedWebhook = null)}
-						class="self-start text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-					>
-						Done
-					</button>
-				</div>
-			{/if}
-
-			{#if webhookList.length === 0 && !showAddWebhook}
-				<p class="text-sm text-neutral-500">No webhooks configured.</p>
-			{:else}
-				<ul class="flex flex-col gap-2">
-					{#each webhookList as webhook (webhook.id)}
-						<li
-							class="flex flex-col gap-1 rounded-md border border-ink/12 p-2 text-xs dark:border-white/10"
-						>
-							<div class="flex items-center justify-between">
-								<span class="font-mono text-sm text-ink dark:text-ink-dark">
-									{webhook.name ?? webhook.id.slice(0, 8)}
-								</span>
-								<div class="flex items-center gap-2">
-									{#if auth.grant === 'owner'}
-										<button
-											onclick={() => toggleWebhookEnabled(webhook)}
-											class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-										>
-											{webhook.enabled ? 'Disable' : 'Enable'}
-										</button>
-									{/if}
-									<button
-										onclick={() => rotateWebhookSecret(webhook.id)}
-										class="text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-									>
-										Rotate secret
-									</button>
-									<button
-										onclick={() => removeWebhook(webhook.id)}
-										class="text-neutral-500 hover:text-agent-magenta-600"
-									>
-										Remove
-									</button>
-								</div>
-							</div>
-							<p class="text-neutral-500">
-								Channel: {channelList.find((c) => c.id === webhook.channel_id)?.name ??
-									'Deleted channel'}
-							</p>
-							<p class="text-neutral-500">
-								Last triggered: {webhook.last_triggered_at
-									? timeAgo(webhook.last_triggered_at)
-									: 'never'}
-							</p>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-
-			{#if showAddWebhook}
-				<div class="flex flex-col gap-2 rounded-md border border-ink/12 p-3 dark:border-white/10">
-					<label class="flex flex-col gap-1 text-xs text-neutral-500">
-						Name (optional)
-						<input
-							type="text"
-							bind:value={webhookNameDraft}
-							placeholder="e.g. GitHub"
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					</label>
-					<label class="flex flex-col gap-1 text-xs text-neutral-500">
-						Channel
-						<select
-							bind:value={webhookChannelDraft}
-							class="rounded-md border border-ink/15 bg-transparent px-2 py-1 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						>
-							{#each channelList as channel (channel.id)}
-								<option value={channel.id}>{channel.name}</option>
-							{/each}
-						</select>
-					</label>
-					{#if webhookError}
-						<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-							{webhookError}
-						</p>
-					{/if}
-					<div class="flex gap-3">
-						<button
-							onclick={handleAddWebhook}
-							disabled={webhookBusy || !webhookChannelDraft}
-							class="self-start rounded-md bg-agent-cyan px-3 py-1.5 text-xs font-semibold text-white hover:bg-agent-cyan-600 disabled:opacity-50"
-						>
-							{webhookBusy ? 'Adding…' : 'Add webhook'}
-						</button>
-						<button
-							onclick={closeAddWebhook}
-							class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-						>
-							Cancel
-						</button>
-					</div>
-				</div>
-			{/if}
-		</section>
-
-		<section
-			class="relative w-full overflow-hidden rounded-lg border border-ink/12 dark:border-white/10"
-			style="height: 34rem"
-		>
-			<WorkflowFlowCanvas
-				nodes={flowGraph.nodes}
-				edges={flowGraph.edges}
-				colorMode={theme.preference}
-				onnodeclick={startEditNode}
-				onnodesmoved={handleNodesMoved}
-				onpalettedrop={startAddNode}
-				onconnect={handleConnect}
-				onedgeclick={startEditEdge}
-				readOnly={!canEditGraph}
-			/>
-		</section>
-
-		{#if overlayRunId}
-			{@const overlaidRun = runList?.find((r) => r.id === overlayRunId)}
-			{#if overlaidRun}
-				<div
-					data-testid="workflow-run-overlay-banner"
-					class="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs {overlaidRun.status ===
-					'awaiting_human'
-						? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-400'
-						: 'border-agent-cyan-600/30 bg-agent-cyan-100/60 text-agent-cyan-700 dark:border-agent-cyan-900/40 dark:bg-agent-cyan-900/20 dark:text-agent-cyan-400'}"
-				>
-					<span class="flex items-center gap-2">
-						<Icon
-							name={overlaidRun.status === 'awaiting_human' ? 'user-plus' : 'route'}
-							class="h-3.5 w-3.5 shrink-0"
-						/>
-						{#if overlaidRun.status === 'awaiting_human'}
-							Awaiting human input at
-							<strong>
-								{nodeList.find((n) => n.id === overlaidRun.current_node_id)?.name ?? 'a step'}
-							</strong>
-							— paused {timeAgo(overlaidRun.started_at)}.
-						{:else}
-							Viewing the path taken by the run from {timeAgo(overlaidRun.started_at)} ({overlaidRun.status}).
-						{/if}
-					</span>
-					<button
-						type="button"
-						data-testid="workflow-run-overlay-clear"
-						onclick={() => (overlayRunId = null)}
-						class="flex-none font-medium hover:underline"
-					>
-						Clear
-					</button>
-				</div>
-			{/if}
-		{/if}
-
-		{#if flowGraph.nodes.length === 0}
-			<p class="text-center text-sm text-neutral-500">
-				No steps yet — drag one from the palette above onto the canvas.
-			</p>
-		{/if}
-
-		{#if flowGraph.hasLoop}
-			<p
-				class="flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
-				data-testid="workflow-loop-notice"
-			>
-				<Icon name="sync" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-				<span>
-					This workflow loops back to an earlier step (dotted "↻" edge). To guard against a runaway
-					loop, a run stops with an error after {LOOP_MAX_NODE_VISITS} visits to the same step or {LOOP_MAX_TOTAL_STEPS}
-					total steps, whichever comes first.
-				</span>
-			</p>
-		{/if}
-
-		{#if connectError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{connectError}</p>
-		{/if}
-
-		{#if nodesMoveError}
-			<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{nodesMoveError}</p>
-		{/if}
-
-		{#if editingEdgeId}
-			<section
-				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-			>
-				<p class="text-sm text-ink dark:text-ink-dark">Connection selected.</p>
-				{#if editingEdgeIsLoop}
+				{#if flowGraph.nodes.length === 0}
 					<p
-						class="mt-2 flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
-						data-testid="workflow-loop-edge-notice"
+						class="pointer-events-none absolute inset-x-0 top-1/2 text-center text-base text-muted dark:text-muted-dark"
 					>
-						<Icon name="sync" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-						<span>
-							This edge loops back to an earlier step. The engine caps it at {LOOP_MAX_NODE_VISITS}
-							visits to that step or {LOOP_MAX_TOTAL_STEPS} total steps in the run, whichever comes first,
-							then stops the run with an error.
-						</span>
+						Drag a step onto the board.
 					</p>
 				{/if}
-				<form
-					onsubmit={(event) => {
-						event.preventDefault();
-						handleUpdateEdgeCondition(editingEdgeId!);
-					}}
-					class="mt-3 flex flex-col gap-2"
-				>
-					<label class="flex flex-col gap-1 text-xs text-neutral-600 dark:text-neutral-400">
-						Condition
-						<select
-							bind:value={editingEdgeCondition.operator}
-							class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
+
+				{#if overlayRunId}
+					{@const overlaidRun = runList?.find((r) => r.id === overlayRunId)}
+					{#if overlaidRun}
+						<div
+							data-testid="workflow-run-overlay-banner"
+							class="absolute inset-x-4 top-16 flex items-center gap-3 rounded-xl border px-4 py-2.5 text-sm shadow-pop {overlaidRun.status ===
+							'awaiting_human'
+								? 'border-warn-line bg-warn-soft text-warn-ink dark:border-warn-line-dark dark:bg-warn-soft-dark dark:text-warn-ink-dark'
+								: 'border-accent bg-accent-soft text-ink dark:border-accent-dark dark:bg-accent-soft-dark dark:text-ink-dark'}"
 						>
-							<option value="none">Always follow</option>
-							<option value="contains">Follow if output contains…</option>
-							<option value="not_contains">Follow if output does not contain…</option>
-						</select>
-					</label>
-					{#if editingEdgeCondition.operator !== 'none'}
-						<input
-							type="text"
-							bind:value={editingEdgeCondition.value}
-							placeholder="Text to match"
-							class="rounded-md border border-ink/15 bg-transparent px-3 py-2 text-sm text-ink focus:border-agent-cyan-600 focus:outline-none dark:border-white/15 dark:text-ink-dark"
-						/>
-					{/if}
-					<div class="flex items-center gap-3">
-						<button
-							type="submit"
-							disabled={conditionBusy}
-							class="self-start rounded-md bg-agent-cyan px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-agent-cyan-600 disabled:opacity-50"
-						>
-							{conditionBusy ? 'Saving…' : 'Save condition'}
-						</button>
-					</div>
-					{#if conditionError}
-						<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
-							{conditionError}
-						</p>
-					{/if}
-				</form>
-				{#if edgeDeleteError}
-					<p class="mt-2 text-sm text-agent-magenta-700 dark:text-agent-magenta-400">
-						{edgeDeleteError}
-					</p>
-				{/if}
-				<div class="mt-3 flex gap-3">
-					<button
-						onclick={() => handleDeleteConnection(editingEdgeId!)}
-						disabled={edgeDeleteBusy}
-						class="text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
-					>
-						{edgeDeleteBusy ? 'Deleting…' : 'Delete connection'}
-					</button>
-					<button
-						onclick={() => (editingEdgeId = null)}
-						class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-					>
-						Cancel
-					</button>
-				</div>
-			</section>
-		{/if}
-
-		{#if editingNodeId}
-			{@const node = nodeList.find((n) => n.id === editingNodeId)}
-			{#if node}
-				<section
-					class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-				>
-					{#if node.node_type === 'merge'}
-						{@const incomingCount = connectionList.filter(
-							(c) => c.to_node_id === node.id && c.from_node_id
-						).length}
-						<p
-							class="mb-3 flex items-start gap-2 text-xs text-neutral-600 dark:text-neutral-400"
-							data-testid="workflow-merge-notice"
-						>
-							<Icon name="inbox-check" class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-							{#if flowGraph.mergeFanOut}
-								{@const ancestorName =
-									nodeList.find((n) => n.id === flowGraph.mergeFanOut?.ancestorId)?.name ??
-									'an earlier step'}
-								<span>
-									This step joins {flowGraph.mergeFanOut.branchCount} branches that diverged at
-									<strong>{ancestorName}</strong>, highlighted on the canvas.
-								</span>
-							{:else if incomingCount < 2}
-								<span>
-									Connect at least two incoming steps to this merge to see where its branches
-									diverge.
-								</span>
-							{:else}
-								<span>
-									This step joins {incomingCount} incoming connections, but they don't share a common
-									branch point in this graph.
-								</span>
-							{/if}
-						</p>
-					{/if}
-					{#key node.id}
-						<WorkflowNodeForm
-							bind:this={nodeFormRef}
-							agentOptions={agentList}
-							{workflowOptions}
-							lockNodeType
-							initial={{
-								name: node.name,
-								node_type: node.node_type,
-								agent_id: node.agent_id,
-								child_workflow_id: node.child_workflow_id,
-								config: node.config,
-								retry_max_attempts: node.retry_max_attempts,
-								retry_backoff_seconds: node.retry_backoff_seconds
-							}}
-							submitLabel="Save changes"
-							busyLabel="Saving…"
-							busy={editBusy}
-							error={editError}
-							onsubmit={(values) => handleEditNode(node.id, values)}
-							oncancel={() => (editingNodeId = null)}
-							oncreateagent={() => {
-								creatingAgentForNode = true;
-								createAgentError = null;
-							}}
-						/>
-					{/key}
-					<button
-						onclick={() => handleDeleteNode(node.id)}
-						disabled={deleteBusy}
-						class="mt-3 text-xs text-neutral-500 hover:text-agent-magenta-600 disabled:opacity-50"
-					>
-						{deleteBusy ? 'Deleting…' : 'Delete step'}
-					</button>
-				</section>
-			{/if}
-		{/if}
-
-		{#if addingNode}
-			<section
-				class="rounded-lg border border-ink/12 bg-surface p-4 dark:border-white/10 dark:bg-surface-dark"
-			>
-				<WorkflowNodeForm
-					bind:this={nodeFormRef}
-					agentOptions={agentList}
-					{workflowOptions}
-					lockNodeType
-					initial={{
-						name: NODE_TYPE_LABELS[addingNode.nodeType],
-						node_type: addingNode.nodeType,
-						agent_id: null,
-						child_workflow_id: null,
-						config: {},
-						retry_max_attempts: 0,
-						retry_backoff_seconds: 5
-					}}
-					submitLabel="Add step"
-					busyLabel="Adding…"
-					busy={addBusy}
-					error={addError}
-					onsubmit={handleAddNode}
-					oncancel={() => (addingNode = null)}
-					oncreateagent={() => {
-						creatingAgentForNode = true;
-						createAgentError = null;
-					}}
-				/>
-			</section>
-		{/if}
-
-		{#if creatingAgentForNode}
-			<section
-				class="rounded-lg border border-dashed border-ink/15 bg-surface p-4 dark:border-white/15 dark:bg-surface-dark"
-			>
-				<p class="mb-2 text-xs font-medium text-neutral-600 dark:text-neutral-400">New agent</p>
-				<AgentForm
-					providers={providerList}
-					submitLabel="Create agent"
-					busyLabel="Creating…"
-					busy={createAgentBusy}
-					error={createAgentError}
-					onsubmit={handleCreateAgentInline}
-					oncancel={() => (creatingAgentForNode = false)}
-				/>
-			</section>
-		{/if}
-
-		<section class="flex flex-col gap-3">
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-ink dark:text-ink-dark">Run history</h2>
-				<button
-					onclick={loadRuns}
-					class="text-xs text-neutral-500 hover:text-ink dark:hover:text-ink-dark"
-				>
-					{runList === null ? 'Load runs' : 'Refresh'}
-				</button>
-			</div>
-			{#if runsError}
-				<p class="text-sm text-agent-magenta-700 dark:text-agent-magenta-400">{runsError}</p>
-			{:else if runList === null}
-				<p class="text-sm text-neutral-500">
-					Not loaded yet — click "Load runs" to see past executions.
-				</p>
-			{:else if runList.length === 0}
-				<p class="text-sm text-neutral-500">
-					No runs yet — trigger this workflow from a channel with /{workflow.name} &lt;input&gt;.
-				</p>
-			{:else}
-				<ul class="flex flex-col gap-2">
-					{#each runList as run (run.id)}
-						<li class="rounded-lg border border-ink/12 dark:border-white/10">
+							<span class="min-w-0 truncate">
+								{#if overlaidRun.status === 'awaiting_human'}
+									Waiting on a person at
+									<strong>
+										{nodeList.find((n) => n.id === overlaidRun.current_node_id)?.name ?? 'a step'}
+									</strong>
+									— paused {timeAgo(overlaidRun.started_at)}.
+								{:else}
+									Showing the path taken by the run from {timeAgo(overlaidRun.started_at)}.
+								{/if}
+							</span>
 							<button
 								type="button"
-								onclick={() => toggleRun(run.id)}
-								class="flex w-full items-center justify-between px-3 py-2 text-left"
+								data-testid="workflow-run-overlay-clear"
+								onclick={() => (overlayRunId = null)}
+								class="ml-auto flex-none font-semibold hover:underline"
 							>
-								<span class="flex items-center gap-2 text-sm text-ink dark:text-ink-dark">
-									<Icon
-										name="chevron"
-										class="h-3 w-3 flex-none text-neutral-500 transition-transform duration-150 {expandedRunId ===
-										run.id
-											? 'rotate-90'
-											: ''}"
-									/>
-									{timeAgo(run.started_at)}
-									{#if run.triggered_by === 'workflow'}
-										<span class="text-neutral-500">(nested)</span>
-									{:else if run.triggered_by === 'schedule'}
-										<span class="text-neutral-500">(scheduled)</span>
-									{:else if run.triggered_by === 'remediation'}
-										<span class="text-neutral-500">(remediation)</span>
-									{/if}
-								</span>
-								<span class="rounded-sm px-2 py-0.5 text-xs {statusClass(run.status)}">
-									{run.status}
-								</span>
+								Clear
 							</button>
-							{#if expandedRunId === run.id}
-								<div class="border-t border-ink/10 px-3 py-2 dark:border-white/10">
-									{#if run.error_message}
-										<p class="mb-2 text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-											{run.error_message}
-										</p>
-									{/if}
-									{#if nodeRunsError}
-										<p class="text-xs text-agent-magenta-700 dark:text-agent-magenta-400">
-											{nodeRunsError}
-										</p>
-									{:else if !nodeRunsByRun[run.id]}
-										<p class="text-xs text-neutral-500">Loading steps…</p>
-									{:else}
+						</div>
+					{/if}
+				{/if}
+
+				{#if connectError || nodesMoveError}
+					<p
+						class="absolute inset-x-4 bottom-4 rounded-xl border border-danger-line bg-danger-soft px-4 py-2.5 text-sm text-danger-ink dark:border-danger-line-dark dark:bg-danger-soft-dark dark:text-danger-ink-dark"
+					>
+						{connectError ?? nodesMoveError}
+					</p>
+				{/if}
+			</div>
+
+			<aside
+				class="hidden w-[320px] flex-none flex-col border-l border-line bg-surface md:flex dark:border-line-dark dark:bg-surface-dark"
+			>
+				<div class="flex gap-1.5 px-5 pt-5">
+					<button
+						type="button"
+						onclick={() => (inspectorTab = 'step')}
+						class="flex h-9 items-center rounded-md px-3.5 text-sm {tabClass(
+							inspectorTab === 'step'
+						)}"
+					>
+						Step
+					</button>
+					<button
+						type="button"
+						onclick={() => (inspectorTab = 'triggers')}
+						class="flex h-9 items-center rounded-md px-3.5 text-sm {tabClass(
+							inspectorTab === 'triggers'
+						)}"
+					>
+						Triggers
+					</button>
+					<button
+						type="button"
+						onclick={openRunsTab}
+						class="flex h-9 items-center rounded-md px-3.5 text-sm {tabClass(
+							inspectorTab === 'runs'
+						)}"
+					>
+						Runs
+					</button>
+				</div>
+
+				<div class="flex-1 overflow-y-auto p-5">
+					{#if inspectorTab === 'step'}
+						{#if addingNode}
+							<WorkflowNodeForm
+								bind:this={nodeFormRef}
+								agentOptions={agentList}
+								{workflowOptions}
+								lockNodeType
+								initial={{
+									name: NODE_TYPE_LABELS[addingNode.nodeType],
+									node_type: addingNode.nodeType,
+									agent_id: null,
+									child_workflow_id: null,
+									config: {},
+									retry_max_attempts: 0,
+									retry_backoff_seconds: 5
+								}}
+								submitLabel="Add step"
+								busyLabel="Adding…"
+								busy={addBusy}
+								error={addError}
+								onsubmit={handleAddNode}
+								oncancel={() => (addingNode = null)}
+								oncreateagent={() => {
+									creatingAgentForNode = true;
+									createAgentError = null;
+								}}
+							/>
+						{:else if editingNodeId}
+							{@const node = nodeList.find((n) => n.id === editingNodeId)}
+							{#if node}
+								{#if node.node_type === 'merge'}
+									{@const incomingCount = connectionList.filter(
+										(c) => c.to_node_id === node.id && c.from_node_id
+									).length}
+									<p
+										class="mb-4 text-[13px] leading-normal text-muted dark:text-muted-dark"
+										data-testid="workflow-merge-notice"
+									>
+										{#if flowGraph.mergeFanOut}
+											{@const ancestorName =
+												nodeList.find((n) => n.id === flowGraph.mergeFanOut?.ancestorId)?.name ??
+												'an earlier step'}
+											This step joins {flowGraph.mergeFanOut.branchCount} branches that diverged at
+											<strong>{ancestorName}</strong>, highlighted on the board.
+										{:else if incomingCount < 2}
+											Connect at least two incoming steps to this merge to see where its branches
+											diverge.
+										{:else}
+											This step joins {incomingCount} incoming connections, but they don't share a common
+											branch point.
+										{/if}
+									</p>
+								{/if}
+								{#key node.id}
+									<WorkflowNodeForm
+										bind:this={nodeFormRef}
+										agentOptions={agentList}
+										{workflowOptions}
+										lockNodeType
+										initial={{
+											name: node.name,
+											node_type: node.node_type,
+											agent_id: node.agent_id,
+											child_workflow_id: node.child_workflow_id,
+											config: node.config,
+											retry_max_attempts: node.retry_max_attempts,
+											retry_backoff_seconds: node.retry_backoff_seconds
+										}}
+										submitLabel="Save"
+										busyLabel="Saving…"
+										busy={editBusy}
+										error={editError}
+										onsubmit={(values) => handleEditNode(node.id, values)}
+										oncancel={() => (editingNodeId = null)}
+										oncreateagent={() => {
+											creatingAgentForNode = true;
+											createAgentError = null;
+										}}
+									/>
+								{/key}
+								<button
+									type="button"
+									onclick={() => handleDeleteNode(node.id)}
+									disabled={deleteBusy}
+									class="mt-4 text-sm font-medium text-danger hover:underline disabled:opacity-50"
+								>
+									{deleteBusy ? 'Deleting…' : 'Delete step'}
+								</button>
+							{/if}
+						{:else if editingEdgeId}
+							<p class="mb-3 text-[15px] font-semibold text-ink dark:text-ink-dark">
+								Connection selected
+							</p>
+							{#if editingEdgeIsLoop}
+								<p
+									class="mb-3 text-[13px] leading-normal text-muted dark:text-muted-dark"
+									data-testid="workflow-loop-edge-notice"
+								>
+									This connection loops back to an earlier step. A run stops after
+									{LOOP_MAX_NODE_VISITS} visits to the same step or {LOOP_MAX_TOTAL_STEPS} total steps.
+								</p>
+							{/if}
+							<form
+								onsubmit={(event) => {
+									event.preventDefault();
+									handleUpdateEdgeCondition(editingEdgeId!);
+								}}
+								class="flex flex-col gap-3"
+							>
+								<label
+									class="flex flex-col gap-2 text-sm font-semibold text-ink dark:text-ink-dark"
+								>
+									When to follow it
+									<select bind:value={editingEdgeCondition.operator} class={inputClass}>
+										<option value="none">Always</option>
+										<option value="contains">If the output contains…</option>
+										<option value="not_contains">Unless the output contains…</option>
+									</select>
+								</label>
+								{#if editingEdgeCondition.operator !== 'none'}
+									<input
+										type="text"
+										bind:value={editingEdgeCondition.value}
+										placeholder="Text to match"
+										aria-label="Text to match"
+										class={inputClass}
+									/>
+								{/if}
+								<Button type="submit" size="md" class="self-start" disabled={conditionBusy}>
+									{conditionBusy ? 'Saving…' : 'Save'}
+								</Button>
+								{#if conditionError}
+									<p class="text-sm text-danger">{conditionError}</p>
+								{/if}
+							</form>
+							{#if edgeDeleteError}
+								<p class="mt-2 text-sm text-danger">{edgeDeleteError}</p>
+							{/if}
+							<div class="mt-4 flex gap-4">
+								<button
+									type="button"
+									onclick={() => handleDeleteConnection(editingEdgeId!)}
+									disabled={edgeDeleteBusy}
+									class="text-sm font-medium text-danger hover:underline disabled:opacity-50"
+								>
+									{edgeDeleteBusy ? 'Deleting…' : 'Delete connection'}
+								</button>
+								<button
+									type="button"
+									onclick={() => (editingEdgeId = null)}
+									class="text-sm font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+								>
+									Cancel
+								</button>
+							</div>
+						{:else}
+							<p class="text-[15px] leading-normal text-muted dark:text-muted-dark">
+								Select a step on the board, or drag a new one from the palette.
+							</p>
+							{#if flowGraph.hasLoop}
+								<p
+									class="mt-4 text-[13px] leading-normal text-muted dark:text-muted-dark"
+									data-testid="workflow-loop-notice"
+								>
+									This workflow loops back to an earlier step (dotted "↻" edge). A run stops after
+									{LOOP_MAX_NODE_VISITS} visits to the same step or {LOOP_MAX_TOTAL_STEPS} total steps.
+								</p>
+							{/if}
+						{/if}
+
+						{#if creatingAgentForNode}
+							<div
+								class="mt-5 flex flex-col gap-3 rounded-xl border border-dashed border-line p-4 dark:border-line-dark"
+							>
+								<p class="text-sm font-semibold text-ink dark:text-ink-dark">New agent</p>
+								<input
+									type="text"
+									bind:value={newAgentName}
+									placeholder="Name"
+									aria-label="Agent name"
+									class={inputClass}
+								/>
+								<input
+									type="text"
+									bind:value={newAgentRole}
+									placeholder="What this agent does"
+									aria-label="What this agent does"
+									class={inputClass}
+								/>
+								<textarea
+									rows="3"
+									bind:value={newAgentInstructions}
+									placeholder="How it should behave"
+									aria-label="How it should behave"
+									class="rounded-lg border border-line bg-surface px-4 py-3 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+								></textarea>
+								{#if createAgentError}
+									<p class="text-sm text-danger">{createAgentError}</p>
+								{/if}
+								<div class="flex gap-3">
+									<Button
+										size="md"
+										disabled={createAgentBusy ||
+											!newAgentName.trim() ||
+											!newAgentRole.trim() ||
+											!newAgentInstructions.trim()}
+										onclick={handleCreateAgentInline}
+									>
+										{createAgentBusy ? 'Creating…' : 'Create agent'}
+									</Button>
+									<button
+										type="button"
+										onclick={() => (creatingAgentForNode = false)}
+										class="text-sm font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+									>
+										Cancel
+									</button>
+								</div>
+							</div>
+						{/if}
+					{:else if inspectorTab === 'triggers'}
+						<div class="flex flex-col gap-7">
+							{#if !workflow.published}
+								<p
+									class="rounded-xl border border-warn-line bg-warn-soft px-4 py-3 text-[13px] leading-normal text-warn-ink dark:border-warn-line-dark dark:bg-warn-soft-dark dark:text-warn-ink-dark"
+								>
+									Nothing here fires until this workflow is published.
+								</p>
+							{/if}
+
+							<section class="flex flex-col gap-3">
+								<div class="flex items-center justify-between">
+									<h3 class="text-sm font-semibold text-ink dark:text-ink-dark">Schedules</h3>
+									{#if auth.grant === 'owner'}
 										<button
 											type="button"
-											data-testid={`workflow-run-${run.id}-view-on-canvas`}
-											onclick={() => viewRunOnCanvas(run.id)}
-											class="mb-2 flex items-center gap-1 text-xs font-medium text-agent-cyan-700 hover:underline dark:text-agent-cyan-400"
+											onclick={openAddSchedule}
+											class="text-sm font-semibold text-accent hover:underline dark:text-accent-dark"
 										>
-											<Icon name="route" class="h-3 w-3" />
-											{overlayRunId === run.id ? 'Hide from canvas' : 'Show path on canvas'}
+											Add
 										</button>
-										{#if nodeRunsByRun[run.id].length === 0}
-											<p class="text-xs text-neutral-500">No steps recorded for this run.</p>
-										{:else}
-											<ul class="flex flex-col gap-2">
-												{#each nodeRunsByRun[run.id] as nodeRun (nodeRun.id)}
-													<li class="flex flex-col gap-1 text-xs">
-														<div class="flex items-center gap-2">
-															<span class="rounded-sm px-1.5 py-0.5 {statusClass(nodeRun.status)}">
-																{nodeRun.status}
-															</span>
-															<span class="text-neutral-500">
-																{nodeList.find((n) => n.id === nodeRun.node_id)?.name ??
-																	'Deleted step'}
-															</span>
-														</div>
-														{#if nodeRun.output_content}
-															<p class="text-neutral-600 dark:text-neutral-400">
-																{nodeRun.output_content}
-															</p>
-														{/if}
-														{#if nodeRun.error_message}
-															<p class="text-agent-magenta-700 dark:text-agent-magenta-400">
-																{nodeRun.error_message}
-															</p>
-														{/if}
-													</li>
-												{/each}
-											</ul>
-										{/if}
 									{/if}
 								</div>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</section>
+								{#if scheduleError}
+									<p class="text-sm text-danger">{scheduleError}</p>
+								{/if}
+								{#if scheduleList.length === 0 && !showAddSchedule}
+									<p class="text-sm text-muted dark:text-muted-dark">No schedules.</p>
+								{/if}
+								{#each scheduleList as schedule (schedule.id)}
+									<div
+										class="flex flex-col gap-1 rounded-xl border border-line p-3.5 text-[13px] dark:border-line-dark"
+									>
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-mono text-sm text-ink dark:text-ink-dark">
+												{scheduleTiming(schedule)}
+											</span>
+											{#if auth.grant === 'owner'}
+												<span class="flex flex-none gap-2.5">
+													{#if schedule.enabled || !isSpentOneOff(schedule)}
+														<button
+															type="button"
+															onclick={() => toggleScheduleEnabled(schedule)}
+															class="font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+														>
+															{schedule.enabled ? 'Turn off' : 'Turn on'}
+														</button>
+													{/if}
+													<button
+														type="button"
+														onclick={() => removeSchedule(schedule.id)}
+														class="font-medium text-danger hover:underline"
+													>
+														Remove
+													</button>
+												</span>
+											{/if}
+										</div>
+										{#if isPendingAgentApproval(schedule)}
+											<p class="text-warn">Created by an agent — waiting on your approval.</p>
+										{/if}
+										<p class="text-muted dark:text-muted-dark">
+											In #{channelList.find((c) => c.id === schedule.channel_id)?.name ??
+												'a deleted channel'}
+											{#if schedule.enabled}
+												· next {new Date(schedule.next_fire_at).toLocaleString()}
+											{/if}
+										</p>
+										{#if !schedule.enabled && schedule.consecutive_failures >= 5}
+											<p class="text-danger">
+												Turned off after {schedule.consecutive_failures} failures in a row
+											</p>
+										{:else if schedule.consecutive_failures > 0}
+											<p class="text-warn">
+												{schedule.consecutive_failures} failure{schedule.consecutive_failures === 1
+													? ''
+													: 's'} in a row
+											</p>
+										{/if}
+									</div>
+								{/each}
+
+								{#if showAddSchedule}
+									<div
+										class="flex flex-col gap-3 rounded-xl border border-line p-3.5 dark:border-line-dark"
+									>
+										{#if !scheduleAdvanced}
+											<label
+												class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+											>
+												How often
+												<select
+													bind:value={scheduleFrequencyDraft}
+													onchange={buildCronFromSimple}
+													class={inputClass}
+												>
+													<option value="daily">Every day</option>
+													<option value="weekly">Every week</option>
+													<option value="hourly">Every hour</option>
+												</select>
+											</label>
+											{#if scheduleFrequencyDraft === 'weekly'}
+												<label
+													class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+												>
+													Day
+													<select
+														bind:value={scheduleWeekdayDraft}
+														onchange={buildCronFromSimple}
+														class={inputClass}
+													>
+														{#each WEEKDAY_OPTIONS as day (day.value)}
+															<option value={day.value}>{day.label}</option>
+														{/each}
+													</select>
+												</label>
+											{/if}
+											{#if scheduleFrequencyDraft === 'hourly'}
+												<label
+													class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+												>
+													Minute past the hour
+													<input
+														type="number"
+														min="0"
+														max="59"
+														bind:value={scheduleMinuteDraft}
+														oninput={buildCronFromSimple}
+														class={inputClass}
+													/>
+												</label>
+											{:else}
+												<label
+													class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+												>
+													Time
+													<input
+														type="time"
+														bind:value={scheduleTimeDraft}
+														onchange={buildCronFromSimple}
+														class={inputClass}
+													/>
+												</label>
+											{/if}
+										{:else}
+											<label
+												class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+											>
+												Cron expression
+												<input
+													type="text"
+													bind:value={scheduleCronDraft}
+													oninput={onCronDraftChange}
+													placeholder="0 9 * * *"
+													class="{inputClass} font-mono text-sm"
+												/>
+											</label>
+										{/if}
+										<button
+											type="button"
+											onclick={() => (scheduleAdvanced = !scheduleAdvanced)}
+											class="self-start text-[13px] font-semibold text-accent hover:underline dark:text-accent-dark"
+										>
+											{scheduleAdvanced ? 'Plain language instead' : 'Advanced (cron)'}
+										</button>
+										{#if schedulePreview}
+											{#if schedulePreview.error}
+												<p class="text-[13px] text-danger">{schedulePreview.error}</p>
+											{:else if schedulePreview.next_fire_at}
+												<p class="text-[13px] text-muted dark:text-muted-dark">
+													Next run: {new Date(schedulePreview.next_fire_at).toLocaleString()}
+												</p>
+											{/if}
+										{/if}
+										<label
+											class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+										>
+											Channel
+											<select bind:value={scheduleChannelDraft} class={inputClass}>
+												{#each channelList as channel (channel.id)}
+													<option value={channel.id}>#{channel.name}</option>
+												{/each}
+											</select>
+										</label>
+										<label
+											class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+										>
+											Input
+											<input
+												type="text"
+												bind:value={scheduleInputDraft}
+												placeholder="Passed to the first step"
+												class={inputClass}
+											/>
+										</label>
+										<div class="flex gap-3">
+											<Button
+												size="md"
+												onclick={handleAddSchedule}
+												disabled={scheduleBusy ||
+													!scheduleCronDraft.trim() ||
+													!scheduleChannelDraft}
+											>
+												{scheduleBusy ? 'Adding…' : 'Add schedule'}
+											</Button>
+											<button
+												type="button"
+												onclick={closeAddSchedule}
+												class="text-sm font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+							</section>
+
+							<section class="flex flex-col gap-3">
+								<div class="flex items-center justify-between">
+									<h3 class="text-sm font-semibold text-ink dark:text-ink-dark">Webhooks</h3>
+									<button
+										type="button"
+										onclick={openAddWebhook}
+										class="text-sm font-semibold text-accent hover:underline dark:text-accent-dark"
+									>
+										Add
+									</button>
+								</div>
+								<p class="text-[13px] leading-normal text-muted dark:text-muted-dark">
+									An outside system can POST to a webhook's address to run this workflow, signed
+									with its secret. Only reachable beyond this machine if you've deliberately opened
+									it up.
+								</p>
+								{#if webhookError}
+									<p class="text-sm text-danger">{webhookError}</p>
+								{/if}
+
+								{#if revealedWebhook}
+									<div
+										class="flex flex-col gap-2 rounded-xl border border-accent bg-accent-soft p-3.5 text-[13px] dark:border-accent-dark dark:bg-accent-soft-dark"
+									>
+										<p class="font-semibold text-ink dark:text-ink-dark">
+											Save this now — it won't be shown again.
+										</p>
+										<input
+											readonly
+											aria-label="Webhook address"
+											value={webhookTriggerUrl(revealedWebhook.id)}
+											onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
+											class="h-10 rounded-lg border border-line bg-surface px-3 font-mono text-xs text-ink dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
+										/>
+										<input
+											readonly
+											aria-label="Webhook secret"
+											value={revealedWebhook.secret}
+											onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
+											class="h-10 rounded-lg border border-line bg-surface px-3 font-mono text-xs text-ink dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
+										/>
+										<button
+											type="button"
+											onclick={() => (revealedWebhook = null)}
+											class="self-start font-semibold text-accent hover:underline dark:text-accent-dark"
+										>
+											Done
+										</button>
+									</div>
+								{/if}
+
+								{#if webhookList.length === 0 && !showAddWebhook}
+									<p class="text-sm text-muted dark:text-muted-dark">No webhooks.</p>
+								{/if}
+								{#each webhookList as webhook (webhook.id)}
+									<div
+										class="flex flex-col gap-1 rounded-xl border border-line p-3.5 text-[13px] dark:border-line-dark"
+									>
+										<div class="flex items-center justify-between gap-2">
+											<span class="font-mono text-sm text-ink dark:text-ink-dark">
+												{webhook.name ?? webhook.id.slice(0, 8)}
+											</span>
+											<span class="flex flex-none gap-2.5">
+												{#if auth.grant === 'owner'}
+													<button
+														type="button"
+														onclick={() => toggleWebhookEnabled(webhook)}
+														class="font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+													>
+														{webhook.enabled ? 'Turn off' : 'Turn on'}
+													</button>
+												{/if}
+												<button
+													type="button"
+													onclick={() => rotateWebhookSecret(webhook.id)}
+													class="font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+												>
+													New secret
+												</button>
+												<button
+													type="button"
+													onclick={() => removeWebhook(webhook.id)}
+													class="font-medium text-danger hover:underline"
+												>
+													Remove
+												</button>
+											</span>
+										</div>
+										<p class="text-muted dark:text-muted-dark">
+											In #{channelList.find((c) => c.id === webhook.channel_id)?.name ??
+												'a deleted channel'} · last fired {webhook.last_triggered_at
+												? timeAgo(webhook.last_triggered_at)
+												: 'never'}
+										</p>
+									</div>
+								{/each}
+
+								{#if showAddWebhook}
+									<div
+										class="flex flex-col gap-3 rounded-xl border border-line p-3.5 dark:border-line-dark"
+									>
+										<label
+											class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+										>
+											Name (optional)
+											<input
+												type="text"
+												bind:value={webhookNameDraft}
+												placeholder="e.g. GitHub"
+												class={inputClass}
+											/>
+										</label>
+										<label
+											class="flex flex-col gap-1.5 text-sm font-semibold text-ink dark:text-ink-dark"
+										>
+											Channel
+											<select bind:value={webhookChannelDraft} class={inputClass}>
+												{#each channelList as channel (channel.id)}
+													<option value={channel.id}>#{channel.name}</option>
+												{/each}
+											</select>
+										</label>
+										<div class="flex gap-3">
+											<Button
+												size="md"
+												onclick={handleAddWebhook}
+												disabled={webhookBusy || !webhookChannelDraft}
+											>
+												{webhookBusy ? 'Adding…' : 'Add webhook'}
+											</Button>
+											<button
+												type="button"
+												onclick={() => (showAddWebhook = false)}
+												class="text-sm font-medium text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								{/if}
+							</section>
+
+							<section class="flex flex-col gap-3">
+								<h3 class="text-sm font-semibold text-ink dark:text-ink-dark">If a run fails</h3>
+								<label class="flex flex-col gap-1.5 text-[13px] text-muted dark:text-muted-dark">
+									Run another workflow with the failure as its input
+									<select
+										value={workflow.on_failure_workflow_id ?? ''}
+										onchange={(e) => updateRemediation(e.currentTarget.value)}
+										disabled={remediationBusy || auth.grant !== 'owner'}
+										class="{inputClass} disabled:opacity-50"
+									>
+										<option value="">None</option>
+										{#each workflowOptions as candidate (candidate.id)}
+											<option value={candidate.id}>/{candidate.name}</option>
+										{/each}
+									</select>
+								</label>
+								{#if remediationError}
+									<p class="text-sm text-danger">{remediationError}</p>
+								{/if}
+								<label class="flex flex-col gap-1.5 text-[13px] text-muted dark:text-muted-dark">
+									Bring in an agent
+									<select
+										value={workflow.on_call_agent_id ?? ''}
+										onchange={(e) => updateOnCallAgent(e.currentTarget.value)}
+										disabled={onCallBusy || auth.grant !== 'owner'}
+										class="{inputClass} disabled:opacity-50"
+									>
+										<option value="">Workspace default</option>
+										{#each agentList as agent (agent.id)}
+											<option value={agent.id}>{agent.name}</option>
+										{/each}
+									</select>
+								</label>
+								{#if onCallError}
+									<p class="text-sm text-danger">{onCallError}</p>
+								{/if}
+							</section>
+						</div>
+					{:else if inspectorTab === 'runs'}
+						{#if runsError}
+							<p class="text-sm text-danger">{runsError}</p>
+						{:else if runList === null}
+							<div class="breath h-3 w-1/2 rounded-full bg-line dark:bg-line-dark"></div>
+						{:else if runList.length === 0}
+							<p class="text-sm leading-normal text-muted dark:text-muted-dark">
+								Nothing has run yet. Trigger it from a channel with
+								<code class="font-mono">/{workflow.name}</code>.
+							</p>
+						{:else}
+							<div class="flex flex-col gap-2">
+								{#each runList as run (run.id)}
+									<div class="rounded-xl border border-line dark:border-line-dark">
+										<button
+											type="button"
+											onclick={() => toggleRun(run.id)}
+											class="flex h-11 w-full items-center gap-2 px-3 text-left"
+										>
+											<Icon
+												name="chevron-right"
+												class="h-3.5 w-3.5 flex-none text-muted transition-transform duration-150 dark:text-muted-dark {expandedRunId ===
+												run.id
+													? 'rotate-90'
+													: ''}"
+											/>
+											<span class="min-w-0 truncate text-[13px] text-ink dark:text-ink-dark">
+												{timeAgo(run.started_at)}
+												{#if run.triggered_by === 'workflow'}
+													<span class="text-muted dark:text-muted-dark">(nested)</span>
+												{:else if run.triggered_by === 'schedule'}
+													<span class="text-muted dark:text-muted-dark">(scheduled)</span>
+												{:else if run.triggered_by === 'remediation'}
+													<span class="text-muted dark:text-muted-dark">(auto)</span>
+												{/if}
+											</span>
+											<StatusPill tone={statusTone(run.status)} class="ml-auto h-5 text-xs">
+												{run.status === 'awaiting_human' ? 'waiting on a person' : run.status}
+											</StatusPill>
+										</button>
+										{#if expandedRunId === run.id}
+											<div class="border-t border-line px-3 py-2.5 dark:border-line-dark">
+												{#if run.error_message}
+													<p class="mb-2 text-[13px] text-danger">{run.error_message}</p>
+												{/if}
+												{#if nodeRunsError}
+													<p class="text-[13px] text-danger">{nodeRunsError}</p>
+												{:else if !nodeRunsByRun[run.id]}
+													<div
+														class="breath h-2.5 w-1/2 rounded-full bg-line dark:bg-line-dark"
+													></div>
+												{:else}
+													<button
+														type="button"
+														data-testid={`workflow-run-${run.id}-view-on-canvas`}
+														onclick={() => viewRunOnCanvas(run.id)}
+														class="mb-2 text-[13px] font-semibold text-accent hover:underline dark:text-accent-dark"
+													>
+														{overlayRunId === run.id ? 'Hide from board' : 'Show path on board'}
+													</button>
+													{#if nodeRunsByRun[run.id].length === 0}
+														<p class="text-[13px] text-muted dark:text-muted-dark">
+															No steps recorded for this run.
+														</p>
+													{:else}
+														<div class="flex flex-col gap-2">
+															{#each nodeRunsByRun[run.id] as nodeRun (nodeRun.id)}
+																<div class="flex flex-col gap-0.5 text-[13px]">
+																	<div class="flex items-center gap-2">
+																		<span
+																			class="h-2 w-2 flex-none rounded-full {nodeRun.status ===
+																			'succeeded'
+																				? 'bg-accent dark:bg-accent-dark'
+																				: nodeRun.status === 'failed'
+																					? 'bg-danger'
+																					: nodeRun.status === 'awaiting_human' ||
+																						  nodeRun.status === 'running'
+																						? 'bg-warn'
+																						: 'bg-line dark:bg-line-dark'}"
+																		></span>
+																		<span class="font-medium text-ink dark:text-ink-dark">
+																			{nodeList.find((n) => n.id === nodeRun.node_id)?.name ??
+																				'Deleted step'}
+																		</span>
+																	</div>
+																	{#if nodeRun.output_content}
+																		<p class="pl-4 text-muted dark:text-muted-dark">
+																			{nodeRun.output_content}
+																		</p>
+																	{/if}
+																	{#if nodeRun.error_message}
+																		<p class="pl-4 text-danger">{nodeRun.error_message}</p>
+																	{/if}
+																</div>
+															{/each}
+														</div>
+													{/if}
+												{/if}
+											</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
+					{/if}
+				</div>
+			</aside>
+		</div>
 	{/if}
 </div>
+
+{#if renaming && workflow}
+	<Sheet title="Rename workflow" onClose={() => (renaming = false)} width={480}>
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="wf-rename-name">
+					Name
+				</label>
+				<input
+					id="wf-rename-name"
+					type="text"
+					bind:value={nameDraft}
+					class="{inputClass} font-mono text-sm"
+				/>
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					This is also the command: /{nameDraft.trim() || workflow.name}
+				</p>
+			</div>
+			<div class="flex flex-col gap-2">
+				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="wf-rename-desc">
+					What it does
+				</label>
+				<input id="wf-rename-desc" type="text" bind:value={descriptionDraft} class={inputClass} />
+			</div>
+			{#if renameError}
+				<p class="text-sm text-danger">{renameError}</p>
+			{/if}
+		</div>
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (renaming = false)}>Cancel</Button>
+			<Button onclick={saveRename} disabled={renameBusy || !nameDraft.trim()}>
+				{renameBusy ? 'Saving…' : 'Save'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}

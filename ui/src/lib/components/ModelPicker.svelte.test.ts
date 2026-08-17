@@ -84,7 +84,7 @@ describe('ModelPicker.svelte', () => {
 		render(ModelPicker, { providers: [], value: '' });
 
 		await expect
-			.element(page.getByText('No providers configured yet — add one under Providers first.'))
+			.element(page.getByText('No providers yet — add one under Providers first.'))
 			.toBeInTheDocument();
 	});
 });

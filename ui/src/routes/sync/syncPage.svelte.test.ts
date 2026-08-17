@@ -1,18 +1,28 @@
-// Browser-mode component test (see agents/agentsPage.svelte.test.ts). This
-// route depends on $lib/api/sync, plus the real (unmocked) $lib/api/client
-// for the ApiError class used in instanceof checks.
+// Browser-mode component test for Sync (06-screens.md → Sync, mockup 2m,
+// owner only): This machine / Other machines / Conflicts, with coordinator
+// details and capability labels tucked behind Advanced.
 
 import { page } from 'vitest/browser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 import SyncPage from './+page.svelte';
-import { sync, type CoordinatorStatus, type SyncStatus, type SyncConflict } from '$lib/api/sync';
-import { ApiError } from '$lib/api/client';
+import { sync, type CoordinatorStatus, type SyncConflict, type SyncStatus } from '$lib/api/sync';
 
-// See Sidebar.svelte.test.ts for the auth.grant mocking pattern this
-// follows -- defaults to 'owner' so the existing (pre-#351) tests below
-// don't have to know about grants at all.
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
+
+vi.mock('$lib/api/sync', () => ({
+	sync: {
+		status: vi.fn(),
+		coordinator: vi.fn(),
+		conflicts: vi.fn(),
+		getCapabilities: vi.fn(),
+		setCapabilities: vi.fn(),
+		connect: vi.fn(),
+		disconnect: vi.fn(),
+		resolveConflict: vi.fn(),
+		reclaimCoordinator: vi.fn()
+	}
+}));
 
 vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
@@ -22,53 +32,9 @@ vi.mock('$lib/api/auth.svelte', () => ({
 	}
 }));
 
-vi.mock('$lib/api/sync', () => ({
-	sync: {
-		status: vi.fn(),
-		connect: vi.fn(),
-		disconnect: vi.fn(),
-		coordinator: vi.fn(),
-		reclaimCoordinator: vi.fn(),
-		conflicts: vi.fn(),
-		resolveConflict: vi.fn(),
-		getCapabilities: vi.fn(),
-		setCapabilities: vi.fn()
-	}
-}));
-
-const runningStatus: SyncStatus = {
-	running: true,
-	node_id: 'node-abc123',
-	peers: [
-		{
-			peer_id: 'peer-1',
-			address: '/ip4/1.2.3.4/tcp/5000/p2p/peer-1',
-			connected: true,
-			capabilities: []
-		}
-	],
-	pending_changes: 0,
-	own_addresses: ['/ip4/192.168.1.5/tcp/5000/p2p/node-abc123']
-};
-
-const selfCoordinator: CoordinatorStatus = {
-	running: true,
-	node_id: 'node-abc123',
-	coordinator_id: 'node-abc123',
-	term: 1,
-	is_self: true,
-	self_score: 42.5,
-	peer_scores: {}
-};
-
 let writeTextMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
-	vi.mocked(sync.getCapabilities).mockResolvedValue({ capabilities: [] });
-	vi.mocked(sync.coordinator).mockResolvedValue(selfCoordinator);
-	// navigator.clipboard.writeText is stubbed since real clipboard access
-	// needs OS-level permissions Playwright's headless Chromium doesn't
-	// grant by default (see invites/invitesPage.svelte.test.ts).
 	writeTextMock = vi.fn().mockResolvedValue(undefined);
 	Object.defineProperty(navigator, 'clipboard', {
 		value: { writeText: writeTextMock },
@@ -76,343 +42,183 @@ beforeEach(() => {
 	});
 });
 
-const conflict: SyncConflict = {
-	id: 'conf-1',
-	entity_type: 'channel',
-	entity_id: 'chan-1',
-	local_snapshot: { name: 'general' },
-	remote_snapshot: { name: 'general-renamed' },
-	remote_node_id: 'node-xyz789',
-	detected_at: '2026-08-01T00:00:00Z'
-};
-
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.grant = 'owner';
 });
 
+const runningStatus: SyncStatus = {
+	running: true,
+	node_id: 'node-a1',
+	peers: [
+		{
+			peer_id: 'node-b7-long-peer-id-value',
+			address: '/ip4/192.168.1.20/tcp/5000',
+			connected: true,
+			capabilities: []
+		}
+	],
+	pending_changes: 0,
+	own_addresses: ['/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest']
+};
+
+const selfCoordinator: CoordinatorStatus = {
+	running: true,
+	node_id: 'node-a1',
+	coordinator_id: 'node-a1',
+	term: 3,
+	is_self: true,
+	self_score: 12.5,
+	peer_scores: {}
+};
+
+const conflict: SyncConflict = {
+	id: 'conf-1',
+	entity_type: 'agent',
+	entity_id: 'agent-1-entity-id',
+	remote_node_id: 'node-b7-long-peer-id-value',
+	local_snapshot: { name: 'Assistant' },
+	remote_snapshot: { name: 'Helper' },
+	detected_at: new Date().toISOString()
+};
+
+function seed(overrides?: {
+	status?: SyncStatus;
+	coordinator?: CoordinatorStatus;
+	conflicts?: SyncConflict[];
+}) {
+	vi.mocked(sync.status).mockResolvedValue(overrides?.status ?? runningStatus);
+	vi.mocked(sync.coordinator).mockResolvedValue(overrides?.coordinator ?? selfCoordinator);
+	vi.mocked(sync.conflicts).mockResolvedValue(overrides?.conflicts ?? []);
+	vi.mocked(sync.getCapabilities).mockResolvedValue({ capabilities: [] });
+}
+
 describe('sync/+page.svelte', () => {
-	it('shows an owner-only empty state to a non-owner session without calling the API (#351)', async () => {
+	it('renders the owner-only empty state for a guest without firing requests (#351)', async () => {
 		authState.grant = 'invite';
 
 		render(SyncPage);
 
 		await expect
-			.element(page.getByText('only available to the workspace owner', { exact: false }))
+			.element(page.getByText('This is only available to the workspace owner.'))
 			.toBeInTheDocument();
 		expect(sync.status).not.toHaveBeenCalled();
-		expect(sync.coordinator).not.toHaveBeenCalled();
-		expect(sync.conflicts).not.toHaveBeenCalled();
-		expect(sync.getCapabilities).not.toHaveBeenCalled();
 	});
 
-	it('shows running status and connected peers', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
+	it('shows this machine, its sync address, and connected machines', async () => {
+		seed();
 
 		render(SyncPage);
 
-		await expect.element(page.getByText('running')).toBeInTheDocument();
-		await expect.element(page.getByText('node: node-abc123', { exact: false })).toBeInTheDocument();
 		await expect
-			.element(page.getByText('No unresolved conflicts', { exact: false }))
+			.element(page.getByText('This machine', { exact: true }).first())
 			.toBeInTheDocument();
+		await expect.element(page.getByText('Syncing')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest'))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Connected')).toBeInTheDocument();
 	});
 
-	it('connects to a peer via sync.connect and clears the address field', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
+	it('copies this machine’s sync address', async () => {
+		seed();
+
+		render(SyncPage);
+		await page.getByRole('button', { name: 'Copy', exact: true }).click();
+
+		expect(writeTextMock).toHaveBeenCalledWith('/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest');
+	});
+
+	it('connects a machine from the paste-address sheet', async () => {
+		seed();
 		vi.mocked(sync.connect).mockResolvedValueOnce({
-			peer_id: 'peer-2',
-			address: '/ip4/9.9.9.9/tcp/5000/p2p/peer-2',
+			peer_id: 'new-peer',
+			address: '/ip4/10.0.0.9/tcp/5000',
 			connected: true,
 			capabilities: []
 		});
 
 		render(SyncPage);
-		const input = page.getByPlaceholder(/Multiaddr/);
-		await expect.element(input).toBeInTheDocument();
-
-		await input.fill('/ip4/9.9.9.9/tcp/5000/p2p/peer-2');
+		await page.getByRole('button', { name: 'Connect a machine' }).click();
+		await page.getByLabelText('Sync address').fill('/ip4/10.0.0.9/tcp/5000/p2p/12D3KooOther');
 		await page.getByRole('button', { name: 'Connect', exact: true }).click();
 
-		expect(sync.connect).toHaveBeenCalledWith('/ip4/9.9.9.9/tcp/5000/p2p/peer-2');
-		await expect.element(input).toHaveValue('');
+		expect(sync.connect).toHaveBeenCalledWith('/ip4/10.0.0.9/tcp/5000/p2p/12D3KooOther');
 	});
 
-	it('shows own sync address with a copy affordance (#132)', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-		await expect
-			.element(page.getByText('/ip4/192.168.1.5/tcp/5000/p2p/node-abc123'))
-			.toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Copy', exact: true }).click();
-
-		expect(writeTextMock).toHaveBeenCalledWith('/ip4/192.168.1.5/tcp/5000/p2p/node-abc123');
-		await expect.element(page.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
-	});
-
-	it('hides the own-address section when no addresses are available', async () => {
-		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, own_addresses: [] });
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-		await expect.element(page.getByText('running')).toBeInTheDocument();
-
-		await expect
-			.element(page.getByText('Your sync address', { exact: false }))
-			.not.toBeInTheDocument();
-	});
-
-	it('disconnects a peer via sync.disconnect', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
+	it('disconnects a machine', async () => {
+		seed();
 		vi.mocked(sync.disconnect).mockResolvedValueOnce(undefined);
 
 		render(SyncPage);
-		await expect.element(page.getByText('running')).toBeInTheDocument();
-
 		await page.getByRole('button', { name: 'Disconnect' }).click();
 
-		expect(sync.disconnect).toHaveBeenCalledWith('peer-1');
+		expect(sync.disconnect).toHaveBeenCalledWith('node-b7-long-peer-id-value');
 	});
 
-	it('resolves a conflict by keeping the remote version', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([conflict]);
+	it('resolves a conflict by keeping this machine or the other machine', async () => {
+		seed({ conflicts: [conflict] });
 		vi.mocked(sync.resolveConflict).mockResolvedValueOnce(conflict);
 
 		render(SyncPage);
-		await expect.element(page.getByText('Conflicts (1)')).toBeInTheDocument();
-		await expect.element(page.getByText('general-renamed')).toBeInTheDocument();
+		await expect.element(page.getByText('Assistant')).toBeInTheDocument();
+		await expect.element(page.getByText('Helper')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Keep remote' }).click();
+		await page.getByRole('button', { name: 'Keep the other machine' }).click();
 
 		expect(sync.resolveConflict).toHaveBeenCalledWith('conf-1', 'remote');
 	});
 
-	it('shows a not-running status and disables Connect', async () => {
-		vi.mocked(sync.status).mockResolvedValue({
-			...runningStatus,
-			running: false,
-			node_id: null,
-			own_addresses: []
+	it('says when there are no conflicts', async () => {
+		seed();
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('No conflicts.')).toBeInTheDocument();
+	});
+
+	it('keeps coordinator term and score behind Advanced', async () => {
+		seed({
+			coordinator: { ...selfCoordinator, is_self: false, coordinator_id: 'other-node-id-x' }
 		});
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
 
 		render(SyncPage);
-
-		await expect.element(page.getByText('not running')).toBeInTheDocument();
-		await expect.element(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled();
-	});
-
-	it('shows an error when the initial load fails', async () => {
-		vi.mocked(sync.status).mockRejectedValueOnce(new Error('Failed to load sync status'));
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-
-		await expect.element(page.getByText('Failed to load sync status')).toBeInTheDocument();
-	});
-
-	it('shows a peer with capabilities and no peers otherwise', async () => {
-		vi.mocked(sync.status).mockResolvedValue({
-			...runningStatus,
-			peers: [{ ...runningStatus.peers[0], capabilities: ['gpu', 'cpu-heavy'] }]
-		});
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-
-		await expect.element(page.getByText('gpu, cpu-heavy')).toBeInTheDocument();
-	});
-
-	it('shows a no-peers message when nothing is connected', async () => {
-		vi.mocked(sync.status).mockResolvedValue({ ...runningStatus, peers: [] });
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-
-		await expect.element(page.getByText('No peers connected.')).toBeInTheDocument();
-	});
-
-	it('saves capabilities via sync.setCapabilities, splitting and trimming the draft', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.setCapabilities).mockResolvedValueOnce({ capabilities: ['gpu', 'cpu-heavy'] });
-
-		render(SyncPage);
-		await page.getByPlaceholder(/My capabilities/).fill(' gpu ,cpu-heavy, ');
-		await page.getByRole('button', { name: 'Save capabilities' }).click();
-
-		expect(sync.setCapabilities).toHaveBeenCalledWith(['gpu', 'cpu-heavy']);
-	});
-
-	it('shows the ApiError message when saving capabilities fails', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.setCapabilities).mockRejectedValueOnce(
-			new ApiError(422, 'invalid capability tag')
-		);
-
-		render(SyncPage);
-		await page.getByPlaceholder(/My capabilities/).fill('bad tag!');
-		await page.getByRole('button', { name: 'Save capabilities' }).click();
-
-		await expect.element(page.getByText('invalid capability tag')).toBeInTheDocument();
-	});
-
-	it('does not connect while the address is blank', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-
-		render(SyncPage);
-		await page.getByRole('button', { name: 'Connect', exact: true }).click();
-
-		expect(sync.connect).not.toHaveBeenCalled();
-	});
-
-	it('shows the ApiError message when connecting fails', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.connect).mockRejectedValueOnce(new ApiError(502, 'peer refused connection'));
-
-		render(SyncPage);
-		await page.getByPlaceholder(/Multiaddr/).fill('/ip4/9.9.9.9/tcp/5000/p2p/peer-2');
-		await page.getByRole('button', { name: 'Connect', exact: true }).click();
-
-		await expect.element(page.getByText('peer refused connection')).toBeInTheDocument();
-	});
-
-	it('resolves a conflict by keeping the local version', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([conflict]);
-		vi.mocked(sync.resolveConflict).mockResolvedValueOnce(conflict);
-
-		render(SyncPage);
-		await expect.element(page.getByText('Conflicts (1)')).toBeInTheDocument();
-
-		await page.getByRole('button', { name: 'Keep local' }).click();
-
-		expect(sync.resolveConflict).toHaveBeenCalledWith('conf-1', 'local');
-	});
-
-	it('shows the ApiError message when resolving a conflict fails', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([conflict]);
-		vi.mocked(sync.resolveConflict).mockRejectedValueOnce(
-			new ApiError(409, 'conflict already resolved')
-		);
-
-		render(SyncPage);
-		await page.getByRole('button', { name: 'Keep remote' }).click();
-
-		await expect.element(page.getByText('conflict already resolved')).toBeInTheDocument();
-	});
-
-	it('shows the ApiError message when disconnecting fails', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.disconnect).mockRejectedValueOnce(new ApiError(500, 'peer unreachable'));
-
-		render(SyncPage);
-		await page.getByRole('button', { name: 'Disconnect' }).click();
-
-		await expect.element(page.getByText('peer unreachable')).toBeInTheDocument();
-	});
-
-	it('shows this node as coordinator and hides the reclaim button', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.coordinator).mockResolvedValue(selfCoordinator);
-
-		render(SyncPage);
-
-		await expect.element(page.getByText('this node', { exact: true })).toBeInTheDocument();
-		await expect.element(page.getByText('term 1', { exact: false })).toBeInTheDocument();
 		await expect
-			.element(page.getByRole('button', { name: 'Reclaim coordinator' }))
-			.not.toBeInTheDocument();
-	});
+			.element(page.getByText('This machine', { exact: true }).first())
+			.toBeInTheDocument();
 
-	it('shows another peer as coordinator with a reclaim option', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.coordinator).mockResolvedValue({
-			...selfCoordinator,
-			coordinator_id: 'peer-9999999999999999',
-			is_self: false
-		});
+		// The term/score details are inside the collapsed Advanced section.
+		const details = document.querySelector('details');
+		expect(details?.open).toBeFalsy();
 
-		render(SyncPage);
-
+		await page.getByText('Advanced').click();
+		await expect.element(page.getByText(/term 3/)).toBeInTheDocument();
 		await expect
-			.element(page.getByRole('button', { name: 'Reclaim coordinator' }))
+			.element(page.getByRole('button', { name: 'Run scheduled work here' }))
 			.toBeInTheDocument();
 	});
 
-	it('reclaims coordinator via sync.reclaimCoordinator', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.coordinator).mockResolvedValue({
-			...selfCoordinator,
-			coordinator_id: 'peer-9999999999999999',
-			is_self: false
-		});
-		vi.mocked(sync.reclaimCoordinator).mockResolvedValueOnce({
-			...selfCoordinator,
-			term: 2
-		});
+	it('saves this machine’s capability labels from Advanced', async () => {
+		seed();
+		vi.mocked(sync.setCapabilities).mockResolvedValueOnce({ capabilities: ['gpu'] });
 
 		render(SyncPage);
-		await page.getByRole('button', { name: 'Reclaim coordinator' }).click();
+		await page.getByText('Advanced').click();
+		await page.getByLabelText("This machine's labels").fill('gpu');
+		await page.getByRole('button', { name: 'Save', exact: true }).click();
 
-		expect(sync.reclaimCoordinator).toHaveBeenCalled();
-		await expect.element(page.getByText('this node', { exact: true })).toBeInTheDocument();
+		expect(sync.setCapabilities).toHaveBeenCalledWith(['gpu']);
 	});
 
-	it('shows the ApiError message when reclaiming coordinator fails', async () => {
-		vi.mocked(sync.status).mockResolvedValue(runningStatus);
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.coordinator).mockResolvedValue({
-			...selfCoordinator,
-			coordinator_id: 'peer-9999999999999999',
-			is_self: false
-		});
-		vi.mocked(sync.reclaimCoordinator).mockRejectedValueOnce(
-			new ApiError(409, 'sync engine is not running')
-		);
-
-		render(SyncPage);
-		await page.getByRole('button', { name: 'Reclaim coordinator' }).click();
-
-		await expect.element(page.getByText('sync engine is not running')).toBeInTheDocument();
-	});
-
-	it('hides the coordinator section when sync is not running', async () => {
-		vi.mocked(sync.status).mockResolvedValue({
-			...runningStatus,
-			running: false,
-			node_id: null,
-			own_addresses: []
-		});
-		vi.mocked(sync.conflicts).mockResolvedValue([]);
-		vi.mocked(sync.coordinator).mockResolvedValue({
-			running: false,
-			node_id: null,
-			coordinator_id: null,
-			term: 0,
-			is_self: false,
-			self_score: 0,
-			peer_scores: {}
-		});
+	it('shows a quiet error with retry when sync status fails to load', async () => {
+		vi.mocked(sync.status).mockRejectedValue(new Error('boom'));
+		vi.mocked(sync.coordinator).mockRejectedValue(new Error('boom'));
+		vi.mocked(sync.conflicts).mockRejectedValue(new Error('boom'));
+		vi.mocked(sync.getCapabilities).mockRejectedValue(new Error('boom'));
 
 		render(SyncPage);
 
-		await expect.element(page.getByText('not running')).toBeInTheDocument();
-		await expect.element(page.getByText('Coordinator')).not.toBeInTheDocument();
+		await expect.element(page.getByText("Couldn't load sync status.")).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
 	});
 });
