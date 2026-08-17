@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_session_claims
 from rivulets.api.teams import team_holds_owner_scoped_agent
-from rivulets.db.models import Channel
+from rivulets.db.models import Channel, Team
 from rivulets.sync.publish import publish_current_state
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -25,6 +25,8 @@ async def _publish_channel_change(db: DbSession, channel: Channel) -> None:
 class ChannelCreate(BaseModel):
     name: str
     description: str | None = None
+    # #411: assign a team at create so the first message can get a reply.
+    team_id: str | None = None
 
 
 class ChannelUpdate(BaseModel):
@@ -61,11 +63,31 @@ async def list_channels(db: DbSession, _: CurrentWorkspaceId) -> list[Channel]:
     return list(result.scalars().all())
 
 
+async def _require_assignable_team(db: DbSession, claims: SessionClaims, team_id: str) -> None:
+    if await db.get(Team, team_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
+    if claims.grant != "owner" and await team_holds_owner_scoped_agent(db, team_id):
+        # #326: same confused-deputy concern as update_channel — pointing
+        # a channel at a team that already has a capability-scoped agent
+        # makes that agent @mention-able from chat.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Owner access required to point a channel at a team with a capability-scoped agent",
+        )
+
+
 @router.post("", response_model=ChannelOut, status_code=status.HTTP_201_CREATED)
-async def create_channel(body: ChannelCreate, db: DbSession, _: CurrentWorkspaceId) -> Channel:
+async def create_channel(
+    body: ChannelCreate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+) -> Channel:
     if not (3 <= len(body.name) <= 80):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "name must be 3-80 chars")
-    channel = Channel(name=body.name, description=body.description)
+    if body.team_id is not None:
+        await _require_assignable_team(db, claims, body.team_id)
+    channel = Channel(name=body.name, description=body.description, team_id=body.team_id)
     db.add(channel)
     await db.commit()
     await db.refresh(channel)

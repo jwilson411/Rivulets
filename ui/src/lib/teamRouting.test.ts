@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	defaultChannelTeamId,
 	describeSpeakRule,
 	describeSpeakRulesList,
 	keywordsFromRules,
@@ -12,6 +13,22 @@ import type { RoutingRule } from '$lib/api/agents';
 function rule(rule_type: RoutingRule['rule_type'], pattern = ''): RoutingRule {
 	return { id: 'r1', rule_type, pattern, priority: 0 };
 }
+
+describe('defaultChannelTeamId', () => {
+	it('prefers a team whose name includes starter', () => {
+		expect(
+			defaultChannelTeamId([
+				{ id: 't-test', name: 'Test Team' },
+				{ id: 't-starter', name: 'Starter Team' }
+			])
+		).toBe('t-starter');
+	});
+
+	it('falls back to the first team, then null', () => {
+		expect(defaultChannelTeamId([{ id: 't-test', name: 'Test Team' }])).toBe('t-test');
+		expect(defaultChannelTeamId([])).toBeNull();
+	});
+});
 
 describe('teamComposerHint', () => {
 	it('says the team answers only when a rule or mention matches', () => {

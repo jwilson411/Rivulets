@@ -14,6 +14,13 @@ export function teamComposerHint(teamName: string): string {
 	return `${teamName} answers when a rule or @mention matches`;
 }
 
+// #411: a new room should land on Starter Team when it exists, otherwise
+// the first team in the list — never "No team" by accident.
+export function defaultChannelTeamId(teamList: { id: string; name: string }[]): string | null {
+	const starter = teamList.find((team) => team.name.toLowerCase().includes('starter'));
+	return (starter ?? teamList[0])?.id ?? null;
+}
+
 export function parseRulePhrases(pattern: string): string[] {
 	try {
 		const parsed = JSON.parse(pattern) as unknown;

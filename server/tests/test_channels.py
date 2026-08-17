@@ -39,6 +39,32 @@ def test_channel_name_length_validation(client: TestClient, auth_headers: dict[s
     assert response.status_code == 400
 
 
+def test_create_channel_accepts_team_id(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """#411: assigning a team at create so the first message can get a reply."""
+    teams = client.get("/api/v1/teams", headers=auth_headers).json()
+    starter = next(team for team in teams if "starter" in team["name"].lower())
+
+    created = client.post(
+        "/api/v1/channels",
+        json={"name": "My Channel", "team_id": starter["id"]},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == "My Channel"
+    assert created.json()["team_id"] == starter["id"]
+
+
+def test_create_channel_unknown_team_returns_404(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/channels",
+        json={"name": "orphan-room", "team_id": "team-does-not-exist"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+
+
 def test_duplicate_active_channel_name_returns_409_via_global_handler(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
@@ -137,6 +163,31 @@ def test_invite_grant_cannot_point_channel_at_team_with_scoped_agent(
         headers=auth_headers,
     )
     assert owner_response.status_code == 200, owner_response.text
+
+
+def test_invite_grant_cannot_create_channel_on_team_with_scoped_agent(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    scoped_agent = _create_agent(client, auth_headers, "Create Scoped")
+    client.put(
+        f"/api/v1/agents/{scoped_agent}/tool-scopes",
+        json={"scopes": ["invites:manage"]},
+        headers=auth_headers,
+    )
+    team_id = client.post(
+        "/api/v1/teams", json={"name": "Create Scoped Team"}, headers=auth_headers
+    ).json()["id"]
+    client.patch(
+        f"/api/v1/teams/{team_id}", json={"agent_ids": [scoped_agent]}, headers=auth_headers
+    )
+    invite_headers = _invite_headers(client, auth_headers)
+
+    response = client.post(
+        "/api/v1/channels",
+        json={"name": "guest-create-scoped", "team_id": team_id},
+        headers=invite_headers,
+    )
+    assert response.status_code == 403
 
 
 def test_invite_grant_can_point_channel_at_team_without_scoped_agent(
