@@ -80,6 +80,14 @@
 	let mentionCandidates = $derived<MentionCandidate[]>(
 		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
 	);
+	// Header chip keeps four member discs; leftover members become a +N
+	// disc so a fifth agent is not silently dropped (#423).
+	const TEAM_CHIP_VISIBLE = 4;
+	let visibleTeamMembers = $derived(teamMembers.slice(0, TEAM_CHIP_VISIBLE));
+	let overflowTeamMembers = $derived(teamMembers.slice(TEAM_CHIP_VISIBLE));
+	let overflowCount = $derived(overflowTeamMembers.length);
+	let allMemberNames = $derived(teamMembers.map((member) => member.name).join(', '));
+	let overflowNames = $derived(overflowTeamMembers.map((member) => member.name).join(', '));
 	let composer = $state<{ insertMention: (name: string) => void } | null>(null);
 	let openRivulets = $derived(rivuletList.filter((r) => r.status !== 'closed'));
 	let closedRivulets = $derived(rivuletList.filter((r) => r.status === 'closed'));
@@ -281,8 +289,8 @@
 				class="flex h-10 items-center rounded-lg border border-line bg-surface hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 			>
 				{#if teamMembers.length > 0}
-					<span class="flex pl-2">
-						{#each teamMembers.slice(0, 4) as member, i (member.id)}
+					<span class="flex pl-2" title={allMemberNames}>
+						{#each visibleTeamMembers as member, i (member.id)}
 							<button
 								type="button"
 								title="Mention {member.name}"
@@ -298,6 +306,21 @@
 								/>
 							</button>
 						{/each}
+						{#if overflowCount > 0}
+							<button
+								type="button"
+								title="+{overflowCount} more: {overflowNames}"
+								aria-label="+{overflowCount} more: {overflowNames}"
+								onclick={() => (teamMenuOpen = !teamMenuOpen)}
+								class="-ml-2 flex items-center"
+							>
+								<span
+									class="inline-flex h-6 w-6 flex-none items-center justify-center rounded-[8px] border-2 border-surface bg-paper text-[11px] font-semibold text-ink dark:border-surface-dark dark:bg-paper-dark dark:text-ink-dark"
+								>
+									+{overflowCount}
+								</span>
+							</button>
+						{/if}
 					</span>
 				{/if}
 				<button
@@ -317,6 +340,27 @@
 					class="absolute right-0 z-30 mt-2 w-64 rounded-xl border border-line bg-surface p-2 shadow-pop dark:border-line-dark dark:bg-surface-dark"
 					role="menu"
 				>
+					{#if teamMembers.length > 0}
+						<p
+							class="px-3 pt-1 pb-1 text-[11px] font-semibold tracking-wide text-muted uppercase dark:text-muted-dark"
+						>
+							On this team
+						</p>
+						{#each teamMembers as member (member.id)}
+							<button
+								type="button"
+								role="menuitem"
+								onclick={() => {
+									composer?.insertMention(member.name);
+									teamMenuOpen = false;
+								}}
+								class="flex h-11 w-full items-center rounded-md px-3 text-left text-[15px] text-ink hover:bg-paper dark:text-ink-dark dark:hover:bg-paper-dark"
+							>
+								@{member.name}
+							</button>
+						{/each}
+						<div class="my-1 border-t border-line dark:border-line-dark"></div>
+					{/if}
 					{#each teamList as team (team.id)}
 						<button
 							type="button"
