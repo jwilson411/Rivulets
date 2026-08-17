@@ -103,11 +103,14 @@ from rivulets.sync.engine import (
     PeerInfo,
     SyncEngine,
     _bound_port,  # pyright: ignore[reportPrivateUsage]
+    _dialable_own_address,  # pyright: ignore[reportPrivateUsage]
     _is_lan_address,  # pyright: ignore[reportPrivateUsage]
     _PeerConnectionNotifee,  # pyright: ignore[reportPrivateUsage]
     get_sync_engine,
     init_sync_engine,
+    own_address_scope,
     reset_sync_engine_for_testing,
+    running_in_container,
 )
 from rivulets.sync.file_transfer import HASH_LEN, HIT_PREFIX, MAX_FILE_BYTES, MISS_MARKER
 from rivulets.validation import local_path_for_content_hash
@@ -1923,8 +1926,12 @@ async def test_own_addresses_populated_after_start(tmp_path: Path) -> None:
     try:
         addrs = engine.own_addresses
         assert len(addrs) > 0
+        suffix = f"/p2p/{engine.node_id}"
         for addr in addrs:
-            assert addr.endswith(f"/p2p/{engine.node_id}")
+            assert addr.endswith(suffix)
+            # Issue #420: host.get_addrs() already includes /p2p/<id>;
+            # appending it again produced /p2p/id/p2p/id.
+            assert addr[: -len(suffix)].count("/p2p/") == 0
     finally:
         await engine.stop()
     assert engine.own_addresses == []  # reset on stop, same as other ephemeral state
@@ -3209,7 +3216,9 @@ def test_sync_status_when_running_reports_peers(
     body = response.json()
     assert body["running"] is True
     assert body["node_id"] == "fake-node-id"
-    assert body["own_addresses"] == ["/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id"]
+    assert body["own_addresses"] == [
+        {"address": "/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id", "scope": "network"}
+    ]
     assert body["peers"] == [
         {
             "peer_id": "peer-1",
@@ -3687,6 +3696,85 @@ def test_bound_port_raises_when_host_has_no_tcp_port() -> None:
 )
 def test_is_lan_address_classifies_private_ranges_as_lan(address: str, expected: bool) -> None:
     assert _is_lan_address(address) is expected  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "raw,peer_id,expected",
+    [
+        ("/ip4/127.0.0.1/tcp/1", "12D3KooWpeer", "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWpeer"),
+        (
+            "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWpeer",
+            "12D3KooWpeer",
+            "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWpeer",
+        ),
+        (
+            "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWpeer/p2p/12D3KooWpeer",
+            "12D3KooWpeer",
+            "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWpeer",
+        ),
+    ],
+)
+def test_dialable_own_address_keeps_a_single_peer_id_suffix(
+    raw: str, peer_id: str, expected: str
+) -> None:
+    assert _dialable_own_address(raw, peer_id) == expected  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "address,in_container,expected",
+    [
+        ("/ip4/127.0.0.1/tcp/1", False, "loopback"),
+        ("/ip6/::1/tcp/1", False, "loopback"),
+        ("/ip4/192.168.1.5/tcp/1", False, "network"),
+        ("/ip4/192.168.1.5/tcp/1", True, "network"),
+        ("/ip4/10.0.0.7/tcp/1", True, "network"),
+        ("/ip4/172.22.0.2/tcp/1", False, "network"),
+        ("/ip4/172.22.0.2/tcp/1", True, "container"),
+        ("/ip4/172.17.0.2/tcp/1", True, "container"),
+        ("not-a-multiaddr", True, "network"),
+        # Invalid /p2p/ suffix must not hide a well-formed host IP.
+        ("/ip4/127.0.0.1/tcp/4001/p2p/fake-node-id", False, "loopback"),
+        ("/ip4/172.22.0.2/tcp/4001/p2p/fake-node-id", True, "container"),
+    ],
+)
+def test_own_address_scope_labels_loopback_and_docker_bridge(
+    address: str, in_container: bool, expected: str
+) -> None:
+    assert own_address_scope(address, in_container=in_container) == expected
+
+
+def test_running_in_container_detects_dockerenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = Path.exists
+
+    def exists(self: Path) -> bool:
+        if str(self) == "/.dockerenv":
+            return True
+        return original(self)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    assert running_in_container() is True
+
+
+def test_sync_status_scopes_and_orders_own_addresses(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeRunningEngine()
+    fake.own_addresses = [
+        "/ip4/172.22.0.2/tcp/4001/p2p/fake-node-id",
+        "/ip4/127.0.0.1/tcp/4001/p2p/fake-node-id",
+        "/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id",
+    ]
+    monkeypatch.setattr("rivulets.api.sync.get_sync_engine", lambda: fake)
+    monkeypatch.setattr("rivulets.api.sync.running_in_container", lambda: True)
+
+    response = client.get("/api/v1/sync/status", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["own_addresses"] == [
+        {"address": "/ip4/192.168.1.5/tcp/4001/p2p/fake-node-id", "scope": "network"},
+        {"address": "/ip4/127.0.0.1/tcp/4001/p2p/fake-node-id", "scope": "loopback"},
+        {"address": "/ip4/172.22.0.2/tcp/4001/p2p/fake-node-id", "scope": "container"},
+    ]
 
 
 def test_sync_engine_peer_is_lan_reads_connected_peers_address(tmp_path: Path) -> None:

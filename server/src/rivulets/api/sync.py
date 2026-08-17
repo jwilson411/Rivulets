@@ -15,7 +15,7 @@ when the number matters.
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
@@ -26,6 +26,7 @@ from rivulets.agentos import sync_agents
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
 from rivulets.db.models import File, SyncConflict, SyncPendingInbound, SyncPendingOutbound, Tool
+from rivulets.sync import PeerInfo as EnginePeerInfo
 from rivulets.sync import get_sync_engine
 from rivulets.sync.apply import (
     AGENTOS_RESYNC_ENTITY_TYPES,
@@ -40,7 +41,7 @@ from rivulets.sync.apply import (
     write_tool_source,
 )
 from rivulets.sync.capabilities import load_capabilities, save_capabilities
-from rivulets.sync.engine import PeerInfo as EnginePeerInfo
+from rivulets.sync.engine import own_address_scope, running_in_container
 from rivulets.sync.publish import build_entity_payload, publish_current_state, publish_tombstone
 from rivulets.validation import TOOL_NAME_RE, local_path_for_content_hash
 
@@ -71,12 +72,19 @@ class ConflictOut(BaseModel):
     detected_at: str
 
 
+class OwnAddressOut(BaseModel):
+    address: str
+    # network — paste on another device. loopback — this machine only.
+    # container — Docker-bridge IP, not reachable from the LAN (#420).
+    scope: Literal["network", "loopback", "container"]
+
+
 class SyncStatus(BaseModel):
     running: bool
     node_id: str | None
     peers: list[PeerOut]
     pending_changes: int
-    own_addresses: list[str] = []
+    own_addresses: list[OwnAddressOut] = []
 
 
 class ConnectRequest(BaseModel):
@@ -118,6 +126,23 @@ def _peer_out(peer: EnginePeerInfo, capabilities: list[str]) -> PeerOut:
     )
 
 
+_OWN_ADDRESS_SCOPE_ORDER = {"network": 0, "loopback": 1, "container": 2}
+
+
+def _own_address_outs(addresses: list[str]) -> list[OwnAddressOut]:
+    in_container = running_in_container()
+    classified = [
+        OwnAddressOut(address=addr, scope=own_address_scope(addr, in_container=in_container))
+        for addr in addresses
+    ]
+    # Shareable LAN addresses first so "paste this on the other device"
+    # isn't visually led by 127.0.0.1 / the container veth.
+    return sorted(
+        classified,
+        key=lambda item: (_OWN_ADDRESS_SCOPE_ORDER.get(item.scope, 9), item.address),
+    )
+
+
 async def _count_pending_changes(db: DbSession) -> int:
     outbound = await db.scalar(select(func.count()).select_from(SyncPendingOutbound))
     inbound = await db.scalar(select(func.count()).select_from(SyncPendingInbound))
@@ -137,7 +162,7 @@ async def sync_status(db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant) -> S
         node_id=engine.node_id,
         peers=[_peer_out(p, peer_capabilities.get(p.peer_id, [])) for p in peers],
         pending_changes=pending_changes,
-        own_addresses=engine.own_addresses,
+        own_addresses=_own_address_outs(engine.own_addresses),
     )
 
 

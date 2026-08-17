@@ -10,12 +10,19 @@ export interface Peer {
 	capabilities: string[];
 }
 
+export type OwnAddressScope = 'network' | 'loopback' | 'container';
+
+export interface OwnAddress {
+	address: string;
+	scope: OwnAddressScope;
+}
+
 export interface SyncStatus {
 	running: boolean;
 	node_id: string | null;
 	peers: Peer[];
 	pending_changes: number;
-	own_addresses: string[];
+	own_addresses: OwnAddress[];
 }
 
 export interface CoordinatorStatus {
