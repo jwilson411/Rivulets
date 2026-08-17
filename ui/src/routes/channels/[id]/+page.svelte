@@ -43,8 +43,15 @@
 	let postError = $state<string | null>(null);
 
 	let routedTeam = $derived(teamList.find((t) => t.id === channel?.team_id) ?? null);
+	let agentsNotReady = $derived(
+		teamMembers.length > 0 && teamMembers.every((a) => !a.agentos_agent_id)
+	);
 	let helper = $derived(
-		routedTeam ? `Routes to ${routedTeam.name}` : "No team — agents won't answer"
+		agentsNotReady
+			? "Agents aren't ready to run — sign out and back in"
+			: routedTeam
+				? `Routes to ${routedTeam.name}`
+				: "No team — agents won't answer"
 	);
 
 	async function loadTeamMembers(teamId: string | null) {
@@ -244,6 +251,13 @@
 	</header>
 
 	<div class="flex-1 overflow-y-auto px-4 py-6 md:px-10">
+		{#if agentsNotReady}
+			<ErrorBanner
+				class="mb-4"
+				message="Agents aren't ready to run on this node. Sign out and back in, or check Settings > Providers."
+				onRetry={() => load(page.params.id!)}
+			/>
+		{/if}
 		{#if loading}
 			<SkeletonCards count={3} />
 		{:else if loadError}

@@ -9,6 +9,7 @@ import ChannelPage from './+page.svelte';
 import { channels, type Channel } from '$lib/api/channels';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams, type Team } from '$lib/api/teams';
+import { agents, type Agent } from '$lib/api/agents';
 import { files as filesApi } from '$lib/api/files';
 import { workflows as workflowsApi } from '$lib/api/workflows';
 import { runs, type RunTrace } from '$lib/api/runs';
@@ -165,6 +166,35 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect
 			.element(page.getByText('Start the first conversation in #general.'))
 			.toBeInTheDocument();
+	});
+
+	it('banners instead of Routes to when the routed team is unregistered', async () => {
+		const assistant: Agent = {
+			id: 'agent-1',
+			name: 'Assistant',
+			description: 'Generalist',
+			instructions: 'Help.',
+			model: 'auto',
+			fallback_models: [],
+			approved_for_unattended_tools: false,
+			agentos_agent_id: null
+		};
+		seed({
+			channel: { ...generalChannel, team_id: 'team-1' },
+			teams: [supportTeam]
+		});
+		vi.mocked(teams.get).mockResolvedValue({ ...supportTeam, agent_ids: ['agent-1'] });
+		vi.mocked(agents.list).mockResolvedValue([assistant]);
+
+		render(ChannelPage);
+
+		await expect
+			.element(page.getByText(/Agents aren't ready to run on this node/))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText("Agents aren't ready to run — sign out and back in"))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Routes to Support')).not.toBeInTheDocument();
 	});
 
 	it('warns in the helper line when the channel has no team', async () => {

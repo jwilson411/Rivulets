@@ -57,12 +57,7 @@ from agno.run.base import RunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.models import (
-    AUTO_MODEL,
-    UnknownProviderError,
-    resolve_model,
-    resolve_tier_model,
-)
+from rivulets.agentos.models import AUTO_MODEL, resolve_model, resolve_tier_model
 from rivulets.agentos.tool_resolution import resolve_agent_tools
 from rivulets.config import get_settings
 from rivulets.db.models import Agent
@@ -122,7 +117,35 @@ def reset_agentos_for_testing() -> None:
     reset_agentos()
 
 
-async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
+def _lookup_registered(agent_id: str) -> AgnoAgent | None:
+    """The in-process AgentOS entry for `agent_id`, or None if this process
+    has not registered it yet (startup before login, or a failed rebuild)."""
+    agent_os = get_agentos()
+    return next(
+        (a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent) and a.id == agent_id),
+        None,
+    )
+
+
+def live_agentos_id(agent_id: str) -> str | None:
+    """#404: `Agent.agentos_agent_id` is written at register time and
+    survives a process restart, so the UI cannot trust the DB column as
+    "this agent can run in *this* process". Only an in-memory registry
+    entry that already has a resolvable model counts as ready."""
+    try:
+        agno_agent = _lookup_registered(agent_id)
+    except RuntimeError:
+        return None
+    if agno_agent is None or agno_agent.model is None:
+        return None
+    return agent_id
+
+
+async def _resolve_agent_model(db: AsyncSession, agent_row: Agent) -> Model | None:
+    """Best-effort model for registration or a later run. None means the
+    credential store is still locked, no provider is configured, or the
+    key cannot be read — the agent can still sit in the registry and
+    pick the model up at invoke time (#404)."""
     if agent_row.model == AUTO_MODEL:
         # An "auto" agent's real per-message model is resolved fresh by
         # dispatch/service.py (classify -> resolve_tier_model -> run_agent's
@@ -133,10 +156,24 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
         # cheap-tier safety net.
         cheap_provider_model = await resolve_tier_model(db, "cheap")
         if cheap_provider_model is None:
-            raise UnknownProviderError("No provider configured for Auto mode.")
-        model = await resolve_model(db, cheap_provider_model)
-    else:
-        model = await resolve_model(db, agent_row.model)
+            return None
+        return await resolve_model(db, cheap_provider_model)
+    return await resolve_model(db, agent_row.model)
+
+
+async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
+    model: Model | None = None
+    try:
+        model = await _resolve_agent_model(db, agent_row)
+    except Exception:
+        # Docker / fallback keys are locked until login; a missing
+        # provider is the same shape. Do not fail the whole agent —
+        # register it without a model so run_agent can resolve later.
+        logger.warning(
+            "Agent %r — model could not be resolved; registering without one",
+            agent_row.name,
+            exc_info=True,
+        )
     assigned_tools = await resolve_agent_tools(db, agent_row)
     return AgnoAgent(
         id=agent_row.id,
@@ -158,26 +195,32 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
 
 async def sync_agents(db: AsyncSession) -> None:
     """Rebuild AgentOS's agent registry from our DB (FR-3.2, FR-3.4). Call
-    after any agent create/update/delete commit.
+    after any agent create/update/delete commit, after login unlocks the
+    credential store, and after a provider key is added.
 
-    An agent whose provider is missing/unreachable is skipped rather than
-    failing the whole sync (NFR-2.4: other agents must keep functioning).
-    It simply won't be invokable until its provider is fixed — there's no
-    "unavailable" UI indicator for it yet (that's a UI-layer TODO, not
-    something this function can surface on its own).
+    An agent whose provider is missing or whose key is still locked is
+    still registered, just without a model (#404). Skipping it used to
+    leave dispatch matching a DB row that `run_agent` then refused to
+    invoke — chat went silent after every Docker restart. A total
+    construction failure (corrupt row, tool loader crash) is still
+    skipped so one bad agent cannot take the whole roster offline
+    (NFR-2.4).
     """
     agent_os = get_agentos()
     result = await db.execute(select(Agent))
     rows = result.scalars().all()
 
     agno_agents: list[AgnoAgent] = []
+    ready = 0
     for row in rows:
         try:
-            agno_agents.append(await _build_agno_agent(db, row))
+            built = await _build_agno_agent(db, row)
         except Exception:
-            logger.warning(
-                "Skipping agent %r — model could not be resolved", row.name, exc_info=True
-            )
+            logger.warning("Skipping agent %r — could not be constructed", row.name, exc_info=True)
+            continue
+        if built.model is not None:
+            ready += 1
+        agno_agents.append(built)
 
     # AgentOS.agents is typed as a union including RemoteAgent/AgentProtocol/
     # AgentFactory, which we never use — list invariance makes pyright treat
@@ -185,9 +228,10 @@ async def sync_agents(db: AsyncSession) -> None:
     # safe subset at runtime.
     agent_os.agents = agno_agents  # pyright: ignore[reportAttributeAccessIssue]
     logger.info(
-        "Registered %d/%d agents with AgentOS",
+        "Registered %d/%d agents with AgentOS (%d with a resolvable model)",
         len(agno_agents),
         len(rows),
+        ready,
     )
 
 
@@ -268,26 +312,48 @@ async def run_agent(
     of the above and takes the non-streamed `_run_structured` path below
     instead — see that function's docstring for why.
     """
-    agent_os = get_agentos()
-
-    def _lookup() -> AgnoAgent | None:
-        return next(
-            (a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent) and a.id == agent_id),
-            None,
-        )
-
-    agno_agent = _lookup()
+    agno_agent = _lookup_registered(agent_id)
     if agno_agent is None:
-        # Startup registration often skips every agent: Docker/fallback
-        # provider keys cannot be decrypted until login unlocks the
-        # credential store. A later login (or adding a provider) may
-        # have made them resolvable since the last sync_agents() call.
+        # Startup registration used to skip every agent whose key was
+        # still locked. Rebuild first; if this one agent is still
+        # missing, construct it directly so a stale empty registry
+        # cannot keep chat silent after login (#404).
         await sync_agents(db)
-        agno_agent = _lookup()
+        agno_agent = _lookup_registered(agent_id)
     if agno_agent is None:
-        raise ValueError(
-            f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"
-        )
+        agent_row = await db.get(Agent, agent_id)
+        if agent_row is None:
+            raise ValueError(
+                f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"
+            )
+        try:
+            agno_agent = await _build_agno_agent(db, agent_row)
+        except Exception as exc:
+            raise ValueError(
+                f"Agent {agent_id!r} is not registered with AgentOS — call sync_agents() first"
+            ) from exc
+        agent_os = get_agentos()
+        current = [a for a in (agent_os.agents or []) if isinstance(a, AgnoAgent)]
+        agent_os.agents = [  # pyright: ignore[reportAttributeAccessIssue]
+            a for a in current if a.id != agent_id
+        ] + [agno_agent]
+    if model_override is None and agno_agent.model is None:
+        # Registered before the credential store was unlocked (or
+        # before a provider existed). Resolve now — login / a later
+        # provider add may have made the key available. No DB row
+        # means a test-constructed registry entry; leave model unset.
+        agent_row = await db.get(Agent, agent_id)
+        if agent_row is not None:
+            try:
+                model_override = await _resolve_agent_model(db, agent_row)
+            except Exception as exc:
+                raise ValueError(
+                    f"Agent {agent_id!r} has no usable model — add a provider or sign in again"
+                ) from exc
+            if model_override is None:
+                raise ValueError(
+                    f"Agent {agent_id!r} has no usable model — add a provider or sign in again"
+                )
     if model_override is not None:
         agno_agent = agno_agent.deep_copy(update={"model": model_override})
 

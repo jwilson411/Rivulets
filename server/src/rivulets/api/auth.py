@@ -60,6 +60,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from rivulets.agentos import sync_agents
+from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.starter_content import seed_starter_agents, seed_starter_teams
 from rivulets.api.deps import (
     DbSession,
@@ -178,10 +179,12 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     session_store.set_webhook_secret_key(webhook_secret_key)
 
     # Now that the credential store is unlocked, rebuild AgentOS from the
-    # DB. Per-agent resolve failures are swallowed inside sync_agents
+    # DB and rewrite agentos_agent_id from the live registry (#404).
+    # Per-agent resolve failures are swallowed inside sync_agents
     # (NFR-2.4); a total failure here must not fail login.
     try:
         await sync_agents(db)
+        await record_registration_flags(db)
     except Exception:
         logger.warning("Failed to register agents after login", exc_info=True)
 

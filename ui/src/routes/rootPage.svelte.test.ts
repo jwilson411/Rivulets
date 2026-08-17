@@ -11,6 +11,7 @@ import { channels, type Channel } from '$lib/api/channels';
 import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams } from '$lib/api/teams';
 import { providers, type Provider } from '$lib/api/providers';
+import { agents, type Agent } from '$lib/api/agents';
 import { goto } from '$app/navigation';
 
 const authState = vi.hoisted(() => ({ grant: 'owner', displayName: 'Riley' }));
@@ -45,6 +46,7 @@ vi.mock('$lib/api/rivulets', () => ({
 }));
 vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn(), create: vi.fn() } }));
+vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn() } }));
 vi.mock('$lib/api/files', () => ({ files: { upload: vi.fn() } }));
 
 afterEach(() => {
@@ -67,6 +69,17 @@ const provider: Provider = {
 	label: 'Anthropic',
 	base_url: null,
 	is_default: true
+};
+
+const assistant: Agent = {
+	id: 'agent-1',
+	name: 'Assistant',
+	description: 'Generalist',
+	instructions: 'Help.',
+	model: 'auto',
+	fallback_models: [],
+	approved_for_unattended_tools: false,
+	agentos_agent_id: 'agent-1'
 };
 
 const rivulet: Rivulet = {
@@ -117,6 +130,7 @@ function seedComplete() {
 		{ id: 'team-1', name: 'Starter Team', description: null }
 	]);
 	vi.mocked(providers.list).mockResolvedValue([provider]);
+	vi.mocked(agents.list).mockResolvedValue([assistant]);
 	vi.mocked(rivulets.listForChannel).mockResolvedValue([rivulet]);
 	vi.mocked(rivulets.listMessages).mockResolvedValue(messages);
 }
@@ -134,6 +148,21 @@ describe('routes/+page.svelte (Home)', () => {
 			.toBeInTheDocument();
 		await expect.element(page.getByText('Add an API key')).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Save key' })).toBeInTheDocument();
+	});
+
+	it('banners when a provider is connected but no agent is registered', async () => {
+		seedComplete();
+		vi.mocked(agents.list).mockResolvedValue([{ ...assistant, agentos_agent_id: null }]);
+
+		render(HomePage);
+
+		await expect
+			.element(page.getByText(/Agents aren't ready to run on this node/))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText("Agents aren't ready to run — sign out and back in"))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Routes to Starter Team')).not.toBeInTheDocument();
 	});
 
 	it('shows recent conversations across channels once setup is complete', async () => {

@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
-from rivulets.agentos import sync_agents
+from rivulets.agentos import live_agentos_id, sync_agents
 from rivulets.agentos.agent_lifecycle import (
     generate_and_store_routing_rules,
     publish_agent_change,
@@ -306,10 +306,20 @@ async def team_holds_owner_scope(db: DbSession, team_id: str) -> bool:
     return scope is not None
 
 
+def _agent_out(agent: Agent) -> AgentOut:
+    """#404: `agentos_agent_id` on the row is whatever the last register
+    wrote, which survives a container restart. Overlay the live
+    in-process registry so Home/channel can tell "this node cannot run
+    agents" from a stale ready flag."""
+    out = AgentOut.model_validate(agent)
+    out.agentos_agent_id = live_agentos_id(agent.id)
+    return out
+
+
 @router.get("", response_model=list[AgentOut])
-async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[Agent]:
+async def list_agents(db: DbSession, _: CurrentWorkspaceId) -> list[AgentOut]:
     result = await db.execute(select(Agent))
-    return list(result.scalars().all())
+    return [_agent_out(row) for row in result.scalars().all()]
 
 
 async def _check_name_available(db: DbSession, name: str) -> None:
@@ -366,8 +376,8 @@ async def create_agent(
 
 
 @router.get("/{agent_id}", response_model=AgentOut)
-async def get_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> Agent:
-    return await _get_or_404(db, agent_id)
+async def get_agent(agent_id: str, db: DbSession, _: CurrentWorkspaceId) -> AgentOut:
+    return _agent_out(await _get_or_404(db, agent_id))
 
 
 @router.patch("/{agent_id}", response_model=AgentOut)

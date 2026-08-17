@@ -283,7 +283,11 @@ def test_agent_run_failure_is_skipped_gracefully(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert [m["sender_type"] for m in messages] == ["human"]
+    # #404: a failed invoke must not 500, but it also must not leave the
+    # conversation silent — persist a system_alert the UI can render.
+    assert [m["sender_type"] for m in messages] == ["human", "system"]
+    assert messages[1]["content_type"] == "system_alert"
+    assert "isn't ready to run" in messages[1]["content"]
 
 
 def test_run_status_error_posts_system_alert_not_raw_error_text(

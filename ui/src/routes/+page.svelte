@@ -6,6 +6,7 @@
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { teams, type Team } from '$lib/api/teams';
 	import { providers, type Provider } from '$lib/api/providers';
+	import { agents, type Agent } from '$lib/api/agents';
 	import { files as filesApi } from '$lib/api/files';
 	import { formatClock } from '$lib/format';
 	import { agentInkMap, INK_AVATAR, HUMAN_AVATAR } from '$lib/ink';
@@ -37,6 +38,7 @@
 	let channelList = $state<Channel[]>([]);
 	let teamList = $state<Team[]>([]);
 	let providerList = $state<Provider[]>([]);
+	let agentList = $state<Agent[]>([]);
 	let recent = $state<RecentConversation[]>([]);
 	let selectedChannelId = $state<string | null>(null);
 	let sendError = $state<string | null>(null);
@@ -50,7 +52,16 @@
 	let selectedChannel = $derived(
 		activeChannels.find((c) => c.id === selectedChannelId) ?? activeChannels[0] ?? null
 	);
+	let agentsNotReady = $derived(
+		isOwner &&
+			providerList.length > 0 &&
+			agentList.length > 0 &&
+			agentList.every((a) => !a.agentos_agent_id)
+	);
 	let helper = $derived.by(() => {
+		if (agentsNotReady) {
+			return "Agents aren't ready to run — sign out and back in";
+		}
 		if (!selectedChannel) return null;
 		const team = teamList.find((t) => t.id === selectedChannel.team_id);
 		return team ? `Routes to ${team.name}` : 'No team on this channel — add one';
@@ -63,14 +74,16 @@
 		loading = true;
 		loadError = null;
 		try {
-			const [loadedChannels, loadedTeams, loadedProviders] = await Promise.all([
+			const [loadedChannels, loadedTeams, loadedProviders, loadedAgents] = await Promise.all([
 				channels.list(),
 				teams.list().catch(() => []),
-				isOwner ? providers.list().catch(() => [] as Provider[]) : Promise.resolve([])
+				isOwner ? providers.list().catch(() => [] as Provider[]) : Promise.resolve([]),
+				agents.list().catch(() => [] as Agent[])
 			]);
 			channelList = loadedChannels;
 			teamList = loadedTeams;
 			providerList = loadedProviders;
+			agentList = loadedAgents;
 			await loadRecent();
 		} catch {
 			loadError = "Couldn't load conversations.";
@@ -161,6 +174,13 @@
 	{:else}
 		<SectionLabel class="px-4 pt-6 text-sm md:px-10">Recent conversations</SectionLabel>
 		<div class="flex-1 overflow-y-auto px-4 py-4 md:px-10">
+			{#if agentsNotReady}
+				<ErrorBanner
+					class="mb-4"
+					message="Agents aren't ready to run on this node. Sign out and back in, or check Settings > Providers."
+					onRetry={load}
+				/>
+			{/if}
 			{#if loading}
 				<SkeletonCards count={2} />
 			{:else if loadError}

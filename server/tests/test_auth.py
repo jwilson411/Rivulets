@@ -269,6 +269,48 @@ def test_login_seeds_starter_agents_and_team_on_first_workspace_creation(
     assert [team["name"] for team in teams] == ["Starter Team"]
 
 
+def test_login_reregisters_after_restart_with_locked_fallback(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#404: closer to a Docker restart than the in-memory-keyring
+    simulation above. Provider keys live only in the encrypted fallback;
+    a process restart clears the session key and the AgentOS list.
+    Login must unlock the store and leave every starter agent runnable.
+    """
+    import keyring
+    import keyring.errors
+
+    def _no_keyring(*_args: object, **_kwargs: object) -> None:
+        raise keyring.errors.NoKeyringError("no backend")
+
+    monkeypatch.setattr(keyring, "get_password", _no_keyring)
+    monkeypatch.setattr(keyring, "set_password", _no_keyring)
+    monkeypatch.setattr(keyring, "delete_password", _no_keyring)
+
+    mnemonic = keys.generate_mnemonic()
+    first = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    headers = {"Authorization": f"Bearer {first.json()['token']}"}
+
+    added = client.post(
+        "/api/v1/providers",
+        json={"provider": "openai", "label": "OpenAI", "api_key": "sk-test"},
+        headers=headers,
+    )
+    assert added.status_code == 201, added.text
+
+    get_agentos().agents = []
+    get_session_key_store().clear()
+
+    second = client.post("/api/v1/auth/login", json={"key": mnemonic})
+    assert second.status_code == 200, second.text
+
+    registered = [a for a in (get_agentos().agents or []) if getattr(a, "model", None) is not None]
+    listed = client.get("/api/v1/agents", headers=headers).json()
+    assert {agent["id"] for agent in listed} <= {a.id for a in registered}
+    assert all(agent["agentos_agent_id"] == agent["id"] for agent in listed)
+    assert len(registered) >= 4
+
+
 def test_login_reregisters_agents_after_session_unlocks_credentials(client: TestClient) -> None:
     """Startup sync_agents() cannot resolve provider keys stored in the
     encrypted fallback (Docker / no OS keychain) because the credential

@@ -1509,6 +1509,32 @@ async def _invoke_agent(
         publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
         _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
         await finish_span(db, agent_span_id, status="error")
+        # #404: "not registered" / no usable model used to leave the
+        # human message sitting alone. Persist a system_alert so the
+        # channel is not silent (sibling issue: missing SSE-only error).
+        text = (
+            f"{agent.name} couldn't respond — it isn't ready to run on this node. "
+            "Sign out and back in, or check Settings > Providers."
+        )
+        message = Message(
+            rivulet_id=rivulet.id,
+            sender_type="system",
+            sender_name="system",
+            content=text,
+            content_type="system_alert",
+        )
+        db.add(message)
+        new_messages.append(message)
+        publish(
+            rivulet.id,
+            "system_alert",
+            {
+                "type": "agent_not_ready",
+                "agent_id": agent.id,
+                "agent_name": agent.name,
+                "message": text,
+            },
+        )
         await db.commit()
         return new_messages
 

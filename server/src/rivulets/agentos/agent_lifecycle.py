@@ -17,7 +17,7 @@ reach up and import from api/agents.py.
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.service import get_agentos, sync_agents
+from rivulets.agentos.service import live_agentos_id, sync_agents
 from rivulets.db.models import Agent, AgentRoutingRule, AgentTool, AgentVersion, TeamAgent
 from rivulets.sync.apply import AGENT_TOOL_SPEC, TEAM_AGENT_SPEC
 from rivulets.sync.publish import (
@@ -172,13 +172,23 @@ async def record_agent_version(db: AsyncSession, agent: Agent) -> None:
 
 
 async def register_agent_with_agentos(db: AsyncSession, agent: Agent) -> None:
-    """Rebuild AgentOS's agent registry and record whether `agent` made it
-    in. It won't have if its provider can't be resolved (NFR-2.4: that
-    only takes the one agent offline, not the whole sync) -- agentos_agent_id
-    staying null is this scaffold's stand-in for an "unavailable" signal
-    until the UI grows a real status indicator."""
+    """Rebuild AgentOS's agent registry and record whether `agent` is
+    actually runnable in this process. An agent can be in the in-memory
+    list without a model (startup before login, #404); agentos_agent_id
+    stays null until a provider key resolves, which is what the Agents
+    page's "Needs a provider" badge reads."""
     await sync_agents(db)
-    registered = any(a.id == agent.id for a in (get_agentos().agents or []))
-    agent.agentos_agent_id = agent.id if registered else None
+    agent.agentos_agent_id = live_agentos_id(agent.id)
     await db.commit()
     await db.refresh(agent)
+
+
+async def record_registration_flags(db: AsyncSession) -> None:
+    """Rewrite every Agent.agentos_agent_id from the live registry.
+    Login calls this after unlocking the credential store so a process
+    restart cannot leave the DB claiming agents are registered when
+    this process has not actually built them."""
+    result = await db.execute(select(Agent))
+    for row in result.scalars():
+        row.agentos_agent_id = live_agentos_id(row.id)
+    await db.commit()
