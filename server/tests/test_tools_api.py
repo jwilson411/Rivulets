@@ -589,3 +589,26 @@ def test_list_tools_exposes_required_scope(
     assert tools["reconnect_mcp_server"] == "mcp_servers:manage"
     assert tools["delete_mcp_server"] == "mcp_servers:manage"
     assert tools["list_mcp_servers"] is None
+
+
+def test_list_tools_exposes_display_name_and_group(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """#422: the agent Tools picker needs a human label and a group, not
+    just the snake_case identifier. Custom tools land in their own group."""
+    created = _create_custom_tool(client, auth_headers)
+    listed = client.get("/api/v1/tools", headers=auth_headers).json()
+    tools = {tool["name"]: tool for tool in listed}
+
+    assert tools["http_request"]["display_name"] == "HTTP request"
+    assert tools["http_request"]["group"] == "chat"
+    assert tools["web_search"]["display_name"] == "Web search"
+    assert tools["web_search"]["group"] == "chat"
+    assert tools["execute_python"]["display_name"] == "Execute Python"
+    assert tools["execute_python"]["group"] == "files"
+    assert tools["update_agent_peer_preference"]["display_name"] == "Update agent peer preference"
+    assert tools["update_agent_peer_preference"]["group"] == "workspace_admin"
+    assert tools["query_workspace_db"]["display_name"] == "Query workspace DB"
+    assert tools[created["name"]]["display_name"] == "My tool"
+    assert tools[created["name"]]["group"] == "custom"
+    assert tools["http_request"]["description"]

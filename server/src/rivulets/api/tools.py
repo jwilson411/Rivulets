@@ -25,11 +25,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from rivulets.agentos import sync_agents
+from rivulets.agentos.tool_catalog import display_name_for, group_for
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
@@ -123,8 +124,21 @@ class ToolOut(BaseModel):
     # tool before #188.
     required_scope: str | None = None
     available: bool = True
+    # #422: human label + picker group. Derived, not stored -- see
+    # agentos/tool_catalog.py. Defaults so FastAPI can coerce a bare Tool
+    # ORM row (create/update/rollback return one) through this model.
+    display_name: str = ""
+    group: str = ""
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _fill_picker_labels(self) -> "ToolOut":
+        # Always recompute: these aren't stored, and create/update return
+        # a Tool ORM row that FastAPI coerces through this model.
+        self.display_name = display_name_for(self.name)
+        self.group = group_for(self.name, self.tool_type)
+        return self
 
     @classmethod
     def from_tool(cls, tool: Tool) -> "ToolOut":

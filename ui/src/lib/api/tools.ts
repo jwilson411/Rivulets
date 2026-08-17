@@ -23,6 +23,10 @@ export interface Tool {
 	// same as every tool before #188.
 	required_scope: string | null;
 	available: boolean;
+	// #422: human picker label + group (chat / files / workspace_admin /
+	// custom / mcp). Derived server-side from the tool name and type.
+	display_name: string;
+	group: string;
 }
 
 export interface ToolVersion {

@@ -44,7 +44,9 @@ const webSearch: Tool = {
 	source_path: null,
 	sensitive: false,
 	required_scope: null,
-	available: true
+	available: true,
+	display_name: 'Web search',
+	group: 'chat'
 };
 
 const executePython: Tool = {
@@ -53,7 +55,9 @@ const executePython: Tool = {
 	name: 'execute_python',
 	description: 'Runs code',
 	sensitive: true,
-	available: false
+	available: false,
+	display_name: 'Execute Python',
+	group: 'files'
 };
 
 const customTool: Tool = {
@@ -61,7 +65,9 @@ const customTool: Tool = {
 	id: 'tool-3',
 	name: 'fetch_notes',
 	description: 'Fetches notes',
-	tool_type: 'custom'
+	tool_type: 'custom',
+	display_name: 'Fetch notes',
+	group: 'custom'
 };
 
 const version: ToolVersion = {

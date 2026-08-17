@@ -10,8 +10,10 @@
 	import type { Provider } from '$lib/api/providers';
 	import type { Tool } from '$lib/api/tools';
 	import type { TeamDetail } from '$lib/api/teams';
+	import { toolDescriptionLine, toolDisplayName, toolsByGroup } from '$lib/toolCatalog';
 	import Button from '$lib/ui/Button.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
+	import SectionLabel from '$lib/ui/SectionLabel.svelte';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import StatusPill from '$lib/ui/StatusPill.svelte';
 	import {
@@ -86,6 +88,8 @@
 	const storedRuleSummary = describeSpeakRulesList(storedRules);
 	let ruleType = $state<SpeakChoice>(speakChoiceFromRules(storedRules));
 	let keywords = $state(keywordsFromRules(storedRules));
+
+	const groupedTools = $derived(toolsByGroup(tools));
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -396,22 +400,43 @@
 				{#if tools.length > 0}
 					<div class="flex flex-col gap-2.5">
 						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Tools</span>
-						<div class="flex flex-col gap-2">
-							{#each tools as tool (tool.id)}
-								<label
-									class="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-line px-4 py-2 dark:border-line-dark"
-								>
-									<input
-										type="checkbox"
-										checked={selectedToolIds.includes(tool.id)}
-										onchange={() => toggleTool(tool.id)}
-										class="accent-(--color-accent)"
-									/>
-									<span class="font-mono text-sm text-ink dark:text-ink-dark">{tool.name}</span>
-									{#if tool.sensitive}
-										<StatusPill tone="warn" class="ml-auto">Sensitive</StatusPill>
-									{/if}
-								</label>
+						{#if selectedToolIds.length === 0}
+							<p class="text-[13px] text-muted dark:text-muted-dark">
+								No tools until you pick some.
+							</p>
+						{/if}
+						<div class="flex flex-col gap-4">
+							{#each groupedTools as group (group.key)}
+								<div class="flex flex-col gap-2">
+									<SectionLabel>{group.label}</SectionLabel>
+									{#each group.tools as tool (tool.id)}
+										<label
+											class="flex min-h-12 cursor-pointer items-start gap-3 rounded-lg border border-line px-4 py-2.5 dark:border-line-dark"
+										>
+											<input
+												type="checkbox"
+												checked={selectedToolIds.includes(tool.id)}
+												onchange={() => toggleTool(tool.id)}
+												class="mt-1 accent-(--color-accent)"
+											/>
+											<span class="flex min-w-0 flex-1 flex-col gap-0.5">
+												<span class="flex items-center gap-2">
+													<span class="text-[15px] text-ink dark:text-ink-dark">
+														{toolDisplayName(tool)}
+													</span>
+													{#if tool.sensitive}
+														<StatusPill tone="warn" class="ml-auto">Sensitive</StatusPill>
+													{/if}
+												</span>
+												{#if tool.description}
+													<span class="text-[13px] leading-snug text-muted dark:text-muted-dark">
+														{toolDescriptionLine(tool.description)}
+													</span>
+												{/if}
+											</span>
+										</label>
+									{/each}
+								</div>
 							{/each}
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
