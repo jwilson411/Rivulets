@@ -34,6 +34,17 @@ describe('providers', () => {
 		expect(result).toEqual([{ id: 'p1' }]);
 	});
 
+	it('get() GETs /providers/:id', async () => {
+		const fetchMock = mockFetch({ id: 'p1' });
+
+		const result = await providers.get('p1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/providers/p1');
+		expect(init.method).toBe('GET');
+		expect(result).toEqual({ id: 'p1' });
+	});
+
 	it('create() POSTs the input to /providers', async () => {
 		const fetchMock = mockFetch({ id: 'p1' });
 		const input = { provider: 'anthropic' as const, label: 'Prod key', api_key: 'sk-secret' };
