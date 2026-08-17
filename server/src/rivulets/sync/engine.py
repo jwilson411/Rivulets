@@ -71,7 +71,7 @@ import threading
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import trio
 from libp2p import new_host
@@ -159,6 +159,21 @@ class CoordinatorStatus:
     peer_scores: dict[str, float]
 
 
+def _peer_ip_from_text(address: str) -> str | None:
+    """Best-effort ip4/ip6 extraction when Multiaddr refuses the string.
+
+    A `/p2p/<id>` suffix with a non-CID peer id (common in tests, and
+    possible if a listen addr is assembled by hand) makes Multiaddr
+    raise, even though the host component is still well-formed. The
+    Sync page only needs the IP to label loopback vs container (#420).
+    """
+    parts = address.split("/")
+    for index, part in enumerate(parts[:-1]):
+        if part in ("ip4", "ip6") and parts[index + 1]:
+            return parts[index + 1]
+    return None
+
+
 def _peer_ip(address: str) -> str | None:
     """Extracts the ip4/ip6 host component from a peer's stored multiaddr
     string (e.g. "/ip4/192.168.1.5/tcp/4001/p2p/Qm..."). Returns None for
@@ -169,7 +184,7 @@ def _peer_ip(address: str) -> str | None:
     try:
         maddr = Multiaddr(address)
     except Exception:
-        return None
+        return _peer_ip_from_text(address)
     for proto in ("ip4", "ip6"):
         try:
             value = maddr.value_for_protocol(proto)
@@ -198,6 +213,80 @@ _LAN_NETWORKS = (
     ipaddress.ip_network("fc00::/7"),  # RFC4193 IPv6 ULA
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
 )
+
+
+# Docker's default bridge is 172.17.0.0/16; compose / user-defined
+# networks typically land elsewhere in 172.16.0.0/12. Those IPs are
+# reachable only from other containers on the same bridge — not from
+# another machine on the LAN — so the Sync page must not offer them as
+# "paste this on the other device" without a label (issue #420).
+# 10.0.0.0/8 and 192.168.0.0/16 stay "network" even inside a container:
+# host-network mode advertises the host's real LAN address in those
+# ranges, and that *is* the address another device should paste.
+_CONTAINER_ONLY_NETWORKS = (ipaddress.ip_network("172.16.0.0/12"),)
+
+
+def running_in_container() -> bool:
+    """True when this process is inside a Docker/OCI container.
+
+    `/.dockerenv` is the usual Docker tell. The cgroup fallback also
+    catches containerd / nerdctl / some Podman setups that skip that
+    file. Host-network containers still return True — callers must not
+    treat *every* private IP as container-only (see
+    `_CONTAINER_ONLY_NETWORKS`).
+    """
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        text = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(token in text for token in ("docker", "containerd", "kubepods", "libpod"))
+
+
+OwnAddressScope = Literal["network", "loopback", "container"]
+
+
+def own_address_scope(address: str, *, in_container: bool | None = None) -> OwnAddressScope:
+    """Classify a listen multiaddr for the Sync page (issue #420).
+
+    `loopback` — 127.0.0.1 / ::1: only this machine.
+    `container` — Docker-bridge 172.16/12 while running in a container:
+        not reachable from another device on the LAN.
+    `network` — everything else, including RFC1918 LAN and host-network
+        container IPs in 10/8 or 192.168/16.
+    """
+    if in_container is None:
+        in_container = running_in_container()
+    ip = _peer_ip(address)
+    if ip is None:
+        return "network"
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return "network"
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        parsed = parsed.ipv4_mapped
+    if parsed.is_loopback:
+        return "loopback"
+    if in_container and any(parsed in network for network in _CONTAINER_ONLY_NETWORKS):
+        return "container"
+    return "network"
+
+
+def _dialable_own_address(addr: object, peer_id: str) -> str:
+    """One `/p2p/<peer_id>` suffix, no more.
+
+    `host.get_addrs()` already returns listen multiaddrs with the peer
+    id attached. Appending `/p2p/{id}` again produced the
+    `/p2p/id/p2p/id` strings on the Sync page (issue #420). Strip any
+    existing copies of this node's suffix, then add exactly one.
+    """
+    text = str(addr).rstrip("/")
+    suffix = f"/p2p/{peer_id}"
+    while text.endswith(suffix):
+        text = text[: -len(suffix)].rstrip("/")
+    return f"{text}{suffix}"
 
 
 def _is_lan_address(address: str) -> bool:
@@ -465,7 +554,9 @@ class SyncEngine:
         port = find_free_port()
         listen_addrs = get_available_interfaces(port)
         async with host.run(listen_addrs=listen_addrs):
-            self._own_addresses = [f"{addr}/p2p/{self._node_id}" for addr in host.get_addrs()]
+            self._own_addresses = [
+                _dialable_own_address(addr, self._node_id) for addr in host.get_addrs()
+            ]
             mdns = WorkspaceMDNS(host, self._workspace_fingerprint, _bound_port(host))
             self._mdns = mdns
             # PeerListener (sync/discovery.py) only adds a discovered

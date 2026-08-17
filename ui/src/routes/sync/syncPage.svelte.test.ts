@@ -59,7 +59,7 @@ const runningStatus: SyncStatus = {
 		}
 	],
 	pending_changes: 0,
-	own_addresses: ['/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest']
+	own_addresses: [{ address: '/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest', scope: 'network' }]
 };
 
 const selfCoordinator: CoordinatorStatus = {
@@ -118,6 +118,64 @@ describe('sync/+page.svelte', () => {
 			.element(page.getByText('/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest'))
 			.toBeInTheDocument();
 		await expect.element(page.getByText('Connected')).toBeInTheDocument();
+	});
+
+	it('says Listening when the engine is up but the mesh is empty (#420)', async () => {
+		seed({
+			status: { ...runningStatus, peers: [] }
+		});
+
+		render(SyncPage);
+
+		await expect.element(page.getByText('Listening')).toBeInTheDocument();
+		await expect.element(page.getByText('Syncing')).not.toBeInTheDocument();
+	});
+
+	it('labels loopback and container addresses so they are not offered as LAN paste targets (#420)', async () => {
+		seed({
+			status: {
+				...runningStatus,
+				peers: [],
+				own_addresses: [
+					{ address: '/ip4/192.168.1.12/tcp/5000/p2p/12D3KooTest', scope: 'network' },
+					{ address: '/ip4/127.0.0.1/tcp/5000/p2p/12D3KooTest', scope: 'loopback' },
+					{ address: '/ip4/172.22.0.2/tcp/5000/p2p/12D3KooTest', scope: 'container' }
+				]
+			}
+		});
+
+		render(SyncPage);
+
+		await expect
+			.element(
+				page.getByText('This machine\'s sync address — paste it into "Connect a machine"', {
+					exact: false
+				})
+			)
+			.toBeInTheDocument();
+		await expect.element(page.getByText('This machine only')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Container only — not reachable from another device'))
+			.toBeInTheDocument();
+	});
+
+	it('does not tell the user to paste container-only addresses on another device (#420)', async () => {
+		seed({
+			status: {
+				...runningStatus,
+				peers: [],
+				own_addresses: [
+					{ address: '/ip4/127.0.0.1/tcp/5000/p2p/12D3KooTest', scope: 'loopback' },
+					{ address: '/ip4/172.22.0.2/tcp/5000/p2p/12D3KooTest', scope: 'container' }
+				]
+			}
+		});
+
+		render(SyncPage);
+
+		await expect
+			.element(page.getByText('These addresses only work on this machine.'))
+			.toBeInTheDocument();
 	});
 
 	it('copies this machine’s sync address', async () => {

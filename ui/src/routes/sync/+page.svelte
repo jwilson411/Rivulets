@@ -4,6 +4,8 @@
 	import {
 		sync,
 		type CoordinatorStatus,
+		type OwnAddress,
+		type OwnAddressScope,
 		type Peer,
 		type SyncConflict,
 		type SyncStatus
@@ -157,6 +159,26 @@
 		if (typeof value === 'boolean') return value ? 'true' : 'false';
 		return String(value);
 	}
+
+	function machineStatusLabel(current: SyncStatus): string {
+		if (!current.running) return 'Not running';
+		// Empty mesh is listening for peers, not actively syncing (#420).
+		return current.peers.length > 0 ? 'Syncing' : 'Listening';
+	}
+
+	function machineStatusTone(current: SyncStatus): 'accent' | 'neutral' {
+		return current.running && current.peers.length > 0 ? 'accent' : 'neutral';
+	}
+
+	function addressScopeNote(scope: OwnAddressScope): string | null {
+		if (scope === 'loopback') return 'This machine only';
+		if (scope === 'container') return 'Container only — not reachable from another device';
+		return null;
+	}
+
+	function hasShareableAddress(addresses: OwnAddress[]): boolean {
+		return addresses.some((item) => item.scope === 'network');
+	}
 </script>
 
 {#if auth.grant !== 'owner'}
@@ -177,30 +199,43 @@
 				<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">
 					{status.node_id ? shortId(status.node_id) : 'this machine'}
 				</span>
-				<StatusPill tone={status.running ? 'accent' : 'neutral'} class="ml-auto">
-					{status.running ? 'Syncing' : 'Not running'}
+				<StatusPill tone={machineStatusTone(status)} class="ml-auto">
+					{machineStatusLabel(status)}
 				</StatusPill>
 			</div>
 			{#if status.own_addresses.length > 0}
 				<div class="mb-6 flex flex-col gap-2">
 					<p class="text-[13px] leading-normal text-muted dark:text-muted-dark">
-						This machine's sync address — paste it into "Connect a machine" on the other device to
-						pair them manually.
+						{#if hasShareableAddress(status.own_addresses)}
+							This machine's sync address — paste it into "Connect a machine" on the other device to
+							pair them manually.
+						{:else}
+							These addresses only work on this machine. They won't reach another device on the
+							network.
+						{/if}
 					</p>
-					{#each status.own_addresses as address (address)}
-						<div class="flex items-center gap-2.5">
-							<code
-								class="flex h-12 min-w-0 flex-1 items-center overflow-hidden rounded-lg border border-line bg-surface px-4 font-mono text-xs text-ink dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
-							>
-								<span class="truncate">{address}</span>
-							</code>
-							<Button
-								variant="secondary"
-								class="flex-none"
-								onclick={() => handleCopyAddress(address)}
-							>
-								{copiedAddress === address ? 'Copied' : 'Copy'}
-							</Button>
+					{#each status.own_addresses as item (item.address)}
+						{@const note = addressScopeNote(item.scope)}
+						<div class="flex flex-col gap-1">
+							<div class="flex items-center gap-2.5">
+								<code
+									class="flex h-12 min-w-0 flex-1 items-center overflow-hidden rounded-lg border border-line bg-surface px-4 font-mono text-xs text-ink dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark"
+								>
+									<span class="truncate">{item.address}</span>
+								</code>
+								<Button
+									variant="secondary"
+									class="flex-none"
+									onclick={() => handleCopyAddress(item.address)}
+								>
+									{copiedAddress === item.address ? 'Copied' : 'Copy'}
+								</Button>
+							</div>
+							{#if note}
+								<p class="pl-1 text-[12px] text-muted dark:text-muted-dark">
+									{note}
+								</p>
+							{/if}
 						</div>
 					{/each}
 				</div>
