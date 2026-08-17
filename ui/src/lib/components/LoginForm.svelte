@@ -44,6 +44,13 @@
 	let bootstrapToken = $state('');
 	let needsBootstrapToken = $state(false);
 
+	// #407: opt-in stay-signed-in. Off by default — storing the phrase on
+	// this machine is a real tradeoff, so it has to be a deliberate check.
+	// If this browser already holds a stay credential (JWT expired on an
+	// open tab, or Unlock after a failed silent resume), start checked so
+	// unlocking again doesn't silently drop the preference.
+	let staySignedIn = $state(auth.ownerStayEnabled);
+
 	// #350: an invite-redeemed browser holds a persisted resume credential
 	// and no mnemonic — after a sign-out or an expired session, this button
 	// is its way back in. auth.resumeDisplayName goes null (and the offer
@@ -70,7 +77,15 @@
 		loginError = null;
 		loggingIn = true;
 		try {
-			await auth.login(phrase.trim(), phrasePassphrase || undefined, bootstrapToken || undefined);
+			const trimmed = phrase.trim();
+			await auth.login(trimmed, phrasePassphrase || undefined, bootstrapToken || undefined);
+			// Persist or drop the stay credential only after a successful
+			// login, so a failed attempt doesn't lock in (or wipe) anything.
+			if (staySignedIn) {
+				auth.rememberOwnerStay(trimmed, phrasePassphrase || undefined);
+			} else {
+				auth.forgetOwnerStay();
+			}
 			return true;
 		} catch (err) {
 			loginError = err instanceof Error ? err.message : 'Login failed';
@@ -160,6 +175,29 @@
 	{/if}
 {/snippet}
 
+{#snippet staySignedInField()}
+	<label class="flex cursor-pointer items-start gap-3">
+		<input type="checkbox" bind:checked={staySignedIn} class="peer sr-only" />
+		<span
+			class="mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-[8px] border border-line bg-surface text-transparent peer-checked:border-accent peer-checked:bg-accent peer-checked:text-white peer-focus-visible:outline-2 peer-focus-visible:outline-accent dark:border-line-dark dark:bg-surface-dark dark:peer-checked:border-accent-dark dark:peer-checked:bg-accent-dark dark:peer-checked:text-paper-dark"
+			aria-hidden="true"
+		>
+			<Icon name="check" class="h-3.5 w-3.5" />
+		</span>
+		<span class="flex flex-col gap-1">
+			<span class="text-[15px] text-ink dark:text-ink-dark">Stay signed in on this machine</span>
+			<span class="text-[13px] text-muted dark:text-muted-dark">
+				{#if staySignedIn}
+					Stores your recovery phrase in this browser so refresh and new tabs keep you signed in.
+					Anyone with access to this browser can unlock the workspace. Sign out to remove it.
+				{:else}
+					Refreshing or opening a new tab will sign you out.
+				{/if}
+			</span>
+		</span>
+	</label>
+{/snippet}
+
 <main class="mx-auto flex min-h-screen w-full max-w-[480px] flex-col justify-center px-6 py-12">
 	<div class="mb-10 flex items-center gap-3">
 		<span
@@ -228,6 +266,10 @@
 		{/if}
 
 		{@render bootstrapField('generated-bootstrap-token')}
+
+		<div class="mb-6">
+			{@render staySignedInField()}
+		</div>
 
 		<label class="mb-6 flex cursor-pointer items-center gap-3">
 			<input type="checkbox" bind:checked={acknowledged} class="peer sr-only" />
@@ -313,6 +355,7 @@
 				</div>
 			{/if}
 			{@render bootstrapField('bootstrap-token')}
+			{@render staySignedInField()}
 			<button
 				type="submit"
 				disabled={loggingIn || !mnemonic.trim()}

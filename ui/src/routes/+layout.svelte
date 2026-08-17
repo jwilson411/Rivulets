@@ -20,25 +20,28 @@
 	// than needing LoginForm/IdentityPicker to grow an invite-aware branch.
 	let isInviteRoute = $derived(page.url.pathname.startsWith('/invite/'));
 
-	// #350: an invite-redeemed browser holds a persisted resume credential
-	// (the session JWT itself is memory-only, so it never survives a
-	// reload) — exchange it silently on startup so a refresh lands the
-	// invited human back in the workspace instead of on the mnemonic-only
-	// LoginForm. Only on initial load: after an explicit sign-out, resuming
-	// stays a deliberate click (LoginForm's "Continue as …"), not something
-	// that silently undoes the sign-out.
+	// #350 / #407: a browser that opted into persistence holds a re-entry
+	// credential (invite resume token, or the owner's stay-signed-in
+	// phrase). The session JWT itself is memory-only, so it never survives
+	// a reload — exchange/re-derive silently on startup so a refresh lands
+	// them back in the workspace instead of on LoginForm. Only on initial
+	// load: after an explicit sign-out, owner stay is dropped, and invite
+	// resume stays a deliberate click (LoginForm's "Continue as …").
 	// Initialized synchronously, not in onMount — the first render must
 	// already know a resume attempt is coming, or LoginForm flashes for a
 	// frame before it starts.
-	let resuming = $state(!auth.isAuthenticated && auth.resumeDisplayName !== null);
+	let resuming = $state(
+		!auth.isAuthenticated && (auth.ownerStayEnabled || auth.resumeDisplayName !== null)
+	);
 	onMount(() => {
 		if (!resuming) return;
-		auth
-			.resumeInviteSession()
+		const attempt = auth.ownerStayEnabled ? auth.resumeOwnerSession() : auth.resumeInviteSession();
+		attempt
 			.catch(() => {
 				// Transient failure (locked node, network) — fall through to
 				// LoginForm, where the kept credential is offered as a button
-				// whose own error handling can actually be seen.
+				// (invite) or the phrase form (owner) whose own error
+				// handling can actually be seen.
 			})
 			.finally(() => {
 				resuming = false;
