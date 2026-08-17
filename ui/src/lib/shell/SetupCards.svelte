@@ -4,6 +4,7 @@
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
 	import { channels, type Channel } from '$lib/api/channels';
 	import { teams } from '$lib/api/teams';
+	import { defaultChannelTeamId } from '$lib/teamRouting';
 	import Button from '$lib/ui/Button.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
 
@@ -77,14 +78,10 @@
 		try {
 			let target = generalChannel;
 			if (!target) {
-				target = await channels.create('general', 'Default room');
-				// Route it to the starter team so agents can actually answer.
+				// #411: assign the team in the same create so #general is
+				// answerable on the first message.
 				const teamList = await teams.list().catch(() => []);
-				const starter =
-					teamList.find((t) => t.name.toLowerCase().includes('starter')) ?? teamList[0];
-				if (starter) {
-					target = await channels.update(target.id, { team_id: starter.id });
-				}
+				target = await channels.create('general', 'Default room', defaultChannelTeamId(teamList));
 			}
 			goto(resolve('/channels/[id]', { id: target.id }));
 		} catch {
