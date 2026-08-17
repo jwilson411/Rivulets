@@ -67,14 +67,14 @@
 	// R-9's "agent status indicators" (#30): what an agent is doing before
 	// its first token streams — set from agent_status events, cleared to
 	// 'streaming' the moment real content starts arriving.
-	type LiveStatus = 'thinking' | 'executing_tool' | 'waiting_for_handoff' | 'streaming';
+	type LiveStatus = 'routing' | 'thinking' | 'executing_tool' | 'waiting_for_handoff' | 'streaming';
 
 	// Filled in token-by-token from the SSE stream below (FR-12.3) while an
 	// agent is mid-run, then cleared once its agent_message event lands —
-	// at which point the message is already in `messages` too, either from
-	// this same event or from the refetch handleReply does once its POST
-	// resolves (dispatch runs synchronously server-side; SSE is what makes
-	// the wait visible incrementally instead of as one silent pause).
+	// at which point the message is already in `messages` too. #413: the
+	// human POST returns before dispatch finishes, so this row also starts
+	// from an optimistic "Routing…" the instant Send is pressed (and from
+	// dispatch_status / a still-running latestRun when landing mid-round).
 	let liveMessage = $state<{
 		agentId: string;
 		agentName: string;
@@ -83,13 +83,39 @@
 		statusDetail: string | null;
 	} | null>(null);
 
-	// Copy deck: "Thinking…" / "Using web search…" / "Handing off…". Never
-	// renders tool args, only the tool name the backend already limited
+	// Copy deck: "Routing…" / "Thinking…" / "Using web search…" / "Handing off…".
+	// Never renders tool args, only the tool name the backend already limited
 	// itself to forwarding.
 	function statusLabel(status: LiveStatus, detail: string | null): string {
+		if (status === 'routing') return 'Routing…';
 		if (status === 'executing_tool') return detail ? `Using ${detail}…` : 'Using a tool…';
 		if (status === 'waiting_for_handoff') return 'Handing off…';
 		return 'Thinking…';
+	}
+
+	function routingLive(): NonNullable<typeof liveMessage> {
+		return {
+			agentId: '',
+			agentName: '',
+			content: '',
+			status: 'routing',
+			statusDetail: null
+		};
+	}
+
+	function runIsRecentlyRunning(run: RunTrace | null): boolean {
+		if (run?.status !== 'running') return false;
+		const started = Date.parse(run.started_at);
+		return Number.isFinite(started) && Date.now() - started < 5 * 60 * 1000;
+	}
+
+	function ensureRoutingStatus() {
+		if (liveMessage) return;
+		if (!runIsRecentlyRunning(latestRun)) return;
+		const last = [...messages]
+			.reverse()
+			.find((m) => m.content_type === 'text' || m.content_type === 'system_alert');
+		if (last?.sender_type === 'human') liveMessage = routingLive();
 	}
 
 	let pauseNotice = $derived(
@@ -101,7 +127,9 @@
 	let inkMap = $derived(
 		agentInkMap([
 			...messages,
-			...(liveMessage ? [{ sender_type: 'agent' as const, sender_id: liveMessage.agentId }] : [])
+			...(liveMessage?.agentId
+				? [{ sender_type: 'agent' as const, sender_id: liveMessage.agentId }]
+				: [])
 		])
 	);
 
@@ -171,6 +199,7 @@
 			workflowList = loadedWorkflows;
 			latestRun = loadedRuns[0] ?? null;
 			await loadTeamMembers(loadedChannel.team_id);
+			ensureRoutingStatus();
 		} catch {
 			loadError = "Couldn't load this conversation.";
 		}
@@ -189,6 +218,7 @@
 
 	$effect(() => {
 		const rivuletId = page.params.rivuletId!;
+		liveMessage = null;
 		if (!auth.token) return;
 
 		let source: EventSource | null = null;
@@ -220,6 +250,17 @@
 		const source = new EventSource(
 			`/api/v1/rivulets/${rivuletId}/stream?token=${encodeURIComponent(ticket)}`
 		);
+
+		// #413: published as soon as the human message is committed, before
+		// any agent is matched — upgrades the optimistic Routing… row (or
+		// starts one if we landed mid-round).
+		source.addEventListener('dispatch_status', (event) => {
+			const data = JSON.parse((event as MessageEvent).data) as { status?: string };
+			if (data.status !== 'routing') return;
+			if (!liveMessage || liveMessage.status === 'routing') {
+				liveMessage = routingLive();
+			}
+		});
 
 		// Arrives before an agent's first token (invocation, tool calls,
 		// handoff) — see run_agent's on_status in agentos/service.py. Content
@@ -288,14 +329,13 @@
 		});
 
 		source.addEventListener('system_alert', () => {
-			liveMessage = null;
+			void refreshAfterDispatch(rivuletId);
 		});
 
 		// The handoff message itself is a persisted Message row (content_type
-		// 'handoff', rendered as a divider below), which the post-POST
-		// refetch in handleReply already picks up — this listener only needs
-		// to stop showing a stale "still typing" bubble for the handing-off
-		// agent once the handoff fires.
+		// 'handoff', rendered as a divider below). Stop showing a stale
+		// "still typing" bubble for the handing-off agent once it fires;
+		// the next agent's agent_status will start a new live row.
 		source.addEventListener('handoff', () => {
 			liveMessage = null;
 		});
@@ -304,39 +344,92 @@
 		// own reserved name for connection-level failures, so this also
 		// fires on plain network hiccups, not just our agent-run-failed
 		// payloads — deliberately not parsing event.data here since its
-		// shape differs between the two cases. Both agent-failure paths
-		// (RunStatus.error and run_output is None, #405) persist a
-		// system_alert Message; POST is synchronous, so handleReply's
-		// refetch picks it up without this listener. We only need to
-		// stop showing a stale "still typing" bubble.
+		// shape differs between the two cases. Agent-failure paths persist
+		// a system_alert Message (#405); refetch so that row replaces
+		// Thinking… instead of leaving a silent empty transcript (#413).
 		source.addEventListener('error', () => {
-			liveMessage = null;
+			void refreshAfterDispatch(rivuletId);
+		});
+
+		source.addEventListener('done', () => {
+			void refreshAfterDispatch(rivuletId);
 		});
 
 		return source;
+	}
+
+	async function refreshAfterDispatch(rivuletId: string) {
+		liveMessage = null;
+		try {
+			const [loadedMessages, loadedRivulet, loadedRuns] = await Promise.all([
+				rivulets.listMessages(rivuletId),
+				rivulets.get(rivuletId),
+				runs.list({ rivuletId, limit: 1 }).catch(() => [] as RunTrace[])
+			]);
+			messages = loadedMessages;
+			rivulet = loadedRivulet;
+			latestRun = loadedRuns[0] ?? null;
+		} catch {
+			// Keep whatever is already on screen — the next event or a
+			// manual retry can recover.
+		}
 	}
 
 	async function handleReply(text: string, files: File[]): Promise<boolean> {
 		const rivuletId = page.params.rivuletId!;
 		sending = true;
 		sendError = null;
+		const pendingId = `pending-${crypto.randomUUID()}`;
+		const pending: Message = {
+			id: pendingId,
+			rivulet_id: rivuletId,
+			sender_type: 'human',
+			sender_id: auth.humanId,
+			sender_name: auth.displayName ?? humanName ?? 'You',
+			content: text,
+			content_type: 'text',
+			created_at: new Date().toISOString(),
+			attachments: files.map((file, index) => ({
+				file_id: `pending-file-${index}`,
+				filename: file.name,
+				mime_type: file.type || 'application/octet-stream',
+				size_bytes: file.size
+			})),
+			model_used: null,
+			tier: null,
+			executed_node_id: null,
+			served_model: null
+		};
+		messages = [...messages, pending];
+		if (!liveMessage) liveMessage = routingLive();
 		try {
 			// Uploads happen first, as their own step — a file has to exist on
 			// the server (POST /files/upload) before it can be referenced by
 			// file_id in the message body that attaches it.
 			const uploaded = await Promise.all(files.map((f) => filesApi.upload(f)));
-			// The backend runs the dispatcher + any matched agent synchronously
-			// before responding (dispatch/service.py), so re-fetching right
-			// after this resolves already picks up an agent's reply — no
-			// polling or SSE needed for the reply to show up.
-			await rivulets.postMessage(
+			// POST returns the human message as soon as it is committed;
+			// dispatch continues in the background and arrives over SSE (#413).
+			const posted = await rivulets.postMessage(
 				rivuletId,
 				text,
 				uploaded.map((f) => f.file_id)
 			);
-			messages = await rivulets.listMessages(rivuletId);
+			const loaded = await rivulets.listMessages(rivuletId);
+			messages = loaded.some((m) => m.id === posted.id)
+				? loaded
+				: [...loaded.filter((m) => m.id !== pendingId), posted];
+			const last = messages.at(-1);
+			if (
+				liveMessage?.status === 'routing' &&
+				last &&
+				(last.sender_type !== 'human' || last.content_type === 'system_alert')
+			) {
+				liveMessage = null;
+			}
 			return true;
 		} catch {
+			messages = messages.filter((m) => m.id !== pendingId);
+			if (liveMessage?.status === 'routing') liveMessage = null;
 			sendError = "Couldn't send that. Try again.";
 			return false;
 		} finally {
@@ -552,14 +645,18 @@
 				{#if liveMessage}
 					{@const ink = inkMap.get(liveMessage.agentId)}
 					<div class="flex max-w-[68ch] gap-3.5">
-						<Disc
-							name={liveMessage.agentName}
-							colorClass={ink ? INK_AVATAR[ink] : HUMAN_AVATAR}
-							size={32}
-						/>
+						{#if liveMessage.agentName}
+							<Disc
+								name={liveMessage.agentName}
+								colorClass={ink ? INK_AVATAR[ink] : HUMAN_AVATAR}
+								size={32}
+							/>
+						{/if}
 						<div class="min-w-0">
 							<div class="mb-1.5 flex items-center gap-2.5 text-sm">
-								<strong class="text-ink dark:text-ink-dark">{liveMessage.agentName}</strong>
+								{#if liveMessage.agentName}
+									<strong class="text-ink dark:text-ink-dark">{liveMessage.agentName}</strong>
+								{/if}
 								{#if liveMessage.status !== 'streaming' || !liveMessage.content}
 									<span
 										class="flex h-6 items-center gap-1.5 rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"

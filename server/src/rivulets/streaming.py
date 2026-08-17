@@ -4,10 +4,11 @@ api-design.md#sse-protocol).
 Single-process, in-memory, not persisted — fine for the current
 architecture (one App Server process, no horizontal scaling; see
 ADR-002). dispatch/service.py publishes events as a dispatch round runs;
-api/rivulets.py's `/rivulets/{id}/stream` subscribes for the lifetime of
-one client connection. A subscriber that never connects just means
-publish() has nothing to deliver to — dispatch itself doesn't block on
-whether anyone's listening.
+api/rivulets.py publishes `dispatch_status` as soon as the human
+message is committed (#413) and `/rivulets/{id}/stream` subscribes for
+the lifetime of one client connection. A subscriber that never connects
+just means publish() has nothing to deliver to — dispatch itself doesn't
+block on whether anyone's listening.
 
 #286: a rivulet's subscriber list is not uniformly trusted -- an
 invite-grant session can open the same stream an owner session can

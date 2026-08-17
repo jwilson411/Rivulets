@@ -124,19 +124,21 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         unsubscribe(rivulet_id, event_queue)
 
     assert [e["event"] for e in events] == [
+        "dispatch_status",
         "agent_status",
         "agent_token",
         "agent_token",
         "agent_message",
         "done",
     ]
-    assert events[0]["data"] == {
+    assert events[0]["data"] == {"status": "routing"}
+    assert events[1]["data"] == {
         "agent_id": agent_id,
         "agent_name": "Streamer",
         "status": "thinking",
         "detail": None,
     }
-    assert [e["data"]["token"] for e in events[1:3]] == ["Hel", "lo"]
-    assert events[3]["data"]["content"] == "Hello"
-    assert events[3]["data"]["agent_id"] == agent_id
-    assert events[4]["data"] == {"rivulet_id": rivulet_id}
+    assert [e["data"]["token"] for e in events[2:4]] == ["Hel", "lo"]
+    assert events[4]["data"]["content"] == "Hello"
+    assert events[4]["data"]["agent_id"] == agent_id
+    assert events[5]["data"] == {"rivulet_id": rivulet_id}

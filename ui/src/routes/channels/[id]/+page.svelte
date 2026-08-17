@@ -162,6 +162,9 @@
 		postError = null;
 		try {
 			const uploaded = await Promise.all(files.map((f) => filesApi.upload(f)));
+			// #413: create returns as soon as the human message is committed;
+			// dispatch continues in the background. The rivulet page picks up
+			// Routing… from the still-running trace / SSE.
 			const created = await rivulets.create(
 				channelId,
 				text,
@@ -361,6 +364,16 @@
 	</div>
 
 	<div class="px-4 pb-24 md:px-10 md:pb-7">
+		{#if posting}
+			<div class="mb-3 flex items-center gap-2 pl-1 text-sm">
+				<span
+					class="flex h-6 items-center gap-1.5 rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
+				>
+					<span class="breath h-1.5 w-1.5 rounded-full bg-current"></span>
+					Routing…
+				</span>
+			</div>
+		{/if}
 		<StreamBar
 			bind:this={composer}
 			placeholder="Start a conversation…"

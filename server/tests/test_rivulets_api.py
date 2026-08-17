@@ -9,14 +9,15 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets import streaming
 from rivulets.api.deps import SessionClaims
-from rivulets.api.rivulets import stream_rivulet
+from rivulets.api.rivulets import _run_message_dispatch, stream_rivulet
 from rivulets.db.models import Channel, Message, Rivulet
 from rivulets.db.session import session_scope
+from rivulets.tracing import start_trace
 
 _OWNER_CLAIMS = SessionClaims(workspace_id="workspace-1", human_id=None, grant="owner")
 _INVITE_CLAIMS = SessionClaims(workspace_id="workspace-1", human_id="human-1", grant="invite")
@@ -219,3 +220,41 @@ async def test_stream_rivulet_owner_only_event_never_reaches_an_invite_grant_ses
     text = chunks[0].decode()
     assert "event: agent_token" in text
     assert "abc.secret" not in text
+
+
+async def test_background_dispatch_crash_posts_a_system_alert(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#413: a failure after the 201 can't become an HTTP error, so the
+    thinking row is replaced by a persisted system_alert instead."""
+    db_session.add(Channel(id="chan-bg", name="general"))
+    db_session.add(Rivulet(id="riv-bg", channel_id="chan-bg", created_by="human", status="active"))
+    await db_session.commit()
+    trace = await start_trace(
+        db_session,
+        trigger_type="message",
+        label="ping",
+        rivulet_id="riv-bg",
+        channel_id="chan-bg",
+    )
+    await db_session.commit()
+
+    async def _boom(*_args: object, **_kwargs: object) -> list[Message]:
+        raise RuntimeError("dispatch exploded")
+
+    monkeypatch.setattr("rivulets.api.rivulets.dispatch_and_respond", _boom)
+
+    queue = streaming.subscribe("riv-bg", is_owner=True)
+    try:
+        await _run_message_dispatch("riv-bg", "chan-bg", "msg-bg", "ping", [], trace.trace_id)
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+    finally:
+        streaming.unsubscribe("riv-bg", queue)
+
+    assert any(e["event"] == "system_alert" for e in events)
+    result = await db_session.execute(select(Message).where(Message.rivulet_id == "riv-bg"))
+    alerts = [m for m in result.scalars().all() if m.content_type == "system_alert"]
+    assert len(alerts) == 1
+    assert "routing that message" in alerts[0].content

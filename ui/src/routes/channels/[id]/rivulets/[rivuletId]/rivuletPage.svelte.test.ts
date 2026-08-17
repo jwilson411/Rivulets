@@ -41,6 +41,12 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		get token() {
 			return authState.token;
 		},
+		get humanId() {
+			return 'human-1';
+		},
+		get displayName() {
+			return 'Justin';
+		},
 		// The component exchanges the session token for one of these before
 		// opening the EventSource -- returning a fixed, distinct value here
 		// is what proves the FakeEventSource URL assertion below is actually
@@ -284,6 +290,57 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-1', 'Sounds good', []);
 		await expect.element(input).toHaveValue('');
 		await expect.element(page.getByText('On it')).toBeInTheDocument();
+	});
+
+	it('shows the human bubble and Routing… as soon as Send is pressed (#413)', async () => {
+		seed([humanMessage]);
+		let resolvePost!: (value: Message) => void;
+		vi.mocked(rivulets.postMessage).mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolvePost = resolve;
+				})
+		);
+
+		render(RivuletPage);
+		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
+
+		await page.getByPlaceholder('Reply to this conversation…').fill('@Assistant ping');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		await expect.element(page.getByText('@Assistant ping')).toBeInTheDocument();
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
+
+		const reply: Message = {
+			...humanMessage,
+			id: 'msg-ping',
+			content: '@Assistant ping'
+		};
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, reply]);
+		resolvePost(reply);
+		await expect.element(page.getByText('@Assistant ping')).toBeInTheDocument();
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
+	});
+
+	it('replaces Routing… with the agent thinking pill from agent_status', async () => {
+		authState.token = 'test-token';
+		seed([humanMessage]);
+		vi.mocked(rivulets.postMessage).mockImplementation(() => new Promise(() => {}));
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+		await page.getByPlaceholder('Reply to this conversation…').fill('ping');
+		await page.getByRole('button', { name: 'Send' }).click();
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
+
+		FakeEventSource.instances[0].emit('agent_status', {
+			agent_id: 'agent-1',
+			agent_name: 'Researcher',
+			status: 'thinking',
+			detail: null
+		});
+		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
+		await expect.element(page.getByText('Routing…')).not.toBeInTheDocument();
 	});
 
 	it('shows the paused banner and resumes via rivulets.resume', async () => {
@@ -555,6 +612,17 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			.toBeInTheDocument();
 	});
 
+	it('shows Routing… from a dispatch_status event', async () => {
+		authState.token = 'test-token';
+		seed([humanMessage]);
+
+		render(RivuletPage);
+		await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+		FakeEventSource.instances[0].emit('dispatch_status', { status: 'routing' });
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
+	});
+
 	it('shows a "Using …" status pill with the tool name from an agent_status event', async () => {
 		authState.token = 'test-token';
 		seed([humanMessage]);
@@ -654,8 +722,35 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		});
 		await expect.element(page.getByText('Thinking…')).toBeInTheDocument();
 
+		vi.mocked(rivulets.listMessages).mockResolvedValue([humanMessage, systemAlertMessage]);
 		source.emit('system_alert', {});
 		await expect.element(page.getByText('Thinking…')).not.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Agent Researcher was paused after an error'))
+			.toBeInTheDocument();
+	});
+
+	it('shows Routing… when the latest run is still in progress on a human-last thread', async () => {
+		seed([humanMessage]);
+		vi.mocked(runs.list).mockResolvedValue([
+			{
+				id: 'trace-live',
+				trigger_type: 'message',
+				label: 'Kickoff message',
+				rivulet_id: 'riv-1',
+				channel_id: 'chan-1',
+				status: 'running',
+				span_count: 0,
+				total_cost_usd: null,
+				total_tokens: 0,
+				started_at: new Date().toISOString(),
+				completed_at: null
+			}
+		]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('Routing…')).toBeInTheDocument();
 	});
 
 	it('clears the live status pill on a connection error event', async () => {

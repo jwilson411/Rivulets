@@ -29,9 +29,10 @@ before an agent starts and on each tool-call transition (R-9, #30),
 `agent_token` per streamed content delta, `agent_message` once a reply is
 persisted, `handoff` when one occurs, `error`/`system_alert` on failure or
 guard pause, and `done` once per external (non-recursive) call. Persisting rows
-and publishing events both happen inline here, in the same request that
-triggered the dispatch — see api/rivulets.py's SSE endpoint for how a
-concurrent connection observes these live while this coroutine runs.
+and publishing events both happen inline here while this coroutine
+runs — api/rivulets.py kicks this off as a BackgroundTask after the
+human-message POST returns (#413) so an SSE subscriber can observe the
+round without waiting on that HTTP response.
 
 A message that misses every @mention and deterministic rule falls through
 to dispatch/llm_fallback.py's LLM-based fallback (ADR-005 stage 2) before
