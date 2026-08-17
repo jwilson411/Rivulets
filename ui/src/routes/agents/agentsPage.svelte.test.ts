@@ -57,17 +57,33 @@ const writer: Agent = {
 	agentos_agent_id: null
 };
 
-function seed(list: Agent[] = [assistant, writer]) {
+const starterTeam = {
+	id: 'team-1',
+	name: 'Starter Team',
+	description: null,
+	agent_ids: ['agent-1']
+};
+
+const testTeam = {
+	id: 'team-2',
+	name: 'Test Team',
+	description: null,
+	agent_ids: ['agent-1']
+};
+
+function seed(
+	list: Agent[] = [assistant, writer],
+	teamDetails: (typeof starterTeam)[] = [starterTeam]
+) {
 	vi.mocked(agents.list).mockResolvedValue(list);
 	vi.mocked(providers.list).mockResolvedValue([]);
-	vi.mocked(teams.list).mockResolvedValue([
-		{ id: 'team-1', name: 'Starter Team', description: null }
-	]);
-	vi.mocked(teams.get).mockResolvedValue({
-		id: 'team-1',
-		name: 'Starter Team',
-		description: null,
-		agent_ids: ['agent-1']
+	vi.mocked(teams.list).mockResolvedValue(
+		teamDetails.map(({ id, name, description }) => ({ id, name, description }))
+	);
+	vi.mocked(teams.get).mockImplementation(async (id: string) => {
+		const team = teamDetails.find((item) => item.id === id);
+		if (!team) throw new Error(`unknown team ${id}`);
+		return team;
 	});
 	vi.mocked(tools.list).mockResolvedValue([]);
 	vi.mocked(tools.listScopes).mockResolvedValue([]);
@@ -127,7 +143,7 @@ describe('agents/+page.svelte', () => {
 		await page.getByLabelText('Name').fill('Writer');
 		await page.getByLabelText('What this agent does').fill('Drafts and edits prose.');
 		await page.getByLabelText('How it should behave').fill('Keep the workspace voice.');
-		await page.getByLabelText('Team').selectOptions('team-1');
+		await page.getByRole('checkbox', { name: 'Starter Team' }).click();
 		await page.getByRole('button', { name: 'Create agent' }).click();
 
 		expect(agents.create).toHaveBeenCalledWith({
@@ -156,6 +172,75 @@ describe('agents/+page.svelte', () => {
 		expect(agents.getToolIds).toHaveBeenCalledWith('agent-1');
 		await expect.element(page.getByLabelText('Name')).toHaveValue('Assistant');
 		await expect.element(page.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+	});
+
+	it('keeps every team membership when the sheet saves (#409)', async () => {
+		seed([assistant], [starterTeam, testTeam]);
+		vi.mocked(agents.update).mockResolvedValueOnce(assistant);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+
+		await expect.element(page.getByRole('checkbox', { name: 'Starter Team' })).toBeChecked();
+		await expect.element(page.getByRole('checkbox', { name: 'Test Team' })).toBeChecked();
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.update).toHaveBeenCalledWith(
+			'agent-1',
+			expect.objectContaining({ team_ids: ['team-1', 'team-2'] })
+		);
+		expect(agents.setRoutingRules).not.toHaveBeenCalled();
+	});
+
+	it('shows generated When to speak rules and does not wipe them on Save (#409)', async () => {
+		seed();
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([
+			{
+				id: 'r1',
+				rule_type: 'keyword',
+				pattern: JSON.stringify(['specialist', 'expert', 'coder', 'researcher', 'writer']),
+				priority: 5
+			},
+			{ id: 'r2', rule_type: 'semantic', pattern: JSON.stringify(['help']), priority: 1 }
+		]);
+		vi.mocked(agents.update).mockResolvedValueOnce(assistant);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+
+		await expect.element(page.getByText('Keep the current rules')).toBeInTheDocument();
+		await expect
+			.element(
+				page.getByText('When the message includes specialist, expert, coder, researcher, writer')
+			)
+			.toBeInTheDocument();
+		await expect.element(page.getByText('When the message is about help')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.update).toHaveBeenCalled();
+		expect(agents.setRoutingRules).not.toHaveBeenCalled();
+	});
+
+	it('asks before replacing a generated When to speak set (#409)', async () => {
+		seed();
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([
+			{ id: 'r1', rule_type: 'keyword', pattern: JSON.stringify(['specialist']), priority: 5 },
+			{ id: 'r2', rule_type: 'semantic', pattern: JSON.stringify(['help']), priority: 1 }
+		]);
+		vi.mocked(agents.update).mockResolvedValueOnce(assistant);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('Always').click();
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.update).not.toHaveBeenCalled();
+		await expect.element(page.getByText('Replace When to speak?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Replace rules' }).click();
+
+		expect(agents.setRoutingRules).toHaveBeenCalledWith('agent-1', [
+			{ rule_type: 'always', pattern: '', priority: 10 }
+		]);
 	});
 
 	it('saves a keyword "when to speak" rule from the sheet', async () => {

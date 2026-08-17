@@ -202,7 +202,7 @@
 			tools={toolList}
 			teams={teamList}
 			{scopeCatalog}
-			initialTeamId={sheetAgent ? (teamsFor(sheetAgent.id)[0]?.id ?? null) : null}
+			initialTeamIds={sheetAgent ? teamsFor(sheetAgent.id).map((team) => team.id) : []}
 			initialRules={sheetRules}
 			initialToolIds={sheetToolIds}
 			initialScopes={sheetScopes}

@@ -14,6 +14,12 @@
 	import Icon from '$lib/ui/Icon.svelte';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import StatusPill from '$lib/ui/StatusPill.svelte';
+	import {
+		describeSpeakRulesList,
+		keywordsFromRules,
+		speakChoiceFromRules,
+		type SpeakChoice
+	} from '$lib/teamRouting';
 	import ModelPicker from './ModelPicker.svelte';
 
 	// Agent sheet (06-screens.md → Agent sheet, mockup 1j). Everyday fields
@@ -27,7 +33,7 @@
 		tools,
 		teams,
 		scopeCatalog,
-		initialTeamId = null,
+		initialTeamIds = [],
 		initialRules = [],
 		initialToolIds = [],
 		initialScopes = [],
@@ -41,7 +47,7 @@
 		tools: Tool[];
 		teams: TeamDetail[];
 		scopeCatalog: string[];
-		initialTeamId?: string | null;
+		initialTeamIds?: string[];
 		initialRules?: RoutingRule[];
 		initialToolIds?: string[];
 		initialScopes?: string[];
@@ -57,7 +63,7 @@
 	let description = $state(untrack(() => agent?.description ?? ''));
 	let instructions = $state(untrack(() => agent?.instructions ?? ''));
 	let model = $state(untrack(() => agent?.model ?? 'auto'));
-	let teamId = $state<string | null>(untrack(() => initialTeamId));
+	let teamIds = $state<string[]>(untrack(() => [...initialTeamIds]));
 	let fallbackModels = $state(
 		untrack(() =>
 			(agent?.fallback_models ?? []).map((m) => ({ id: crypto.randomUUID(), value: m }))
@@ -71,29 +77,20 @@
 	let peerTag = $state(untrack(() => initialPeerTag));
 	let unattendedApproved = $state(untrack(() => agent?.approved_for_unattended_tools ?? false));
 
-	// "When to speak" — one exclusive rule (copy deck: Always / Only when
-	// mentioned / When the message includes…).
-	function initialRuleType(): RuleType {
-		const rules = untrack(() => initialRules);
-		if (rules.some((rule) => rule.rule_type === 'always')) return 'always';
-		if (rules.some((rule) => rule.rule_type === 'mention_only')) return 'mention_only';
-		return rules[0]?.rule_type ?? 'mention_only';
-	}
-	function initialKeywords(): string {
-		const rule = untrack(() => initialRules[0]);
-		if (rule?.rule_type !== 'keyword') return '';
-		try {
-			return (JSON.parse(rule.pattern) as string[]).join(', ');
-		} catch {
-			return rule.pattern;
-		}
-	}
-	let ruleType = $state<RuleType>(initialRuleType());
-	let keywords = $state(initialKeywords());
+	// "When to speak" — exclusive everyday radios (copy deck: Always /
+	// Only when mentioned / When the message includes…). Generated
+	// multi-rule sets (#409) are a fourth "keep current" choice so Save
+	// cannot silently collapse them to rules[0].
+	const storedRules = untrack(() => initialRules);
+	const hadCustomRules = speakChoiceFromRules(storedRules) === 'custom';
+	const storedRuleSummary = describeSpeakRulesList(storedRules);
+	let ruleType = $state<SpeakChoice>(speakChoiceFromRules(storedRules));
+	let keywords = $state(keywordsFromRules(storedRules));
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
 	let confirmingDelete = $state(false);
+	let confirmingReplaceRules = $state(false);
 	let deleting = $state(false);
 
 	const inputClass =
@@ -111,7 +108,20 @@
 			: [...selectedScopes, scope];
 	}
 
+	function toggleTeam(id: string) {
+		teamIds = teamIds.includes(id) ? teamIds.filter((teamId) => teamId !== id) : [...teamIds, id];
+	}
+
+	function normalizedKeywords(): string {
+		return keywords
+			.split(',')
+			.map((k) => k.trim())
+			.filter(Boolean)
+			.join(', ');
+	}
+
 	function buildRules(): { rule_type: RuleType; pattern: string; priority?: number }[] {
+		if (ruleType === 'custom') return [];
 		if (ruleType === 'keyword') {
 			const list = keywords
 				.split(',')
@@ -122,9 +132,32 @@
 		return [{ rule_type: ruleType, pattern: '', priority: 10 }];
 	}
 
+	function rulesNeedWrite(): boolean {
+		if (!agent) return true;
+		if (ruleType === 'custom') return false;
+		const initialChoice = speakChoiceFromRules(storedRules);
+		if (initialChoice === 'custom') return true;
+		if (ruleType !== initialChoice) return true;
+		return ruleType === 'keyword' && normalizedKeywords() !== keywordsFromRules(storedRules);
+	}
+
+	function replacementSummary(): string {
+		if (ruleType === 'keyword') {
+			const list = normalizedKeywords();
+			return list ? `When the message includes ${list}` : 'When the message includes…';
+		}
+		if (ruleType === 'always') return 'Always';
+		return 'Only when mentioned';
+	}
+
 	async function save() {
 		if (!name.trim() || !description.trim() || !instructions.trim() || !model.trim()) {
 			error = 'Name, role, instructions, and model are all needed.';
+			return;
+		}
+
+		if (hadCustomRules && rulesNeedWrite() && !confirmingReplaceRules) {
+			confirmingReplaceRules = true;
 			return;
 		}
 
@@ -156,7 +189,7 @@
 				fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== ''),
 				output_schema,
 				tool_ids: selectedToolIds,
-				team_ids: teamId ? [teamId] : []
+				team_ids: [...teamIds]
 			};
 
 			let saved: Agent;
@@ -172,7 +205,9 @@
 				}
 			}
 
-			await agents.setRoutingRules(saved.id, buildRules());
+			if (rulesNeedWrite()) {
+				await agents.setRoutingRules(saved.id, buildRules());
+			}
 			if (peerTag.trim() || initialPeerTag) {
 				await agents.setPeerPreference(saved.id, peerTag.trim() || null);
 			}
@@ -219,7 +254,7 @@
 	}
 </script>
 
-{#if !confirmingDelete}
+{#if !confirmingDelete && !confirmingReplaceRules}
 	<Sheet title={agent ? agent.name : 'New agent'} {onClose}>
 		<div class="flex flex-col gap-2">
 			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-name">Name</label>
@@ -257,27 +292,40 @@
 			></textarea>
 		</div>
 
-		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-			<div class="flex flex-col gap-2">
-				<span class="text-sm font-semibold text-ink dark:text-ink-dark">Model</span>
-				<ModelPicker {providers} bind:value={model} />
-			</div>
-			<div class="flex flex-col gap-2">
-				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="agent-team"
-					>Team</label
-				>
-				<select
-					id="agent-team"
-					value={teamId ?? ''}
-					onchange={(e) => (teamId = (e.target as HTMLSelectElement).value || null)}
-					class={inputClass}
-				>
-					<option value="">No team</option>
+		<div class="flex flex-col gap-2">
+			<span class="text-sm font-semibold text-ink dark:text-ink-dark">Model</span>
+			<ModelPicker {providers} bind:value={model} />
+		</div>
+
+		<div class="flex flex-col gap-2.5">
+			<span class="text-sm font-semibold text-ink dark:text-ink-dark">Team</span>
+			{#if teams.length === 0}
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					No teams yet. Create one under
+					<a href="/teams" class="font-semibold text-accent hover:underline dark:text-accent-dark"
+						>Teams</a
+					>.
+				</p>
+			{:else}
+				<div class="flex flex-col gap-2" role="group" aria-label="Team">
 					{#each teams as team (team.id)}
-						<option value={team.id}>{team.name}</option>
+						<label
+							class="flex h-12 cursor-pointer items-center gap-3 rounded-lg border border-line px-4 dark:border-line-dark"
+						>
+							<input
+								type="checkbox"
+								checked={teamIds.includes(team.id)}
+								onchange={() => toggleTeam(team.id)}
+								class="accent-(--color-accent)"
+							/>
+							<span class="text-[15px] text-ink dark:text-ink-dark">{team.name}</span>
+						</label>
 					{/each}
-				</select>
-			</div>
+				</div>
+				<p class="text-[13px] text-muted dark:text-muted-dark">
+					An agent can belong to more than one team.
+				</p>
+			{/if}
 		</div>
 
 		<div class="flex flex-col gap-2.5">
@@ -300,6 +348,28 @@
 						<span class="text-[15px] text-ink dark:text-ink-dark">{option.label}</span>
 					</label>
 				{/each}
+				{#if hadCustomRules}
+					<label
+						class="flex min-h-12 cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 {ruleType ===
+						'custom'
+							? 'border-accent bg-accent-soft dark:border-accent-dark dark:bg-accent-soft-dark'
+							: 'border-line dark:border-line-dark'}"
+					>
+						<input
+							type="radio"
+							name="agent-when"
+							value="custom"
+							bind:group={ruleType}
+							class="mt-1 accent-(--color-accent)"
+						/>
+						<span class="flex min-w-0 flex-col gap-1">
+							<span class="text-[15px] text-ink dark:text-ink-dark">Keep the current rules</span>
+							{#each storedRuleSummary as line (line)}
+								<span class="text-[13px] text-muted dark:text-muted-dark">{line}</span>
+							{/each}
+						</span>
+					</label>
+				{/if}
 			</div>
 			{#if ruleType === 'keyword'}
 				<input
@@ -502,6 +572,29 @@
 			<Button variant="secondary" onclick={onClose}>Cancel</Button>
 			<Button onclick={save} disabled={busy}>
 				{busy ? 'Saving…' : agent ? 'Save' : 'Create agent'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if confirmingReplaceRules && agent}
+	<Sheet
+		title="Replace When to speak?"
+		onClose={() => (confirmingReplaceRules = false)}
+		width={480}
+	>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			This agent has {storedRules.length}
+			{storedRules.length === 1 ? 'rule' : 'rules'} the form cannot show one-by-one. Saving will replace
+			them with: {replacementSummary()}.
+		</p>
+		{#if error}
+			<p class="text-sm text-danger">{error}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingReplaceRules = false)}>Cancel</Button>
+			<Button onclick={save} disabled={busy}>
+				{busy ? 'Saving…' : 'Replace rules'}
 			</Button>
 		{/snippet}
 	</Sheet>
