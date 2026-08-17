@@ -65,6 +65,15 @@ describe('channels', () => {
 		expect(init.body).toBe('{"name":"general"}');
 	});
 
+	it('create() POSTs team_id when given (#411)', async () => {
+		const fetchMock = mockFetch({ id: 'c1' });
+
+		await channels.create('My Channel', undefined, 'team-1');
+
+		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(init.body).toBe(JSON.stringify({ name: 'My Channel', team_id: 'team-1' }));
+	});
+
 	it('update() PATCHes /channels/:id with the patch', async () => {
 		const fetchMock = mockFetch({ id: 'c1' });
 

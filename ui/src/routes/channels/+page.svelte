@@ -2,11 +2,11 @@
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { channels, type Channel } from '$lib/api/channels';
+	import NewChannelSheet from '$lib/components/NewChannelSheet.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import FilterChip from '$lib/ui/FilterChip.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
-	import Sheet from '$lib/ui/Sheet.svelte';
 	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
 
 	// Channel list (04-information-architecture.md): on desktop the context
@@ -19,9 +19,6 @@
 	let loadError = $state<string | null>(null);
 	let showArchived = $state(false);
 	let creating = $state(false);
-	let newName = $state('');
-	let createBusy = $state(false);
-	let createError = $state<string | null>(null);
 
 	let visible = $derived(channelList.filter((c) => (showArchived ? c.archived : !c.archived)));
 
@@ -39,22 +36,9 @@
 
 	load();
 
-	async function handleCreate(event: SubmitEvent) {
-		event.preventDefault();
-		const name = newName.trim();
-		if (!name) return;
-		createBusy = true;
-		createError = null;
-		try {
-			const created = await channels.create(name);
-			creating = false;
-			newName = '';
-			goto(resolve('/channels/[id]', { id: created.id }));
-		} catch (err) {
-			createError = err instanceof Error ? err.message : "Couldn't create the channel.";
-		} finally {
-			createBusy = false;
-		}
+	function handleCreated(created: Channel) {
+		creating = false;
+		goto(resolve('/channels/[id]', { id: created.id }));
 	}
 </script>
 
@@ -103,31 +87,5 @@
 </div>
 
 {#if creating}
-	<Sheet title="New channel" onClose={() => (creating = false)}>
-		<form id="channels-new-form" onsubmit={handleCreate} class="flex flex-col gap-2">
-			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="channels-new-name">
-				Name
-			</label>
-			<input
-				id="channels-new-name"
-				type="text"
-				bind:value={newName}
-				placeholder="launch-readiness"
-				class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
-			/>
-			{#if createError}
-				<p class="text-sm text-danger">{createError}</p>
-			{/if}
-		</form>
-		{#snippet footer()}
-			<Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
-			<Button
-				disabled={createBusy || !newName.trim()}
-				onclick={() =>
-					(document.getElementById('channels-new-form') as HTMLFormElement).requestSubmit()}
-			>
-				Create channel
-			</Button>
-		{/snippet}
-	</Sheet>
+	<NewChannelSheet onClose={() => (creating = false)} onCreated={handleCreated} />
 {/if}

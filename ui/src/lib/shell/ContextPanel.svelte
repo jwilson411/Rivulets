@@ -4,9 +4,9 @@
 	import { resolve } from '$app/paths';
 	import { auth } from '$lib/api/auth.svelte';
 	import { channels, type Channel } from '$lib/api/channels';
+	import NewChannelSheet from '$lib/components/NewChannelSheet.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
-	import Sheet from '$lib/ui/Sheet.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
 	import SearchJumpButton from '$lib/shell/SearchJumpButton.svelte';
 
@@ -67,9 +67,6 @@
 	let channelList = $state<Channel[]>([]);
 	let loadError = $state<string | null>(null);
 	let creating = $state(false);
-	let newName = $state('');
-	let createBusy = $state(false);
-	let createError = $state<string | null>(null);
 
 	let isChatArea = $derived(page.url.pathname === '/' || page.url.pathname.startsWith('/channels'));
 	// The workflow canvas is full bleed (03-design-direction.md → Layout) —
@@ -101,23 +98,10 @@
 		return page.url.pathname.startsWith(`/channels/${id}`);
 	}
 
-	async function handleCreate(event: SubmitEvent) {
-		event.preventDefault();
-		const name = newName.trim();
-		if (!name) return;
-		createBusy = true;
-		createError = null;
-		try {
-			const created = await channels.create(name);
-			creating = false;
-			newName = '';
-			await refresh();
-			goto(resolve('/channels/[id]', { id: created.id }));
-		} catch (err) {
-			createError = err instanceof Error ? err.message : "Couldn't create the channel.";
-		} finally {
-			createBusy = false;
-		}
+	async function handleCreated(created: Channel) {
+		creating = false;
+		await refresh();
+		goto(resolve('/channels/[id]', { id: created.id }));
 	}
 </script>
 
@@ -185,31 +169,5 @@
 {/if}
 
 {#if creating}
-	<Sheet title="New channel" onClose={() => (creating = false)}>
-		<form id="new-channel-form" onsubmit={handleCreate} class="flex flex-col gap-2">
-			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-channel-name">
-				Name
-			</label>
-			<input
-				id="new-channel-name"
-				type="text"
-				bind:value={newName}
-				placeholder="launch-readiness"
-				class="h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
-			/>
-			{#if createError}
-				<p class="text-sm text-danger">{createError}</p>
-			{/if}
-		</form>
-		{#snippet footer()}
-			<Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
-			<Button
-				disabled={createBusy || !newName.trim()}
-				onclick={() =>
-					(document.getElementById('new-channel-form') as HTMLFormElement).requestSubmit()}
-			>
-				Create channel
-			</Button>
-		{/snippet}
-	</Sheet>
+	<NewChannelSheet onClose={() => (creating = false)} onCreated={handleCreated} />
 {/if}

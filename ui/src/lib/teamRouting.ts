@@ -4,42 +4,75 @@ import type { RoutingRule } from '$lib/api/agents';
 // "the team will answer this." Mentions and When to speak rules decide
 // who actually does.
 
+// #409: the agent sheet radios can only represent one exclusive everyday
+// choice. Generated keyword + semantic + regex sets are "custom" — show
+// them honestly and don't replace them unless the user picks a simple
+// choice on purpose.
+export type SpeakChoice = 'always' | 'mention_only' | 'keyword' | 'custom';
+
 export function teamComposerHint(teamName: string): string {
 	return `${teamName} answers when a rule or @mention matches`;
 }
 
-export function keywordList(rules: RoutingRule[]): string[] {
-	const words: string[] = [];
-	const seen = new Set<string>();
-	for (const rule of rules) {
-		if (rule.rule_type !== 'keyword' && rule.rule_type !== 'semantic') continue;
-		let parsed: unknown = rule.pattern;
-		try {
-			parsed = JSON.parse(rule.pattern) as unknown;
-		} catch {
-			// Stored as a raw string — treat the whole pattern as one term.
-		}
-		const items = Array.isArray(parsed) ? parsed : [parsed];
-		for (const item of items) {
-			const text = String(item).trim();
-			const key = text.toLowerCase();
-			if (!text || seen.has(key)) continue;
-			seen.add(key);
-			words.push(text);
-		}
-	}
-	return words;
+// #411: a new room should land on Starter Team when it exists, otherwise
+// the first team in the list — never "No team" by accident.
+export function defaultChannelTeamId(teamList: { id: string; name: string }[]): string | null {
+	const starter = teamList.find((team) => team.name.toLowerCase().includes('starter'));
+	return (starter ?? teamList[0])?.id ?? null;
 }
 
-export function extraSpeakRules(rules: RoutingRule[]): RoutingRule[] {
-	return rules.filter((rule) => rule.rule_type === 'regex');
+export function parseRulePhrases(pattern: string): string[] {
+	try {
+		const parsed = JSON.parse(pattern) as unknown;
+		if (Array.isArray(parsed)) return parsed.map(String).filter((word) => word.trim() !== '');
+	} catch {
+		// Stored as a raw string (regex, or a keyword rule written by hand).
+	}
+	return pattern.trim() === '' ? [] : [pattern];
+}
+
+export function speakChoiceFromRules(rules: RoutingRule[]): SpeakChoice {
+	if (rules.length === 0) return 'mention_only';
+	if (rules.every((rule) => rule.rule_type === 'always')) return 'always';
+	if (rules.every((rule) => rule.rule_type === 'mention_only')) return 'mention_only';
+	if (rules.every((rule) => rule.rule_type === 'keyword')) return 'keyword';
+	return 'custom';
+}
+
+export function keywordsFromRules(rules: RoutingRule[]): string {
+	return rules
+		.filter((rule) => rule.rule_type === 'keyword')
+		.flatMap((rule) => parseRulePhrases(rule.pattern))
+		.join(', ');
+}
+
+export function describeSpeakRulesList(rules: RoutingRule[]): string[] {
+	return [...rules]
+		.sort((a, b) => b.priority - a.priority)
+		.map((rule) => {
+			const phrases = parseRulePhrases(rule.pattern).join(', ');
+			switch (rule.rule_type) {
+				case 'always':
+					return 'Always';
+				case 'mention_only':
+					return 'Only when mentioned';
+				case 'keyword':
+					return phrases ? `When the message includes ${phrases}` : 'Keywords';
+				case 'semantic':
+					return phrases ? `When the message is about ${phrases}` : 'Similar meaning';
+				case 'regex':
+					return rule.pattern ? `When the message matches ${rule.pattern}` : 'A pattern';
+			}
+		});
 }
 
 export function describeSpeakRule(rules: RoutingRule[]): string {
 	if (rules.some((rule) => rule.rule_type === 'always')) return 'always';
 	if (rules.length === 0) return 'no rule yet';
 	if (rules.every((rule) => rule.rule_type === 'mention_only')) return 'only when @mentioned';
-	const words = keywordList(rules);
+	const words = rules
+		.filter((rule) => rule.rule_type === 'keyword')
+		.flatMap((rule) => parseRulePhrases(rule.pattern));
 	if (words.length > 0) {
 		const shown = words.slice(0, 3);
 		const extra = words.length > 3 ? '…' : '';
