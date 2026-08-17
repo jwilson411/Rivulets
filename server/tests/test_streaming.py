@@ -75,6 +75,9 @@ def test_dispatch_publishes_documented_sse_event_sequence(
         )
 
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_streaming_run_agent)
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, auth_headers)
 
     created = client.post(
         "/api/v1/agents",

@@ -121,6 +121,9 @@ def _create_agent(
 
 
 def _create_channel_with_team(client: TestClient, headers: dict[str, str], agent_id: str) -> str:
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, headers)
     # Both team and channel names are unique-constrained, so this is
     # suffixed with the agent id -- several tests in this module create
     # more than one channel (one per agent) and would otherwise collide.

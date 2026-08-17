@@ -77,7 +77,7 @@
 				onchange={(e) => (selectedTeamId = (e.target as HTMLSelectElement).value || null)}
 				class={inputClass}
 			>
-				<option value="">No team — agents won't answer</option>
+				<option value="">No team — Assistant still answers</option>
 				{#each teamList as team (team.id)}
 					<option value={team.id}>{team.name}</option>
 				{/each}

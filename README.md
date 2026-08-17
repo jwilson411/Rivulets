@@ -15,7 +15,7 @@
 
 ## What is Rivulets?
 
-Rivulets is a chat-native workspace, in the shape of Slack, where the people in a channel aren't the only ones paying attention. You create channels and populate them with **teams of AI agents** — each with its own instructions, model, and area of expertise — and those agents autonomously monitor the conversation and jump in when something is relevant to them. No `@mentions` required, though they still work when you want to be explicit.
+Rivulets is a chat-native workspace, in the shape of Slack, where the people in a channel aren't the only ones paying attention. You create channels and populate them with **teams of AI agents** — each with its own instructions, model, and area of expertise. **Assistant** is the orchestrator in every channel: it answers first, asks clarifying questions, and unlocks the rest of the team when the request is clear. Specialists then jump in when something is relevant to them. `@mentions` still work when you want to be explicit.
 
 Under the hood, every agent, tool, and MCP server you configure maps directly onto [Agno's AgentOS](https://github.com/agno-agi/agno) — Rivulets is a thin, opinionated UI and dispatch layer over a production-grade agent runtime, not a reimplementation of one. A **channel dispatcher** decides who should respond to each message: first against deterministic routing rules generated when an agent is created (fast, no LLM call), and only when nothing matches does it escalate to a lightweight LLM router. Agents can **hand off** to one another mid-conversation, and platform-level guardrails cap turn counts and detect cycles so two agents can't loop forever.
 
@@ -28,7 +28,7 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 ### Chat-native multi-agent workspace
 
 - **Channels & teams** — organize agents into teams, assign a team to a channel, and every message in that channel is visible to the whole team.
-- **Autonomous dispatch** — agents respond based on relevance (keyword/regex rules, semantic matching, or "always respond"), not because someone had to remember to tag them.
+- **Orchestrated dispatch** — Assistant is always in the channel and holds the thread until it (or you) engages the team. After that, specialists respond based on relevance (keyword/regex rules, semantic matching, or "always respond"). Every agent sees the rivulet's chat history, not just the latest turn.
 - **Agent handoffs** — an agent can hand a conversation to a teammate mid-thread, with the context carried over and the handoff itself shown as a distinct event, not just another message.
 - **Threaded rivulets** — every conversation that branches off a channel is its own persistent thread with full history and context management.
 - **Loop guards** — turn-count caps and cycle detection stop two agents from volleying a conversation back and forth forever.

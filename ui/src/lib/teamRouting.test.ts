@@ -5,6 +5,8 @@ import {
 	describeSpeakRulesList,
 	keywordsFromRules,
 	speakChoiceFromRules,
+	isTeamEngaged,
+	lockedTeamComposerHint,
 	teamComposerHint,
 	teamSpeakSummary
 } from './teamRouting';
@@ -33,6 +35,20 @@ describe('defaultChannelTeamId', () => {
 describe('teamComposerHint', () => {
 	it('says the team answers only when a rule or mention matches', () => {
 		expect(teamComposerHint('Test Team')).toBe('Test Team answers when a rule or @mention matches');
+	});
+});
+
+describe('lockedTeamComposerHint', () => {
+	it('says Assistant is gathering context', () => {
+		expect(lockedTeamComposerHint()).toContain('Assistant is gathering context');
+	});
+});
+
+describe('isTeamEngaged', () => {
+	it('is locked until a handoff or engage marker appears', () => {
+		expect(isTeamEngaged([{ content_type: 'text' }])).toBe(false);
+		expect(isTeamEngaged([{ content_type: 'team_engaged' }])).toBe(true);
+		expect(isTeamEngaged([{ content_type: 'handoff' }])).toBe(true);
 	});
 });
 

@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from rivulets.dispatch.service import _find_handoff_call  # pyright: ignore[reportPrivateUsage]
 from rivulets.streaming import subscribe, unsubscribe
 from rivulets.tools.builtin.handoff import handoff
+from tests.conftest import delete_starter_assistant
 
 
 def test_handoff_tool_returns_confirmation_string() -> None:
@@ -86,6 +87,7 @@ def _create_agent(
 def _create_channel_with_team(
     client: TestClient, headers: dict[str, str], agent_ids: list[str]
 ) -> str:
+    delete_starter_assistant(client, headers)
     team = client.post("/api/v1/teams", json={"name": "Handoff Test Team"}, headers=headers)
     team_id = team.json()["id"]
     client.patch(f"/api/v1/teams/{team_id}", json={"agent_ids": agent_ids}, headers=headers)

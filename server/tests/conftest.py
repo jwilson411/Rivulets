@@ -234,6 +234,16 @@ def auth_headers(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def delete_starter_assistant(client: TestClient, headers: dict[str, str]) -> None:
+    """Remove the seeded orchestrator so a test that builds its own team
+    keeps pre-orchestrator dispatch (specialists match immediately)."""
+    agents = client.get("/api/v1/agents", headers=headers).json()
+    for agent in agents:
+        if agent["name"] == "Assistant":
+            deleted = client.delete(f"/api/v1/agents/{agent['id']}", headers=headers)
+            assert deleted.status_code in (200, 204), deleted.text
+
+
 def authorize_agent_for_builtin_tool(
     client: TestClient, headers: dict[str, str], agent_id: str, *tool_names: str
 ) -> None:

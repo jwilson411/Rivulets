@@ -1,8 +1,9 @@
 """Built-in tool library (FR-8.1). Each module exports an agno `@tool`-decorated
 callable; api/tools.py registers the ones a workspace enables against agents.
 
-`handoff` is the exception — it's not opt-in like the rest of this library;
-agentos/service.py attaches it to every agent unconditionally (FR-6.1).
+`handoff` and `engage_team` are the exceptions — they're not opt-in like
+the rest of this library; agentos/service.py attaches both to every agent
+unconditionally (FR-6.1, orchestrator lock).
 """
 
 from rivulets.tools.builtin.agents_teams import (
@@ -30,6 +31,7 @@ from rivulets.tools.builtin.code_exec import execute_python
 from rivulets.tools.builtin.db_query import query_workspace_db
 from rivulets.tools.builtin.files import read_attached_file
 from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
+from rivulets.tools.builtin.engage_team import engage_team
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
 from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
@@ -65,6 +67,7 @@ __all__ = [
     "delete_mcp_server",
     "delete_team",
     "delete_workflow",
+    "engage_team",
     "execute_python",
     "get_workspace_settings",
     "handoff",

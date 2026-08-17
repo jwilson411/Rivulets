@@ -99,6 +99,9 @@ def _create_agent(
 
 
 def _create_channel_with_team(client: TestClient, headers: dict[str, str], agent_id: str) -> str:
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, headers)
     team = client.post(
         "/api/v1/teams", json={"name": f"Settings Tool Test Team {agent_id}"}, headers=headers
     )

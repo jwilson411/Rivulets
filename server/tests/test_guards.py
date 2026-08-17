@@ -37,6 +37,9 @@ def _create_agent(client: TestClient, headers: dict[str, str], name: str, rule_t
 def _create_channel_with_team(
     client: TestClient, headers: dict[str, str], agent_ids: list[str]
 ) -> str:
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, headers)
     team = client.post("/api/v1/teams", json={"name": "Guard Test Team"}, headers=headers)
     team_id = team.json()["id"]
     client.patch(f"/api/v1/teams/{team_id}", json={"agent_ids": agent_ids}, headers=headers)

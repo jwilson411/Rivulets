@@ -717,6 +717,9 @@ async def test_delete_connection_queues_sync_tombstone(
 
 
 def _create_channel(client: TestClient, headers: dict[str, str], name: str) -> str:
+    from tests.conftest import delete_starter_assistant
+
+    delete_starter_assistant(client, headers)
     channel = client.post("/api/v1/channels", json={"name": name}, headers=headers)
     assert channel.status_code == 201, channel.text
     channel_id: str = channel.json()["id"]

@@ -9,7 +9,7 @@
 	import { agents, type Agent } from '$lib/api/agents';
 	import { files as filesApi } from '$lib/api/files';
 	import { formatClock } from '$lib/format';
-	import { teamComposerHint } from '$lib/teamRouting';
+	import { lockedTeamComposerHint, teamComposerHint } from '$lib/teamRouting';
 	import { agentInkMap, INK_AVATAR, HUMAN_AVATAR } from '$lib/ink';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
@@ -68,7 +68,10 @@
 		}
 		if (!selectedChannel) return null;
 		const team = teamList.find((t) => t.id === selectedChannel.team_id);
-		return team ? teamComposerHint(team.name) : 'No team on this channel — add one';
+		if (continueLast) {
+			return team ? teamComposerHint(team.name) : 'Assistant is listening';
+		}
+		return lockedTeamComposerHint();
 	});
 	let generalChannel = $derived(
 		activeChannels.find((c) => c.name === 'general') ?? activeChannels[0] ?? null

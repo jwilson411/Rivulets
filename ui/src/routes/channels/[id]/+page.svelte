@@ -12,7 +12,7 @@
 	import { agentInk, INK_AVATAR } from '$lib/ink';
 	import { formatClock } from '$lib/format';
 	import type { MentionCandidate } from '$lib/mentions';
-	import { teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
+	import { lockedTeamComposerHint, teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
@@ -63,9 +63,11 @@
 	let helper = $derived(
 		agentsNotReady
 			? "Agents aren't ready to run — sign out and back in"
-			: routedTeam
-				? teamComposerHint(routedTeam.name)
-				: "No team — agents won't answer"
+			: continueLast
+				? routedTeam
+					? teamComposerHint(routedTeam.name)
+					: 'Assistant is listening'
+				: lockedTeamComposerHint()
 	);
 	let speakSummary = $derived(
 		!agentsNotReady && teamMembers.length > 0
@@ -100,12 +102,19 @@
 	async function loadTeamMembers(teamId: string | null) {
 		teamMembers = [];
 		memberRules = {};
-		if (!teamId) return;
 		try {
-			const [detail, agentList] = await Promise.all([teams.get(teamId), agents.list()]);
-			teamMembers = (detail as TeamDetail).agent_ids
-				.map((id) => agentList.find((a) => a.id === id))
-				.filter((a): a is Agent => a !== undefined);
+			const agentList = await agents.list();
+			const byId = new Map(agentList.map((agent) => [agent.id, agent]));
+			if (teamId) {
+				const detail = (await teams.get(teamId)) as TeamDetail;
+				teamMembers = detail.agent_ids
+					.map((id) => byId.get(id))
+					.filter((a): a is Agent => a !== undefined);
+			}
+			const assistant = agentList.find((agent) => agent.name.toLowerCase() === 'assistant');
+			if (assistant && !teamMembers.some((member) => member.id === assistant.id)) {
+				teamMembers = [assistant, ...teamMembers];
+			}
 			const ruleEntries = await Promise.all(
 				teamMembers.map(async (member) => {
 					const rules = await agents.getRoutingRules(member.id).catch(() => [] as RoutingRule[]);
@@ -382,7 +391,7 @@
 							? 'bg-accent-soft font-semibold dark:bg-accent-soft-dark'
 							: 'hover:bg-paper dark:hover:bg-paper-dark'} text-muted dark:text-muted-dark"
 					>
-						No team — agents won't answer
+						No team — Assistant still answers
 					</button>
 				</div>
 			{/if}
