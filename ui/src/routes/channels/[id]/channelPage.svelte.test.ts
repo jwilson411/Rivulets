@@ -36,7 +36,14 @@ vi.mock('$lib/api/channels', () => ({
 }));
 
 vi.mock('$lib/api/rivulets', () => ({
-	rivulets: { listForChannel: vi.fn(), listMessages: vi.fn(), create: vi.fn() }
+	rivulets: {
+		listForChannel: vi.fn(),
+		listMessages: vi.fn(),
+		create: vi.fn(),
+		postMessage: vi.fn(),
+		close: vi.fn(),
+		resume: vi.fn()
+	}
 }));
 
 vi.mock('$lib/api/teams', () => ({
@@ -166,7 +173,7 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 	});
 
@@ -219,7 +226,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 
 		await page
@@ -240,7 +247,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 
 		await page
@@ -296,7 +303,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		const { container } = await render(ChannelPage);
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -323,7 +330,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		const { container } = await render(ChannelPage);
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 
 		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -344,7 +351,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText('Start the first conversation in #general.'))
+			.element(page.getByText('Each send starts a conversation — click a card to reply.').first())
 			.toBeInTheDocument();
 
 		await page.getByRole('button', { name: 'Send' }).click();
@@ -442,5 +449,60 @@ describe('channels/[id]/+page.svelte', () => {
 
 		await page.getByRole('button', { name: 'Mention Assistant' }).click();
 		await expect.element(input).toHaveValue('@Assistant ');
+	});
+
+	it('hides archived conversations until Archived is selected', async () => {
+		const archived: Rivulet = {
+			...kickoffRivulet,
+			id: 'riv-closed',
+			status: 'closed',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		seed({ rivulets: [kickoffRivulet, archived] });
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id: string) => {
+			if (id === 'riv-closed') {
+				return [{ ...humanMessage, id: 'msg-closed', rivulet_id: id, content: 'Old thread' }];
+			}
+			return [humanMessage, agentMessage];
+		});
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
+		await expect.element(page.getByText('Old thread')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archived' }).click();
+		await expect.element(page.getByText('Old thread')).toBeInTheDocument();
+	});
+
+	it('archives a conversation from the card after confirming', async () => {
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(rivulets.close).mockResolvedValueOnce(undefined);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archive', exact: true }).click();
+		await expect.element(page.getByText('Archive this conversation?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
+
+		expect(rivulets.close).toHaveBeenCalledWith('riv-1');
+		await expect.element(page.getByText('Kickoff message')).not.toBeInTheDocument();
+	});
+
+	it('continues the last conversation instead of creating a new one', async () => {
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(humanMessage);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Continue last' }).click();
+		await page.getByPlaceholder('Reply to the last conversation…').fill('Following up');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-1', 'Following up', []);
+		expect(rivulets.create).not.toHaveBeenCalled();
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-1');
 	});
 });

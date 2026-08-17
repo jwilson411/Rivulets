@@ -13,15 +13,20 @@
 	import { formatClock } from '$lib/format';
 	import type { MentionCandidate } from '$lib/mentions';
 	import { teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
+	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
+	import FilterChip from '$lib/ui/FilterChip.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
+	import Sheet from '$lib/ui/Sheet.svelte';
 	import SkeletonCards from '$lib/ui/SkeletonCards.svelte';
 	import StreamBar from '$lib/ui/StreamBar.svelte';
 
 	// Channel page (06-screens.md → Channel, mockup 1f): a room of thread
-	// cards. Posting here CREATES a new conversation (rivulet) — replies
-	// live inside each card's own page. There is no channel-root transcript.
+	// cards. Posting here CREATES a new conversation (rivulet) unless the
+	// composer is set to continue the last one (#412) — replies live
+	// inside each card's own page. There is no channel-root transcript.
+	// Closed rivulets hide behind Archived; DELETE is a soft archive.
 
 	interface ThreadPreview {
 		title: string;
@@ -44,6 +49,12 @@
 	let teamChangeError = $state<string | null>(null);
 	let posting = $state(false);
 	let postError = $state<string | null>(null);
+	let showArchived = $state(false);
+	let continueLast = $state(false);
+	let archiving = $state<Rivulet | null>(null);
+	let archiveBusy = $state(false);
+	let archiveError = $state<string | null>(null);
+	let listError = $state<string | null>(null);
 
 	let routedTeam = $derived(teamList.find((t) => t.id === channel?.team_id) ?? null);
 	let agentsNotReady = $derived(
@@ -70,6 +81,13 @@
 		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
 	);
 	let composer = $state<{ insertMention: (name: string) => void } | null>(null);
+	let openRivulets = $derived(rivuletList.filter((r) => r.status !== 'closed'));
+	let closedRivulets = $derived(rivuletList.filter((r) => r.status === 'closed'));
+	let visibleRivulets = $derived(showArchived ? closedRivulets : openRivulets);
+	let lastOpen = $derived(openRivulets[0] ?? null);
+	let composerPlaceholder = $derived(
+		continueLast && lastOpen ? 'Reply to the last conversation…' : 'Start a conversation…'
+	);
 
 	async function loadTeamMembers(teamId: string | null) {
 		teamMembers = [];
@@ -162,11 +180,18 @@
 		postError = null;
 		try {
 			const uploaded = await Promise.all(files.map((f) => filesApi.upload(f)));
-			const created = await rivulets.create(
-				channelId,
-				text,
-				uploaded.map((f) => f.file_id)
-			);
+			const fileIds = uploaded.map((f) => f.file_id);
+			if (continueLast && lastOpen) {
+				await rivulets.postMessage(lastOpen.id, text, fileIds);
+				goto(
+					resolve('/channels/[id]/rivulets/[rivuletId]', {
+						id: channelId,
+						rivuletId: lastOpen.id
+					})
+				);
+				return true;
+			}
+			const created = await rivulets.create(channelId, text, fileIds);
 			goto(
 				resolve('/channels/[id]/rivulets/[rivuletId]', { id: channelId, rivuletId: created.id })
 			);
@@ -176,6 +201,33 @@
 			return false;
 		} finally {
 			posting = false;
+		}
+	}
+
+	async function handleArchive() {
+		if (!archiving) return;
+		archiveBusy = true;
+		archiveError = null;
+		try {
+			await rivulets.close(archiving.id);
+			rivuletList = rivuletList.map((r) =>
+				r.id === archiving!.id ? { ...r, status: 'closed' } : r
+			);
+			archiving = null;
+		} catch {
+			archiveError = "Couldn't archive that conversation. Try again.";
+		} finally {
+			archiveBusy = false;
+		}
+	}
+
+	async function handleUnarchive(rivulet: Rivulet) {
+		listError = null;
+		try {
+			const updated = await rivulets.resume(rivulet.id);
+			rivuletList = rivuletList.map((r) => (r.id === rivulet.id ? updated : r));
+		} catch {
+			listError = "Couldn't unarchive that conversation. Try again.";
 		}
 	}
 
@@ -213,10 +265,13 @@
 				#{channel?.name ?? '…'}
 			</h1>
 			<div class="text-sm text-muted dark:text-muted-dark">
-				{rivuletList.length} conversation{rivuletList.length === 1 ? '' : 's'}{channel?.description
-					? ` · ${channel.description}`
-					: ''}
+				{openRivulets.length} conversation{openRivulets.length === 1
+					? ''
+					: 's'}{channel?.description ? ` · ${channel.description}` : ''}
 			</div>
+			<p class="mt-1.5 text-sm text-muted dark:text-muted-dark">
+				Each send starts a conversation — click a card to reply.
+			</p>
 		</div>
 		<div class="relative ml-auto flex max-w-full flex-none flex-col items-end gap-1.5">
 			<div
@@ -303,67 +358,119 @@
 				onRetry={() => load(page.params.id!)}
 			/>
 		{/if}
+		{#if !loading && !loadError && (openRivulets.length > 0 || closedRivulets.length > 0)}
+			<div class="mb-4 flex gap-2">
+				<FilterChip selected={!showArchived} onclick={() => (showArchived = false)}>
+					Active
+				</FilterChip>
+				<FilterChip selected={showArchived} onclick={() => (showArchived = true)}>
+					Archived
+				</FilterChip>
+			</div>
+		{/if}
+		{#if listError}
+			<ErrorBanner class="mb-4" message={listError} />
+		{/if}
 		{#if loading}
 			<SkeletonCards count={3} />
 		{:else if loadError}
 			<ErrorBanner message={loadError} onRetry={() => load(page.params.id!)} />
-		{:else if rivuletList.length === 0}
+		{:else if visibleRivulets.length === 0}
 			<p class="py-6 text-center text-base text-muted dark:text-muted-dark">
-				Start the first conversation in #{channel?.name ?? 'this channel'}.
+				{#if showArchived}
+					No archived conversations.
+				{:else}
+					Each send starts a conversation — click a card to reply.
+				{/if}
 			</p>
 		{:else}
 			<div class="flex flex-col gap-4">
-				{#each rivuletList as rivulet, i (rivulet.id)}
+				{#each visibleRivulets as rivulet, i (rivulet.id)}
 					{@const preview = previews[rivulet.id]}
 					{@const runNote = latestRunNote(rivulet.id)}
-					<a
-						href={resolve('/channels/[id]/rivulets/[rivuletId]', {
-							id: page.params.id!,
-							rivuletId: rivulet.id
-						})}
+					<div
 						class="flex min-h-[88px] gap-4 rounded-2xl border border-line bg-surface px-6 py-5 hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 					>
-						<span class="mt-2 h-2 w-2 flex-none rounded-full {dotClass(rivulet, i)}"></span>
-						<span class="min-w-0">
-							<span
-								class="mb-1 block truncate text-base leading-snug font-semibold text-ink dark:text-ink-dark"
-							>
-								{preview?.title ?? '…'}
-							</span>
-							{#if runNote}
+						<a
+							href={resolve('/channels/[id]/rivulets/[rivuletId]', {
+								id: page.params.id!,
+								rivuletId: rivulet.id
+							})}
+							class="flex min-w-0 flex-1 gap-4"
+						>
+							<span class="mt-2 h-2 w-2 flex-none rounded-full {dotClass(rivulet, i)}"></span>
+							<span class="min-w-0">
 								<span
-									class="block truncate text-[15px] {latestRunByRivulet[rivulet.id]?.status ===
-									'error'
-										? 'text-danger'
-										: 'text-warn'}"
+									class="mb-1 block truncate text-base leading-snug font-semibold text-ink dark:text-ink-dark"
 								>
-									{runNote}
+									{preview?.title ?? '…'}
 								</span>
-							{:else if rivulet.status === 'paused'}
-								<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
-									Paused — waiting on a person.
-								</span>
-							{:else if preview?.preview}
-								<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
-									{preview.preview}
-								</span>
-							{/if}
-							{#if preview?.lastSender}
-								<span class="mt-2 block text-[13px] text-muted dark:text-muted-dark">
-									{preview.lastSender}{preview.lastAt ? ` · ${formatClock(preview.lastAt)}` : ''}
-								</span>
-							{/if}
-						</span>
-					</a>
+								{#if rivulet.status === 'closed'}
+									<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
+										Archived
+									</span>
+								{:else if runNote}
+									<span
+										class="block truncate text-[15px] {latestRunByRivulet[rivulet.id]?.status ===
+										'error'
+											? 'text-danger'
+											: 'text-warn'}"
+									>
+										{runNote}
+									</span>
+								{:else if rivulet.status === 'paused'}
+									<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
+										Paused — waiting on a person.
+									</span>
+								{:else if preview?.preview}
+									<span class="block truncate text-[15px] text-muted dark:text-muted-dark">
+										{preview.preview}
+									</span>
+								{/if}
+								{#if preview?.lastSender}
+									<span class="mt-2 block text-[13px] text-muted dark:text-muted-dark">
+										{preview.lastSender}{preview.lastAt ? ` · ${formatClock(preview.lastAt)}` : ''}
+									</span>
+								{/if}
+							</span>
+						</a>
+						{#if rivulet.status === 'closed'}
+							<button
+								type="button"
+								onclick={() => handleUnarchive(rivulet)}
+								class="self-center text-sm font-semibold text-accent hover:text-accent-deep dark:text-accent-dark"
+							>
+								Unarchive
+							</button>
+						{:else}
+							<button
+								type="button"
+								onclick={() => (archiving = rivulet)}
+								class="self-center text-sm font-semibold text-muted hover:text-ink dark:text-muted-dark dark:hover:text-ink-dark"
+							>
+								Archive
+							</button>
+						{/if}
+					</div>
 				{/each}
 			</div>
 		{/if}
 	</div>
 
 	<div class="px-4 pb-24 md:px-10 md:pb-7">
+		{#if lastOpen}
+			<div class="mb-3 flex flex-wrap gap-2">
+				<FilterChip selected={!continueLast} onclick={() => (continueLast = false)}>
+					New conversation
+				</FilterChip>
+				<FilterChip selected={continueLast} onclick={() => (continueLast = true)}>
+					Continue last
+				</FilterChip>
+			</div>
+		{/if}
 		<StreamBar
 			bind:this={composer}
-			placeholder="Start a conversation…"
+			placeholder={composerPlaceholder}
 			{helper}
 			busy={posting}
 			error={postError}
@@ -373,3 +480,20 @@
 		/>
 	</div>
 </div>
+
+{#if archiving}
+	<Sheet title="Archive this conversation?" onClose={() => (archiving = null)} width={480}>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			It leaves the channel list. You can find it under Archived and restore it.
+		</p>
+		{#if archiveError}
+			<p class="text-sm text-danger">{archiveError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (archiving = null)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleArchive} disabled={archiveBusy}>
+				{archiveBusy ? 'Archiving…' : 'Archive'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
