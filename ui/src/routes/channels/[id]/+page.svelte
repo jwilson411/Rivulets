@@ -11,6 +11,7 @@
 	import { files as filesApi } from '$lib/api/files';
 	import { agentInk, INK_AVATAR } from '$lib/ink';
 	import { formatClock } from '$lib/format';
+	import type { MentionCandidate } from '$lib/mentions';
 	import { teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
@@ -65,6 +66,10 @@
 				)
 			: ''
 	);
+	let mentionCandidates = $derived<MentionCandidate[]>(
+		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
+	);
+	let composer = $state<{ insertMention: (name: string) => void } | null>(null);
 
 	async function loadTeamMembers(teamId: string | null) {
 		teamMembers = [];
@@ -214,29 +219,41 @@
 			</div>
 		</div>
 		<div class="relative ml-auto flex max-w-full flex-none flex-col items-end gap-1.5">
-			<button
-				type="button"
-				onclick={() => (teamMenuOpen = !teamMenuOpen)}
-				aria-expanded={teamMenuOpen}
-				class="flex h-10 items-center gap-2.5 rounded-lg border border-line bg-surface px-3.5 hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
+			<div
+				class="flex h-10 items-center rounded-lg border border-line bg-surface hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 			>
 				{#if teamMembers.length > 0}
-					<span class="flex">
+					<span class="flex pl-2">
 						{#each teamMembers.slice(0, 4) as member, i (member.id)}
-							<Disc
-								name={member.name}
-								colorClass={INK_AVATAR[agentInk(i)]}
-								size={24}
-								class="border-2 border-surface dark:border-surface-dark {i > 0 ? '-ml-2' : ''}"
-							/>
+							<button
+								type="button"
+								title="Mention {member.name}"
+								aria-label="Mention {member.name}"
+								onclick={() => composer?.insertMention(member.name)}
+								class="flex items-center {i > 0 ? '-ml-2' : ''}"
+							>
+								<Disc
+									name={member.name}
+									colorClass={INK_AVATAR[agentInk(i)]}
+									size={24}
+									class="border-2 border-surface dark:border-surface-dark"
+								/>
+							</button>
 						{/each}
 					</span>
 				{/if}
-				<span class="text-sm font-semibold text-ink dark:text-ink-dark">
-					{routedTeam?.name ?? 'No team'}
-				</span>
-				<Icon name="chevron-down" class="h-3.5 w-3.5 text-muted dark:text-muted-dark" />
-			</button>
+				<button
+					type="button"
+					onclick={() => (teamMenuOpen = !teamMenuOpen)}
+					aria-expanded={teamMenuOpen}
+					class="flex h-10 items-center gap-2.5 px-3.5"
+				>
+					<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+						{routedTeam?.name ?? 'No team'}
+					</span>
+					<Icon name="chevron-down" class="h-3.5 w-3.5 text-muted dark:text-muted-dark" />
+				</button>
+			</div>
 			{#if teamMenuOpen}
 				<div
 					class="absolute right-0 z-30 mt-2 w-64 rounded-xl border border-line bg-surface p-2 shadow-pop dark:border-line-dark dark:bg-surface-dark"
@@ -345,11 +362,13 @@
 
 	<div class="px-4 pb-24 md:px-10 md:pb-7">
 		<StreamBar
+			bind:this={composer}
 			placeholder="Start a conversation…"
 			{helper}
 			busy={posting}
 			error={postError}
 			slashWorkflows={workflowList}
+			{mentionCandidates}
 			onSend={handlePost}
 		/>
 	</div>

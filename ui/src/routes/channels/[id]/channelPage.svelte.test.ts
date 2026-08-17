@@ -155,7 +155,9 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 
-		await expect.element(page.getByText('Last run is stuck — no steps recorded.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Last run is stuck — no steps recorded.'))
+			.toBeInTheDocument();
 	});
 
 	it('shows the empty state when the channel has no conversations', async () => {
@@ -408,5 +410,37 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 
 		await expect.element(page.getByText('Nobody picked this up.')).toBeInTheDocument();
+	});
+
+	it('opens an @mention picker for team agents and inserts from a member disc', async () => {
+		const assistant: Agent = {
+			id: 'agent-1',
+			name: 'Assistant',
+			description: 'Generalist',
+			instructions: 'Help.',
+			model: 'auto',
+			fallback_models: [],
+			approved_for_unattended_tools: false,
+			agentos_agent_id: 'agent-1'
+		};
+		seed({
+			channel: { ...generalChannel, team_id: 'team-1' },
+			teams: [supportTeam]
+		});
+		vi.mocked(teams.get).mockResolvedValue({ ...supportTeam, agent_ids: ['agent-1'] });
+		vi.mocked(agents.list).mockResolvedValue([assistant]);
+		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
+
+		render(ChannelPage);
+		await expect
+			.element(page.getByText('Support answers when a rule or @mention matches'))
+			.toBeInTheDocument();
+
+		const input = page.getByPlaceholder('Start a conversation…');
+		await input.fill('@');
+		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Mention Assistant' }).click();
+		await expect.element(input).toHaveValue('@Assistant ');
 	});
 });

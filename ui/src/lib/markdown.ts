@@ -18,10 +18,26 @@ function escapeHtml(text: string): string {
 		.replaceAll("'", '&#39;');
 }
 
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Wrap `@Name` that matches a known teammate/person. Runs on already-escaped
+// text so the span is the only markup we add; names are compared
+// case-insensitively to match dispatch/engine.py.
+function highlightMentions(escaped: string, mentionNames: string[]): string {
+	const tokens = [
+		...new Set(mentionNames.filter((name) => name.length > 0).map((name) => escapeHtml(name)))
+	].sort((a, b) => b.length - a.length);
+	if (tokens.length === 0) return escaped;
+	const re = new RegExp(`@(${tokens.map(escapeRegExp).join('|')})(?![A-Za-z0-9_-])`, 'gi');
+	return escaped.replace(re, '<span class="mention">@$1</span>');
+}
+
 // Inline transforms run on already-escaped text. Inline code is extracted
 // into NUL-delimited placeholders first so `**not bold**` inside backticks
 // stays literal — a NUL can't appear in user text that survived escaping.
-function renderInline(text: string): string {
+function renderInline(text: string, mentionNames: string[] = []): string {
 	const codeSpans: string[] = [];
 	let out = escapeHtml(text).replace(/`([^`]+)`/g, (_, code: string) => {
 		codeSpans.push(`<code>${code}</code>`);
@@ -36,11 +52,12 @@ function renderInline(text: string): string {
 
 	out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 	out = out.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+	out = highlightMentions(out, mentionNames);
 
 	return out.replace(PLACEHOLDER_RE, (_, i: string) => codeSpans[Number(i)]);
 }
 
-export function renderMarkdown(src: string): string {
+export function renderMarkdown(src: string, mentionNames: string[] = []): string {
 	// Strip any literal NULs up front so user text can never collide with
 	// the inline-code placeholder scheme above.
 	const lines = src.replaceAll(NUL, '').split('\n');
@@ -72,7 +89,7 @@ export function renderMarkdown(src: string): string {
 		const heading = /^(#{1,3})\s+(.*)$/.exec(line);
 		if (heading) {
 			const level = heading[1].length;
-			blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+			blocks.push(`<h${level}>${renderInline(heading[2], mentionNames)}</h${level}>`);
 			i += 1;
 			continue;
 		}
@@ -81,7 +98,7 @@ export function renderMarkdown(src: string): string {
 		if (/^\s*[-*]\s+/.test(line)) {
 			const items: string[] = [];
 			while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-				items.push(`<li>${renderInline(lines[i].replace(/^\s*[-*]\s+/, ''))}</li>`);
+				items.push(`<li>${renderInline(lines[i].replace(/^\s*[-*]\s+/, ''), mentionNames)}</li>`);
 				i += 1;
 			}
 			blocks.push(`<ul>${items.join('')}</ul>`);
@@ -92,7 +109,9 @@ export function renderMarkdown(src: string): string {
 		if (/^\s*\d+[.)]\s+/.test(line)) {
 			const items: string[] = [];
 			while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
-				items.push(`<li>${renderInline(lines[i].replace(/^\s*\d+[.)]\s+/, ''))}</li>`);
+				items.push(
+					`<li>${renderInline(lines[i].replace(/^\s*\d+[.)]\s+/, ''), mentionNames)}</li>`
+				);
 				i += 1;
 			}
 			blocks.push(`<ol>${items.join('')}</ol>`);
@@ -103,7 +122,7 @@ export function renderMarkdown(src: string): string {
 		if (/^\s*>\s?/.test(line)) {
 			const quoted: string[] = [];
 			while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-				quoted.push(renderInline(lines[i].replace(/^\s*>\s?/, '')));
+				quoted.push(renderInline(lines[i].replace(/^\s*>\s?/, ''), mentionNames));
 				i += 1;
 			}
 			blocks.push(`<blockquote>${quoted.join('<br>')}</blockquote>`);
@@ -117,7 +136,7 @@ export function renderMarkdown(src: string): string {
 			lines[i].trim() !== '' &&
 			!/^(#{1,3}\s|\s*```|\s*[-*]\s+|\s*\d+[.)]\s+|\s*>\s?)/.test(lines[i])
 		) {
-			para.push(renderInline(lines[i]));
+			para.push(renderInline(lines[i], mentionNames));
 			i += 1;
 		}
 		blocks.push(`<p>${para.join('<br>')}</p>`);

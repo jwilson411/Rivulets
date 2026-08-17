@@ -13,6 +13,7 @@ import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { channels, type Channel } from '$lib/api/channels';
 import { files as filesApi } from '$lib/api/files';
 import { teams } from '$lib/api/teams';
+import { agents } from '$lib/api/agents';
 import { workflows } from '$lib/api/workflows';
 import { runs } from '$lib/api/runs';
 
@@ -57,7 +58,11 @@ vi.mock('$lib/api/rivulets', () => ({
 }));
 
 vi.mock('$lib/api/teams', () => ({
-	teams: { list: vi.fn() }
+	teams: { list: vi.fn(), get: vi.fn() }
+}));
+
+vi.mock('$lib/api/agents', () => ({
+	agents: { list: vi.fn() }
 }));
 
 vi.mock('$lib/api/workflows', () => ({
@@ -671,5 +676,40 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 
 		source.emit('error', {});
 		await expect.element(page.getByText('Thinking…')).not.toBeInTheDocument();
+	});
+
+	it('highlights a resolved @mention and offers teammates in the composer picker', async () => {
+		const mentioned: Message = {
+			...humanMessage,
+			content: '@Assistant ping'
+		};
+		seed([mentioned]);
+		vi.mocked(channels.get).mockResolvedValue({ ...generalChannel, team_id: 'team-1' });
+		vi.mocked(teams.list).mockResolvedValue([{ id: 'team-1', name: 'Support', description: null }]);
+		vi.mocked(teams.get).mockResolvedValue({
+			id: 'team-1',
+			name: 'Support',
+			description: null,
+			agent_ids: ['agent-1']
+		});
+		vi.mocked(agents.list).mockResolvedValue([
+			{
+				id: 'agent-1',
+				name: 'Assistant',
+				description: 'Generalist',
+				instructions: 'Help.',
+				model: 'auto',
+				fallback_models: [],
+				approved_for_unattended_tools: false,
+				agentos_agent_id: 'agent-1'
+			}
+		]);
+
+		const { container } = await render(RivuletPage);
+		await expect.element(page.getByText(/type @ to mention/)).toBeInTheDocument();
+		expect(container.querySelector('.mention')?.textContent).toBe('@Assistant');
+
+		await page.getByPlaceholder('Reply to this conversation…').fill('@');
+		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
 	});
 });
