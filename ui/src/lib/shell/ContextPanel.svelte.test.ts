@@ -1,5 +1,6 @@
-// Browser-mode component test for the desktop channel sidebar: the
-// filter must have a visible placeholder and an accessible name (#415).
+// Browser-mode component test for the desktop channel sidebar: Search /
+// jump opens the shared palette (#416). The local channel filter that
+// #415 named is gone — jump-to-channel lives in the palette now.
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -46,17 +47,19 @@ const testChannel: Channel = {
 };
 
 describe('ContextPanel.svelte', () => {
-	it('names the channel filter and hides channels that do not match', async () => {
+	it('exposes Search / jump and still lists channels (#416)', async () => {
 		vi.mocked(channels.list).mockResolvedValue([testChannel]);
+		const onOpenPalette = vi.fn();
 
-		render(ContextPanel);
+		render(ContextPanel, { onOpenPalette });
 
-		const search = page.getByRole('searchbox', { name: 'Filter channels', includeHidden: true });
-		await expect.element(search).toBeInTheDocument();
-		await expect.element(search).toHaveAttribute('placeholder', 'Filter channels');
+		// The aside is `lg:flex` / `hidden` at the default test viewport,
+		// so query with includeHidden — click-to-open is covered on the
+		// layout through More, which is always reachable.
+		await expect
+			.element(page.getByRole('button', { name: 'Search / jump', includeHidden: true }))
+			.toBeInTheDocument();
 		await expect.element(page.getByText('test-channel')).toBeInTheDocument();
-
-		await search.fill('nope');
-		await expect.element(page.getByText('test-channel')).not.toBeInTheDocument();
+		expect(onOpenPalette).not.toHaveBeenCalled();
 	});
 });

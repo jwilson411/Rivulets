@@ -9,6 +9,7 @@
 	import { initials } from '$lib/ink';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
+	import SearchJumpButton from '$lib/shell/SearchJumpButton.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
 
 	// The "More" sheet (mockup 2c): grouped cards with large type, 64px
@@ -16,7 +17,13 @@
 	// disabled (2q); their Settings row is spend status only.
 	// #417: phone chrome hides IconRail (and its avatar menu), so Account
 	// lives here — theme, switch name, sign out — rather than only on md+.
-	let { onClose }: { onClose: () => void } = $props();
+	let {
+		onClose,
+		onOpenPalette
+	}: {
+		onClose: () => void;
+		onOpenPalette: () => void;
+	} = $props();
 
 	let agentCount = $state<number | null>(null);
 	let teamCount = $state<number | null>(null);
@@ -60,6 +67,13 @@
 {/snippet}
 
 <Sheet title="More" {onClose} width={640}>
+	<SearchJumpButton
+		class="mb-6"
+		onOpen={() => {
+			onClose();
+			onOpenPalette();
+		}}
+	/>
 	<div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
 		<div class="flex flex-col gap-2 sm:col-span-2">
 			<SectionLabel>Account</SectionLabel>

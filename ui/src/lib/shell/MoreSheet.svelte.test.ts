@@ -53,7 +53,7 @@ describe('MoreSheet.svelte', () => {
 	it('puts theme, switch-name, and sign out on Account so phone chrome can reach them (#417)', async () => {
 		seedLists();
 		const onClose = vi.fn();
-		render(MoreSheet, { onClose });
+		render(MoreSheet, { onClose, onOpenPalette: vi.fn() });
 
 		await expect.element(page.getByText('Account')).toBeInTheDocument();
 		await expect.element(page.getByText('Riley')).toBeInTheDocument();
@@ -71,7 +71,7 @@ describe('MoreSheet.svelte', () => {
 	it('hides switch-name for guests and still offers sign out and theme', async () => {
 		seedLists();
 		authState.grant = 'guest';
-		render(MoreSheet, { onClose: vi.fn() });
+		render(MoreSheet, { onClose: vi.fn(), onOpenPalette: vi.fn() });
 
 		await expect.element(page.getByText('Guest')).toBeInTheDocument();
 		await expect
@@ -84,7 +84,7 @@ describe('MoreSheet.svelte', () => {
 	it('signs out and closes the sheet', async () => {
 		seedLists();
 		const onClose = vi.fn();
-		render(MoreSheet, { onClose });
+		render(MoreSheet, { onClose, onOpenPalette: vi.fn() });
 
 		await page.getByRole('button', { name: 'Sign out' }).click();
 
@@ -95,7 +95,7 @@ describe('MoreSheet.svelte', () => {
 	it('clears identity and closes when the owner switches name', async () => {
 		seedLists();
 		const onClose = vi.fn();
-		render(MoreSheet, { onClose });
+		render(MoreSheet, { onClose, onOpenPalette: vi.fn() });
 
 		await page.getByRole('button', { name: 'Use a different name' }).click();
 
@@ -105,7 +105,7 @@ describe('MoreSheet.svelte', () => {
 
 	it('applies a theme choice from the Account section', async () => {
 		seedLists();
-		render(MoreSheet, { onClose: vi.fn() });
+		render(MoreSheet, { onClose: vi.fn(), onOpenPalette: vi.fn() });
 
 		await page.getByRole('button', { name: 'Dark' }).click();
 

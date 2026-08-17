@@ -80,8 +80,12 @@
 {:else}
 	<div class="flex h-screen flex-col">
 		<div class="flex min-h-0 flex-1">
-			<IconRail onOpenMore={() => (moreOpen = true)} onOpenAccount={() => (accountOpen = true)} />
-			<ContextPanel />
+			<IconRail
+				onOpenMore={() => (moreOpen = true)}
+				onOpenAccount={() => (accountOpen = true)}
+				onOpenPalette={() => (paletteOpen = true)}
+			/>
+			<ContextPanel onOpenPalette={() => (paletteOpen = true)} />
 			<main class="min-w-0 flex-1 overflow-y-auto">
 				{@render children()}
 			</main>
@@ -90,7 +94,13 @@
 	</div>
 
 	{#if moreOpen}
-		<MoreSheet onClose={() => (moreOpen = false)} />
+		<MoreSheet
+			onClose={() => (moreOpen = false)}
+			onOpenPalette={() => {
+				moreOpen = false;
+				paletteOpen = true;
+			}}
+		/>
 	{/if}
 	{#if accountOpen}
 		<AccountMenu onClose={() => (accountOpen = false)} />

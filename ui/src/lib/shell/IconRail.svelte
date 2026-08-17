@@ -7,17 +7,21 @@
 	import { readLastChannel } from '$lib/lastChannel';
 	import { initials } from '$lib/ink';
 	import Icon from '$lib/ui/Icon.svelte';
+	import { paletteShortcutLabel } from '$lib/format';
 
 	// 72px icon rail (04-information-architecture.md → Chrome): House,
-	// Hash, Inbox (pending badge), Grid ("More" sheet), avatar menu at the
-	// bottom. Desktop only — MobileTabs is the phone equivalent, and
-	// MoreSheet carries Account because this rail is `hidden` below md.
+	// Search (palette), Hash, Inbox (pending badge), Grid ("More" sheet),
+	// avatar menu at the bottom. Desktop only — MobileTabs is the phone
+	// equivalent, and MoreSheet carries Account because this rail is
+	// `hidden` below md.
 	let {
 		onOpenMore,
-		onOpenAccount
+		onOpenAccount,
+		onOpenPalette
 	}: {
 		onOpenMore: () => void;
 		onOpenAccount: () => void;
+		onOpenPalette: () => void;
 	} = $props();
 
 	approvalsBadge.refresh();
@@ -60,6 +64,16 @@
 	>
 		<Icon name="home" class="h-6 w-6" />
 	</a>
+
+	<button
+		type="button"
+		onclick={onOpenPalette}
+		title="Search / jump ({paletteShortcutLabel()})"
+		aria-label="Search / jump"
+		class="flex h-12 w-12 items-center justify-center rounded-xl {railClass(false)}"
+	>
+		<Icon name="search" class="h-6 w-6" />
+	</button>
 
 	<button
 		type="button"
