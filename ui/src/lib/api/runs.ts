@@ -50,6 +50,7 @@ export interface RunSpan {
 	started_at: string;
 	completed_at: string | null;
 	duration_ms: number | null;
+	error_message: string | null;
 	tool_calls: ToolCall[];
 }
 

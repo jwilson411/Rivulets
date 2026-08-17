@@ -1164,6 +1164,18 @@ _RETRYABLE_KEYWORDS = (
     "overloaded",
 )
 _ERROR_CODE_PATTERN = re.compile(r"[Ee]rror code:\s*(\d{3})")
+_RUN_ERROR_LIMIT = 300
+
+
+def _sanitize_run_error(text: str, *, limit: int = _RUN_ERROR_LIMIT) -> str:
+    """#405: collapse whitespace and cap length so Runs detail can show
+    `str(exc)` without dumping a stack-shaped wall of text into the
+    page. The rivulet thread still uses a plain-language system_alert
+    (NFR-5.4) and never displays this string."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) > limit:
+        return cleaned[: limit - 1] + "…"
+    return cleaned
 
 
 def _is_retryable_error(text: str) -> bool:
@@ -1502,13 +1514,29 @@ async def _invoke_agent(
         # our own run_agent() (e.g. "not registered") that happen before
         # agno even gets a chance to run, and the case where every entry
         # in the fallback chain (#103) was exhausted without success.
+        # #405: this path used to log + SSE `error` only, so the thread
+        # showed dead air after the human message. Persist the same
+        # system_alert shape as the RunStatus.error branch below; POST
+        # is synchronous, so the refetch after send picks it up without
+        # relying on SSE. The sanitized exception rides the RunSpan so
+        # Runs detail can show why.
         assert exc is not None
         logger.warning(
             "Agent %r failed to respond in rivulet %r", agent.name, rivulet.id, exc_info=exc
         )
-        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(exc)})
+        reason = _sanitize_run_error(str(exc))
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": reason})
         _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
-        await finish_span(db, agent_span_id, status="error")
+        await finish_span(db, agent_span_id, status="error", error_message=reason)
+        message = Message(
+            rivulet_id=rivulet.id,
+            sender_type="system",
+            sender_name="system",
+            content=f"{agent.name} couldn't respond — it failed before a run started.",
+            content_type="system_alert",
+        )
+        db.add(message)
+        new_messages.append(message)
         await db.commit()
         return new_messages
 
@@ -1522,7 +1550,8 @@ async def _invoke_agent(
         logger.warning(
             "Agent %r run failed in rivulet %r: %s", agent.name, rivulet.id, run_output.content
         )
-        publish(rivulet.id, "error", {"agent_id": agent.id, "error": str(run_output.content)})
+        reason = _sanitize_run_error(str(run_output.content))
+        publish(rivulet.id, "error", {"agent_id": agent.id, "error": reason})
         _restore_guard_state(guard_state, guard_snapshot)  # #237: failed call, undo the reservation
         error_run = await record_agent_run(
             db,
@@ -1541,6 +1570,7 @@ async def _invoke_agent(
             model=served_model,
             cost_usd=error_run.cost_usd,
             total_tokens=error_run.total_tokens,
+            error_message=reason,
         )
         message = Message(
             rivulet_id=rivulet.id,

@@ -99,6 +99,7 @@ async def test_run_migrations_on_fresh_db_creates_full_schema(settings: Settings
     tables = _sqlite_tables(settings.db_path)
     assert {"workspace", "agent", "workflow", "knowledge_base"} <= tables
     assert "fallback_models" in _sqlite_columns(settings.db_path, "agent")
+    assert "error_message" in _sqlite_columns(settings.db_path, "run_span")
 
 
 async def test_run_migrations_upgrades_legacy_schema(settings: Settings) -> None:
