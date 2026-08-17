@@ -1,5 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { formatBytes, formatClock, timeAgo } from './format';
+import { formatBytes, formatClock, paletteShortcutLabel, timeAgo } from './format';
+
+describe('paletteShortcutLabel', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('prints ⌘K on Apple platforms', () => {
+		vi.stubGlobal('navigator', { platform: 'MacIntel' });
+		expect(paletteShortcutLabel()).toBe('⌘K');
+	});
+
+	it('prints Ctrl+K elsewhere', () => {
+		vi.stubGlobal('navigator', { platform: 'Linux x86_64' });
+		expect(paletteShortcutLabel()).toBe('Ctrl+K');
+	});
+});
 
 describe('formatBytes', () => {
 	it('formats sub-1024-byte sizes as whole bytes', () => {

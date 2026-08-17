@@ -8,10 +8,14 @@
 	import Icon from '$lib/ui/Icon.svelte';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
+	import SearchJumpButton from '$lib/shell/SearchJumpButton.svelte';
 
 	// Desktop context panel (04-information-architecture.md → Chrome):
 	// the channel list on Home / Channels, a section nav on "More" rooms,
-	// nothing anywhere else.
+	// nothing anywhere else. Search / jump opens the shared ⌘K palette
+	// (#416) — the local channel filter used to live here and hid the
+	// palette entirely.
+	let { onOpenPalette }: { onOpenPalette: () => void } = $props();
 
 	interface NavItem {
 		label: string;
@@ -62,7 +66,6 @@
 
 	let channelList = $state<Channel[]>([]);
 	let loadError = $state<string | null>(null);
-	let search = $state('');
 	let creating = $state(false);
 	let newName = $state('');
 	let createBusy = $state(false);
@@ -79,11 +82,7 @@
 					null)
 	);
 
-	let visibleChannels = $derived(
-		channelList.filter(
-			(c) => !c.archived && c.name.toLowerCase().includes(search.trim().toLowerCase())
-		)
-	);
+	let visibleChannels = $derived(channelList.filter((c) => !c.archived));
 
 	async function refresh() {
 		loadError = null;
@@ -127,17 +126,7 @@
 		class="hidden h-full w-[280px] flex-none flex-col border-r border-line px-4 pt-6 pb-4 lg:flex dark:border-line-dark"
 		aria-label="Channels"
 	>
-		<label
-			class="mb-5 flex h-11 items-center gap-2.5 rounded-lg border border-line bg-surface px-3.5 focus-within:border-accent dark:border-line-dark dark:bg-surface-dark dark:focus-within:border-accent-dark"
-		>
-			<Icon name="search" class="h-[18px] w-[18px] flex-none text-muted dark:text-muted-dark" />
-			<input
-				type="search"
-				bind:value={search}
-				placeholder="Search channels"
-				class="min-w-0 flex-1 bg-transparent text-[15px] text-ink placeholder:text-muted focus:outline-none dark:text-ink-dark dark:placeholder:text-muted-dark"
-			/>
-		</label>
+		<SearchJumpButton class="mb-5" onOpen={onOpenPalette} />
 		<SectionLabel class="mb-2 px-3.5">Channels</SectionLabel>
 		<div class="flex flex-1 flex-col gap-1 overflow-y-auto">
 			{#if loadError}
@@ -176,6 +165,7 @@
 		class="hidden h-full w-[240px] flex-none flex-col border-r border-line px-4 pt-8 lg:flex dark:border-line-dark"
 		aria-label={activeGroup.label}
 	>
+		<SearchJumpButton class="mb-5" onOpen={onOpenPalette} />
 		<SectionLabel class="mb-3 px-3.5">{activeGroup.label}</SectionLabel>
 		<div class="flex flex-col gap-1">
 			{#each activeGroup.items.filter((i) => !i.ownerOnly || auth.grant === 'owner') as item (item.path)}

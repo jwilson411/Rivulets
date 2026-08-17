@@ -66,6 +66,9 @@ vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
 vi.mock('$lib/api/approvals', () => ({ approvals: { list: vi.fn() } }));
+vi.mock('$lib/api/workflows', () => ({
+	workflows: { list: vi.fn().mockResolvedValue([]) }
+}));
 
 function childrenSnippet(text: string) {
 	return createRawSnippet(() => ({
@@ -195,6 +198,29 @@ describe('routes/+layout.svelte', () => {
 			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
 		expect(resumeInviteSessionMock).not.toHaveBeenCalled();
+	});
+
+	it('opens the command palette from the Search / jump control (#416)', async () => {
+		authState.isAuthenticated = true;
+		authState.humanId = 'human-1';
+		authState.displayName = 'Riley';
+		authState.grant = 'owner';
+		const { channels } = await import('$lib/api/channels');
+		const { approvals } = await import('$lib/api/approvals');
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(approvals.list).mockResolvedValue([]);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		// Rail/sidebar hide below md/lg, but More is always reachable
+		// (icon rail or the phone tab bar). The sheet is the viewport-safe
+		// way to prove the chrome actually opens the same palette.
+		await page.getByRole('button', { name: 'More' }).first().click();
+		await expect.element(page.getByRole('dialog', { name: 'More' })).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Search / jump' }).click();
+
+		await expect.element(page.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument();
+		await expect.element(page.getByLabelText('Command palette search')).toBeInTheDocument();
 	});
 
 	it('renders routed children directly on an /invite/ route, bypassing auth entirely', async () => {

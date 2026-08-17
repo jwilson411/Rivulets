@@ -7,11 +7,18 @@
 	import { mcpServers } from '$lib/api/mcpServers';
 	import Sheet from '$lib/ui/Sheet.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
+	import SearchJumpButton from '$lib/shell/SearchJumpButton.svelte';
 
 	// The "More" sheet (mockup 2c): grouped cards with large type, 64px
 	// rows. Guests never see Providers, Sync, or Invites — hidden, not
 	// disabled (2q); their Settings row is spend status only.
-	let { onClose }: { onClose: () => void } = $props();
+	let {
+		onClose,
+		onOpenPalette
+	}: {
+		onClose: () => void;
+		onOpenPalette: () => void;
+	} = $props();
 
 	let agentCount = $state<number | null>(null);
 	let teamCount = $state<number | null>(null);
@@ -49,6 +56,13 @@
 {/snippet}
 
 <Sheet title="More" {onClose} width={640}>
+	<SearchJumpButton
+		class="mb-6"
+		onOpen={() => {
+			onClose();
+			onOpenPalette();
+		}}
+	/>
 	<div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
 		<div class="flex flex-col gap-2">
 			<SectionLabel>People</SectionLabel>
