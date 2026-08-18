@@ -40,6 +40,7 @@ describe('humanizeToolName', () => {
 		expect(humanizeToolName('query_workspace_db')).toBe('Query workspace DB');
 		expect(humanizeToolName('list_mcp_servers')).toBe('List MCP servers');
 		expect(humanizeToolName('google_gmail_search')).toBe('Google Gmail search');
+		expect(humanizeToolName('google_drive_search')).toBe('Google Drive search');
 	});
 });
 
@@ -69,6 +70,7 @@ describe('isGoogleIntegrationTool', () => {
 	it('marks Gmail and Calendar tools, not model-provider tools', () => {
 		expect(isGoogleIntegrationTool('google_gmail_search')).toBe(true);
 		expect(isGoogleIntegrationTool('google_calendar_list')).toBe(true);
+		expect(isGoogleIntegrationTool('google_drive_search')).toBe(true);
 		expect(isGoogleIntegrationTool('web_search')).toBe(false);
 		expect(SETTINGS_INTEGRATIONS_SEARCH).toBe('?tab=integrations');
 		expect(SETTINGS_INTEGRATIONS_HREF).toBe('/settings?tab=integrations');
