@@ -103,6 +103,40 @@ describe('workflows/+page.svelte', () => {
 		await expect.element(page.getByText('/nightly-digest')).toBeInTheDocument();
 	});
 
+	it('reserves "No workflows yet" for a truly empty library (#479)', async () => {
+		seed([]);
+
+		render(WorkflowsPage);
+
+		await expect.element(page.getByText('No workflows yet.')).toBeInTheDocument();
+	});
+
+	it('says no published workflows when drafts exist but Published is empty (#479)', async () => {
+		seed([nightlyDigest]);
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText('/nightly-digest')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Published', exact: true }).click();
+
+		await expect.element(page.getByText('No published workflows.')).toBeInTheDocument();
+		await expect.element(page.getByText('No workflows yet.')).not.toBeInTheDocument();
+		await expect.element(page.getByText('/nightly-digest')).not.toBeInTheDocument();
+	});
+
+	it('says no drafts when only published workflows exist (#479)', async () => {
+		seed([retryCheck]);
+
+		render(WorkflowsPage);
+		await expect.element(page.getByText('/retry-check')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Draft', exact: true }).click();
+
+		await expect.element(page.getByText('No drafts.')).toBeInTheDocument();
+		await expect.element(page.getByText('No workflows yet.')).not.toBeInTheDocument();
+		await expect.element(page.getByText('/retry-check')).not.toBeInTheDocument();
+	});
+
 	it('shows the failed-run banner with a way into the conversation (#94)', async () => {
 		seed([retryCheck], [failedRun]);
 
