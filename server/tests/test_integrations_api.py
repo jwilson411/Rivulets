@@ -110,6 +110,9 @@ def test_connect_returns_google_authorization_url(
     assert query["access_type"] == ["offline"]
     assert "state" in query
     assert "gmail.readonly" in query["scope"][0]
+    assert "drive.readonly" in query["scope"][0]
+    assert "documents.readonly" in query["scope"][0]
+    assert "spreadsheets.readonly" in query["scope"][0]
 
 
 def test_invite_grant_cannot_connect_or_list(

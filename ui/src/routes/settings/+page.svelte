@@ -705,9 +705,10 @@
 			<section class="flex flex-col gap-3">
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
-					Connect a Google account so assigned agents can read Gmail and list Calendar. Sending mail
-					and creating events stay extra-gated. Tokens live in this machine's credential store, not
-					the workspace database.
+					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs, and
+					Sheets. Sending mail, creating events, and writing files stay extra-gated. Tokens live in
+					this machine's credential store, not the workspace database. Already connected? Disconnect
+					and connect again to grant Drive, Docs, and Sheets.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:

@@ -14,6 +14,7 @@ def test_display_name_keeps_acronyms() -> None:
     assert display_name_for("query_workspace_db") == "Query workspace DB"
     assert display_name_for("list_mcp_servers") == "List MCP servers"
     assert display_name_for("google_gmail_search") == "Google Gmail search"
+    assert display_name_for("google_drive_search") == "Google Drive search"
 
 
 def test_group_for_splits_builtins_and_user_tools() -> None:
@@ -26,6 +27,9 @@ def test_group_for_splits_builtins_and_user_tools() -> None:
     assert group_for("create_agent", "builtin") == "workspace_admin"
     assert group_for("google_gmail_search", "builtin") == "integrations"
     assert group_for("google_calendar_list", "builtin") == "integrations"
+    assert group_for("google_drive_search", "builtin") == "integrations"
+    assert group_for("google_docs_read", "builtin") == "integrations"
+    assert group_for("google_sheets_read", "builtin") == "integrations"
     assert group_for("cancel_schedule", "builtin") == "workspace_admin"
     assert group_for("fetch_notes", "custom") == "custom"
     assert group_for("whatever", "mcp") == "mcp"

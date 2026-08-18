@@ -118,11 +118,11 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # human to the workspace), so a workspace owner may want to grant one
 # without the other.
 #
-# #458: Google Gmail/Calendar tools share one "integrations:google"
+# #458: Google Workspace tools share one "integrations:google"
 # scope. Connecting an account in Settings does not make every agent
 # eligible -- assignment plus this grant, same split as every category
-# above. Write tools (draft/send/create) are additionally marked
-# sensitive so unattended use goes through tool_audit.py.
+# above. Write tools (draft/send/create/update/append) are additionally
+# marked sensitive so unattended use goes through tool_audit.py.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -163,4 +163,12 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "google_gmail_send": "integrations:google",
     "google_calendar_list": "integrations:google",
     "google_calendar_create": "integrations:google",
+    "google_calendar_update": "integrations:google",
+    "google_drive_search": "integrations:google",
+    "google_drive_read": "integrations:google",
+    "google_drive_write": "integrations:google",
+    "google_docs_read": "integrations:google",
+    "google_docs_append": "integrations:google",
+    "google_sheets_read": "integrations:google",
+    "google_sheets_update": "integrations:google",
 }

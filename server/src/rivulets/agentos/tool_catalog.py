@@ -19,11 +19,15 @@ from __future__ import annotations
 # "Db"). Everything else is first-word capitalized, rest lower.
 _TOKEN_OVERRIDES: dict[str, str] = {
     "db": "DB",
+    "calendar": "Calendar",
+    "docs": "Docs",
+    "drive": "Drive",
     "gmail": "Gmail",
     "google": "Google",
     "http": "HTTP",
     "mcp": "MCP",
     "python": "Python",
+    "sheets": "Sheets",
 }
 
 # Conversation-time helpers -- the set the issue's repro is about
@@ -53,10 +57,18 @@ INTEGRATION_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "google_calendar_create",
         "google_calendar_list",
+        "google_calendar_update",
+        "google_docs_append",
+        "google_docs_read",
+        "google_drive_read",
+        "google_drive_search",
+        "google_drive_write",
         "google_gmail_draft",
         "google_gmail_read",
         "google_gmail_search",
         "google_gmail_send",
+        "google_sheets_read",
+        "google_sheets_update",
     }
 )
 

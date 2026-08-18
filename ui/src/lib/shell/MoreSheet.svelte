@@ -170,7 +170,7 @@
 			<SectionLabel>Workspace</SectionLabel>
 			{#if isOwner}
 				{@render row('Providers', '/providers', null)}
-				{@render row('Integrations', SETTINGS_INTEGRATIONS_HREF, 'Gmail · Calendar')}
+				{@render row('Integrations', SETTINGS_INTEGRATIONS_HREF, 'Gmail · Drive · Calendar')}
 			{/if}
 			{@render row('Usage', '/usage', null)}
 			{@render row('Settings', '/settings', isOwner ? null : 'Spend status only')}

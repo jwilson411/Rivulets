@@ -144,7 +144,8 @@
 			Providers
 		</h1>
 		<p class="mb-6 max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
-			These keys are for models. Gmail and Calendar need a connected Google account in
+			These keys are for models. Gmail, Calendar, Drive, Docs, and Sheets need a connected Google
+			account in
 			<a
 				href={`${resolve('/settings')}${SETTINGS_INTEGRATIONS_SEARCH}`}
 				class="text-accent underline dark:text-accent-dark">Settings → Integrations</a
