@@ -279,4 +279,21 @@
 		<rect x="3" y="4.5" width="18" height="12.5" rx="2" />
 		<path d="M9 20.5h6M12 17v3.5" />
 	</svg>
+{:else if name === 'folder'}
+	<svg
+		viewBox="0 0 24 24"
+		width="24"
+		height="24"
+		fill="none"
+		stroke="currentColor"
+		stroke-width="2"
+		stroke-linecap="round"
+		stroke-linejoin="round"
+		class={className}
+		aria-hidden="true"
+	>
+		<path
+			d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"
+		/>
+	</svg>
 {/if}
