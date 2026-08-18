@@ -44,6 +44,19 @@ describe('NewChannelSheet.svelte', () => {
 		await expect.element(page.getByLabelText('Team')).toHaveValue('team-starter');
 		await expect.element(page.getByPlaceholder('My Channel')).toBeInTheDocument();
 		await expect.element(page.getByPlaceholder('launch-readiness')).not.toBeInTheDocument();
+		await expect.element(page.getByText('3–80 characters.')).toBeInTheDocument();
+	});
+
+	it('keeps Create disabled until the name is 3–80 characters', async () => {
+		vi.mocked(teams.list).mockResolvedValue([starter]);
+
+		render(NewChannelSheet, { onClose: vi.fn(), onCreated: vi.fn() });
+
+		await expect.element(page.getByLabelText('Team')).toHaveValue('team-starter');
+		await page.getByLabelText('Name').fill('ai');
+		await expect.element(page.getByRole('button', { name: 'Create channel' })).toBeDisabled();
+		await page.getByLabelText('Name').fill('ops');
+		await expect.element(page.getByRole('button', { name: 'Create channel' })).toBeEnabled();
 	});
 
 	it('creates the channel with the selected team', async () => {
@@ -60,6 +73,23 @@ describe('NewChannelSheet.svelte', () => {
 		await expect.poll(() => vi.mocked(channels.create).mock.calls.length).toBe(1);
 		expect(channels.create).toHaveBeenCalledWith('My Channel', undefined, 'team-starter');
 		expect(onCreated).toHaveBeenCalledWith(created);
+	});
+
+	it('shows the server sentence when the name is already taken', async () => {
+		vi.mocked(teams.list).mockResolvedValue([starter]);
+		vi.mocked(channels.create).mockRejectedValue(
+			new Error("A channel named 'general' already exists")
+		);
+
+		render(NewChannelSheet, { onClose: vi.fn(), onCreated: vi.fn() });
+
+		await expect.element(page.getByLabelText('Team')).toHaveValue('team-starter');
+		await page.getByLabelText('Name').fill('general');
+		await page.getByRole('button', { name: 'Create channel' }).click();
+
+		await expect
+			.element(page.getByText("A channel named 'general' already exists"))
+			.toBeInTheDocument();
 	});
 
 	it('lets the user create with no team', async () => {
