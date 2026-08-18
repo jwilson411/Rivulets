@@ -50,13 +50,7 @@ def wrap_with_history(transcript: str, current_message: str) -> str:
     """Keep the triggering turn as the last thing the model sees."""
     if not transcript.strip():
         return current_message
-    return (
-        "[Conversation so far]\n"
-        f"{transcript}\n"
-        "\n"
-        "[Current message]\n"
-        f"{current_message}"
-    )
+    return f"[Conversation so far]\n{transcript}\n\n[Current message]\n{current_message}"
 
 
 async def with_conversation_history(

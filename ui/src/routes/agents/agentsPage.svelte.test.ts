@@ -429,6 +429,41 @@ describe('agents/+page.svelte', () => {
 		expect(agents.remove).toHaveBeenCalledWith('agent-1');
 	});
 
+	it('rejects invalid reply-shape JSON from More options', async () => {
+		seed();
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('More options').click();
+		await page.getByText('Advanced', { exact: true }).click();
+		await page.getByPlaceholder('Leave blank for normal replies').fill('not-json');
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		await expect.element(page.getByText('The reply shape must be valid JSON.')).toBeInTheDocument();
+		expect(agents.update).not.toHaveBeenCalled();
+	});
+
+	it('rolls an agent back to a prior version from History', async () => {
+		seed();
+		vi.mocked(agents.listVersions).mockResolvedValue([
+			{
+				version: 2,
+				model: 'auto',
+				instructions: 'Be helpful.',
+				created_at: '2026-01-02T00:00:00Z'
+			}
+		]);
+		vi.mocked(agents.rollback).mockResolvedValueOnce(assistant);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('More options').click();
+		await page.getByText('Advanced', { exact: true }).click();
+		await page.getByRole('button', { name: 'Roll back' }).click();
+
+		expect(agents.rollback).toHaveBeenCalledWith('agent-1', 2);
+	});
+
 	it('shows a quiet error with retry when agents fail to load', async () => {
 		vi.mocked(agents.list).mockRejectedValue(new Error('boom'));
 		vi.mocked(providers.list).mockResolvedValue([]);

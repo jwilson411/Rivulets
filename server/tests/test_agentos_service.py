@@ -86,7 +86,7 @@ async def test_sync_agents_registers_without_a_model_when_keys_are_locked(
 
     registered = [a for a in (get_agentos().agents or []) if a.id == "agent-locked"]
     assert len(registered) == 1
-    assert registered[0].model is None
+    assert registered[0].model is None  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def test_run_agent_resolves_model_when_registered_without_one(
@@ -112,7 +112,7 @@ async def test_run_agent_resolves_model_when_registered_without_one(
     )
     await db_session.commit()
     placeholder = AgnoAgent(id="agent-1", name="Assistant")
-    placeholder.arun = _scripted_arun(  # pyright: ignore[reportUnknownMemberType]
+    placeholder.arun = _scripted_arun(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         [RunCompletedEvent(content="Hello")]
     )
     get_agentos().agents = [placeholder]  # pyright: ignore[reportAttributeAccessIssue]

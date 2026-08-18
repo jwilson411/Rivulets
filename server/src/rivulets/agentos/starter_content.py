@@ -248,9 +248,7 @@ async def _grant_all_tools_to_named_agents(db: AsyncSession, names: list[str]) -
     await _grant_all_tools(db, agents, builtin_ids)
 
 
-async def _grant_all_tools(
-    db: AsyncSession, agents: list[Agent], builtin_ids: set[str]
-) -> None:
+async def _grant_all_tools(db: AsyncSession, agents: list[Agent], builtin_ids: set[str]) -> None:
     changed = False
     for agent in agents:
         existing_tool_ids = set(

@@ -4,6 +4,7 @@ stream endpoint itself (test_streaming.py only checks the pub/sub broadcaster
 and dispatch's publish calls, never the /stream route)."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -75,7 +76,7 @@ def test_list_rivulets_returns_created_rivulets_newest_first(
 
 
 def test_rivulet_working_directory_overrides_channel(
-    client: TestClient, auth_headers: dict[str, str], tmp_path
+    client: TestClient, auth_headers: dict[str, str], tmp_path: Path
 ) -> None:
     river = tmp_path / "river"
     stream = tmp_path / "stream"
@@ -120,7 +121,7 @@ def test_rivulet_working_directory_overrides_channel(
 
 
 def test_rivulet_working_directory_is_owner_only(
-    client: TestClient, auth_headers: dict[str, str], tmp_path
+    client: TestClient, auth_headers: dict[str, str], tmp_path: Path
 ) -> None:
     from tests.test_channels import _invite_headers
 

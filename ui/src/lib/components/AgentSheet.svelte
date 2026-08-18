@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { untrack } from 'svelte';
 	import {
 		agents,
@@ -306,7 +307,10 @@
 			{#if teams.length === 0}
 				<p class="text-[13px] text-muted dark:text-muted-dark">
 					No teams yet. Create one under
-					<a href="/teams" class="font-semibold text-accent hover:underline dark:text-accent-dark"
+					<a
+						href={resolve('/teams')}
+						class="font-semibold text-accent hover:underline dark:text-accent-dark"
+					>
 						>Teams</a
 					>.
 				</p>
@@ -440,8 +444,8 @@
 							{/each}
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
-							New agents start with every tool and permission. Uncheck any you want to hold
-							back. Sensitive tools still need the owner's OK for unattended runs.
+							New agents start with every tool and permission. Uncheck any you want to hold back.
+							Sensitive tools still need the owner's OK for unattended runs.
 						</p>
 					</div>
 				{/if}
