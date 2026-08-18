@@ -31,6 +31,9 @@ vi.mock('$lib/api/auth.svelte', () => ({
 vi.mock('$lib/api/channels', () => ({
 	channels: { list: vi.fn(), create: vi.fn() }
 }));
+vi.mock('$lib/api/teams', () => ({
+	teams: { list: vi.fn() }
+}));
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -63,5 +66,40 @@ describe('ContextPanel.svelte', () => {
 			.toBeInTheDocument();
 		await expect.element(page.getByText('test-channel')).toBeInTheDocument();
 		expect(onOpenPalette).not.toHaveBeenCalled();
+	});
+
+	it('shows the People section nav on /agents and hides owner-only items for guests', async () => {
+		routeState.pathname = '/agents';
+		const { auth } = await import('$lib/api/auth.svelte');
+		(auth as { grant: string }).grant = 'invite';
+
+		render(ContextPanel, { onOpenPalette: vi.fn() });
+
+		await expect
+			.element(page.getByLabelText('People', { includeHidden: true }))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Agents', { includeHidden: true })).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Providers', { includeHidden: true }))
+			.not.toBeInTheDocument();
+	});
+
+	it('shows a load error when the channel list fails', async () => {
+		vi.mocked(channels.list).mockRejectedValue(new Error('boom'));
+
+		render(ContextPanel, { onOpenPalette: vi.fn() });
+
+		await expect.element(page.getByText("Couldn't load channels.")).toBeInTheDocument();
+	});
+
+	it('opens the new-channel sheet from the chat-area sidebar', async () => {
+		vi.mocked(channels.list).mockResolvedValue([testChannel]);
+		const { teams } = await import('$lib/api/teams');
+		vi.mocked(teams.list).mockResolvedValue([]);
+
+		render(ContextPanel, { onOpenPalette: vi.fn() });
+
+		await page.getByRole('button', { name: 'New channel', includeHidden: true }).click();
+		await expect.element(page.getByRole('heading', { name: 'New channel' })).toBeInTheDocument();
 	});
 });

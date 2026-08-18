@@ -2,13 +2,14 @@
 and Assistant stays on every channel."""
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.db.models import Agent
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchMethod, DispatchResult
 from rivulets.dispatch.orchestration import apply_orchestrator_lock, format_team_roster
 
@@ -71,9 +72,9 @@ def test_format_team_roster_lists_specialists_not_assistant() -> None:
     unnamed = SimpleNamespace(name="Scout", description="")
     roster = format_team_roster(
         [
-            (assistant, AgentDispatchInfo(agent_id="a", name="Assistant")),
-            (coder, AgentDispatchInfo(agent_id="c", name="Coder")),
-            (unnamed, AgentDispatchInfo(agent_id="s", name="Scout")),
+            (cast(Agent, assistant), AgentDispatchInfo(agent_id="a", name="Assistant")),
+            (cast(Agent, coder), AgentDispatchInfo(agent_id="c", name="Coder")),
+            (cast(Agent, unnamed), AgentDispatchInfo(agent_id="s", name="Scout")),
         ]
     )
     assert "Coder: Writes code." in roster
@@ -165,9 +166,7 @@ def test_locked_human_message_reaches_only_assistant(
 def test_mention_bypasses_lock(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "rivulets.dispatch.service.run_agent", _fake_run_agent("WidgetCoder here.")
-    )
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", _fake_run_agent("WidgetCoder here."))
     coder = _create_keyword_agent(client, auth_headers, "WidgetCoder")
     channel_id = _create_channel_with_team(client, auth_headers, [coder], name="mention-lock")
 
@@ -234,9 +233,7 @@ def test_assistant_engage_team_tool_does_not_unlock_keywords(
             return SimpleNamespace(
                 status=RunStatus.completed,
                 tools=[
-                    ToolExecution(
-                        tool_name="engage_team", tool_args={"reason": "Need the coder"}
-                    )
+                    ToolExecution(tool_name="engage_team", tool_args={"reason": "Need the coder"})
                 ],
                 get_content_as_string=lambda: "Bringing the team in.",
             )

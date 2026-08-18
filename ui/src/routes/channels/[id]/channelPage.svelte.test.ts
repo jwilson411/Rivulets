@@ -231,9 +231,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 
-		await expect
-			.element(page.getByText(/Assistant is coordinating/).first())
-			.toBeInTheDocument();
+		await expect.element(page.getByText(/Assistant is coordinating/).first()).toBeInTheDocument();
 	});
 
 	it('changes the routed team via the team chip menu', async () => {
@@ -474,9 +472,7 @@ describe('channels/[id]/+page.svelte', () => {
 		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
 
 		render(ChannelPage);
-		await expect
-			.element(page.getByText(/Assistant is coordinating/).first())
-			.toBeInTheDocument();
+		await expect.element(page.getByText(/Assistant is coordinating/).first()).toBeInTheDocument();
 
 		await expect
 			.element(page.getByRole('button', { name: 'Mention Assistant' }))
@@ -519,9 +515,7 @@ describe('channels/[id]/+page.svelte', () => {
 		vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
 
 		render(ChannelPage);
-		await expect
-			.element(page.getByText(/Assistant is coordinating/).first())
-			.toBeInTheDocument();
+		await expect.element(page.getByText(/Assistant is coordinating/).first()).toBeInTheDocument();
 
 		const input = page.getByPlaceholder('Start a conversation…');
 		await input.fill('@');

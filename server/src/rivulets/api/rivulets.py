@@ -149,9 +149,7 @@ def _to_rivulet_out(rivulet: Rivulet, channel: Channel | None = None) -> Rivulet
         created_by=rivulet.created_by,
         created_at=rivulet.created_at,
         working_directory=rivulet.working_directory,
-        effective_working_directory=resolve_effective_path(
-            rivulet.working_directory, channel_path
-        ),
+        effective_working_directory=resolve_effective_path(rivulet.working_directory, channel_path),
     )
 
 
@@ -391,9 +389,7 @@ async def _attachments_by_message(db: DbSession, message_ids: list[str]) -> dict
 
 
 @router.get("/channels/{channel_id}/rivulets", response_model=list[RivuletOut])
-async def list_rivulets(
-    channel_id: str, db: DbSession, _: CurrentWorkspaceId
-) -> list[RivuletOut]:
+async def list_rivulets(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[RivuletOut]:
     channel = await _get_channel_or_404(db, channel_id)
     result = await db.execute(
         select(Rivulet).where(Rivulet.channel_id == channel_id).order_by(Rivulet.created_at.desc())

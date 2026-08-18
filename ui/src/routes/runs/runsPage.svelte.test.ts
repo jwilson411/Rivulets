@@ -115,7 +115,7 @@ describe('runs/+page.svelte', () => {
 		await expect.element(link).toHaveAttribute('href', '/channels/chan-1/rivulets/riv-1');
 	});
 
-	it('shows a failed step\'s error reason in the expanded detail', async () => {
+	it("shows a failed step's error reason in the expanded detail", async () => {
 		const failedTrace: RunTrace = {
 			...completedTrace,
 			id: 'trace-fail',

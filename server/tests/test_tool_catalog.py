@@ -30,9 +30,7 @@ def test_group_for_splits_builtins_and_user_tools() -> None:
 
 def test_one_line_description_takes_the_first_sentence() -> None:
     assert (
-        one_line_description(
-            "Search the public web and return titles, URLs, and snippets."
-        )
+        one_line_description("Search the public web and return titles, URLs, and snippets.")
         == "Search the public web and return titles, URLs, and snippets."
     )
     assert (

@@ -44,4 +44,33 @@ describe('settings', () => {
 		expect(init.method).toBe('PATCH');
 		expect(init.body).toBe(JSON.stringify({ 'guard.turn_limit': 20 }));
 	});
+
+	it('listDirectories() GETs /settings/directories', async () => {
+		const listing = { path: '/tmp', parent: '/', entries: [{ name: 'proj', path: '/tmp/proj' }] };
+		const fetchMock = mockFetch(listing);
+
+		await expect(settings.listDirectories()).resolves.toEqual(listing);
+		expect((fetchMock.mock.calls[0] as [string])[0]).toBe('/api/v1/settings/directories');
+	});
+
+	it('listDirectories() encodes an optional path query', async () => {
+		const listing = { path: '/tmp/proj', parent: '/tmp', entries: [] };
+		const fetchMock = mockFetch(listing);
+
+		await settings.listDirectories('/tmp/proj');
+		expect((fetchMock.mock.calls[0] as [string])[0]).toBe(
+			'/api/v1/settings/directories?path=%2Ftmp%2Fproj'
+		);
+	});
+
+	it('createDirectory() POSTs parent and name', async () => {
+		const listing = { path: '/tmp/proj', parent: '/tmp', entries: [] };
+		const fetchMock = mockFetch(listing);
+
+		await expect(settings.createDirectory('/tmp', 'proj')).resolves.toEqual(listing);
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/settings/directories');
+		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify({ parent: '/tmp', name: 'proj' }));
+	});
 });

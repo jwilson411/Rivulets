@@ -99,6 +99,15 @@ root = "tests"
 reportUnknownVariableType = false
 reportUnknownMemberType = false
 reportUnknownArgumentType = false
+# Tests import private helpers (_run_message_dispatch, _find_*_call, etc.)
+# to pin internal contracts. That's intentional; ruff S101 is already off.
+reportPrivateUsage = false
+# `from tests.conftest import ...` (and tests.test_channels) is valid at
+# runtime because pytest puts the server root on sys.path. Pyright does
+# not treat `tests` as an importable package unless extraPaths is the
+# project root, and that extraPaths setting makes the installed
+# `rivulets` package look untyped. Suppress the false positive instead.
+reportMissingImports = false
 
 [tool.pytest.ini_options]
 addopts = "--cov=rivulets --cov-report=term-missing"

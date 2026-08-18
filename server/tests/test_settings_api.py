@@ -132,7 +132,10 @@ def test_patch_working_directory_clears_with_null(
 
 
 def test_patch_working_directory_is_not_synced(
-    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()

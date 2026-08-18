@@ -2364,16 +2364,14 @@ async def _handle_hire_teammate(
 
     existing = await db.scalar(select(Agent).where(Agent.name == call.name))
     if existing is not None:
-        already_on_team = False
-        if channel.team_id is not None:
-            already_on_team = (
-                await db.scalar(
-                    select(TeamAgent).where(
-                        TeamAgent.team_id == channel.team_id,
-                        TeamAgent.agent_id == existing.id,
-                    )
+        already_on_team = (
+            await db.scalar(
+                select(TeamAgent).where(
+                    TeamAgent.team_id == channel.team_id,
+                    TeamAgent.agent_id == existing.id,
                 )
-            ) is not None
+            )
+        ) is not None
         error = await _add_agent_to_channel_team(db, channel, existing)
         if error is not None:
             return None, [
