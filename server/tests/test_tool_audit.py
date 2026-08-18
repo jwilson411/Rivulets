@@ -111,6 +111,8 @@ async def test_seed_builtin_tools_marks_only_the_documented_sensitive_set(
     assert sensitivity["google_drive_write"] is True
     assert sensitivity["google_docs_append"] is True
     assert sensitivity["google_sheets_update"] is True
+    assert sensitivity["google_tasks_add"] is True
+    assert sensitivity["google_meet_create"] is True
     # Read-only/low-risk builtins stay unmarked.
     assert sensitivity["read_file"] is False
     assert sensitivity["list_files"] is False
@@ -122,6 +124,8 @@ async def test_seed_builtin_tools_marks_only_the_documented_sensitive_set(
     assert sensitivity["google_drive_read"] is False
     assert sensitivity["google_docs_read"] is False
     assert sensitivity["google_sheets_read"] is False
+    assert sensitivity["google_contacts_search"] is False
+    assert sensitivity["google_tasks_list"] is False
 
 
 async def test_seed_builtin_tools_backfills_sensitivity_on_existing_rows(

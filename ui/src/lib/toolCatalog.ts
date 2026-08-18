@@ -28,6 +28,7 @@ const INTEGRATION_TOOLS = new Set([
 	'google_calendar_create',
 	'google_calendar_list',
 	'google_calendar_update',
+	'google_contacts_search',
 	'google_docs_append',
 	'google_docs_read',
 	'google_drive_read',
@@ -37,8 +38,11 @@ const INTEGRATION_TOOLS = new Set([
 	'google_gmail_read',
 	'google_gmail_search',
 	'google_gmail_send',
+	'google_meet_create',
 	'google_sheets_read',
-	'google_sheets_update'
+	'google_sheets_update',
+	'google_tasks_add',
+	'google_tasks_list'
 ]);
 
 // Google Workspace tools talk to a connected account, not the Google AI
@@ -53,6 +57,7 @@ export function isGoogleIntegrationTool(name: string): boolean {
 
 const TOKEN_OVERRIDES: Record<string, string> = {
 	calendar: 'Calendar',
+	contacts: 'Contacts',
 	db: 'DB',
 	docs: 'Docs',
 	drive: 'Drive',
@@ -60,8 +65,10 @@ const TOKEN_OVERRIDES: Record<string, string> = {
 	google: 'Google',
 	http: 'HTTP',
 	mcp: 'MCP',
+	meet: 'Meet',
 	python: 'Python',
-	sheets: 'Sheets'
+	sheets: 'Sheets',
+	tasks: 'Tasks'
 };
 
 export function toolDisplayName(tool: Pick<Tool, 'name' | 'display_name'>): string {

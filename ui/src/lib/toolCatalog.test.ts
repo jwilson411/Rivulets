@@ -41,6 +41,9 @@ describe('humanizeToolName', () => {
 		expect(humanizeToolName('list_mcp_servers')).toBe('List MCP servers');
 		expect(humanizeToolName('google_gmail_search')).toBe('Google Gmail search');
 		expect(humanizeToolName('google_drive_search')).toBe('Google Drive search');
+		expect(humanizeToolName('google_contacts_search')).toBe('Google Contacts search');
+		expect(humanizeToolName('google_tasks_list')).toBe('Google Tasks list');
+		expect(humanizeToolName('google_meet_create')).toBe('Google Meet create');
 	});
 });
 
@@ -71,6 +74,9 @@ describe('isGoogleIntegrationTool', () => {
 		expect(isGoogleIntegrationTool('google_gmail_search')).toBe(true);
 		expect(isGoogleIntegrationTool('google_calendar_list')).toBe(true);
 		expect(isGoogleIntegrationTool('google_drive_search')).toBe(true);
+		expect(isGoogleIntegrationTool('google_contacts_search')).toBe(true);
+		expect(isGoogleIntegrationTool('google_tasks_add')).toBe(true);
+		expect(isGoogleIntegrationTool('google_meet_create')).toBe(true);
 		expect(isGoogleIntegrationTool('web_search')).toBe(false);
 		expect(SETTINGS_INTEGRATIONS_SEARCH).toBe('?tab=integrations');
 		expect(SETTINGS_INTEGRATIONS_HREF).toBe('/settings?tab=integrations');

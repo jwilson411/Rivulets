@@ -128,10 +128,11 @@ DEFAULT_AGENT_SCOPES: frozenset[str] = TOOL_SCOPES - DEFAULT_WITHHELD_SCOPES
 #
 # #458 / #463: Google read tools (search / read / list) share
 # "integrations:google". Write tools (draft / send / create / update /
-# append) need a second owner grant, "integrations:google:write", so
-# connecting an account only enables read until write is turned on for
-# a specific agent. Write tools are also marked sensitive so
-# unattended use still goes through tool_audit.py.
+# append / add / meet create) need a second owner grant,
+# "integrations:google:write", so connecting an account only enables
+# read until write is turned on for a specific agent. Write tools are
+# also marked sensitive so unattended use still goes through
+# tool_audit.py.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -180,4 +181,8 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "google_docs_append": "integrations:google:write",
     "google_sheets_read": "integrations:google",
     "google_sheets_update": "integrations:google:write",
+    "google_contacts_search": "integrations:google",
+    "google_tasks_list": "integrations:google",
+    "google_tasks_add": "integrations:google:write",
+    "google_meet_create": "integrations:google:write",
 }

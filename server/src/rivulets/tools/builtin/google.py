@@ -2,12 +2,12 @@
 
 Thin wrappers: they resolve the stored token at invocation time and
 never take a secret as a model-visible argument. Read tools (search /
-read / list) and write tools (draft / send / create / update / append)
-are separate so an owner can assign Gmail read without send-as-me, or
-Drive read without Drive write.
+read / list) and write tools (draft / send / create / update / append /
+add / meet create) are separate so an owner can assign Gmail read
+without send-as-me, or Tasks list without Tasks add.
 
 Read tools require the `integrations:google` scope. Write tools
-(draft / send / create / update / append) require
+(draft / send / create / update / append / add) require
 `integrations:google:write` so connecting an account only enables
 read until an owner grants write on a specific agent (#463). Write
 tools are also `sensitive` so unattended send/create/write still
@@ -32,6 +32,7 @@ from rivulets.integrations.google import (
     calendar_create,
     calendar_list,
     calendar_update,
+    contacts_search,
     docs_append,
     docs_read,
     drive_read,
@@ -41,9 +42,12 @@ from rivulets.integrations.google import (
     gmail_read,
     gmail_search,
     gmail_send,
+    meet_create,
     resolve_access_token,
     sheets_read,
     sheets_update,
+    tasks_add,
+    tasks_list,
 )
 
 
@@ -229,4 +233,65 @@ def google_sheets_update(spreadsheet_id: str, range_a1: str, values: str, accoun
     return _run(
         account or None,
         lambda token: sheets_update(token, spreadsheet_id, range_a1, values),
+    )
+
+
+@tool
+def google_contacts_search(query: str, max_results: int = 10, account: str = "") -> str:
+    """Search the connected Google account's Contacts. `query` is a name,
+    email, or phone. Returns contact ids plus name/email/phone."""
+    return _run(account or None, lambda token: contacts_search(token, query, max_results))
+
+
+@tool
+def google_tasks_list(
+    task_list: str = "",
+    max_results: int = 20,
+    include_completed: bool = False,
+    account: str = "",
+) -> str:
+    """List Google Tasks. Omit `task_list` to walk every list; pass a
+    list id (from a previous call) to stay on one. Incomplete tasks
+    only unless `include_completed` is true."""
+    return _run(
+        account or None,
+        lambda token: tasks_list(
+            token,
+            task_list=task_list or None,
+            max_results=max_results,
+            include_completed=include_completed,
+        ),
+    )
+
+
+@tool
+def google_tasks_add(
+    title: str,
+    notes: str = "",
+    due: str = "",
+    task_list: str = "",
+    account: str = "",
+) -> str:
+    """Add a Google Task. `due` is YYYY-MM-DD or RFC3339. Omit
+    `task_list` to use the default list. This writes immediately."""
+    return _run(
+        account or None,
+        lambda token: tasks_add(
+            token,
+            title=title,
+            notes=notes or None,
+            due=due or None,
+            task_list=task_list or None,
+        ),
+    )
+
+
+@tool
+def google_meet_create(access_type: str = "", account: str = "") -> str:
+    """Create a Google Meet space and return the join link.
+    `access_type` is OPEN, TRUSTED, or RESTRICTED; omit for Google's
+    default. This creates immediately."""
+    return _run(
+        account or None,
+        lambda token: meet_create(token, access_type=access_type or None),
     )
