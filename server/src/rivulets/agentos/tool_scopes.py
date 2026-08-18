@@ -80,7 +80,8 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # list_mcp_servers.
 #
 # #240: SENSITIVE_BUILTIN_TOOL_NAMES (agentos/tool_resolution.py --
-# execute_python, http_request, write_file, query_workspace_db) previously
+# execute_python, fetch_webpage, http_request, write_file,
+# query_workspace_db) previously
 # carried no required_scope at all, which oversold "agents_teams:manage":
 # update_agent's tool_ids lets an agent reassign *any* tool to *any*
 # agent, and with no scope of their own, these four resolved and ran the
@@ -145,6 +146,7 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "list_invites": "invites:manage",
     "revoke_invite": "invites:manage",
     "execute_python": "sensitive_tools:manage",
+    "fetch_webpage": "sensitive_tools:manage",
     "http_request": "sensitive_tools:manage",
     "write_file": "sensitive_tools:manage",
     "query_workspace_db": "sensitive_tools:manage",

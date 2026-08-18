@@ -604,6 +604,8 @@ def test_list_tools_exposes_display_name_and_group(
     assert tools["http_request"]["group"] == "chat"
     assert tools["web_search"]["display_name"] == "Web search"
     assert tools["web_search"]["group"] == "chat"
+    assert tools["fetch_webpage"]["display_name"] == "Fetch webpage"
+    assert tools["fetch_webpage"]["group"] == "chat"
     assert tools["execute_python"]["display_name"] == "Execute Python"
     assert tools["execute_python"]["group"] == "files"
     assert tools["update_agent_peer_preference"]["display_name"] == "Update agent peer preference"

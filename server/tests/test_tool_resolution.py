@@ -359,7 +359,13 @@ async def test_seed_builtin_tools_sets_sensitive_tools_manage_scope(
     test_seed_builtin_tools_sets_channels_manage_scope above."""
     await seed_builtin_tools(db_session)
 
-    for name in ("execute_python", "http_request", "write_file", "query_workspace_db"):
+    for name in (
+        "execute_python",
+        "fetch_webpage",
+        "http_request",
+        "write_file",
+        "query_workspace_db",
+    ):
         row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
         assert row.required_scope == "sensitive_tools:manage"
 

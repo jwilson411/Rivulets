@@ -64,6 +64,7 @@ from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.starter_content import (
     ensure_assistant_always_rule,
     ensure_assistant_orchestrator_instructions,
+    ensure_starter_agents_have_all_tools,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
@@ -191,6 +192,7 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     try:
         await ensure_assistant_always_rule(db)
         await ensure_assistant_orchestrator_instructions(db)
+        await ensure_starter_agents_have_all_tools(db)
     except Exception:
         logger.warning(
             "Failed to ensure Assistant orchestrator defaults after login", exc_info=True

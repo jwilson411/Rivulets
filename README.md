@@ -48,7 +48,7 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 ### Tools & extensibility
 
 - **MCP servers & custom tools** — connect external MCP servers or write your own tools in Python; agents discover and use them like any built-in capability.
-- **Built-in tools out of the box** — including sandboxed code execution, web search, HTTP requests, file/filesystem access, database queries, knowledge-base lookup, and workflow/schedule/channel management actions.
+- **Built-in tools out of the box** — including sandboxed code execution, web search (DuckDuckGo by default, Brave if `RIVULETS_BRAVE_API_KEY` is set), page fetch, HTTP requests, file/filesystem access, database queries, knowledge-base lookup, and workflow/schedule/channel management actions. New agents start with every tool checked.
 - **Per-tool permission scope** — fine-grained control over which tools an agent can use and what they're allowed to touch.
 
 ### Knowledge & governance

@@ -3,6 +3,7 @@
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import { teams as teamsApi, type TeamDetail } from '$lib/api/teams';
 	import { tools as toolsApi, type Tool } from '$lib/api/tools';
+	import { defaultNewAgentScopes, defaultNewAgentToolIds } from '$lib/toolCatalog';
 	import { agentInk, INK_AVATAR } from '$lib/ink';
 	import AgentSheet from '$lib/components/AgentSheet.svelte';
 	import Button from '$lib/ui/Button.svelte';
@@ -75,8 +76,8 @@
 	function openCreate() {
 		sheetAgent = null;
 		sheetRules = [];
-		sheetToolIds = [];
-		sheetScopes = [];
+		sheetToolIds = defaultNewAgentToolIds(toolList);
+		sheetScopes = defaultNewAgentScopes(scopeCatalog);
 		sheetPeerTag = '';
 		sheetVersions = [];
 		sheetKey += 1;
