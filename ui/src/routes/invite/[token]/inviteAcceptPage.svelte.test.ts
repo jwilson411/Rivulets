@@ -36,26 +36,26 @@ describe('routes/invite/[token]/+page.svelte', () => {
 		vi.mocked(invites.accept).mockResolvedValueOnce(undefined);
 
 		render(InviteAcceptPage);
-		await page.getByLabelText('Your name').fill('Ada');
+		await page.getByLabelText('Your name').fill('  Ada  ');
 		await page.getByRole('button', { name: 'Join workspace' }).click();
 
 		expect(invites.accept).toHaveBeenCalledWith('inv-1.secret', 'Ada');
 		expect(gotoMock).toHaveBeenCalledWith('/');
 	});
 
-	it('accepts with no display name entered', async () => {
-		vi.mocked(invites.accept).mockResolvedValueOnce(undefined);
-
+	it('disables Join workspace until a name is typed', async () => {
 		render(InviteAcceptPage);
-		await page.getByRole('button', { name: 'Join workspace' }).click();
 
-		expect(invites.accept).toHaveBeenCalledWith('inv-1.secret', undefined);
+		await expect.element(page.getByRole('button', { name: 'Join workspace' })).toBeDisabled();
+		await page.getByLabelText('Your name').fill('Ada');
+		await expect.element(page.getByRole('button', { name: 'Join workspace' })).toBeEnabled();
 	});
 
 	it('shows an error message when accepting fails', async () => {
 		vi.mocked(invites.accept).mockRejectedValueOnce(new Error('Invalid invite link'));
 
 		render(InviteAcceptPage);
+		await page.getByLabelText('Your name').fill('Ada');
 		await page.getByRole('button', { name: 'Join workspace' }).click();
 
 		await expect.element(page.getByText('Invalid invite link')).toBeInTheDocument();

@@ -17,10 +17,12 @@
 
 	async function handleAccept(event: SubmitEvent) {
 		event.preventDefault();
+		const name = displayName.trim();
+		if (!name) return;
 		acceptError = null;
 		accepting = true;
 		try {
-			await invites.accept(page.params.token!, displayName.trim() || undefined);
+			await invites.accept(page.params.token!, name);
 			await goto(resolve('/'));
 		} catch (err) {
 			acceptError = err instanceof Error ? err.message : "Couldn't join. Try again.";
@@ -60,7 +62,7 @@
 		/>
 		<button
 			type="submit"
-			disabled={accepting}
+			disabled={accepting || !displayName.trim()}
 			class="mt-2 flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
 		>
 			{accepting ? 'Joining…' : 'Join workspace'}
