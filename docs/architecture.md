@@ -121,7 +121,7 @@ Multiple humans can share a workspace: each browser session claims a display ide
 |---|---|---|
 | **Tool SDK** | Agno SDK (`agno.tools`) | Built-in tools, custom tools, and MCP-discovered tools all register through the same interface. |
 | **Sandboxing** | firejail (Linux), sandbox-exec (macOS) | Platform-native sandboxing for the Code Execution tool. No Windows backend exists yet — the tool reports itself unavailable there rather than running unsandboxed. |
-| **Integrations** | First-party Google tools + owner OAuth (#458, #463) | One connected Google account covers Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks, and Meet. Tokens live in the credential store (same as provider keys), never in SQLite or a sync payload. Connecting or reconnecting an account is owner-only; reconnect updates the same row and credential ref instead of inserting a duplicate. Read tools need assignment plus `integrations:google`, write tools need `integrations:google:write` on that agent. |
+| **Integrations** | First-party Google tools + owner OAuth (#458, #463) | One connected Google account covers Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks, and Meet. The owner picks which of those surfaces Google is asked for at connect/reconnect time; read is the default so send and other writes are opt-in. Tokens live in the credential store (same as provider keys), never in SQLite or a sync payload. Connecting or reconnecting an account is owner-only; reconnect updates the same row and credential ref instead of inserting a duplicate. Read tools need assignment plus `integrations:google`, write tools need `integrations:google:write` on that agent. |
 
 ### Development & operations
 

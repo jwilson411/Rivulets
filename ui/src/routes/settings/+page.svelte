@@ -23,6 +23,14 @@
 	import { teams as teamsApi, type Team } from '$lib/api/teams';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import FolderPickerSheet from '$lib/components/FolderPickerSheet.svelte';
+	import {
+		GOOGLE_CAPABILITIES,
+		GOOGLE_DEFAULT_CAPABILITIES,
+		formatGoogleCapabilities,
+		googleCapabilityName,
+		groupGoogleCapabilities,
+		toggleGoogleCapability
+	} from '$lib/googleCapabilities';
 	import { scopeDisplayName } from '$lib/toolCatalog';
 	import Button from '$lib/ui/Button.svelte';
 	import FilterChip from '$lib/ui/FilterChip.svelte';
@@ -98,6 +106,12 @@
 	let googleAccounts = $state<IntegrationAccount[]>([]);
 	let integrationsError = $state<string | null>(null);
 	let googleClientId = $state('');
+	let selectedGoogleAccess = $state<string[]>([...GOOGLE_DEFAULT_CAPABILITIES]);
+
+	const googleCapabilityCatalog = $derived(
+		googleApp?.capabilities?.length ? googleApp.capabilities : GOOGLE_CAPABILITIES
+	);
+	const googleCapabilityGroups = $derived(groupGoogleCapabilities(googleCapabilityCatalog));
 	let googleClientSecret = $state('');
 	let savingGoogleApp = $state(false);
 	let connectingGoogle = $state(false);
@@ -155,6 +169,9 @@
 			googleApp = app;
 			googleClientId = app.client_id;
 			googleAccounts = accounts.filter((row) => row.provider === 'google');
+			if (app.default_capabilities?.length) {
+				selectedGoogleAccess = [...app.default_capabilities];
+			}
 		} catch {
 			integrationsError = "Couldn't load integrations.";
 		}
@@ -182,7 +199,10 @@
 		connectingGoogle = true;
 		integrationsError = null;
 		try {
-			const { authorization_url } = await integrationsApi.connectGoogle();
+			const { authorization_url } = await integrationsApi.connectGoogle(
+				undefined,
+				selectedGoogleAccess
+			);
 			// Same-tab Google trip drops the memory-only JWT (#464). Park
 			// it so return to ?tab=integrations is already signed in.
 			auth.leaveForOAuth(authorization_url);
@@ -192,11 +212,20 @@
 		}
 	}
 
+	function handleToggleGoogleAccess(id: string, on: boolean) {
+		selectedGoogleAccess = toggleGoogleCapability(
+			selectedGoogleAccess,
+			googleCapabilityCatalog,
+			id,
+			on
+		);
+	}
+
 	async function handleReconnect(id: string) {
 		reconnectingId = id;
 		integrationsError = null;
 		try {
-			const { authorization_url } = await integrationsApi.reconnect(id);
+			const { authorization_url } = await integrationsApi.reconnect(id, selectedGoogleAccess);
 			auth.leaveForOAuth(authorization_url);
 		} catch (err) {
 			integrationsError = err instanceof Error ? err.message : "Couldn't start Google reconnect.";
@@ -729,13 +758,16 @@
 			<section class="flex flex-col gap-3">
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
-					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs, Sheets,
-					Contacts, and Tasks, and create Meet links. Sending mail, creating events, adding tasks,
-					and writing files stay off until you grant
+					Connect a Google account so assigned agents can use the access you grant below. Read is
+					the default — sending mail and other writes only go to Google if you check them here.
+					Agents still need
+					{scopeDisplayName('integrations:google')}
+					(and
 					{scopeDisplayName('integrations:google:write')}
-					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
-					store, not the workspace database. Reconnect an account to grant newly added Google scopes or
-					replace expired access without creating a second connection.
+					for writes) on that agent (Agents → More options → Permissions). Tokens live in this machine's
+					credential store, not the workspace database. Reconnect an account to add access or replace
+					expired tokens without creating a second connection. Unchecking a box does not revoke Google
+					access — disconnect the account to drop it.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:
@@ -788,12 +820,47 @@
 
 			<section class="flex flex-col gap-3">
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">
+					Access to grant
+				</div>
+				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
+					Connect and Reconnect ask Google only for these boxes.
+				</p>
+				<div class="grid gap-3 sm:grid-cols-2">
+					{#each googleCapabilityGroups as group (group.group)}
+						<div
+							class="flex flex-col gap-2 rounded-2xl border border-line bg-surface px-5 py-4 dark:border-line-dark dark:bg-surface-dark"
+						>
+							<div class="text-sm font-semibold text-ink dark:text-ink-dark">
+								{group.group_label}
+							</div>
+							{#each group.items as cap (cap.id)}
+								<label
+									class="flex cursor-pointer items-center gap-2.5 text-[15px] text-ink dark:text-ink-dark"
+								>
+									<input
+										type="checkbox"
+										checked={selectedGoogleAccess.includes(cap.id)}
+										onchange={(event) =>
+											handleToggleGoogleAccess(cap.id, event.currentTarget.checked)}
+										aria-label={googleCapabilityName(cap)}
+										class="accent-(--color-accent)"
+									/>
+									<span>{cap.label}</span>
+								</label>
+							{/each}
+						</div>
+					{/each}
+				</div>
+			</section>
+
+			<section class="flex flex-col gap-3">
+				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">
 					Connected accounts
 				</div>
 				<Button
 					class="self-start"
 					onclick={handleConnectGoogle}
-					disabled={connectingGoogle || !googleApp?.client_id}
+					disabled={connectingGoogle || !googleApp?.client_id || selectedGoogleAccess.length === 0}
 				>
 					{connectingGoogle ? 'Opening Google…' : 'Connect Google account'}
 				</Button>
@@ -817,6 +884,11 @@
 									>
 										{integrationStatusLabel(account.status)}
 									</span>
+									{#if formatGoogleCapabilities(account.capabilities, googleCapabilityCatalog)}
+										<span class="block text-[13px] text-muted dark:text-muted-dark">
+											{formatGoogleCapabilities(account.capabilities, googleCapabilityCatalog)}
+										</span>
+									{/if}
 									{#if account.last_error}
 										<span class="mt-0.5 block text-[13px] text-danger">{account.last_error}</span>
 									{/if}

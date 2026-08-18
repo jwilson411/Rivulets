@@ -257,9 +257,16 @@ describe('settings/+page.svelte', () => {
 
 		render(SettingsPage);
 		await page.getByRole('button', { name: 'Integrations' }).click();
+		await expect.element(page.getByLabelText('Gmail — read')).toBeChecked();
+		await expect.element(page.getByLabelText('Gmail — send and draft')).not.toBeChecked();
+		await page.getByLabelText('Gmail — send and draft').click();
 		await page.getByRole('button', { name: 'Connect Google account' }).click();
 
 		expect(integrations.connectGoogle).toHaveBeenCalledOnce();
+		expect(integrations.connectGoogle).toHaveBeenCalledWith(
+			undefined,
+			expect.arrayContaining(['gmail_read', 'gmail_write'])
+		);
 		expect(leaveForOAuthMock).toHaveBeenCalledWith(
 			'https://accounts.google.com/o/oauth2/v2/auth?state=abc'
 		);
@@ -281,6 +288,7 @@ describe('settings/+page.svelte', () => {
 				account_email: 'ada@example.com',
 				status: 'connected',
 				scopes: [],
+				capabilities: ['gmail_read', 'calendar_read'],
 				last_error: null
 			},
 			{
@@ -299,6 +307,7 @@ describe('settings/+page.svelte', () => {
 
 		await expect.element(page.getByText('ada@example.com')).toBeInTheDocument();
 		await expect.element(page.getByText('Connected', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText(/Gmail read · Calendar read/)).toBeInTheDocument();
 		await expect.element(page.getByText('connected', { exact: true })).not.toBeInTheDocument();
 		await expect.element(page.getByText('ada.home@example.com')).toBeInTheDocument();
 		await expect.element(page.getByText('Needs reconnect')).toBeInTheDocument();
@@ -389,7 +398,10 @@ describe('settings/+page.svelte', () => {
 		await page.getByRole('button', { name: 'Integrations' }).click();
 		await page.getByRole('button', { name: 'Reconnect' }).click();
 
-		expect(integrations.reconnect).toHaveBeenCalledWith('acc-1');
+		expect(integrations.reconnect).toHaveBeenCalledWith(
+			'acc-1',
+			expect.arrayContaining(['gmail_read'])
+		);
 		expect(leaveForOAuthMock).toHaveBeenCalledWith(
 			'https://accounts.google.com/o/oauth2/v2/auth?state=re'
 		);

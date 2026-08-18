@@ -52,22 +52,24 @@ describe('integrations', () => {
 	it('reconnect() POSTs /integrations/:id/reconnect', async () => {
 		const fetchMock = mockFetch({ authorization_url: 'https://accounts.google.com/o' });
 
-		const result = await integrations.reconnect('acc-1');
+		const result = await integrations.reconnect('acc-1', ['gmail_write']);
 
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/v1/integrations/acc-1/reconnect');
 		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify({ capabilities: ['gmail_write'] }));
 		expect(result.authorization_url).toContain('accounts.google.com');
 	});
 
 	it('connectGoogle() POSTs /integrations/google/connect', async () => {
 		const fetchMock = mockFetch({ authorization_url: 'https://accounts.google.com/o' });
 
-		const result = await integrations.connectGoogle('Work');
+		const result = await integrations.connectGoogle('Work', ['gmail_read']);
 
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/v1/integrations/google/connect');
 		expect(init.method).toBe('POST');
+		expect(init.body).toBe(JSON.stringify({ label: 'Work', capabilities: ['gmail_read'] }));
 		expect(result.authorization_url).toContain('accounts.google.com');
 	});
 

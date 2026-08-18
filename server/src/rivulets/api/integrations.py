@@ -36,6 +36,13 @@ from rivulets.integrations.google import (
     start_authorization,
     take_pending,
 )
+from rivulets.integrations.google_capabilities import (
+    DEFAULT_CONNECT_CAPABILITIES,
+    GoogleCapabilityError,
+    capabilities_from_scopes,
+    capability_catalog,
+    scopes_for_capabilities,
+)
 from rivulets.integrations.jsonutil import string_list
 from rivulets.integrations.registry import (
     account_from_row,
@@ -67,11 +74,21 @@ class GoogleOAuthAppIn(BaseModel):
     client_secret: str | None = None
 
 
+class GoogleCapabilityOut(BaseModel):
+    id: str
+    group: str
+    group_label: str
+    label: str
+    write: bool
+
+
 class GoogleOAuthAppOut(BaseModel):
     provider: Literal["google"]
     client_id: str
     has_client_secret: bool
     redirect_uri: str
+    capabilities: list[GoogleCapabilityOut]
+    default_capabilities: list[str]
 
 
 class IntegrationAccountOut(BaseModel):
@@ -81,6 +98,7 @@ class IntegrationAccountOut(BaseModel):
     account_email: str | None
     status: str
     scopes: list[str]
+    capabilities: list[str]
     last_error: str | None
 
     model_config = {"from_attributes": True}
@@ -88,6 +106,11 @@ class IntegrationAccountOut(BaseModel):
 
 class GoogleConnectIn(BaseModel):
     label: str | None = None
+    capabilities: list[str] | None = None
+
+
+class GoogleReconnectIn(BaseModel):
+    capabilities: list[str] | None = None
 
 
 class GoogleConnectOut(BaseModel):
@@ -111,8 +134,27 @@ def _account_out(row: IntegrationAccount) -> IntegrationAccountOut:
         account_email=row.account_email,
         status=row.status,
         scopes=scopes,
+        capabilities=capabilities_from_scopes(scopes),
         last_error=row.last_error,
     )
+
+
+def _oauth_app_out(row: IntegrationOAuthApp | None) -> GoogleOAuthAppOut:
+    return GoogleOAuthAppOut(
+        provider="google",
+        client_id=row.client_id if row is not None else "",
+        has_client_secret=bool(row is not None and row.client_secret_ref),
+        redirect_uri=callback_redirect_uri(),
+        capabilities=[GoogleCapabilityOut.model_validate(item) for item in capability_catalog()],
+        default_capabilities=list(DEFAULT_CONNECT_CAPABILITIES),
+    )
+
+
+def _requested_scopes(capabilities: list[str] | None) -> tuple[str, ...]:
+    try:
+        return scopes_for_capabilities(capabilities)
+    except GoogleCapabilityError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
 
 async def _google_oauth_app(db: DbSession) -> IntegrationOAuthApp | None:
@@ -161,13 +203,7 @@ async def list_integrations(
 async def get_google_oauth_app(
     db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
 ) -> GoogleOAuthAppOut:
-    row = await _google_oauth_app(db)
-    return GoogleOAuthAppOut(
-        provider="google",
-        client_id=row.client_id if row is not None else "",
-        has_client_secret=bool(row is not None and row.client_secret_ref),
-        redirect_uri=callback_redirect_uri(),
-    )
+    return _oauth_app_out(await _google_oauth_app(db))
 
 
 @router.put("/google/oauth-app", response_model=GoogleOAuthAppOut)
@@ -199,12 +235,7 @@ async def put_google_oauth_app(
     await db.commit()
     await db.refresh(row)
     cache_oauth_client(row.client_id, load_client_secret(row.client_secret_ref))
-    return GoogleOAuthAppOut(
-        provider="google",
-        client_id=row.client_id,
-        has_client_secret=bool(row.client_secret_ref),
-        redirect_uri=callback_redirect_uri(),
-    )
+    return _oauth_app_out(row)
 
 
 async def _require_google_oauth_app(db: DbSession) -> IntegrationOAuthApp:
@@ -223,12 +254,14 @@ def _authorization_url(
     label: str,
     account_id: str | None = None,
     login_hint: str | None = None,
+    scopes: tuple[str, ...] | None = None,
 ) -> str:
     return start_authorization(
         label,
         app_row.client_id.strip(),
         account_id=account_id,
         login_hint=login_hint,
+        scopes=scopes,
     )
 
 
@@ -238,12 +271,22 @@ async def connect_google(
 ) -> GoogleConnectOut:
     app_row = await _require_google_oauth_app(db)
     label = (body.label or "").strip() or "Google"
-    return GoogleConnectOut(authorization_url=_authorization_url(app_row, label=label))
+    return GoogleConnectOut(
+        authorization_url=_authorization_url(
+            app_row,
+            label=label,
+            scopes=_requested_scopes(body.capabilities),
+        )
+    )
 
 
 @router.post("/{account_id}/reconnect", response_model=GoogleConnectOut)
 async def reconnect_integration(
-    account_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+    account_id: str,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    _o: OwnerGrant,
+    body: GoogleReconnectIn | None = None,
 ) -> GoogleConnectOut:
     row = await db.get(IntegrationAccount, account_id)
     if row is None:
@@ -260,6 +303,7 @@ async def reconnect_integration(
             label=row.label,
             account_id=row.id,
             login_hint=row.account_email,
+            scopes=_requested_scopes(None if body is None else body.capabilities),
         )
     )
 

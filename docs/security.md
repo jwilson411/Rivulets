@@ -58,7 +58,8 @@ Layer 5: Credential Isolation
      OAuth tokens (Google first, #458) use the same store and the same
      never-in-SQLite / never-in-a-response-body rule. Connecting or
      reconnecting an integration is owner-only; invite-grant sessions
-     cannot reach those routes.
+     cannot reach those routes. Google connect asks only for the
+     surfaces the owner checked (read by default; send/write is opt-in).
 
 Layer 6: Sandboxed Code Execution
   └─ The code execution tool runs inside firejail (Linux) or sandbox-exec
