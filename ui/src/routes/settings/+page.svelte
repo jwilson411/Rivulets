@@ -100,6 +100,7 @@
 	let googleClientSecret = $state('');
 	let savingGoogleApp = $state(false);
 	let connectingGoogle = $state(false);
+	let reconnectingId = $state<string | null>(null);
 	let disconnectingAccount = $state<IntegrationAccount | null>(null);
 	let disconnecting = $state(false);
 
@@ -187,6 +188,18 @@
 		} catch (err) {
 			integrationsError = err instanceof Error ? err.message : "Couldn't start Google sign-in.";
 			connectingGoogle = false;
+		}
+	}
+
+	async function handleReconnect(id: string) {
+		reconnectingId = id;
+		integrationsError = null;
+		try {
+			const { authorization_url } = await integrationsApi.reconnect(id);
+			auth.leaveForOAuth(authorization_url);
+		} catch (err) {
+			integrationsError = err instanceof Error ? err.message : "Couldn't start Google reconnect.";
+			reconnectingId = null;
 		}
 	}
 
@@ -722,8 +735,8 @@
 						>integrations:google:write</code
 					>
 					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
-					store, not the workspace database. Already connected? Disconnect and connect again to grant
-					Contacts, Tasks, and Meet.
+					store, not the workspace database. Reconnect an account to grant newly added Google scopes or
+					replace expired access without creating a second connection.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:
@@ -809,13 +822,23 @@
 										<span class="mt-0.5 block text-[13px] text-danger">{account.last_error}</span>
 									{/if}
 								</span>
-								<button
-									type="button"
-									onclick={() => (disconnectingAccount = account)}
-									class="ml-auto text-sm font-medium text-danger hover:underline"
-								>
-									Disconnect
-								</button>
+								<div class="ml-auto flex items-center gap-3">
+									<button
+										type="button"
+										onclick={() => handleReconnect(account.id)}
+										disabled={reconnectingId === account.id || !googleApp?.client_id}
+										class="text-sm font-medium text-accent hover:underline disabled:opacity-50 dark:text-accent-dark"
+									>
+										{reconnectingId === account.id ? 'Opening Google…' : 'Reconnect'}
+									</button>
+									<button
+										type="button"
+										onclick={() => (disconnectingAccount = account)}
+										class="text-sm font-medium text-danger hover:underline"
+									>
+										Disconnect
+									</button>
+								</div>
 							</div>
 						{/each}
 					</div>

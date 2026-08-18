@@ -4,7 +4,9 @@ OAuth is owner-only: an invite-grant session must not connect or
 reconnect. Tokens go to the credential store; this router never returns
 them. The callback is the one unauthenticated route — Google redirects
 the browser to loopback with no Authorization header — and is gated by
-an unguessable `state` minted at connect time.
+an unguessable `state` minted at connect time. Reconnect updates the
+same account row and credential ref so a scope grant does not create
+a second connection.
 """
 
 from __future__ import annotations
@@ -42,9 +44,11 @@ from rivulets.integrations.registry import (
     upsert_connected_account,
 )
 from rivulets.integrations.tokens import (
+    StoredTokens,
     delete_tokens,
     load_tokens,
     oauth_app_secret_ref,
+    prefer_existing_refresh,
     store_tokens,
 )
 from rivulets.security.credentials import (
@@ -203,19 +207,61 @@ async def put_google_oauth_app(
     )
 
 
-@router.post("/google/connect", response_model=GoogleConnectOut)
-async def connect_google(
-    body: GoogleConnectIn, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
-) -> GoogleConnectOut:
+async def _require_google_oauth_app(db: DbSession) -> IntegrationOAuthApp:
     row = await _google_oauth_app(db)
     if row is None or not row.client_id.strip():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Add a Google OAuth client ID in Settings before connecting an account.",
         )
+    return row
+
+
+def _authorization_url(
+    app_row: IntegrationOAuthApp,
+    *,
+    label: str,
+    account_id: str | None = None,
+    login_hint: str | None = None,
+) -> str:
+    return start_authorization(
+        label,
+        app_row.client_id.strip(),
+        account_id=account_id,
+        login_hint=login_hint,
+    )
+
+
+@router.post("/google/connect", response_model=GoogleConnectOut)
+async def connect_google(
+    body: GoogleConnectIn, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> GoogleConnectOut:
+    app_row = await _require_google_oauth_app(db)
     label = (body.label or "").strip() or "Google"
-    url = start_authorization(label, row.client_id.strip())
-    return GoogleConnectOut(authorization_url=url)
+    return GoogleConnectOut(authorization_url=_authorization_url(app_row, label=label))
+
+
+@router.post("/{account_id}/reconnect", response_model=GoogleConnectOut)
+async def reconnect_integration(
+    account_id: str, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> GoogleConnectOut:
+    row = await db.get(IntegrationAccount, account_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Integration not found")
+    if row.provider != PROVIDER:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Reconnect is only implemented for Google.",
+        )
+    app_row = await _require_google_oauth_app(db)
+    return GoogleConnectOut(
+        authorization_url=_authorization_url(
+            app_row,
+            label=row.label,
+            account_id=row.id,
+            login_hint=row.account_email,
+        )
+    )
 
 
 @router.get("/google/callback")
@@ -245,34 +291,107 @@ async def google_callback(
     except GoogleIntegrationError as exc:
         return _callback_page("Google", str(exc), ok=False)
 
-    account_id = uuid7()
+    email = fetch_account_email(tokens.access_token)
+    existing = await _account_for_callback(db, account_id=pending.account_id, email=email)
+    if pending.account_id and existing is None:
+        return _callback_page(
+            "Google",
+            "That connected account was removed before sign-in finished.",
+            ok=False,
+        )
+    if existing is not None and email:
+        clash = await _google_account_by_email(db, email)
+        if clash is not None and clash.id != existing.id:
+            return _callback_page(
+                "Google",
+                f"{email} is already connected as {clash.label}. "
+                "Disconnect that account first, or pick the matching Google user.",
+                ok=False,
+            )
+
+    if existing is not None:
+        stored = _existing_tokens(existing.credential_ref)
+        tokens = prefer_existing_refresh(tokens, stored)
+        account_id = existing.id
+        row = existing
+        created = False
+    else:
+        account_id = uuid7()
+        row = None
+        created = True
+
     try:
         credential_ref = store_tokens(account_id, tokens)
     except CredentialStoreError as exc:
         return _callback_page("Google", str(exc), ok=False)
 
-    email = fetch_account_email(tokens.access_token)
     label = pending.label
     if email and label == "Google":
         label = email
-    row = IntegrationAccount(
-        id=account_id,
-        provider=PROVIDER,
-        label=label,
-        account_email=email,
-        status="connected",
-        scopes_json=json.dumps(list(tokens.scopes)),
-        credential_ref=credential_ref,
-        last_error=None,
-    )
-    db.add(row)
+    if created:
+        row = IntegrationAccount(
+            id=account_id,
+            provider=PROVIDER,
+            label=label,
+            account_email=email,
+            status="connected",
+            scopes_json=json.dumps(list(tokens.scopes)),
+            credential_ref=credential_ref,
+            last_error=None,
+        )
+        db.add(row)
+    else:
+        assert row is not None
+        if pending.label and pending.label != "Google":
+            row.label = pending.label
+        elif email and row.label in {"Google", row.account_email}:
+            row.label = email
+        row.account_email = email or row.account_email
+        row.status = "connected"
+        row.scopes_json = json.dumps(list(tokens.scopes))
+        row.credential_ref = credential_ref
+        row.last_error = None
+        row.updated_at = utcnow_iso()
     await db.commit()
     await db.refresh(row)
     loaded = account_from_row(row)
     if loaded is not None:
         upsert_connected_account(loaded)
     who = email or "Google"
-    return _callback_page("Google", f"{who} is connected. You can close this tab.", ok=True)
+    verb = "reconnected" if not created else "connected"
+    return _callback_page("Google", f"{who} is {verb}. You can close this tab.", ok=True)
+
+
+async def _google_account_by_email(db: DbSession, email: str) -> IntegrationAccount | None:
+    result = await db.execute(
+        select(IntegrationAccount).where(
+            IntegrationAccount.provider == PROVIDER,
+            IntegrationAccount.account_email == email,
+        )
+    )
+    return result.scalars().first()
+
+
+async def _account_for_callback(
+    db: DbSession, *, account_id: str | None, email: str | None
+) -> IntegrationAccount | None:
+    if account_id:
+        row = await db.get(IntegrationAccount, account_id)
+        if row is not None and row.provider == PROVIDER:
+            return row
+        return None
+    if email:
+        return await _google_account_by_email(db, email)
+    return None
+
+
+def _existing_tokens(credential_ref: str | None) -> StoredTokens | None:
+    if not credential_ref:
+        return None
+    try:
+        return load_tokens(credential_ref)
+    except CredentialStoreError:
+        return None
 
 
 @router.patch("/{account_id}", response_model=IntegrationAccountOut)

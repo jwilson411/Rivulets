@@ -44,6 +44,7 @@ vi.mock('$lib/api/integrations', () => ({
 		googleOAuthApp: vi.fn(),
 		saveGoogleOAuthApp: vi.fn(),
 		connectGoogle: vi.fn(),
+		reconnect: vi.fn(),
 		disconnect: vi.fn()
 	}
 }));
@@ -359,6 +360,39 @@ describe('settings/+page.svelte', () => {
 		await expect
 			.element(page.getByRole('button', { name: 'Connect Google account' }))
 			.toBeInTheDocument();
+	});
+
+	it('lets the owner reconnect an existing Google account in place', async () => {
+		seed();
+		vi.mocked(integrations.googleOAuthApp).mockResolvedValue({
+			provider: 'google',
+			client_id: 'client-123',
+			has_client_secret: true,
+			redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+		});
+		vi.mocked(integrations.list).mockResolvedValue([
+			{
+				id: 'acc-1',
+				provider: 'google',
+				label: 'Work',
+				account_email: 'ada@example.com',
+				status: 'connected',
+				scopes: [],
+				last_error: null
+			}
+		]);
+		vi.mocked(integrations.reconnect).mockResolvedValue({
+			authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=re'
+		});
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Integrations' }).click();
+		await page.getByRole('button', { name: 'Reconnect' }).click();
+
+		expect(integrations.reconnect).toHaveBeenCalledWith('acc-1');
+		expect(leaveForOAuthMock).toHaveBeenCalledWith(
+			'https://accounts.google.com/o/oauth2/v2/auth?state=re'
+		);
 	});
 
 	it('lets the owner pick a project folder for agents', async () => {

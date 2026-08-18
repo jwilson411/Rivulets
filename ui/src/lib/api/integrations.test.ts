@@ -49,6 +49,17 @@ describe('integrations', () => {
 		expect(init.body).toBe(JSON.stringify({ client_id: 'abc', client_secret: 's' }));
 	});
 
+	it('reconnect() POSTs /integrations/:id/reconnect', async () => {
+		const fetchMock = mockFetch({ authorization_url: 'https://accounts.google.com/o' });
+
+		const result = await integrations.reconnect('acc-1');
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/integrations/acc-1/reconnect');
+		expect(init.method).toBe('POST');
+		expect(result.authorization_url).toContain('accounts.google.com');
+	});
+
 	it('connectGoogle() POSTs /integrations/google/connect', async () => {
 		const fetchMock = mockFetch({ authorization_url: 'https://accounts.google.com/o' });
 

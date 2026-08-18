@@ -141,6 +141,12 @@ def test_invite_grant_cannot_connect_or_list(
         ).status_code
         == 403
     )
+    assert (
+        client.post(
+            "/api/v1/integrations/missing/reconnect", json={}, headers=invite_headers
+        ).status_code
+        == 403
+    )
 
 
 def _fake_token_response(_request: httpx.Request) -> httpx.Response:
@@ -293,3 +299,163 @@ def test_invite_grant_cannot_disconnect(
         == 403
     )
     assert len(client.get("/api/v1/integrations", headers=auth_headers).json()) == 1
+
+
+def _complete_google_connect(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    label: str = "Work",
+    account_id: str | None = None,
+    access_token: str = "ya29.access",  # noqa: S107
+    refresh_token: str = "1//refresh",  # noqa: S107
+    email: str = "ada@example.com",
+    scope: str = "https://www.googleapis.com/auth/gmail.readonly email",
+) -> str:
+    client.put(
+        "/api/v1/integrations/google/oauth-app",
+        json={"client_id": "client-123"},
+        headers=auth_headers,
+    )
+    if account_id is None:
+        connect = client.post(
+            "/api/v1/integrations/google/connect",
+            json={"label": label},
+            headers=auth_headers,
+        )
+    else:
+        connect = client.post(
+            f"/api/v1/integrations/{account_id}/reconnect",
+            json={},
+            headers=auth_headers,
+        )
+    assert connect.status_code == 200, connect.text
+    state = parse_qs(urlparse(connect.json()["authorization_url"]).query)["state"][0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith(google_mod.TOKEN_ENDPOINT):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_in": 3600,
+                    "scope": scope,
+                    "token_type": "Bearer",
+                },
+            )
+        if str(request.url).startswith(google_mod.USERINFO_ENDPOINT):
+            return httpx.Response(200, json={"email": email})
+        return httpx.Response(404, text="unexpected")
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client(handler))
+    callback = client.get(
+        "/api/v1/integrations/google/callback",
+        params={"code": "auth-code", "state": state},
+    )
+    assert callback.status_code == 200, callback.text
+    listed = client.get("/api/v1/integrations", headers=auth_headers).json()
+    assert listed
+    return listed[0]["id"] if account_id is None else account_id
+
+
+def test_reconnect_keeps_account_id_and_replaces_tokens(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_id = _complete_google_connect(client, auth_headers, monkeypatch)
+    first = get_connected_account("google")
+    assert first is not None
+    assert first.id == account_id
+    assert load_tokens(first.credential_ref).access_token == "ya29.access"  # noqa: S105
+
+    reconnect = client.post(
+        f"/api/v1/integrations/{account_id}/reconnect", json={}, headers=auth_headers
+    )
+    assert reconnect.status_code == 200
+    query = parse_qs(urlparse(reconnect.json()["authorization_url"]).query)
+    assert query["login_hint"] == ["ada@example.com"]
+    assert "contacts.readonly" in query["scope"][0]
+    state = query["state"][0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith(google_mod.TOKEN_ENDPOINT):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "ya29.rotated",
+                    "expires_in": 3600,
+                    "scope": (
+                        "https://www.googleapis.com/auth/gmail.readonly "
+                        "https://www.googleapis.com/auth/contacts.readonly email"
+                    ),
+                    "token_type": "Bearer",
+                },
+            )
+        if str(request.url).startswith(google_mod.USERINFO_ENDPOINT):
+            return httpx.Response(200, json={"email": "ada@example.com"})
+        return httpx.Response(404, text="unexpected")
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client(handler))
+    callback = client.get(
+        "/api/v1/integrations/google/callback",
+        params={"code": "auth-code-2", "state": state},
+    )
+    assert callback.status_code == 200, callback.text
+    assert "reconnected" in callback.text
+    listed = client.get("/api/v1/integrations", headers=auth_headers).json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == account_id
+    assert any("contacts.readonly" in scope for scope in listed[0]["scopes"])
+    connected = get_connected_account("google")
+    assert connected is not None
+    assert connected.id == account_id
+    tokens = load_tokens(connected.credential_ref)
+    assert tokens.access_token == "ya29.rotated"  # noqa: S105
+    assert tokens.refresh_token == "1//refresh"  # noqa: S105
+
+
+def test_second_connect_same_email_updates_existing_account(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_id = _complete_google_connect(client, auth_headers, monkeypatch)
+    _complete_google_connect(
+        client,
+        auth_headers,
+        monkeypatch,
+        access_token="ya29.again",  # noqa: S106
+        refresh_token="1//new-refresh",  # noqa: S106
+        scope="https://www.googleapis.com/auth/tasks.readonly email",
+    )
+    listed = client.get("/api/v1/integrations", headers=auth_headers).json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == account_id
+    assert any("tasks.readonly" in scope for scope in listed[0]["scopes"])
+    connected = get_connected_account("google")
+    assert connected is not None
+    assert load_tokens(connected.credential_ref).access_token == "ya29.again"  # noqa: S105
+
+
+def test_reconnect_missing_account_is_404(client: TestClient, auth_headers: dict[str, str]) -> None:
+    client.put(
+        "/api/v1/integrations/google/oauth-app",
+        json={"client_id": "client-123"},
+        headers=auth_headers,
+    )
+    response = client.post("/api/v1/integrations/missing/reconnect", json={}, headers=auth_headers)
+    assert response.status_code == 404
+
+
+def test_invite_grant_cannot_reconnect(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_id = _complete_google_connect(client, auth_headers, monkeypatch)
+    invite_headers = _invite_headers(client, auth_headers)
+    assert (
+        client.post(
+            f"/api/v1/integrations/{account_id}/reconnect",
+            json={},
+            headers=invite_headers,
+        ).status_code
+        == 403
+    )
