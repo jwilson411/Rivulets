@@ -232,8 +232,13 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 
 		await expect
-			.element(page.getByText(/Agents aren't ready to run on this node/))
+			.element(
+				page.getByText(
+					"Agents aren't ready to run on this node. Sign out and back in, or check Providers (More → Providers)."
+				)
+			)
 			.toBeInTheDocument();
+		await expect.element(page.getByText('Settings > Providers')).not.toBeInTheDocument();
 		await expect
 			.element(page.getByText("Agents aren't ready to run — sign out and back in"))
 			.toBeInTheDocument();

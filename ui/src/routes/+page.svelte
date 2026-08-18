@@ -248,7 +248,7 @@
 			{#if agentsNotReady}
 				<ErrorBanner
 					class="mb-4"
-					message="Agents aren't ready to run on this node. Sign out and back in, or check Settings > Providers."
+					message="Agents aren't ready to run on this node. Sign out and back in, or check Providers (More → Providers)."
 					onRetry={load}
 				/>
 			{/if}
