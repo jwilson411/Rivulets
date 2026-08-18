@@ -33,6 +33,16 @@ const INTEGRATION_TOOLS = new Set([
 	'google_gmail_send'
 ]);
 
+// Gmail / Calendar tools talk to a connected Workspace account, not the
+// Google AI (Gemini) provider key. Agent picker rows link here when none
+// is connected (#471).
+export const SETTINGS_INTEGRATIONS_SEARCH = '?tab=integrations';
+export const SETTINGS_INTEGRATIONS_HREF = `/settings${SETTINGS_INTEGRATIONS_SEARCH}`;
+
+export function isGoogleIntegrationTool(name: string): boolean {
+	return INTEGRATION_TOOLS.has(name);
+}
+
 const TOKEN_OVERRIDES: Record<string, string> = {
 	db: 'DB',
 	gmail: 'Gmail',

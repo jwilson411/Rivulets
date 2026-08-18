@@ -18,6 +18,15 @@ import { agents } from '$lib/api/agents';
 import { teams } from '$lib/api/teams';
 
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
+const routeState = vi.hoisted(() => ({ search: '' }));
+
+vi.mock('$app/state', () => ({
+	page: {
+		get url() {
+			return new URL('http://localhost/settings' + routeState.search);
+		}
+	}
+}));
 
 vi.mock('$lib/api/settings', () => ({
 	settings: { get: vi.fn(), update: vi.fn(), listDirectories: vi.fn(), createDirectory: vi.fn() }
@@ -54,6 +63,7 @@ vi.mock('$lib/api/auth.svelte', () => ({
 afterEach(() => {
 	vi.clearAllMocks();
 	authState.grant = 'owner';
+	routeState.search = '';
 });
 
 const defaults: WorkspaceSettings = {
@@ -212,6 +222,18 @@ describe('settings/+page.svelte', () => {
 		expect(update.status).not.toHaveBeenCalled();
 		expect(backups.list).not.toHaveBeenCalled();
 		expect(integrations.list).not.toHaveBeenCalled();
+	});
+
+	it('opens the Integrations tab from ?tab=integrations (#471)', async () => {
+		seed();
+		routeState.search = '?tab=integrations';
+
+		render(SettingsPage);
+
+		await expect
+			.element(page.getByText('Connect a Google account so assigned agents', { exact: false }))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('How conversations stop')).not.toBeInTheDocument();
 	});
 
 	it('lets the owner save a Google OAuth client and connect an account', async () => {

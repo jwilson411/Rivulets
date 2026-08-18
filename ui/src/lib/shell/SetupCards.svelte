@@ -27,7 +27,7 @@
 	const PROVIDER_CHOICES: { kind: ProviderKind; label: string }[] = [
 		{ kind: 'anthropic', label: 'Anthropic' },
 		{ kind: 'openai', label: 'OpenAI' },
-		{ kind: 'google', label: 'Google' },
+		{ kind: 'google', label: 'Google AI' },
 		{ kind: 'xai', label: 'xAI' },
 		{ kind: 'ollama', label: 'Ollama' },
 		{ kind: 'openai_compatible', label: 'OpenAI-compatible' }
