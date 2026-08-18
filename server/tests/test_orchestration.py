@@ -9,6 +9,7 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.db.models import Agent
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchMethod, DispatchResult
 from rivulets.dispatch.orchestration import apply_orchestrator_lock, format_team_roster
@@ -414,6 +415,53 @@ def test_hire_teammate_then_handoff_invokes_new_agent(
     assert any(m["sender_name"] == "DBA" for m in messages)
     created = client.get("/api/v1/agents", headers=auth_headers).json()
     assert any(a["name"] == "DBA" for a in created)
+
+
+def test_hire_teammate_starts_with_new_agent_tools_and_scopes(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#468: a hire must land with the same default kit as New agent,
+    not an empty tool list that can only talk."""
+    agents = client.get("/api/v1/agents", headers=auth_headers).json()
+    assistant_id = next(a["id"] for a in agents if a["name"] == "Assistant")
+
+    async def fake_run_agent(_db: object, agent_id: str, _message: str, **_kwargs: object) -> Any:
+        if agent_id == assistant_id:
+            return SimpleNamespace(
+                status=RunStatus.completed,
+                tools=[
+                    ToolExecution(
+                        tool_name="hire_teammate",
+                        tool_args={
+                            "name": "DBA",
+                            "role": "Reviews schemas and writes SQL.",
+                            "instructions": "You are a database administrator.",
+                            "assignment": "Check the users table.",
+                        },
+                    )
+                ],
+                get_content_as_string=lambda: "Hiring a DBA.",
+            )
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=None,
+            get_content_as_string=lambda: "Schema looks fine.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    channel_id = _create_channel_with_team(client, auth_headers, [], name="hire-tools")
+    client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "we need a database review"},
+        headers=auth_headers,
+    )
+    roster = client.get("/api/v1/agents", headers=auth_headers).json()
+    hired = next(agent for agent in roster if agent["name"] == "DBA")
+    catalog = client.get("/api/v1/tools", headers=auth_headers).json()
+    assigned = client.get(f"/api/v1/agents/{hired['id']}/tools", headers=auth_headers).json()
+    scopes = client.get(f"/api/v1/agents/{hired['id']}/tool-scopes", headers=auth_headers).json()
+    assert set(assigned["tool_ids"]) == {tool["id"] for tool in catalog}
+    assert set(scopes["scopes"]) == set(TOOL_SCOPES)
 
 
 def test_non_orchestrator_hire_is_ignored(

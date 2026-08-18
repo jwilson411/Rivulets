@@ -23,7 +23,7 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from rivulets.agentos import live_agentos_id, sync_agents
@@ -31,12 +31,16 @@ from rivulets.agentos.agent_lifecycle import (
     generate_and_store_routing_rules,
     publish_agent_change,
     publish_agent_teams_change,
+    publish_agent_tool_scopes_change,
     publish_agent_tools_change,
     record_agent_version,
     register_agent_with_agentos,
     replace_routing_rules,
     set_agent_teams,
     set_agent_tools,
+)
+from rivulets.agentos.agent_lifecycle import (
+    set_agent_tool_scopes as replace_agent_tool_scopes,
 )
 from rivulets.agentos.tool_resolution import SENSITIVE_BUILTIN_TOOL_NAMES
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
@@ -58,11 +62,9 @@ from rivulets.db.models import (
     TeamAgent,
     Tool,
 )
-from rivulets.sync.apply import AGENT_TOOL_SCOPE_SPEC
 from rivulets.sync.publish import (
     publish_current_state,
     publish_tombstone,
-    replace_join_entities,
 )
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -727,24 +729,8 @@ async def set_agent_tool_scopes(
     unknown = sorted(set(body.scopes) - TOOL_SCOPES)
     if unknown:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown scope(s): {', '.join(unknown)}")
-    old_scopes = set(
-        (
-            await db.scalars(
-                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id)
-            )
-        ).all()
-    )
-    await db.execute(delete(AgentToolScope).where(AgentToolScope.agent_id == agent_id))
-    granted = set(body.scopes)
-    for scope in granted:
-        db.add(AgentToolScope(agent_id=agent_id, scope=scope))
+    old_scopes, granted = await replace_agent_tool_scopes(db, agent_id, body.scopes)
     await db.commit()
-    await replace_join_entities(
-        db,
-        "agent_tool_scope",
-        AGENT_TOOL_SCOPE_SPEC,
-        {(agent_id, scope) for scope in old_scopes},
-        {(agent_id, scope) for scope in granted},
-    )
+    await publish_agent_tool_scopes_change(db, agent_id, old_scopes, granted)
     await register_agent_with_agentos(db, agent)
     return AgentToolScopesOut(scopes=sorted(granted))
