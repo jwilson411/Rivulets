@@ -10,6 +10,7 @@
 		storedPath = null,
 		inheritedPath = null,
 		inheritedLabel = 'the default',
+		overrideLabel = 'This conversation',
 		canEdit = false,
 		busy = false,
 		error = null,
@@ -18,6 +19,7 @@
 		storedPath?: string | null;
 		inheritedPath?: string | null;
 		inheritedLabel?: string;
+		overrideLabel?: string;
 		canEdit?: boolean;
 		busy?: boolean;
 		error?: string | null;
@@ -28,7 +30,7 @@
 
 	let effective = $derived(storedPath ?? inheritedPath);
 	let usingOverride = $derived(storedPath != null);
-	let label = $derived(usingOverride ? 'This conversation' : inheritedLabel);
+	let label = $derived(usingOverride ? overrideLabel : inheritedLabel);
 	let displayPath = $derived(effective ?? 'Built-in sandbox');
 
 	async function choose(path: string) {
