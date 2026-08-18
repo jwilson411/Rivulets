@@ -104,10 +104,16 @@ async def test_seed_builtin_tools_marks_only_the_documented_sensitive_set(
     assert sensitivity["fetch_webpage"] is True
     assert sensitivity["write_file"] is True
     assert sensitivity["query_workspace_db"] is True
+    assert sensitivity["google_gmail_send"] is True
+    assert sensitivity["google_gmail_draft"] is True
+    assert sensitivity["google_calendar_create"] is True
     # Read-only/low-risk builtins stay unmarked.
     assert sensitivity["read_file"] is False
     assert sensitivity["list_files"] is False
     assert sensitivity["web_search"] is False
+    assert sensitivity["google_gmail_search"] is False
+    assert sensitivity["google_gmail_read"] is False
+    assert sensitivity["google_calendar_list"] is False
 
 
 async def test_seed_builtin_tools_backfills_sensitivity_on_existing_rows(

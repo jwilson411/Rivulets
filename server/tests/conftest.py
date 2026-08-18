@@ -58,6 +58,13 @@ from rivulets.db.session import (  # noqa: E402
     override_engine,
     session_scope,
 )
+from rivulets.integrations.google import (  # noqa: E402
+    reset_oauth_client_cache_for_testing,
+    reset_pending_oauth_for_testing,
+)
+from rivulets.integrations.registry import (  # noqa: E402
+    reset_integration_registry_for_testing,
+)
 from rivulets.security import keys  # noqa: E402
 from rivulets.security.rate_limit import (  # noqa: E402
     get_invite_accept_rate_limiter,
@@ -145,6 +152,9 @@ async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
     get_invite_resume_rate_limiter().reset_for_testing()
     get_webhook_trigger_rate_limiter().reset_for_testing()
     get_webhook_replay_guard().reset_for_testing()
+    reset_integration_registry_for_testing()
+    reset_pending_oauth_for_testing()
+    reset_oauth_client_cache_for_testing()
 
     app = create_app()
     with TestClient(app) as test_client:
@@ -201,6 +211,9 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     recording a SyncPendingOutbound row, same as an offline node."""
     override_engine(make_engine(in_memory=True))
     await init_db()
+    reset_integration_registry_for_testing()
+    reset_pending_oauth_for_testing()
+    reset_oauth_client_cache_for_testing()
     reset_agentos_for_testing()
     init_agentos()
     reset_sync_engine_for_testing()

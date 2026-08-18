@@ -37,6 +37,14 @@ from rivulets.tools.builtin.filesystem import (
     set_working_directory,
     write_file,
 )
+from rivulets.tools.builtin.google import (
+    google_calendar_create,
+    google_calendar_list,
+    google_gmail_draft,
+    google_gmail_read,
+    google_gmail_search,
+    google_gmail_send,
+)
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.hire_teammate import hire_teammate
 from rivulets.tools.builtin.http_request import http_request
@@ -78,6 +86,12 @@ __all__ = [
     "execute_python",
     "fetch_webpage",
     "get_workspace_settings",
+    "google_calendar_create",
+    "google_calendar_list",
+    "google_gmail_draft",
+    "google_gmail_read",
+    "google_gmail_search",
+    "google_gmail_send",
     "handoff",
     "hire_teammate",
     "http_request",

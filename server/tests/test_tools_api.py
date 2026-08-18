@@ -406,6 +406,7 @@ def test_list_tool_scopes_returns_the_known_catalog(
     assert response.json() == [
         "agents_teams:manage",
         "channels:manage",
+        "integrations:google",
         "invites:manage",
         "mcp_servers:manage",
         "sensitive_tools:manage",

@@ -137,6 +137,47 @@ class ProviderConfig(Base):
     synced: Mapped[bool] = mapped_column(default=False)
 
 
+class IntegrationOAuthApp(Base):
+    """The owner's OAuth client for one vendor (Google first, #458).
+
+    NOT synced — `client_id` is public but `client_secret_ref` points at
+    the credential store, and secrets never enter a sync payload (same
+    FR-9.2 / NFR-3.3 treatment as ProviderConfig). One row per provider.
+    A Desktop/public client has no secret; `client_secret_ref` is then
+    None and the token exchange is PKCE-only.
+    """
+
+    __tablename__ = "integration_oauth_app"
+
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    client_id: Mapped[str]
+    client_secret_ref: Mapped[str | None] = mapped_column(default=None)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
+class IntegrationAccount(Base):
+    """A connected third-party account (Google first, #458). NOT synced.
+
+    Tokens live in the credential store under `credential_ref` — this
+    row is metadata only (label, email, status, scopes the user granted
+    at OAuth time). Disconnect deletes the secret and this row so tools
+    fail closed.
+    """
+
+    __tablename__ = "integration_account"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=uuid7)
+    provider: Mapped[str]
+    label: Mapped[str]
+    account_email: Mapped[str | None] = mapped_column(default=None)
+    status: Mapped[str] = mapped_column(default="connected")
+    scopes_json: Mapped[str] = mapped_column(default="[]")
+    credential_ref: Mapped[str | None] = mapped_column(default=None)
+    last_error: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[str] = mapped_column(default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
+
+
 class WorkspaceSetting(Base):
     __tablename__ = "workspace_settings"
 

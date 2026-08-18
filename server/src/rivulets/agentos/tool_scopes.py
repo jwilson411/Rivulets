@@ -30,6 +30,7 @@ TOOL_SCOPES: frozenset[str] = frozenset(
         "settings:manage",
         "invites:manage",
         "sensitive_tools:manage",
+        "integrations:google",
     }
 )
 
@@ -116,6 +117,12 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # settings key/value pair (it's a credential capable of admitting a new
 # human to the workspace), so a workspace owner may want to grant one
 # without the other.
+#
+# #458: Google Gmail/Calendar tools share one "integrations:google"
+# scope. Connecting an account in Settings does not make every agent
+# eligible -- assignment plus this grant, same split as every category
+# above. Write tools (draft/send/create) are additionally marked
+# sensitive so unattended use goes through tool_audit.py.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -150,4 +157,10 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "http_request": "sensitive_tools:manage",
     "write_file": "sensitive_tools:manage",
     "query_workspace_db": "sensitive_tools:manage",
+    "google_gmail_search": "integrations:google",
+    "google_gmail_read": "integrations:google",
+    "google_gmail_draft": "integrations:google",
+    "google_gmail_send": "integrations:google",
+    "google_calendar_list": "integrations:google",
+    "google_calendar_create": "integrations:google",
 }

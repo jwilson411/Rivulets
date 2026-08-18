@@ -29,6 +29,7 @@ from rivulets.config import get_settings
 from rivulets.db.migrate import run_migrations
 from rivulets.db.session import get_engine, session_scope
 from rivulets.dispatch import invoke_agent_remotely
+from rivulets.integrations.registry import load_integration_registry
 from rivulets.sync import get_sync_engine, init_sync_engine
 from rivulets.sync.apply import handle_incoming_state_change
 from rivulets.sync.capabilities import load_capabilities
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         # Builtin tool rows (FR-8.2) must exist before sync_agents() builds
         # any agent that might reference one via the agent_tool join table.
         await seed_builtin_tools(db)
+        await load_integration_registry(db)
         # Repopulate AgentOS's agent list from the DB on every startup —
         # agents created before a restart need to be re-registered since
         # AgentOS's in-process agent list isn't itself persisted.

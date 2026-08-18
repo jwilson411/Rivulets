@@ -8,6 +8,7 @@ import type { Tool } from '$lib/api/tools';
 export const TOOL_GROUPS = [
 	{ key: 'chat', label: 'Chat' },
 	{ key: 'files', label: 'Files' },
+	{ key: 'integrations', label: 'Integrations' },
 	{ key: 'workspace_admin', label: 'Workspace admin' },
 	{ key: 'custom', label: 'Yours' },
 	{ key: 'mcp', label: 'From MCP' }
@@ -23,8 +24,19 @@ const CHAT_TOOLS = new Set([
 
 const FILES_TOOLS = new Set(['execute_python', 'list_files', 'read_file', 'write_file']);
 
+const INTEGRATION_TOOLS = new Set([
+	'google_calendar_create',
+	'google_calendar_list',
+	'google_gmail_draft',
+	'google_gmail_read',
+	'google_gmail_search',
+	'google_gmail_send'
+]);
+
 const TOKEN_OVERRIDES: Record<string, string> = {
 	db: 'DB',
+	gmail: 'Gmail',
+	google: 'Google',
 	http: 'HTTP',
 	mcp: 'MCP',
 	python: 'Python'
@@ -41,6 +53,7 @@ export function toolGroup(tool: Pick<Tool, 'name' | 'tool_type' | 'group'>): str
 	if (tool.tool_type === 'mcp') return 'mcp';
 	if (CHAT_TOOLS.has(tool.name)) return 'chat';
 	if (FILES_TOOLS.has(tool.name)) return 'files';
+	if (INTEGRATION_TOOLS.has(tool.name)) return 'integrations';
 	return 'workspace_admin';
 }
 
