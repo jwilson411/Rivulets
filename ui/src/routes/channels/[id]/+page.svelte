@@ -11,7 +11,7 @@
 	import { runs, type RunTrace } from '$lib/api/runs';
 	import { files as filesApi } from '$lib/api/files';
 	import { agentInk, INK_AVATAR } from '$lib/ink';
-	import { formatClock } from '$lib/format';
+	import { compareLastActivity, formatClock } from '$lib/format';
 	import type { MentionCandidate } from '$lib/mentions';
 	import { lockedTeamComposerHint, teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
 	import WorkingDirectoryControl from '$lib/components/WorkingDirectoryControl.svelte';
@@ -96,8 +96,18 @@
 	let allMemberNames = $derived(teamMembers.map((member) => member.name).join(', '));
 	let overflowNames = $derived(overflowTeamMembers.map((member) => member.name).join(', '));
 	let composer = $state<{ insertMention: (name: string) => void } | null>(null);
-	let openRivulets = $derived(rivuletList.filter((r) => r.status !== 'closed'));
-	let closedRivulets = $derived(rivuletList.filter((r) => r.status === 'closed'));
+	function byLastActivity(a: Rivulet, b: Rivulet): number {
+		return compareLastActivity(
+			{ lastAt: previews[a.id]?.lastAt, createdAt: a.created_at },
+			{ lastAt: previews[b.id]?.lastAt, createdAt: b.created_at }
+		);
+	}
+	let openRivulets = $derived(
+		rivuletList.filter((r) => r.status !== 'closed').toSorted(byLastActivity)
+	);
+	let closedRivulets = $derived(
+		rivuletList.filter((r) => r.status === 'closed').toSorted(byLastActivity)
+	);
 	let visibleRivulets = $derived(showArchived ? closedRivulets : openRivulets);
 	let lastOpen = $derived(openRivulets[0] ?? null);
 	let composerPlaceholder = $derived(
@@ -164,7 +174,7 @@
 					runs.list({ channelId, limit: 200 }).catch(() => [] as RunTrace[])
 				]);
 			channel = loadedChannel;
-			rivuletList = [...loadedRivulets].sort((a, b) => b.created_at.localeCompare(a.created_at));
+			rivuletList = loadedRivulets;
 			teamList = loadedTeams;
 			workflowList = loadedWorkflows;
 			const latest: Record<string, RunTrace> = {};
