@@ -2,6 +2,7 @@
 	import { ApiError } from '$lib/api/client';
 	import { auth } from '$lib/api/auth.svelte';
 	import { tools, type Tool, type ToolVersion } from '$lib/api/tools';
+	import { toolDescriptionLine, toolDisplayName } from '$lib/toolCatalog';
 	import Button from '$lib/ui/Button.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
@@ -187,14 +188,14 @@
 								? 'hover:border-accent dark:hover:border-accent-dark'
 								: ''}"
 						>
-							<span class="font-mono text-sm font-medium text-ink dark:text-ink-dark">
-								{tool.name}
+							<span class="text-sm font-medium text-ink dark:text-ink-dark">
+								{toolDisplayName(tool)}
 							</span>
 							{#if tool.sensitive}
 								<StatusPill tone="warn" class="h-[22px] text-xs">Sensitive</StatusPill>
 							{/if}
 							<span class="hidden truncate text-[13px] text-muted sm:inline dark:text-muted-dark">
-								{tool.description}
+								{toolDescriptionLine(tool.description)}
 							</span>
 							<StatusPill
 								tone={tool.available ? 'accent' : 'neutral'}
@@ -293,7 +294,7 @@
 {/if}
 
 {#if openTool && !confirmingDelete}
-	<Sheet title={openTool.name} onClose={() => (openTool = null)}>
+	<Sheet title={toolDisplayName(openTool)} onClose={() => (openTool = null)}>
 		<p class="text-[15px] text-muted dark:text-muted-dark">{openTool.description}</p>
 
 		<div class="flex flex-wrap items-center gap-3">
@@ -357,7 +358,11 @@
 {/if}
 
 {#if openTool && confirmingDelete}
-	<Sheet title="Delete {openTool.name}?" onClose={() => (confirmingDelete = false)} width={480}>
+	<Sheet
+		title="Delete {toolDisplayName(openTool)}?"
+		onClose={() => (confirmingDelete = false)}
+		width={480}
+	>
 		<p class="text-base leading-normal text-ink dark:text-ink-dark">
 			Agents using this tool lose it immediately.
 		</p>

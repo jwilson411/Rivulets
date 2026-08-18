@@ -238,7 +238,7 @@ describe('settings/+page.svelte', () => {
 			.element(page.getByText('Connect a Google account so assigned agents', { exact: false }))
 			.toBeInTheDocument();
 		await expect
-			.element(page.getByText('integrations:google:write', { exact: false }))
+			.element(page.getByText('Google send, draft, and write', { exact: false }))
 			.toBeInTheDocument();
 		await expect.element(page.getByText('How conversations stop')).not.toBeInTheDocument();
 	});
