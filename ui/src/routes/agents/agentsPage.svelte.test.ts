@@ -11,6 +11,16 @@ import { providers } from '$lib/api/providers';
 import { teams } from '$lib/api/teams';
 import { tools } from '$lib/api/tools';
 
+const authState = vi.hoisted(() => ({ grant: 'owner' as string | null }));
+
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: {
+		get grant() {
+			return authState.grant;
+		}
+	}
+}));
+
 vi.mock('$lib/api/agents', () => ({
 	agents: {
 		list: vi.fn(),
@@ -35,6 +45,7 @@ vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn(), listScopes: vi.fn() }
 
 afterEach(() => {
 	vi.clearAllMocks();
+	authState.grant = 'owner';
 });
 
 const assistant: Agent = {
@@ -183,6 +194,121 @@ describe('agents/+page.svelte', () => {
 			})
 		);
 		expect(agents.setToolScopes).toHaveBeenCalledWith('agent-3', ['sensitive_tools:manage']);
+	});
+
+	it('starts a guest new agent with only assignable tools and no permissions (#472)', async () => {
+		authState.grant = 'invite';
+		seed([]);
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-search',
+				name: 'web_search',
+				description: 'Search the public web.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Web search',
+				group: 'chat'
+			},
+			{
+				id: 'tool-http',
+				name: 'http_request',
+				description: 'Make an HTTP request.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'sensitive_tools:manage',
+				available: true,
+				display_name: 'HTTP request',
+				group: 'chat'
+			},
+			{
+				id: 'tool-custom',
+				name: 'mine',
+				description: 'A workspace custom tool.',
+				tool_type: 'custom',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Mine',
+				group: 'custom'
+			}
+		]);
+		vi.mocked(tools.listScopes).mockResolvedValue(['sensitive_tools:manage']);
+		vi.mocked(agents.create).mockResolvedValueOnce({ ...writer, id: 'agent-3' });
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: 'New agent' }).click();
+		await page.getByText('More options').click();
+
+		await expect.element(page.getByRole('checkbox', { name: /Web search/ })).toBeChecked();
+		await expect
+			.element(page.getByRole('checkbox', { name: /HTTP request/ }))
+			.not.toBeInTheDocument();
+		await expect.element(page.getByRole('checkbox', { name: /Mine/ })).not.toBeInTheDocument();
+		await page.getByText('Advanced', { exact: true }).click();
+		await expect.element(page.getByText('Permissions')).not.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Let this agent use its sensitive tools when nobody is watching'))
+			.not.toBeInTheDocument();
+
+		await page.getByLabelText('Name').fill('Writer');
+		await page.getByLabelText('What this agent does').fill('Drafts and edits prose.');
+		await page.getByLabelText('How it should behave').fill('Keep the workspace voice.');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(agents.create).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tool_ids: ['tool-search']
+			})
+		);
+		expect(agents.setToolScopes).not.toHaveBeenCalled();
+	});
+
+	it('lets a guest save an existing agent without rewriting owner-only tools (#472)', async () => {
+		authState.grant = 'invite';
+		seed();
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-search',
+				name: 'web_search',
+				description: 'Search the public web.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Web search',
+				group: 'chat'
+			},
+			{
+				id: 'tool-http',
+				name: 'http_request',
+				description: 'Make an HTTP request.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'sensitive_tools:manage',
+				available: true,
+				display_name: 'HTTP request',
+				group: 'chat'
+			}
+		]);
+		vi.mocked(agents.getToolIds).mockResolvedValue({ tool_ids: ['tool-search', 'tool-http'] });
+		vi.mocked(agents.update).mockResolvedValueOnce(assistant);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		expect(agents.update).toHaveBeenCalledWith(
+			'agent-1',
+			expect.not.objectContaining({ tool_ids: expect.anything() })
+		);
+		expect(agents.setToolScopes).not.toHaveBeenCalled();
 	});
 
 	it('creates an agent from the sheet with the everyday fields', async () => {

@@ -9,9 +9,15 @@
 		type RuleType
 	} from '$lib/api/agents';
 	import type { Provider } from '$lib/api/providers';
+	import { auth } from '$lib/api/auth.svelte';
 	import type { Tool } from '$lib/api/tools';
 	import type { TeamDetail } from '$lib/api/teams';
-	import { toolDescriptionLine, toolDisplayName, toolsByGroup } from '$lib/toolCatalog';
+	import {
+		inviteGrantMayAssignTool,
+		toolDescriptionLine,
+		toolDisplayName,
+		toolsByGroup
+	} from '$lib/toolCatalog';
 	import Button from '$lib/ui/Button.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
@@ -90,7 +96,26 @@
 	let ruleType = $state<SpeakChoice>(speakChoiceFromRules(storedRules));
 	let keywords = $state(keywordsFromRules(storedRules));
 
-	const groupedTools = $derived(toolsByGroup(tools));
+	const isOwner = $derived(auth.grant === 'owner');
+	const pickerTools = $derived(isOwner ? tools : tools.filter(inviteGrantMayAssignTool));
+	const groupedTools = $derived(toolsByGroup(pickerTools));
+	// Invite-grant cannot rewrite a set that already includes owner-only
+	// tools: sending those ids 403s, omitting them would strip them.
+	const guestCannotRewriteTools = $derived(
+		!isOwner &&
+			!!agent &&
+			initialToolIds.some((id) => {
+				const listed = tools.find((tool) => tool.id === id);
+				return !listed || !inviteGrantMayAssignTool(listed);
+			})
+	);
+
+	function assignableToolIds(ids: string[]): string[] {
+		return ids.filter((id) => {
+			const listed = tools.find((tool) => tool.id === id);
+			return listed ? inviteGrantMayAssignTool(listed) : false;
+		});
+	}
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -193,19 +218,23 @@
 				model: model.trim(),
 				fallback_models: fallbackModels.map((f) => f.value.trim()).filter((v) => v !== ''),
 				output_schema,
-				tool_ids: selectedToolIds,
-				team_ids: [...teamIds]
+				team_ids: [...teamIds],
+				...(isOwner
+					? { tool_ids: selectedToolIds }
+					: guestCannotRewriteTools
+						? {}
+						: { tool_ids: assignableToolIds(selectedToolIds) })
 			};
 
 			let saved: Agent;
 			if (agent) {
 				saved = await agents.update(agent.id, {
 					...values,
-					approved_for_unattended_tools: unattendedApproved
+					...(isOwner ? { approved_for_unattended_tools: unattendedApproved } : {})
 				});
 			} else {
 				saved = await agents.create(values);
-				if (unattendedApproved) {
+				if (isOwner && unattendedApproved) {
 					await agents.update(saved.id, { approved_for_unattended_tools: true });
 				}
 			}
@@ -216,9 +245,12 @@
 			if (peerTag.trim() || initialPeerTag) {
 				await agents.setPeerPreference(saved.id, peerTag.trim() || null);
 			}
-			// PUT replaces the whole granted set. Owner-only server-side; a
-			// guest who toggled a scope sees the 403 as this sheet's error.
-			if (agent ? selectedScopes.join() !== initialScopes.join() : selectedScopes.length > 0) {
+			// PUT replaces the whole granted set. Owner-only server-side (#472
+			// hides the picker from invite-grant so we never fire the 403).
+			if (
+				isOwner &&
+				(agent ? selectedScopes.join() !== initialScopes.join() : selectedScopes.length > 0)
+			) {
 				await agents.setToolScopes(saved.id, selectedScopes);
 			}
 
@@ -401,12 +433,14 @@
 				</span>
 			</summary>
 			<div class="mt-5 flex flex-col gap-6">
-				{#if tools.length > 0}
+				{#if pickerTools.length > 0}
 					<div class="flex flex-col gap-2.5">
 						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Tools</span>
 						{#if selectedToolIds.length === 0}
 							<p class="text-[13px] text-muted dark:text-muted-dark">
-								No tools assigned. New agents start with every tool checked.
+								{isOwner
+									? 'No tools assigned. New agents start with every tool checked.'
+									: 'No tools assigned. New agents start with every tool you can assign.'}
 							</p>
 						{/if}
 						<div class="flex flex-col gap-4">
@@ -420,6 +454,7 @@
 											<input
 												type="checkbox"
 												checked={selectedToolIds.includes(tool.id)}
+												disabled={guestCannotRewriteTools}
 												onchange={() => toggleTool(tool.id)}
 												class="mt-1 accent-(--color-accent)"
 											/>
@@ -444,8 +479,11 @@
 							{/each}
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
-							New agents start with every tool and permission. Uncheck any you want to hold back.
-							Sensitive tools still need the owner's OK for unattended runs.
+							{isOwner
+								? "New agents start with every tool and permission. Uncheck any you want to hold back. Sensitive tools still need the owner's OK for unattended runs."
+								: guestCannotRewriteTools
+									? 'This agent already has tools only the owner can assign, so the set stays as-is.'
+									: 'New agents start with every tool you can assign. Uncheck any you want to hold back.'}
 						</p>
 					</div>
 				{/if}
@@ -505,21 +543,23 @@
 							</p>
 						</div>
 
-						<label class="flex cursor-pointer items-start gap-3">
-							<input
-								type="checkbox"
-								bind:checked={unattendedApproved}
-								class="mt-1 accent-(--color-accent)"
-							/>
-							<span class="text-[15px] leading-normal text-ink dark:text-ink-dark">
-								Let this agent use its sensitive tools when nobody is watching
-								<span class="block text-[13px] text-muted dark:text-muted-dark">
-									Applies to schedules and automatic runs. Ordinary chat is never affected.
+						{#if isOwner}
+							<label class="flex cursor-pointer items-start gap-3">
+								<input
+									type="checkbox"
+									bind:checked={unattendedApproved}
+									class="mt-1 accent-(--color-accent)"
+								/>
+								<span class="text-[15px] leading-normal text-ink dark:text-ink-dark">
+									Let this agent use its sensitive tools when nobody is watching
+									<span class="block text-[13px] text-muted dark:text-muted-dark">
+										Applies to schedules and automatic runs. Ordinary chat is never affected.
+									</span>
 								</span>
-							</span>
-						</label>
+							</label>
+						{/if}
 
-						{#if scopeCatalog.length > 0}
+						{#if isOwner && scopeCatalog.length > 0}
 							<div class="flex flex-col gap-2">
 								<span class="text-sm font-semibold text-ink dark:text-ink-dark">Permissions</span>
 								{#each scopeCatalog as scope (scope)}
