@@ -67,22 +67,75 @@ def test_create_channel_unknown_team_returns_404(
     assert response.status_code == 404
 
 
-def test_duplicate_active_channel_name_returns_409_via_global_handler(
+def test_duplicate_active_channel_name_returns_409(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    """create_channel has no pre-check of its own (unlike agents/workflows)
-    -- this exercises app.py's #250 IntegrityError safety net against
-    Channel's real partial unique index (idx_channel_name, archived = 0)
-    instead of a contrived exception."""
+    """#473: same 409-with-a-sentence treatment as agent names (#250),
+    not app.py's generic IntegrityError safety net."""
     first = client.post("/api/v1/channels", json={"name": "duplicate-name"}, headers=auth_headers)
     assert first.status_code == 201, first.text
 
     second = client.post("/api/v1/channels", json={"name": "duplicate-name"}, headers=auth_headers)
     assert second.status_code == 409, second.text
-    body = second.json()
-    assert body["error"]["code"] == "conflict"
-    assert "sqlite" not in second.text.lower()
-    assert "INSERT INTO" not in second.text
+    assert second.json()["detail"] == "A channel named 'duplicate-name' already exists"
+
+
+def test_archived_channel_name_can_be_reused(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    created = client.post("/api/v1/channels", json={"name": "recycle-me"}, headers=auth_headers)
+    assert created.status_code == 201, created.text
+    archived = client.delete(f"/api/v1/channels/{created.json()['id']}", headers=auth_headers)
+    assert archived.status_code == 204
+
+    reused = client.post("/api/v1/channels", json={"name": "recycle-me"}, headers=auth_headers)
+    assert reused.status_code == 201, reused.text
+
+
+def test_update_channel_duplicate_name_returns_409(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    first = client.post("/api/v1/channels", json={"name": "alpha-room"}, headers=auth_headers)
+    second = client.post("/api/v1/channels", json={"name": "beta-room"}, headers=auth_headers)
+    assert first.status_code == 201 and second.status_code == 201
+
+    response = client.patch(
+        f"/api/v1/channels/{second.json()['id']}",
+        json={"name": "alpha-room"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "A channel named 'alpha-room' already exists"
+
+
+def test_update_channel_name_length_validation(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    created = client.post("/api/v1/channels", json={"name": "ok-name"}, headers=auth_headers)
+    response = client.patch(
+        f"/api/v1/channels/{created.json()['id']}",
+        json={"name": "ab"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+def test_unarchive_channel_duplicate_name_returns_409(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    first = client.post("/api/v1/channels", json={"name": "shared-name"}, headers=auth_headers)
+    assert first.status_code == 201, first.text
+    archived = client.delete(f"/api/v1/channels/{first.json()['id']}", headers=auth_headers)
+    assert archived.status_code == 204
+
+    replacement = client.post(
+        "/api/v1/channels", json={"name": "shared-name"}, headers=auth_headers
+    )
+    assert replacement.status_code == 201, replacement.text
+
+    response = client.post(f"/api/v1/channels/{first.json()['id']}/unarchive", headers=auth_headers)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "A channel named 'shared-name' already exists"
 
 
 def test_channel_working_directory_round_trip(

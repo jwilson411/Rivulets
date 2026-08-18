@@ -21,6 +21,9 @@
 	let teamsReady = $state(false);
 	let createBusy = $state(false);
 	let createError = $state<string | null>(null);
+	// Server create_channel rejects anything outside 3–80; enable Create
+	// only when that rule is already met so `hr`/`ai` don't fail after submit.
+	let nameReady = $derived(newName.trim().length >= 3 && newName.trim().length <= 80);
 
 	teams
 		.list()
@@ -39,7 +42,7 @@
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		const name = newName.trim();
-		if (!name) return;
+		if (name.length < 3 || name.length > 80) return;
 		createBusy = true;
 		createError = null;
 		try {
@@ -64,8 +67,11 @@
 				type="text"
 				bind:value={newName}
 				placeholder="My Channel"
+				minlength="3"
+				maxlength="80"
 				class={inputClass}
 			/>
+			<p class="text-sm text-muted dark:text-muted-dark">3–80 characters.</p>
 		</div>
 		<div class="flex flex-col gap-2">
 			<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-channel-team">
@@ -93,7 +99,7 @@
 	{#snippet footer()}
 		<Button variant="secondary" onclick={onClose}>Cancel</Button>
 		<Button
-			disabled={createBusy || !teamsReady || !newName.trim()}
+			disabled={createBusy || !teamsReady || !nameReady}
 			onclick={() =>
 				(document.getElementById('new-channel-form') as HTMLFormElement).requestSubmit()}
 		>

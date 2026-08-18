@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_session_claims
 from rivulets.api.teams import team_holds_owner_scoped_agent
@@ -74,6 +75,29 @@ async def _get_or_404(db: DbSession, channel_id: str) -> Channel:
     return channel
 
 
+def _require_name_length(name: str) -> None:
+    if not (3 <= len(name) <= 80):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "name must be 3-80 chars")
+
+
+def _name_conflict(name: str) -> HTTPException:
+    return HTTPException(status.HTTP_409_CONFLICT, f"A channel named {name!r} already exists")
+
+
+async def _require_name_available(
+    db: DbSession, name: str, *, except_id: str | None = None
+) -> None:
+    """Mirrors api/agents.py's _check_name_available against idx_channel_name
+    (unique among non-archived channels) so the common case is a 409 with a
+    plain sentence instead of app.py's generic IntegrityError safety net."""
+    query = select(Channel).where(Channel.name == name, Channel.archived.is_(False))
+    if except_id is not None:
+        query = query.where(Channel.id != except_id)
+    existing = await db.scalar(query)
+    if existing is not None:
+        raise _name_conflict(name)
+
+
 @router.get("", response_model=list[ChannelOut])
 async def list_channels(db: DbSession, _: CurrentWorkspaceId) -> list[ChannelOut]:
     result = await db.execute(select(Channel).order_by(Channel.position))
@@ -100,13 +124,19 @@ async def create_channel(
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
 ) -> ChannelOut:
-    if not (3 <= len(body.name) <= 80):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "name must be 3-80 chars")
+    _require_name_length(body.name)
+    await _require_name_available(db, body.name)
     if body.team_id is not None:
         await _require_assignable_team(db, claims, body.team_id)
     channel = Channel(name=body.name, description=body.description, team_id=body.team_id)
     db.add(channel)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Pre-check closes the common case; this closes the race between
+        # it and commit (two concurrent creates of the same active name).
+        await db.rollback()
+        raise _name_conflict(body.name) from exc
     await db.refresh(channel)
     await _publish_channel_change(db, channel)
     return _to_channel_out(channel)
@@ -152,6 +182,10 @@ async def update_channel(
             "Owner access required to point a channel at a team with a capability-scoped agent",
         )
     updates = body.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        _require_name_length(updates["name"])
+        if updates["name"] != channel.name:
+            await _require_name_available(db, updates["name"], except_id=channel.id)
     if "working_directory" in updates:
         if claims.grant != "owner":
             raise HTTPException(
@@ -171,7 +205,11 @@ async def update_channel(
     # gossip a no-op rivulet-unrelated channel revision to peers.
     if synced_changed:
         channel.vector_clock += 1
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _name_conflict(channel.name) from exc
     await db.refresh(channel)
     if synced_changed:
         await _publish_channel_change(db, channel)
@@ -190,8 +228,13 @@ async def archive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId)
 @router.post("/{channel_id}/unarchive", response_model=ChannelOut)
 async def unarchive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> ChannelOut:
     channel = await _get_or_404(db, channel_id)
+    await _require_name_available(db, channel.name, except_id=channel.id)
     channel.archived = False
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise _name_conflict(channel.name) from exc
     await db.refresh(channel)
     await _publish_channel_change(db, channel)
     return _to_channel_out(channel)
