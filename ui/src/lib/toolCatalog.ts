@@ -99,10 +99,24 @@ export function toolsByGroup(tools: Tool[]): { key: string; label: string; tools
 	})).filter((group) => group.tools.length > 0);
 }
 
-export function defaultNewAgentToolIds(tools: Tool[]): string[] {
-	return tools.map((tool) => tool.id);
+// #472: mirrors find_unauthorized_tool_assignment on the server — an
+// invite-grant session 403s if it tries to assign a scoped, sensitive,
+// custom, or MCP tool. `sensitive` is the API's flag for the builtin
+// blast-radius set; custom/MCP are blocked by type even when that flag
+// is false.
+export function inviteGrantMayAssignTool(
+	tool: Pick<Tool, 'tool_type' | 'required_scope' | 'sensitive'>
+): boolean {
+	if (tool.tool_type === 'custom' || tool.tool_type === 'mcp') return false;
+	if (tool.required_scope != null) return false;
+	return !tool.sensitive;
 }
 
-export function defaultNewAgentScopes(scopes: string[]): string[] {
-	return [...scopes];
+export function defaultNewAgentToolIds(tools: Tool[], grant: string | null = 'owner'): string[] {
+	const pool = grant === 'owner' ? tools : tools.filter(inviteGrantMayAssignTool);
+	return pool.map((tool) => tool.id);
+}
+
+export function defaultNewAgentScopes(scopes: string[], grant: string | null = 'owner'): string[] {
+	return grant === 'owner' ? [...scopes] : [];
 }

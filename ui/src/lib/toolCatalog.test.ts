@@ -4,6 +4,7 @@ import {
 	defaultNewAgentScopes,
 	defaultNewAgentToolIds,
 	humanizeToolName,
+	inviteGrantMayAssignTool,
 	isGoogleIntegrationTool,
 	SETTINGS_INTEGRATIONS_HREF,
 	SETTINGS_INTEGRATIONS_SEARCH,
@@ -92,6 +93,33 @@ describe('toolDescriptionLine', () => {
 	});
 });
 
+describe('inviteGrantMayAssignTool', () => {
+	it('allows unscoped, non-sensitive builtins and refuses the rest', () => {
+		expect(inviteGrantMayAssignTool(tool({ id: 'a', name: 'web_search' }))).toBe(true);
+		expect(
+			inviteGrantMayAssignTool(
+				tool({
+					id: 'b',
+					name: 'http_request',
+					sensitive: true,
+					required_scope: 'sensitive_tools:manage'
+				})
+			)
+		).toBe(false);
+		expect(
+			inviteGrantMayAssignTool(
+				tool({ id: 'c', name: 'create_agent', required_scope: 'agents_teams:manage' })
+			)
+		).toBe(false);
+		expect(inviteGrantMayAssignTool(tool({ id: 'd', name: 'mine', tool_type: 'custom' }))).toBe(
+			false
+		);
+		expect(
+			inviteGrantMayAssignTool(tool({ id: 'e', name: 'remote_thing', tool_type: 'mcp' }))
+		).toBe(false);
+	});
+});
+
 describe('defaultNewAgentToolIds / defaultNewAgentScopes', () => {
 	it('starts a new agent with every listed tool and every scope', () => {
 		expect(
@@ -104,6 +132,25 @@ describe('defaultNewAgentToolIds / defaultNewAgentScopes', () => {
 			'channels:manage',
 			'settings:manage'
 		]);
+	});
+
+	it('starts an invite-grant agent with only assignable tools and no scopes (#472)', () => {
+		expect(
+			defaultNewAgentToolIds(
+				[
+					tool({ id: 'a', name: 'web_search' }),
+					tool({
+						id: 'b',
+						name: 'http_request',
+						sensitive: true,
+						required_scope: 'sensitive_tools:manage'
+					}),
+					tool({ id: 'c', name: 'mine', tool_type: 'custom' })
+				],
+				'invite'
+			)
+		).toEqual(['a']);
+		expect(defaultNewAgentScopes(['channels:manage', 'settings:manage'], 'invite')).toEqual([]);
 	});
 });
 
