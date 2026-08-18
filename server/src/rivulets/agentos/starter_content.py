@@ -28,14 +28,16 @@ on their own reply, so this does not become a self-loop.
 #410: specialists get a few real keywords at seed time (not an LLM
 catch-all or an invalid URL regex) so the sheet can show them.
 
-Every starter agent is granted every builtin tool and every capability
-scope (TOOL_SCOPES). Assignment without the matching AgentToolScope
-leaves scoped tools inert (tool_resolution.py's resolve_agent_tools),
-so the seed has to do both or the roster would advertise tools that
-never resolve. Existing workspaces that still have the original curated
-tool set (or Writer's empty set) are upgraded once via
-ensure_starter_agents_have_all_tools; an owner who already changed
-that set is left alone.
+Every starter agent is granted every builtin tool and every default
+capability scope (DEFAULT_AGENT_SCOPES). Assignment without the
+matching AgentToolScope leaves scoped tools inert
+(tool_resolution.py's resolve_agent_tools), so the seed has to do
+both or the roster would advertise tools that never resolve.
+`integrations:google:write` stays off (#463) so connecting an account
+only enables read until the owner grants send on that agent. Existing
+workspaces that still have the original curated tool set (or Writer's
+empty set) are upgraded once via ensure_starter_agents_have_all_tools;
+an owner who already changed that set is left alone.
 """
 
 from dataclasses import dataclass
@@ -44,7 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -267,7 +269,7 @@ async def _grant_all_tools(db: AsyncSession, agents: list[Agent], builtin_ids: s
                 )
             ).all()
         )
-        missing_scopes = TOOL_SCOPES - existing_scopes
+        missing_scopes = DEFAULT_AGENT_SCOPES - existing_scopes
         for scope in missing_scopes:
             db.add(AgentToolScope(agent_id=agent.id, scope=scope))
 
@@ -280,9 +282,10 @@ async def _grant_all_tools(db: AsyncSession, agents: list[Agent], builtin_ids: s
 
 async def ensure_starter_agents_have_all_tools(db: AsyncSession) -> None:
     """Upgrade a starter that still has its original curated tool set
-    (or Writer's empty set) to every builtin + every scope. A starter
-    whose assignment already differs -- owner unchecked something, or
-    already on the full set -- is left alone. Idempotent."""
+    (or Writer's empty set) to every builtin + every default scope. A
+    starter whose assignment already differs -- owner unchecked
+    something, or already on the full set -- is left alone.
+    Idempotent. Does not grant Google write (#463)."""
     tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
     builtin_rows = list(tool_result.scalars().all())
     builtin_ids = {row.id for row in builtin_rows}

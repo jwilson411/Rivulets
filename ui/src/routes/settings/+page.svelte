@@ -706,8 +706,12 @@
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Connect a Google account so assigned agents can read Gmail and list Calendar. Sending mail
-					and creating events stay extra-gated. Tokens live in this machine's credential store, not
-					the workspace database.
+					and creating events stay off until you grant
+					<code class="font-mono text-[13px] text-ink dark:text-ink-dark"
+						>integrations:google:write</code
+					>
+					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
+					store, not the workspace database.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:

@@ -18,7 +18,7 @@ from rivulets.agentos.starter_content import (
     seed_starter_teams,
 )
 from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES, DEFAULT_WITHHELD_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -99,14 +99,16 @@ async def test_seed_starter_agents_grants_every_capability_scope(db_session: Asy
                 )
             ).scalars()
         )
-        assert scopes == set(TOOL_SCOPES)
+        assert scopes == set(DEFAULT_AGENT_SCOPES)
+        assert scopes.isdisjoint(DEFAULT_WITHHELD_SCOPES)
 
 
 async def test_seed_starter_agents_sensitive_tools_actually_resolve(
     db_session: AsyncSession,
 ) -> None:
-    """resolve_agent_tools returns every seeded builtin, including scoped
-    ones -- assignment plus the matching AgentToolScope grant."""
+    """resolve_agent_tools returns every seeded builtin that the default
+    scopes can unlock. Write tools stay assigned but inert until
+    integrations:google:write is granted (#463)."""
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
@@ -118,7 +120,11 @@ async def test_seed_starter_agents_sensitive_tools_actually_resolve(
             await db_session.execute(select(Agent).where(Agent.name == starter_name))
         ).scalar_one()
         resolved = {fn.name for fn in await resolve_agent_tools(db_session, agent)}
-        assert resolved == builtin_names
+        assert resolved == builtin_names - {
+            "google_gmail_draft",
+            "google_gmail_send",
+            "google_calendar_create",
+        }
 
 
 async def test_ensure_starter_agents_have_all_tools_backfills_legacy_set(
@@ -158,7 +164,7 @@ async def test_ensure_starter_agents_have_all_tools_backfills_legacy_set(
         ).scalars()
     )
     assert assigned == builtin_ids
-    assert scopes == set(TOOL_SCOPES)
+    assert scopes == set(DEFAULT_AGENT_SCOPES)
 
 
 async def test_ensure_starter_agents_have_all_tools_leaves_customized_starter(

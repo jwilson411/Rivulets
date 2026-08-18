@@ -378,13 +378,48 @@ async def test_seed_builtin_tools_sets_integrations_google_scope(
     for name in (
         "google_gmail_search",
         "google_gmail_read",
-        "google_gmail_draft",
-        "google_gmail_send",
         "google_calendar_list",
-        "google_calendar_create",
     ):
         row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
         assert row.required_scope == "integrations:google"
+
+    for name in (
+        "google_gmail_draft",
+        "google_gmail_send",
+        "google_calendar_create",
+    ):
+        row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        assert row.required_scope == "integrations:google:write"
+
+
+async def test_google_write_tools_skipped_without_write_grant(
+    db_session: AsyncSession,
+) -> None:
+    """#463: integrations:google is read-only. Send/draft/create stay
+    inert until the owner grants integrations:google:write."""
+    await seed_builtin_tools(db_session)
+    agent = await _make_agent(db_session)
+    for name in (
+        "google_gmail_search",
+        "google_gmail_send",
+        "google_calendar_create",
+    ):
+        row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        await _assign(db_session, agent.id, row.id)
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="integrations:google"))
+    await db_session.commit()
+    assert [fn.name for fn in await resolve_agent_tools(db_session, agent)] == [
+        "google_gmail_search"
+    ]
+
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="integrations:google:write"))
+    await db_session.commit()
+    assert {fn.name for fn in await resolve_agent_tools(db_session, agent)} == {
+        "google_gmail_search",
+        "google_gmail_send",
+        "google_calendar_create",
+    }
 
 
 async def test_execute_python_tool_skipped_without_sensitive_tools_manage_grant(

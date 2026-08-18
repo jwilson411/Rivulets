@@ -18,7 +18,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.service import live_agentos_id, sync_agents
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -112,11 +112,12 @@ async def grant_new_agent_defaults(
     db: AsyncSession, agent_id: str
 ) -> tuple[tuple[set[str], set[str]], tuple[set[str], set[str]]]:
     """Same starting kit as the New agent sheet: every catalog tool and
-    every capability scope. Hire uses this so a teammate can actually do
-    the work they were hired for (#468). Does not commit."""
+    every default capability scope. Hire uses this so a teammate can
+    actually do the work they were hired for (#468). Google write
+    stays off (#463). Does not commit."""
     tool_ids = list((await db.scalars(select(Tool.id))).all())
     tool_diff = await set_agent_tools(db, agent_id, tool_ids)
-    scope_diff = await set_agent_tool_scopes(db, agent_id, list(TOOL_SCOPES))
+    scope_diff = await set_agent_tool_scopes(db, agent_id, list(DEFAULT_AGENT_SCOPES))
     return tool_diff, scope_diff
 
 

@@ -134,6 +134,26 @@ describe('defaultNewAgentToolIds / defaultNewAgentScopes', () => {
 		]);
 	});
 
+	it('leaves the Google write permission off (#463)', () => {
+		expect(
+			defaultNewAgentToolIds([
+				tool({
+					id: 'search',
+					name: 'google_gmail_search',
+					required_scope: 'integrations:google'
+				}),
+				tool({
+					id: 'send',
+					name: 'google_gmail_send',
+					required_scope: 'integrations:google:write'
+				})
+			])
+		).toEqual(['search', 'send']);
+		expect(defaultNewAgentScopes(['integrations:google', 'integrations:google:write'])).toEqual([
+			'integrations:google'
+		]);
+	});
+
 	it('starts an invite-grant agent with only assignable tools and no scopes (#472)', () => {
 		expect(
 			defaultNewAgentToolIds(
