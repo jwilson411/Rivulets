@@ -7,6 +7,7 @@ from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.starter_content import (
     _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
     _LEGACY_ASSISTANT_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
+    _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     ensure_assistant_always_rule,
@@ -230,6 +231,24 @@ async def test_ensure_assistant_orchestrator_upgrades_legacy_prompt(
         description="A generalist assistant for everyday questions, brainstorming, planning, and "
         "quick tasks that don't need a specialist.",
         instructions=_LEGACY_ASSISTANT_INSTRUCTIONS,
+        model=AUTO_MODEL,
+    )
+    db_session.add(assistant)
+    await db_session.commit()
+
+    await ensure_assistant_orchestrator_instructions(db_session)
+    await db_session.refresh(assistant)
+    assert assistant.instructions == _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
+
+
+async def test_ensure_assistant_orchestrator_upgrades_previous_prompt(
+    db_session: AsyncSession,
+) -> None:
+    assistant = Agent(
+        name="Assistant",
+        description="The channel orchestrator — always present, gathers context from the human, "
+        "and decides when the rest of the team should join.",
+        instructions=_PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,
         model=AUTO_MODEL,
     )
     db_session.add(assistant)

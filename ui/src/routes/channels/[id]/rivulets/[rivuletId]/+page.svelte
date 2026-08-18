@@ -634,13 +634,13 @@
 				class="flex flex-wrap items-center gap-3.5 rounded-xl border border-line bg-surface px-5 py-4 dark:border-line-dark dark:bg-surface-dark"
 			>
 				<span class="text-[15px] font-semibold text-ink dark:text-ink-dark">
-					Assistant is gathering context.
+					Assistant is coordinating this thread.
 				</span>
 				<span class="text-sm text-muted dark:text-muted-dark">
-					Other agents stay quiet until the team is engaged. @mention someone to call them in now.
+					Specialists speak when Assistant hands off, or when you @mention them.
 				</span>
 				<Button variant="secondary" class="ml-auto" onclick={handleEngageTeam} disabled={engaging}>
-					{engaging ? 'Engaging…' : 'Engage team'}
+					{engaging ? 'Asking…' : 'Ask Assistant to pick someone'}
 				</Button>
 			</div>
 			{#if engageError}

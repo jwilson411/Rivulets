@@ -61,7 +61,7 @@ from rivulets.agentos.models import AUTO_MODEL, resolve_model, resolve_tier_mode
 from rivulets.agentos.tool_resolution import resolve_agent_tools
 from rivulets.config import get_settings
 from rivulets.db.models import Agent
-from rivulets.tools.builtin import engage_team, handoff
+from rivulets.tools.builtin import engage_team, handoff, hire_teammate
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +182,14 @@ async def _build_agno_agent(db: AsyncSession, agent_row: Agent) -> AgnoAgent:
         instructions=agent_row.instructions,
         model=model,
         db=_agentos_db(),
-        # FR-6.1: unlike the opt-in tools resolved above, handoff and
-        # engage_team are available to every agent unconditionally.
-        tools=[handoff, engage_team, *assigned_tools],
+        # FR-6.1: handoff and engage_team are on every agent.
+        # hire_teammate is orchestrator-only — specialists do not hire.
+        tools=[
+            handoff,
+            engage_team,
+            *([hire_teammate] if agent_row.name.lower() == "assistant" else []),
+            *assigned_tools,
+        ],
         # #107: a raw JSON Schema dict, agno's own supported shape for
         # output_schema alongside a Pydantic model class -- no dynamic
         # BaseModel construction needed. None means free-form text, same

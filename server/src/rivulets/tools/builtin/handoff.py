@@ -20,6 +20,7 @@ from agno.tools import tool
 @tool
 def handoff(target_agent_name: str, context: str, urgency: str = "normal") -> str:
     """Hand off this conversation to another agent on the team by name,
-    with context for what they should do. Use this when a teammate is
-    better suited to handle part of the conversation than you are."""
+    with context for what they should do. Assistant uses this to pick
+    exactly one specialist. Specialists use it when a teammate should
+    take the next step. Do not rely on keyword rematch."""
     return f"Handed off to {target_agent_name}: {context}"

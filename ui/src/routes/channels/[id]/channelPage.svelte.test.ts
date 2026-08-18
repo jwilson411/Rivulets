@@ -232,7 +232,7 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 
 		await expect
-			.element(page.getByText(/Assistant is gathering context/).first())
+			.element(page.getByText(/Assistant is coordinating/).first())
 			.toBeInTheDocument();
 	});
 
@@ -475,7 +475,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText(/Assistant is gathering context/).first())
+			.element(page.getByText(/Assistant is coordinating/).first())
 			.toBeInTheDocument();
 
 		await expect
@@ -520,7 +520,7 @@ describe('channels/[id]/+page.svelte', () => {
 
 		render(ChannelPage);
 		await expect
-			.element(page.getByText(/Assistant is gathering context/).first())
+			.element(page.getByText(/Assistant is coordinating/).first())
 			.toBeInTheDocument();
 
 		const input = page.getByPlaceholder('Start a conversation…');

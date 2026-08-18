@@ -1,9 +1,10 @@
-"""Assistant-as-orchestrator: always present, team locked until engaged.
+"""Assistant-as-orchestrator: always present, specialists speak on request.
 
-A new conversation starts with only the workspace Assistant speaking.
-Specialists stay quiet so a clarifying question is not drowned out by
-keyword matches and rematches. The human, or Assistant via the
-`engage_team` / `handoff` tools, unlocks the rest of the roster.
+A conversation is routed through the workspace Assistant. Specialists
+stay quiet unless someone @mentions them or Assistant hands off —
+keyword rematch must not let Coder's reply wake Writer, who wakes
+Coder, who wakes Assistant. The human can still @mention anyone, and
+Assistant can hire a missing role onto the team after the human agrees.
 
 If there is no agent named Assistant, dispatch is unchanged — teams
 without an orchestrator keep the old everyone-who-matches behavior.
@@ -18,6 +19,11 @@ from rivulets.dispatch.rules import Rule, RuleType
 
 ORCHESTRATOR_NAME = "Assistant"
 TEAM_ENGAGED_CONTENT_TYPE = "team_engaged"
+HUMAN_PICK_NUDGE = (
+    "[The human asked you to stop gathering context and pick the right teammate. "
+    "Hand off to a specialist if one on the team fits, or propose hiring if a "
+    "needed role is missing.]"
+)
 
 
 def is_orchestrator_name(name: str) -> bool:
@@ -78,23 +84,65 @@ def apply_orchestrator_lock(
     from_agent_id: str | None,
     orchestrator_id: str | None,
 ) -> DispatchResult:
-    """While locked, only @mentions and the orchestrator (on a human
-    turn) may run. No orchestrator means there is nothing to lock."""
-    if team_engaged or orchestrator_id is None:
+    """Keep specialists off the rematch path. Mentions still win.
+
+    Human turns go to Assistant, who hands off. A specialist's reply
+    bounces back to Assistant so they can pick the next step. Assistant's
+    own reply does not rematch — they already had a turn; they use
+    handoff to call someone. `team_engaged` is kept for callers/tests
+    that still pass it; it no longer opens the roster.
+    """
+    if orchestrator_id is None:
         return result
     if result.method is DispatchMethod.MENTION:
         return result
+    _ = team_engaged
     if from_agent_id is None:
         return DispatchResult(
             agent_ids=[orchestrator_id],
             method=DispatchMethod.DEFAULT,
             llm_invoked=result.llm_invoked,
         )
+    if from_agent_id == orchestrator_id:
+        return DispatchResult(
+            agent_ids=[],
+            method=DispatchMethod.NONE,
+            llm_invoked=result.llm_invoked,
+        )
     return DispatchResult(
-        agent_ids=[],
-        method=DispatchMethod.NONE,
+        agent_ids=[orchestrator_id],
+        method=DispatchMethod.DEFAULT,
         llm_invoked=result.llm_invoked,
     )
+
+
+def format_team_roster(agents: list[tuple[Agent, AgentDispatchInfo]]) -> str:
+    """Names and roles Assistant can hand off to, or notice are missing."""
+    lines: list[str] = []
+    for agent, _info in agents:
+        if is_orchestrator_name(agent.name):
+            continue
+        description = (agent.description or "").strip()
+        if description:
+            lines.append(f"- {agent.name}: {description}")
+        else:
+            lines.append(f"- {agent.name}")
+    if not lines:
+        return (
+            "[Channel team]\n"
+            "No specialists on this team yet. If the work needs one, ask the "
+            "human whether to hire them, then call hire_teammate after they agree."
+        )
+    return (
+        "[Channel team]\n"
+        + "\n".join(lines)
+        + "\nHand off to one of these by name. If a needed role is missing, "
+        "ask the human whether to hire them, then call hire_teammate after they agree."
+    )
+
+
+def wrap_with_roster(roster: str, prompt: str) -> str:
+    return f"{roster}\n\n{prompt}"
 
 
 def merge_orchestrator(

@@ -15,9 +15,13 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
-from rivulets.dispatch.service import _find_handoff_call  # pyright: ignore[reportPrivateUsage]
+from rivulets.dispatch.service import (  # pyright: ignore[reportPrivateUsage]
+    _find_handoff_call,
+    _find_hire_teammate_call,
+)
 from rivulets.streaming import subscribe, unsubscribe
 from rivulets.tools.builtin.handoff import handoff
+from rivulets.tools.builtin.hire_teammate import hire_teammate
 from tests.conftest import delete_starter_assistant
 
 
@@ -26,6 +30,39 @@ def test_handoff_tool_returns_confirmation_string() -> None:
     result = handoff.entrypoint(target_agent_name="DBA", context="check the schema")
     assert "DBA" in result
     assert "check the schema" in result
+
+
+def test_hire_teammate_tool_returns_confirmation_string() -> None:
+    assert hire_teammate.entrypoint is not None
+    result = hire_teammate.entrypoint(
+        name="DBA",
+        role="Reviews schemas",
+        instructions="You are a DBA.",
+        assignment="check the schema",
+    )
+    assert "DBA" in result
+    assert "check the schema" in result
+
+
+def test_find_hire_teammate_call_extracts_args() -> None:
+    run_output = RunOutput(
+        status=RunStatus.completed,
+        tools=[
+            _tool_execution(
+                "hire_teammate",
+                {
+                    "name": "DBA",
+                    "role": "Reviews schemas",
+                    "instructions": "You are a DBA.",
+                    "assignment": "schema help",
+                },
+            )
+        ],
+    )
+    call = _find_hire_teammate_call(run_output)
+    assert call is not None
+    assert call.name == "DBA"
+    assert call.assignment == "schema help"
 
 
 def _tool_execution(tool_name: str, tool_args: dict[str, Any]) -> ToolExecution:

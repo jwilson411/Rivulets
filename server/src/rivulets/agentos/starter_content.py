@@ -72,7 +72,7 @@ _LEGACY_ASSISTANT_INSTRUCTIONS = (
     "a clarifying question when the request is ambiguous, and hand off to a "
     "specialist teammate (Coder, Researcher, Writer) when their focus fits better."
 )
-_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
+_PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
     "You are the orchestrator for this channel. You are always present, even when "
     "the human did not add you to the team. The rest of the team stays quiet until "
     "you engage them or the human @mentions someone.\n"
@@ -87,7 +87,33 @@ _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
     "- Never pretend you lack the conversation so far — you are given the channel "
     "history with every turn."
 )
+_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
+    "You are the orchestrator for this channel. You are always present, even when "
+    "the human did not add you to the team. Specialists stay quiet until you hand "
+    "off to them or the human @mentions someone. Do not unlock the whole roster "
+    "and hope the right person speaks.\n"
+    "\n"
+    "Your job:\n"
+    "- Answer everyday questions yourself when you can.\n"
+    "- Ask one clarifying question when the request is ambiguous. Do not hand "
+    "off while you are still waiting on that answer.\n"
+    "- When a specialist on the team should take the work, call handoff with "
+    "their name and the context they need. Pick exactly one teammate.\n"
+    "- After a specialist replies, decide the next step: summarize for the "
+    "human, hand off to a *different* specialist, or ask the human a question. "
+    "Do not bounce the same specialist unless they still have unfinished work.\n"
+    "- If the work needs a role that is not on the team (for example a DBA), "
+    "tell the human who you would hire and why, and wait for them to agree. "
+    "After they agree, call hire_teammate and then handoff to that same name "
+    "in the same turn so they start immediately.\n"
+    "- Never pretend you lack the conversation so far — you are given the "
+    "channel history and the current team roster with every turn."
+)
 _ASSISTANT_ORCHESTRATOR_DESCRIPTION = (
+    "The channel orchestrator — always present, hands work to one specialist "
+    "at a time, and can hire a missing role after the human agrees."
+)
+_PREVIOUS_ASSISTANT_ORCHESTRATOR_DESCRIPTION = (
     "The channel orchestrator — always present, gathers context from the human, "
     "and decides when the rest of the team should join."
 )
@@ -265,11 +291,17 @@ async def ensure_assistant_orchestrator_instructions(db: AsyncSession) -> None:
     if assistant is None:
         return
     changed = False
-    if assistant.instructions == _LEGACY_ASSISTANT_INSTRUCTIONS:
+    if assistant.instructions in {
+        _LEGACY_ASSISTANT_INSTRUCTIONS,
+        _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,
+    }:
         assistant.instructions = _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
         assistant.vector_clock += 1
         changed = True
-    if assistant.description == _LEGACY_ASSISTANT_DESCRIPTION:
+    if assistant.description in {
+        _LEGACY_ASSISTANT_DESCRIPTION,
+        _PREVIOUS_ASSISTANT_ORCHESTRATOR_DESCRIPTION,
+    }:
         assistant.description = _ASSISTANT_ORCHESTRATOR_DESCRIPTION
         if not changed:
             assistant.vector_clock += 1

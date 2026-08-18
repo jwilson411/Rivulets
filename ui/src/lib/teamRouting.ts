@@ -11,11 +11,11 @@ import type { RoutingRule } from '$lib/api/agents';
 export type SpeakChoice = 'always' | 'mention_only' | 'keyword' | 'custom';
 
 export function teamComposerHint(teamName: string): string {
-	return `${teamName} answers when a rule or @mention matches`;
+	return `Assistant coordinates ${teamName} — specialists speak after a handoff or @mention`;
 }
 
 export function lockedTeamComposerHint(): string {
-	return 'Assistant is gathering context — the rest of the team stays quiet until engaged';
+	return 'Assistant is coordinating — specialists speak after a handoff or @mention';
 }
 
 export function isTeamEngaged(messages: { content_type: string }[]): boolean {

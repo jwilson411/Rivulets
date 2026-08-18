@@ -299,7 +299,7 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		await expect.element(page.getByRole('button', { name: 'Choose' })).toBeInTheDocument();
 	});
 
-	it('lets the human unlock a locked team', async () => {
+	it('lets the human ask Assistant to pick someone', async () => {
 		seed([humanMessage]);
 		vi.mocked(rivulets.engageTeam).mockResolvedValueOnce({
 			...humanMessage,
@@ -324,8 +324,10 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 			]);
 
 		render(RivuletPage);
-		await expect.element(page.getByText('Assistant is gathering context.')).toBeInTheDocument();
-		await page.getByRole('button', { name: 'Engage team' }).click();
+		await expect
+			.element(page.getByText('Assistant is coordinating this thread.'))
+			.toBeInTheDocument();
+		await page.getByRole('button', { name: 'Ask Assistant to pick someone' }).click();
 		expect(rivulets.engageTeam).toHaveBeenCalledWith('riv-1');
 		await expect.element(page.getByText('Team engaged', { exact: false })).toBeInTheDocument();
 	});
