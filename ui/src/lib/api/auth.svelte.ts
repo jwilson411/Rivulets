@@ -1,16 +1,24 @@
 // Reactive session state (api-design.md#authentication-flow). The JWT lives
-// in memory only — never localStorage/sessionStorage — per
-// security.md's "JWT in memory (not localStorage)" mitigation for
-// DOM-based XSS. A refresh therefore cannot reuse the JWT; staying signed
-// in means re-deriving a fresh one.
+// in memory only — never localStorage, and never sessionStorage except
+// the one-shot OAuth hop (#464) — per security.md's "JWT in memory (not
+// localStorage)" mitigation for DOM-based XSS. A refresh therefore cannot
+// reuse the JWT; staying signed in means re-deriving a fresh one.
 //
 // #407: owners can opt in to "Stay signed in on this machine". That
 // persists the recovery phrase (and optional passphrase) in localStorage
 // so a refresh, new tab, or typed URL can POST /auth/login again and
-// re-claim the last identity. The JWT itself still never touches storage.
-// This is off by default and cleared on explicit sign-out — storing the
-// phrase is a real XSS/local-access tradeoff, so LoginForm discloses it
-// next to the checkbox rather than doing it silently.
+// re-claim the last identity. The JWT itself still never touches storage
+// except for the one-shot OAuth hop below. This is off by default and
+// cleared on explicit sign-out — storing the phrase is a real XSS/local-
+// access tradeoff, so LoginForm discloses it next to the checkbox rather
+// than doing it silently.
+//
+// #464: "Connect Google account" is a same-tab trip off-origin. The JWT
+// is memory-only, so coming back would dump the owner on Unlock unless
+// stay-signed-in was already on. Parking the *current session* (never
+// the recovery phrase) in sessionStorage for that hop lets the layout
+// restore it without writing the phrase to localStorage. Tab-scoped,
+// deleted on consume / sign-out / tab close.
 //
 // #350: invite-grant sessions are the other deliberate exception to
 // "nothing in localStorage" — not for the JWT itself (still memory-only),
@@ -56,6 +64,7 @@ interface StreamTicketResponse {
 
 const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
 const OWNER_STAY_STORAGE_KEY = 'rivulets-owner-stay';
+const OAUTH_HOP_STORAGE_KEY = 'rivulets-oauth-hop';
 
 interface StoredResume {
 	token: string;
@@ -130,6 +139,44 @@ function writeStoredOwnerStay(value: StoredOwnerStay | null): void {
 	if (typeof localStorage === 'undefined') return;
 	if (value === null) localStorage.removeItem(OWNER_STAY_STORAGE_KEY);
 	else localStorage.setItem(OWNER_STAY_STORAGE_KEY, JSON.stringify(value));
+}
+
+function isSessionInfo(parsed: unknown): parsed is SessionInfo {
+	return (
+		!!parsed &&
+		typeof parsed === 'object' &&
+		typeof (parsed as SessionInfo).token === 'string' &&
+		(parsed as SessionInfo).token.length > 0 &&
+		typeof (parsed as SessionInfo).expires_at === 'string' &&
+		typeof (parsed as SessionInfo).grant === 'string' &&
+		typeof (parsed as SessionInfo).human_id === 'string' &&
+		typeof (parsed as SessionInfo).display_name === 'string'
+	);
+}
+
+function writeParkedOAuthHop(value: SessionInfo | null): void {
+	if (typeof sessionStorage === 'undefined') return;
+	try {
+		if (value === null) sessionStorage.removeItem(OAUTH_HOP_STORAGE_KEY);
+		else sessionStorage.setItem(OAUTH_HOP_STORAGE_KEY, JSON.stringify(value));
+	} catch {
+		// Private mode / quota — connect still navigates; the owner may
+		// have to Unlock if stay-signed-in is also off.
+	}
+}
+
+function takeParkedOAuthHop(): SessionInfo | null {
+	if (typeof sessionStorage === 'undefined') return null;
+	try {
+		const raw = sessionStorage.getItem(OAUTH_HOP_STORAGE_KEY);
+		sessionStorage.removeItem(OAUTH_HOP_STORAGE_KEY);
+		if (!raw) return null;
+		const parsed: unknown = JSON.parse(raw);
+		if (isSessionInfo(parsed)) return parsed;
+	} catch {
+		// fall through — a corrupt entry is treated as absent
+	}
+	return null;
 }
 
 function persistOwnerHumanId(nextHumanId: string | null): void {
@@ -356,6 +403,33 @@ export const auth = {
 		writeStoredOwnerStay(null);
 		ownerStayEnabled = false;
 	},
+	// One-shot park of the in-memory session for a same-tab OAuth trip
+	// (#464). Called immediately before location.assign to Google.
+	// Never writes the recovery phrase.
+	parkOAuthHop(): void {
+		if (!token) return;
+		writeParkedOAuthHop({
+			token,
+			expires_at: expiresAt ?? '',
+			grant: grant ?? 'owner',
+			human_id: humanId ?? '',
+			display_name: displayName ?? ''
+		});
+	},
+	// Park, then leave this origin. Split from parkOAuthHop so tests can
+	// cover the park without actually navigating.
+	leaveForOAuth(url: string): void {
+		auth.parkOAuthHop();
+		window.location.assign(url);
+	},
+	// Restores a parked OAuth-hop session and deletes it. Synchronous so
+	// +layout.svelte can run it before the first Unlock-vs-shell paint.
+	consumeOAuthHop(): boolean {
+		const parked = takeParkedOAuthHop();
+		if (parked === null) return false;
+		auth.applySession(parked);
+		return true;
+	},
 	// Re-derives an owner session from the persisted phrase (#407).
 	// Resolves false when nothing is stored or the server rejected the
 	// phrase (400/401 — workspace reset, corrupt entry), in which case
@@ -397,6 +471,7 @@ export const auth = {
 	async logout(): Promise<void> {
 		const activeToken = token;
 		auth.forgetOwnerStay();
+		writeParkedOAuthHop(null);
 		clearSession(false);
 		if (activeToken) await api.post('/auth/logout', {}, activeToken);
 	}
