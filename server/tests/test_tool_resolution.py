@@ -383,6 +383,8 @@ async def test_seed_builtin_tools_sets_integrations_google_scope(
         "google_drive_read",
         "google_docs_read",
         "google_sheets_read",
+        "google_contacts_search",
+        "google_tasks_list",
     ):
         row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
         assert row.required_scope == "integrations:google"
@@ -395,6 +397,8 @@ async def test_seed_builtin_tools_sets_integrations_google_scope(
         "google_drive_write",
         "google_docs_append",
         "google_sheets_update",
+        "google_tasks_add",
+        "google_meet_create",
     ):
         row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
         assert row.required_scope == "integrations:google:write"

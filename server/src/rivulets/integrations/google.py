@@ -39,6 +39,9 @@ DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
 DOCS_API = "https://docs.googleapis.com/v1/documents"
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
+CONTACTS_API = "https://people.googleapis.com/v1"
+TASKS_API = "https://tasks.googleapis.com/tasks/v1"
+MEET_API = "https://meet.googleapis.com/v2"
 
 SCOPE_GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 SCOPE_GMAIL_COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
@@ -51,6 +54,11 @@ SCOPE_DOCS_READONLY = "https://www.googleapis.com/auth/documents.readonly"
 SCOPE_DOCS = "https://www.googleapis.com/auth/documents"
 SCOPE_SHEETS_READONLY = "https://www.googleapis.com/auth/spreadsheets.readonly"
 SCOPE_SHEETS = "https://www.googleapis.com/auth/spreadsheets"
+SCOPE_CONTACTS_READONLY = "https://www.googleapis.com/auth/contacts.readonly"
+SCOPE_CONTACTS_OTHER_READONLY = "https://www.googleapis.com/auth/contacts.other.readonly"
+SCOPE_TASKS_READONLY = "https://www.googleapis.com/auth/tasks.readonly"
+SCOPE_TASKS = "https://www.googleapis.com/auth/tasks"
+SCOPE_MEET_SPACE_CREATED = "https://www.googleapis.com/auth/meetings.space.created"
 SCOPE_EMAIL = "email"
 SCOPE_OPENID = "openid"
 
@@ -68,6 +76,11 @@ CONNECT_SCOPES: tuple[str, ...] = (
     SCOPE_DOCS,
     SCOPE_SHEETS_READONLY,
     SCOPE_SHEETS,
+    SCOPE_CONTACTS_READONLY,
+    SCOPE_CONTACTS_OTHER_READONLY,
+    SCOPE_TASKS_READONLY,
+    SCOPE_TASKS,
+    SCOPE_MEET_SPACE_CREATED,
 )
 
 _MAX_READ_CHARS = 20_000
@@ -300,7 +313,7 @@ def _google_error_message(response: httpx.Response, fallback: str) -> str:
     if response.status_code == 403 and "scope" in description.lower():
         return (
             f"{description} Reconnect the account in Settings → Integrations "
-            "to grant Drive, Docs, and Sheets access."
+            "to grant the missing Google Workspace scopes."
         )
     return description
 
@@ -784,6 +797,154 @@ def sheets_update(access_token: str, spreadsheet_id: str, range_a1: str, values:
     return f"Updated {updated_range} ({updated} cells)."
 
 
+_CONTACTS_READ_MASK = "names,emailAddresses,phoneNumbers,organizations"
+_MEET_ACCESS_TYPES = frozenset({"OPEN", "TRUSTED", "RESTRICTED"})
+
+
+def contacts_search(access_token: str, query: str, max_results: int) -> str:
+    q = query.strip()
+    if not q:
+        return "Pass a name, email, or phone to search."
+    bounded = max(1, min(max_results, 25))
+    response = google_request(
+        "GET",
+        f"{CONTACTS_API}/people:searchContacts",
+        access_token=access_token,
+        params={"query": q, "pageSize": bounded, "readMask": _CONTACTS_READ_MASK},
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Contacts search failed.")
+    results = _contact_results(response.json())
+    if not results:
+        other = google_request(
+            "GET",
+            f"{CONTACTS_API}/otherContacts:search",
+            access_token=access_token,
+            params={
+                "query": q,
+                "pageSize": bounded,
+                "readMask": "names,emailAddresses,phoneNumbers",
+            },
+        )
+        if other.status_code >= 400:
+            return _google_error_message(other, "Contacts search failed.")
+        results = _contact_results(other.json())
+    if not results:
+        return "No contacts matched."
+    return "\n\n".join(results[:bounded])
+
+
+def tasks_list(
+    access_token: str,
+    *,
+    task_list: str | None,
+    max_results: int,
+    include_completed: bool,
+) -> str:
+    bounded = max(1, min(max_results, 50))
+    list_id = (task_list or "").strip()
+    if list_id:
+        return _tasks_for_list(
+            access_token,
+            list_id,
+            heading=None,
+            max_results=bounded,
+            include_completed=include_completed,
+        )
+    lists_response = google_request(
+        "GET",
+        f"{TASKS_API}/users/@me/lists",
+        access_token=access_token,
+        params={"maxResults": 20},
+    )
+    if lists_response.status_code >= 400:
+        return _google_error_message(lists_response, "Couldn't list task lists.")
+    payload = as_dict(lists_response.json()) or {}
+    lists = as_list(payload.get("items")) or []
+    if not lists:
+        return "No task lists."
+    blocks: list[str] = []
+    for item in lists:
+        row = as_dict(item)
+        if row is None:
+            continue
+        lid = as_str(row.get("id"))
+        title = as_str(row.get("title")) or lid
+        if not lid:
+            continue
+        blocks.append(
+            _tasks_for_list(
+                access_token,
+                lid,
+                heading=title,
+                max_results=bounded,
+                include_completed=include_completed,
+            )
+        )
+    return "\n\n".join(blocks) if blocks else "No task lists."
+
+
+def tasks_add(
+    access_token: str,
+    *,
+    title: str,
+    notes: str | None,
+    due: str | None,
+    task_list: str | None,
+) -> str:
+    stripped_title = title.strip()
+    if not stripped_title:
+        return "A task title is required."
+    list_id = (task_list or "").strip() or "@default"
+    body: dict[str, object] = {"title": stripped_title}
+    if notes and notes.strip():
+        body["notes"] = notes.strip()
+    if due and due.strip():
+        body["due"] = _task_due(due.strip())
+    response = google_request(
+        "POST",
+        f"{TASKS_API}/lists/{quote(list_id, safe='@')}/tasks",
+        access_token=access_token,
+        json_body=body,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't add the task.")
+    payload = as_dict(response.json()) or {}
+    task_id = as_str(payload.get("id")) or ""
+    return f"Task created. task_id={task_id} list_id={list_id}"
+
+
+def meet_create(access_token: str, *, access_type: str | None) -> str:
+    body: dict[str, object] = {}
+    access = (access_type or "").strip().upper()
+    if access:
+        if access not in _MEET_ACCESS_TYPES:
+            return "access_type must be OPEN, TRUSTED, or RESTRICTED."
+        body["config"] = {"accessType": access}
+    response = google_request(
+        "POST",
+        f"{MEET_API}/spaces",
+        access_token=access_token,
+        json_body=body or None,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't create a Meet link.")
+    payload = as_dict(response.json()) or {}
+    uri = as_str(payload.get("meetingUri")) or ""
+    code = as_str(payload.get("meetingCode")) or ""
+    name = as_str(payload.get("name")) or ""
+    if not uri and not code:
+        return "Couldn't create a Meet link."
+    lines = ["Meet space created."]
+    if uri:
+        lines.append(uri)
+    if code:
+        lines.append(f"code={code}")
+    if name:
+        lines.append(name)
+    return "\n".join(lines)
+
+
 def google_request_bytes(
     method: str,
     url: str,
@@ -953,6 +1114,103 @@ def _docs_end_index(payload: object) -> int:
         if isinstance(end, int):
             last_end = end
     return last_end
+
+
+def _contact_results(payload: object) -> list[str]:
+    data = as_dict(payload) or {}
+    rows = as_list(data.get("results")) or []
+    formatted: list[str] = []
+    for item in rows:
+        row = as_dict(item)
+        if row is None:
+            continue
+        person = as_dict(row.get("person")) or row
+        resource = as_str(person.get("resourceName")) or ""
+        name = _first_named(person.get("names"), "displayName")
+        emails = _joined_values(person.get("emailAddresses"))
+        phones = _joined_values(person.get("phoneNumbers"))
+        org = _first_named(person.get("organizations"), "name")
+        parts = [part for part in (resource, name, emails, phones, org) if part]
+        if parts:
+            formatted.append("\n".join(parts))
+    return formatted
+
+
+def _first_named(value: object, key: str) -> str:
+    for item in as_list(value) or []:
+        row = as_dict(item)
+        if row is None:
+            continue
+        text = as_str(row.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _joined_values(value: object) -> str:
+    found: list[str] = []
+    for item in as_list(value) or []:
+        row = as_dict(item)
+        if row is None:
+            continue
+        text = as_str(row.get("value"))
+        if text:
+            found.append(text)
+    return ", ".join(found)
+
+
+def _tasks_for_list(
+    access_token: str,
+    list_id: str,
+    *,
+    heading: str | None,
+    max_results: int,
+    include_completed: bool,
+) -> str:
+    params: dict[str, str | int] = {"maxResults": max_results}
+    if include_completed:
+        params["showCompleted"] = "true"
+        params["showHidden"] = "true"
+    else:
+        params["showCompleted"] = "false"
+    response = google_request(
+        "GET",
+        f"{TASKS_API}/lists/{quote(list_id, safe='@')}/tasks",
+        access_token=access_token,
+        params=params,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't list tasks.")
+    payload = as_dict(response.json()) or {}
+    items = as_list(payload.get("items")) or []
+    title = heading or list_id
+    header = f"{list_id}\n{title}"
+    if not items:
+        return f"{header}\nNo tasks."
+    lines = [header]
+    for item in items[:max_results]:
+        row = as_dict(item)
+        if row is None:
+            continue
+        task_id = as_str(row.get("id")) or ""
+        task_title = as_str(row.get("title")) or "(no title)"
+        status = as_str(row.get("status")) or ""
+        due = as_str(row.get("due")) or ""
+        notes = as_str(row.get("notes")) or ""
+        detail = f"{task_id}\n{task_title}"
+        extras = " ".join(part for part in (status, f"due={due}" if due else "") if part)
+        if extras:
+            detail = f"{detail}  {extras}"
+        if notes:
+            detail = f"{detail}\n{notes}"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
+def _task_due(value: str) -> str:
+    if "T" in value:
+        return value
+    return f"{value}T00:00:00.000Z"
 
 
 def _sheet_values(raw: str) -> list[list[str]]:

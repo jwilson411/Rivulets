@@ -20,14 +20,17 @@ from __future__ import annotations
 _TOKEN_OVERRIDES: dict[str, str] = {
     "db": "DB",
     "calendar": "Calendar",
+    "contacts": "Contacts",
     "docs": "Docs",
     "drive": "Drive",
     "gmail": "Gmail",
     "google": "Google",
     "http": "HTTP",
     "mcp": "MCP",
+    "meet": "Meet",
     "python": "Python",
     "sheets": "Sheets",
+    "tasks": "Tasks",
 }
 
 # Conversation-time helpers -- the set the issue's repro is about
@@ -58,6 +61,7 @@ INTEGRATION_TOOL_NAMES: frozenset[str] = frozenset(
         "google_calendar_create",
         "google_calendar_list",
         "google_calendar_update",
+        "google_contacts_search",
         "google_docs_append",
         "google_docs_read",
         "google_drive_read",
@@ -67,8 +71,11 @@ INTEGRATION_TOOL_NAMES: frozenset[str] = frozenset(
         "google_gmail_read",
         "google_gmail_search",
         "google_gmail_send",
+        "google_meet_create",
         "google_sheets_read",
         "google_sheets_update",
+        "google_tasks_add",
+        "google_tasks_list",
     }
 )
 

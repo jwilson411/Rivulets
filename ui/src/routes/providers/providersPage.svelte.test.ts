@@ -90,7 +90,9 @@ describe('providers/+page.svelte', () => {
 
 		await expect
 			.element(
-				page.getByText('Gmail, Calendar, Drive, Docs, and Sheets need a connected Google', {
+				page.getByText(
+					'Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks, and Meet need a connected Google',
+					{
 					exact: false
 				})
 			)

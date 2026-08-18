@@ -113,6 +113,9 @@ def test_connect_returns_google_authorization_url(
     assert "drive.readonly" in query["scope"][0]
     assert "documents.readonly" in query["scope"][0]
     assert "spreadsheets.readonly" in query["scope"][0]
+    assert "contacts.readonly" in query["scope"][0]
+    assert "tasks.readonly" in query["scope"][0]
+    assert "meetings.space.created" in query["scope"][0]
 
 
 def test_invite_grant_cannot_connect_or_list(

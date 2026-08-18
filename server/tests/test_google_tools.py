@@ -16,6 +16,7 @@ from rivulets.tools.builtin.google import (
     google_calendar_create,
     google_calendar_list,
     google_calendar_update,
+    google_contacts_search,
     google_docs_append,
     google_docs_read,
     google_drive_read,
@@ -24,8 +25,11 @@ from rivulets.tools.builtin.google import (
     google_gmail_read,
     google_gmail_search,
     google_gmail_send,
+    google_meet_create,
     google_sheets_read,
     google_sheets_update,
+    google_tasks_add,
+    google_tasks_list,
 )
 
 google_mod = __import__("rivulets.integrations.google", fromlist=["httpx"])
@@ -43,6 +47,10 @@ assert google_docs_read.entrypoint is not None
 assert google_docs_append.entrypoint is not None
 assert google_sheets_read.entrypoint is not None
 assert google_sheets_update.entrypoint is not None
+assert google_contacts_search.entrypoint is not None
+assert google_tasks_list.entrypoint is not None
+assert google_tasks_add.entrypoint is not None
+assert google_meet_create.entrypoint is not None
 
 _search = cast("Callable[..., str]", google_gmail_search.entrypoint)
 _read = cast("Callable[..., str]", google_gmail_read.entrypoint)
@@ -57,6 +65,10 @@ _docs_read = cast("Callable[..., str]", google_docs_read.entrypoint)
 _docs_append = cast("Callable[..., str]", google_docs_append.entrypoint)
 _sheets_read = cast("Callable[..., str]", google_sheets_read.entrypoint)
 _sheets_update = cast("Callable[..., str]", google_sheets_update.entrypoint)
+_contacts_search = cast("Callable[..., str]", google_contacts_search.entrypoint)
+_tasks_list = cast("Callable[..., str]", google_tasks_list.entrypoint)
+_tasks_add = cast("Callable[..., str]", google_tasks_add.entrypoint)
+_meet_create = cast("Callable[..., str]", google_meet_create.entrypoint)
 
 _RealClient = httpx.Client
 
@@ -464,6 +476,10 @@ def test_insufficient_scopes_asks_to_reconnect(monkeypatch: pytest.MonkeyPatch) 
         _sheets_update(spreadsheet_id="sheet-1", range_a1="A1", values="x"),
         _cal_update(event_id="ev1", summary="x"),
         _drive_write(name="a.txt", content="hi"),
+        _contacts_search(query="ada"),
+        _tasks_list(),
+        _tasks_add(title="Buy milk"),
+        _meet_create(),
     ):
         assert "Reconnect" in result
 
@@ -562,3 +578,150 @@ def test_docs_read_walks_tables(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _docs_read(document_id="doc-1")
     assert "Table doc" in result
     assert "cell" in result
+
+
+def test_contacts_search_formats_people(monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_account()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/people:searchContacts")
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "person": {
+                            "resourceName": "people/c1",
+                            "names": [{"displayName": "Ada Lovelace"}],
+                            "emailAddresses": [{"value": "ada@example.com"}],
+                            "phoneNumbers": [{"value": "+1 555 0100"}],
+                            "organizations": [{"name": "Analytical Engines"}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _contacts_search(query="Ada")
+    assert "people/c1" in result
+    assert "Ada Lovelace" in result
+    assert "ada@example.com" in result
+    assert "Analytical Engines" in result
+
+
+def test_contacts_search_falls_back_to_other_contacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_account()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/people:searchContacts"):
+            return httpx.Response(200, json={"results": []})
+        assert request.url.path.endswith("/otherContacts:search")
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "person": {
+                            "resourceName": "otherContacts/oc1",
+                            "names": [{"displayName": "Bob"}],
+                            "emailAddresses": [{"value": "bob@example.com"}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _contacts_search(query="Bob")
+    assert "otherContacts/oc1" in result
+    assert "bob@example.com" in result
+
+
+def test_contacts_search_requires_query() -> None:
+    _connect_account()
+    assert "Pass a name" in _contacts_search(query="  ")
+
+
+def test_tasks_list_walks_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_account()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/users/@me/lists"):
+            return httpx.Response(
+                200, json={"items": [{"id": "@default", "title": "My Tasks"}]}
+            )
+        assert request.url.path.endswith("/lists/@default/tasks")
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "t1",
+                        "title": "Buy milk",
+                        "status": "needsAction",
+                        "due": "2026-08-19T00:00:00.000Z",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _tasks_list()
+    assert "My Tasks" in result
+    assert "Buy milk" in result
+    assert "t1" in result
+    assert "2026-08-19" in result
+
+
+def test_tasks_add_posts_default_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_account()
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return httpx.Response(200, json={"id": "t-new"})
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _tasks_add(title="Ship review", due="2026-08-20")
+    assert "t-new" in result
+    assert "/lists/@default/tasks" in captured["url"]
+    assert "Ship review" in captured["body"]
+    assert "2026-08-20T00:00:00.000Z" in captured["body"]
+
+
+def test_tasks_add_requires_title() -> None:
+    _connect_account()
+    assert "title is required" in _tasks_add(title="  ")
+
+
+def test_meet_create_returns_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_account()
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return httpx.Response(
+            200,
+            json={
+                "name": "spaces/abc",
+                "meetingUri": "https://meet.google.com/abc-defg-hij",
+                "meetingCode": "abc-defg-hij",
+            },
+        )
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _meet_create(access_type="OPEN")
+    assert "https://meet.google.com/abc-defg-hij" in result
+    assert "abc-defg-hij" in result
+    assert "/spaces" in captured["url"]
+    assert "OPEN" in captured["body"]
+
+
+def test_meet_create_rejects_bad_access() -> None:
+    _connect_account()
+    assert "OPEN" in _meet_create(access_type="public")
