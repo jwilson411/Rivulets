@@ -41,6 +41,19 @@ class StoredTokens:
         return datetime.now(UTC) + skew >= self.expiry
 
 
+def prefer_existing_refresh(new: StoredTokens, existing: StoredTokens | None) -> StoredTokens:
+    """Google often omits `refresh_token` on a reconnect. Keep the old one."""
+    if existing is None:
+        return new
+    return StoredTokens(
+        access_token=new.access_token,
+        refresh_token=new.refresh_token or existing.refresh_token,
+        expiry=new.expiry,
+        scopes=new.scopes or existing.scopes,
+        token_type=new.token_type,
+    )
+
+
 def store_tokens(account_id: str, tokens: StoredTokens) -> str:
     ref = account_token_ref(account_id)
     payload = {

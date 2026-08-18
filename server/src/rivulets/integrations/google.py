@@ -127,6 +127,7 @@ class PendingOAuth:
     label: str
     code_verifier: str
     created_at: float
+    account_id: str | None = None
 
 
 _pending: dict[str, PendingOAuth] = {}
@@ -158,13 +159,29 @@ def _purge_expired_pending(now: float) -> None:
         del _pending[state]
 
 
-def start_authorization(label: str, client_id: str) -> str:
-    """Remember a PKCE verifier under a CSRF `state` and return Google's URL."""
+def start_authorization(
+    label: str,
+    client_id: str,
+    *,
+    account_id: str | None = None,
+    login_hint: str | None = None,
+) -> str:
+    """Remember a PKCE verifier under a CSRF `state` and return Google's URL.
+
+    `account_id` marks an in-place reconnect so the callback updates that
+    row instead of inserting a second account. `login_hint` steers the
+    Google picker toward the already-connected email.
+    """
     now = time.monotonic()
     _purge_expired_pending(now)
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(32)
-    _pending[state] = PendingOAuth(label=label, code_verifier=verifier, created_at=now)
+    _pending[state] = PendingOAuth(
+        label=label,
+        code_verifier=verifier,
+        created_at=now,
+        account_id=account_id,
+    )
     params = {
         "client_id": client_id,
         "redirect_uri": callback_redirect_uri(),
@@ -177,6 +194,8 @@ def start_authorization(label: str, client_id: str) -> str:
         "prompt": "consent",
         "include_granted_scopes": "true",
     }
+    if login_hint and login_hint.strip():
+        params["login_hint"] = login_hint.strip()
     return f"{AUTH_ENDPOINT}?{urlencode(params)}"
 
 

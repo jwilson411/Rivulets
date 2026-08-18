@@ -100,6 +100,7 @@
 	let googleClientSecret = $state('');
 	let savingGoogleApp = $state(false);
 	let connectingGoogle = $state(false);
+	let reconnectingId = $state<string | null>(null);
 	let disconnectingId = $state<string | null>(null);
 
 	const isOwner = $derived(auth.grant === 'owner');
@@ -186,6 +187,18 @@
 		} catch (err) {
 			integrationsError = err instanceof Error ? err.message : "Couldn't start Google sign-in.";
 			connectingGoogle = false;
+		}
+	}
+
+	async function handleReconnect(id: string) {
+		reconnectingId = id;
+		integrationsError = null;
+		try {
+			const { authorization_url } = await integrationsApi.reconnect(id);
+			auth.leaveForOAuth(authorization_url);
+		} catch (err) {
+			integrationsError = err instanceof Error ? err.message : "Couldn't start Google reconnect.";
+			reconnectingId = null;
 		}
 	}
 
@@ -707,15 +720,15 @@
 			<section class="flex flex-col gap-3">
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
-					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs,
-					Sheets, Contacts, and Tasks, and create Meet links. Sending mail, creating events, adding
-					tasks, and writing files stay off until you grant
+					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs, Sheets,
+					Contacts, and Tasks, and create Meet links. Sending mail, creating events, adding tasks,
+					and writing files stay off until you grant
 					<code class="font-mono text-[13px] text-ink dark:text-ink-dark"
 						>integrations:google:write</code
 					>
 					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
-					store, not the workspace database. Already connected? Disconnect and connect again to grant
-					Contacts, Tasks, and Meet.
+					store, not the workspace database. Reconnect an account to grant newly added Google scopes or
+					replace expired access without creating a second connection.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:
@@ -789,14 +802,24 @@
 									{account.account_email ?? account.label}
 								</span>
 								<span class="text-[13px] text-muted dark:text-muted-dark">{account.status}</span>
-								<button
-									type="button"
-									onclick={() => handleDisconnect(account.id)}
-									disabled={disconnectingId === account.id}
-									class="ml-auto text-sm font-medium text-danger hover:underline disabled:opacity-50"
-								>
-									{disconnectingId === account.id ? 'Disconnecting…' : 'Disconnect'}
-								</button>
+								<div class="ml-auto flex items-center gap-3">
+									<button
+										type="button"
+										onclick={() => handleReconnect(account.id)}
+										disabled={reconnectingId === account.id || !googleApp?.client_id}
+										class="text-sm font-medium text-accent hover:underline disabled:opacity-50 dark:text-accent-dark"
+									>
+										{reconnectingId === account.id ? 'Opening Google…' : 'Reconnect'}
+									</button>
+									<button
+										type="button"
+										onclick={() => handleDisconnect(account.id)}
+										disabled={disconnectingId === account.id}
+										class="text-sm font-medium text-danger hover:underline disabled:opacity-50"
+									>
+										{disconnectingId === account.id ? 'Disconnecting…' : 'Disconnect'}
+									</button>
+								</div>
 							</div>
 						{/each}
 					</div>

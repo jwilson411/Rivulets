@@ -33,6 +33,12 @@ export const integrations = {
 			{ label: label || null },
 			auth.token ?? undefined
 		),
+	reconnect: (id: string) =>
+		api.post<{ authorization_url: string }>(
+			`/integrations/${id}/reconnect`,
+			{},
+			auth.token ?? undefined
+		),
 	update: (id: string, patch: { label?: string }) =>
 		api.patch<IntegrationAccount>(`/integrations/${id}`, patch, auth.token ?? undefined),
 	disconnect: (id: string) => api.delete<void>(`/integrations/${id}`, auth.token ?? undefined)
