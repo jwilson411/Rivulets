@@ -36,7 +36,7 @@ vi.mock('$lib/api/auth.svelte', () => ({
 }));
 
 vi.mock('$lib/api/channels', () => ({
-	channels: { get: vi.fn(), update: vi.fn() }
+	channels: { get: vi.fn(), update: vi.fn(), remove: vi.fn(), unarchive: vi.fn() }
 }));
 
 vi.mock('$lib/api/rivulets', () => ({
@@ -525,6 +525,115 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect.element(input).toHaveValue('@Assistant ');
 	});
 
+	it('lists an older conversation first after a new reply (#469)', async () => {
+		const older: Rivulet = {
+			...kickoffRivulet,
+			id: 'riv-older',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		const newerIdle: Rivulet = {
+			...kickoffRivulet,
+			id: 'riv-newer',
+			created_at: '2026-01-02T00:00:00Z'
+		};
+		seed({ rivulets: [newerIdle, older] });
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id: string) => {
+			if (id === older.id) {
+				return [
+					{
+						...humanMessage,
+						id: 'msg-old-root',
+						rivulet_id: older.id,
+						content: 'Older thread we just replied to',
+						created_at: older.created_at
+					},
+					{
+						...humanMessage,
+						id: 'msg-old-reply',
+						rivulet_id: older.id,
+						content: 'Just replied',
+						created_at: '2026-01-03T12:00:00Z'
+					}
+				];
+			}
+			return [
+				{
+					...humanMessage,
+					id: 'msg-new-root',
+					rivulet_id: newerIdle.id,
+					content: 'Newer idle thread',
+					created_at: newerIdle.created_at
+				}
+			];
+		});
+
+		render(ChannelPage);
+
+		const olderCard = page.getByRole('link', { name: /Older thread we just replied to/ });
+		const newerCard = page.getByRole('link', { name: /Newer idle thread/ });
+		await expect.element(olderCard).toBeInTheDocument();
+		await expect.element(newerCard).toBeInTheDocument();
+		const olderEl = olderCard.element();
+		const newerEl = newerCard.element();
+		expect(
+			olderEl.compareDocumentPosition(newerEl) & Node.DOCUMENT_POSITION_FOLLOWING
+		).toBeTruthy();
+	});
+
+	it('continues the conversation with the latest reply, not the newest start (#469)', async () => {
+		const older: Rivulet = {
+			...kickoffRivulet,
+			id: 'riv-older',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		const newerIdle: Rivulet = {
+			...kickoffRivulet,
+			id: 'riv-newer',
+			created_at: '2026-01-02T00:00:00Z'
+		};
+		seed({ rivulets: [newerIdle, older] });
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id: string) => {
+			if (id === older.id) {
+				return [
+					{
+						...humanMessage,
+						id: 'msg-old-root',
+						rivulet_id: older.id,
+						content: 'Older thread we just replied to',
+						created_at: older.created_at
+					},
+					{
+						...humanMessage,
+						id: 'msg-old-reply',
+						rivulet_id: older.id,
+						content: 'Just replied',
+						created_at: '2026-01-03T12:00:00Z'
+					}
+				];
+			}
+			return [
+				{
+					...humanMessage,
+					id: 'msg-new-root',
+					rivulet_id: newerIdle.id,
+					content: 'Newer idle thread',
+					created_at: newerIdle.created_at
+				}
+			];
+		});
+		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(humanMessage);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('Older thread we just replied to')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Continue last' }).click();
+		await page.getByPlaceholder('Reply to the last conversation…').fill('Following up');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-older', 'Following up', []);
+		expect(rivulets.create).not.toHaveBeenCalled();
+	});
+
 	it('hides archived conversations until Archived is selected', async () => {
 		const archived: Rivulet = {
 			...kickoffRivulet,
@@ -556,12 +665,40 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Archive', exact: true }).click();
+		await page.getByRole('button', { name: 'Archive', exact: true }).nth(1).click();
 		await expect.element(page.getByText('Archive this conversation?')).toBeInTheDocument();
 		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
 
 		expect(rivulets.close).toHaveBeenCalledWith('riv-1');
 		await expect.element(page.getByText('Kickoff message')).not.toBeInTheDocument();
+	});
+
+	it('archives the channel from the header after confirming', async () => {
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(channels.remove).mockResolvedValueOnce(undefined);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archive', exact: true }).first().click();
+		await expect.element(page.getByText('Archive this channel?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
+
+		expect(channels.remove).toHaveBeenCalledWith('chan-1');
+		expect(goto).toHaveBeenCalledWith('/channels');
+	});
+
+	it('hides the composer on an archived channel and unarchives via the banner', async () => {
+		seed({ channel: { ...generalChannel, archived: true }, rivulets: [kickoffRivulet] });
+		vi.mocked(channels.unarchive).mockResolvedValueOnce(generalChannel);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('This channel is archived.')).toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Start a conversation…')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Unarchive' }).first().click();
+		expect(channels.unarchive).toHaveBeenCalledWith('chan-1');
+		await expect.element(page.getByText('This channel is archived.')).not.toBeInTheDocument();
 	});
 
 	it('continues the last conversation instead of creating a new one', async () => {

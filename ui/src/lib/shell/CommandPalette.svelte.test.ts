@@ -66,6 +66,7 @@ describe('CommandPalette.svelte', () => {
 		await expect.element(page.getByText('general', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('/retry-check')).toBeInTheDocument();
 		await expect.element(page.getByText('Open Providers')).toBeInTheDocument();
+		await expect.element(page.getByText('Open Integrations')).toBeInTheDocument();
 		await expect.element(page.getByText('New agent')).toBeInTheDocument();
 	});
 
@@ -78,6 +79,7 @@ describe('CommandPalette.svelte', () => {
 
 		await expect.element(page.getByText('Open Settings')).toBeInTheDocument();
 		await expect.element(page.getByText('Open Providers')).not.toBeInTheDocument();
+		await expect.element(page.getByText('Open Integrations')).not.toBeInTheDocument();
 		await expect.element(page.getByText('Open Sync')).not.toBeInTheDocument();
 	});
 
@@ -96,6 +98,22 @@ describe('CommandPalette.svelte', () => {
 		await page.getByText('New agent').click();
 		expect(onClose).toHaveBeenCalledOnce();
 		expect(goto).toHaveBeenCalledWith('/agents');
+	});
+
+	it('opens Settings → Integrations from the owner command (#471)', async () => {
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(workflows.list).mockResolvedValue([]);
+		const onClose = vi.fn();
+
+		render(CommandPalette, { onClose });
+		await expect.element(page.getByText('Open Integrations')).toBeInTheDocument();
+
+		await page.getByLabelText('Command palette search').fill('gmail');
+		await expect.element(page.getByText('Open Integrations')).toBeInTheDocument();
+		await page.getByText('Open Integrations').click();
+
+		expect(onClose).toHaveBeenCalledOnce();
+		expect(goto).toHaveBeenCalledWith('/settings?tab=integrations');
 	});
 
 	it('closes on Escape', async () => {

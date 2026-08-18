@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { auth } from '$lib/api/auth.svelte';
 	import { settings, type WorkspaceSettings } from '$lib/api/settings';
 	import { dispatch, type HitRate } from '$lib/api/dispatch';
@@ -33,7 +34,14 @@
 	// else on this page reads owner-only endpoints).
 
 	type Tab = 'safety' | 'spend' | 'files' | 'integrations' | 'updates';
-	let tab = $state<Tab>('safety');
+	const SETTINGS_TABS: Tab[] = ['safety', 'spend', 'files', 'integrations', 'updates'];
+
+	function tabFromUrl(): Tab {
+		const raw = page.url.searchParams.get('tab');
+		return raw && (SETTINGS_TABS as string[]).includes(raw) ? (raw as Tab) : 'safety';
+	}
+
+	let tab = $state<Tab>(tabFromUrl());
 
 	let loaded = $state<WorkspaceSettings | null>(null);
 	let loadError = $state<string | null>(null);

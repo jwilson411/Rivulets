@@ -18,7 +18,7 @@ vi.mock('$app/paths', () => ({
 }));
 
 vi.mock('$lib/api/channels', () => ({
-	channels: { list: vi.fn(), create: vi.fn() }
+	channels: { list: vi.fn(), create: vi.fn(), remove: vi.fn(), unarchive: vi.fn() }
 }));
 vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
 
@@ -84,6 +84,41 @@ describe('channels/+page.svelte', () => {
 
 		await expect.poll(() => vi.mocked(channels.create).mock.calls.length).toBe(1);
 		expect(goto).toHaveBeenCalledWith('/channels/chan-1');
+	});
+
+	it('archives a channel from the row after confirming', async () => {
+		vi.mocked(channels.list).mockResolvedValue([general]);
+		vi.mocked(channels.remove).mockResolvedValueOnce(undefined);
+
+		render(ChannelsPage);
+		await expect.element(page.getByText('general')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archive', exact: true }).click();
+		await expect.element(page.getByText('Archive this channel?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
+
+		expect(channels.remove).toHaveBeenCalledWith('chan-1');
+		await expect.element(page.getByText('general')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archived' }).click();
+		await expect.element(page.getByText('general')).toBeInTheDocument();
+	});
+
+	it('unarchives a channel from the archived row', async () => {
+		vi.mocked(channels.list).mockResolvedValue([archived]);
+		vi.mocked(channels.unarchive).mockResolvedValueOnce({ ...archived, archived: false });
+
+		render(ChannelsPage);
+		await page.getByRole('button', { name: 'Archived' }).click();
+		await expect.element(page.getByText('old-room')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Unarchive' }).click();
+
+		expect(channels.unarchive).toHaveBeenCalledWith('chan-old');
+		await expect.element(page.getByText('old-room')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Active' }).click();
+		await expect.element(page.getByText('old-room')).toBeInTheDocument();
 	});
 
 	it('shows a retryable error when the list fails', async () => {

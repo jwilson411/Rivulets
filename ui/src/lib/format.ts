@@ -17,6 +17,14 @@ export function formatClock(iso: string): string {
 	return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+/** Newest last-activity timestamp first. Falls back to createdAt when lastAt is missing. */
+export function compareLastActivity(
+	a: { lastAt?: string | null; createdAt: string },
+	b: { lastAt?: string | null; createdAt: string }
+): number {
+	return (b.lastAt ?? b.createdAt).localeCompare(a.lastAt ?? a.createdAt);
+}
+
 export function timeAgo(iso: string): string {
 	const diffMs = Date.now() - new Date(iso).getTime();
 	const seconds = Math.max(0, Math.round(diffMs / 1000));

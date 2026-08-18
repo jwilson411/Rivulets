@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { auth } from '$lib/api/auth.svelte';
+	import { SETTINGS_INTEGRATIONS_SEARCH } from '$lib/toolCatalog';
 	import { providers, type Provider, type ProviderKind } from '$lib/api/providers';
 	import { initials } from '$lib/ink';
 	import Button from '$lib/ui/Button.svelte';
@@ -16,7 +18,7 @@
 	const PROVIDER_LABELS: Record<ProviderKind, string> = {
 		anthropic: 'Anthropic',
 		openai: 'OpenAI',
-		google: 'Google',
+		google: 'Google AI',
 		xai: 'xAI',
 		ollama: 'Ollama',
 		openai_compatible: 'OpenAI-compatible',
@@ -138,9 +140,16 @@
 	<OwnerOnly title="Providers" />
 {:else}
 	<div class="mx-auto max-w-[720px] px-4 pt-8 pb-24 md:px-10 md:pb-12">
-		<h1 class="mb-6 font-display text-[28px] font-semibold text-ink dark:text-ink-dark">
+		<h1 class="mb-2 font-display text-[28px] font-semibold text-ink dark:text-ink-dark">
 			Providers
 		</h1>
+		<p class="mb-6 max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
+			These keys are for models. Gmail and Calendar need a connected Google account in
+			<a
+				href={`${resolve('/settings')}${SETTINGS_INTEGRATIONS_SEARCH}`}
+				class="text-accent underline dark:text-accent-dark">Settings → Integrations</a
+			>, not an API key here.
+		</p>
 
 		{#if credentialBackend === 'fallback'}
 			<p

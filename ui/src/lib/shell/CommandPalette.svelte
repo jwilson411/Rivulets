@@ -4,6 +4,7 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import { channels } from '$lib/api/channels';
 	import { workflows } from '$lib/api/workflows';
+	import { SETTINGS_INTEGRATIONS_HREF } from '$lib/toolCatalog';
 	import { approvalsBadge } from '$lib/approvalsBadge.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
 	import SectionLabel from '$lib/ui/SectionLabel.svelte';
@@ -82,6 +83,13 @@
 				hint: null,
 				run: () => go('/providers')
 			});
+			// Gmail / Calendar live on Settings → Integrations, not Providers (#471).
+			list.push({
+				group: 'Actions',
+				label: 'Open Integrations',
+				hint: 'Gmail · Calendar',
+				run: () => go(SETTINGS_INTEGRATIONS_HREF)
+			});
 			list.push({ group: 'Actions', label: 'Open Sync', hint: null, run: () => go('/sync') });
 			list.push({ group: 'Actions', label: 'Open Invites', hint: null, run: () => go('/invites') });
 		}
@@ -92,12 +100,19 @@
 
 	function go(path: string) {
 		onClose();
-		goto(resolve(path as '/'));
+		const [pathname, search = ''] = path.split('?');
+		goto(resolve(pathname as '/') + (search ? `?${search}` : ''));
 	}
 
 	let matches = $derived.by(() => {
 		const q = query.trim().toLowerCase();
-		const filtered = q ? commandList.filter((c) => c.label.toLowerCase().includes(q)) : commandList;
+		const filtered = q
+			? commandList.filter(
+					(c) =>
+						c.label.toLowerCase().includes(q) ||
+						(c.hint != null && c.hint.toLowerCase().includes(q))
+				)
+			: commandList;
 		// Jump-to entries first, then actions, capped so the list stays short.
 		return [
 			...filtered.filter((c) => c.group === 'Jump to'),

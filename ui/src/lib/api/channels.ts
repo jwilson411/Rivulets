@@ -27,5 +27,9 @@ export const channels = {
 			team_id?: string | null;
 			working_directory?: string | null;
 		}
-	) => api.patch<Channel>(`/channels/${id}`, patch, auth.token ?? undefined)
+	) => api.patch<Channel>(`/channels/${id}`, patch, auth.token ?? undefined),
+	// Soft archive (FR-2.5) — recoverable via unarchive, not destroyed.
+	remove: (id: string) => api.delete<void>(`/channels/${id}`, auth.token ?? undefined),
+	unarchive: (id: string) =>
+		api.post<Channel>(`/channels/${id}/unarchive`, {}, auth.token ?? undefined)
 };

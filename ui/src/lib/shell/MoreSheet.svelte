@@ -5,6 +5,7 @@
 	import { agents } from '$lib/api/agents';
 	import { teams } from '$lib/api/teams';
 	import { mcpServers } from '$lib/api/mcpServers';
+	import { SETTINGS_INTEGRATIONS_HREF } from '$lib/toolCatalog';
 	import { theme, type ThemePreference } from '$lib/theme.svelte';
 	import { initials } from '$lib/ink';
 	import Sheet from '$lib/ui/Sheet.svelte';
@@ -13,8 +14,8 @@
 	import Icon from '$lib/ui/Icon.svelte';
 
 	// The "More" sheet (mockup 2c): grouped cards with large type, 64px
-	// rows. Guests never see Providers, Sync, or Invites — hidden, not
-	// disabled (2q); their Settings row is spend status only.
+	// rows. Guests never see Providers, Integrations, Sync, or Invites —
+	// hidden, not disabled (2q); their Settings row is spend status only.
 	// #417: phone chrome hides IconRail (and its avatar menu), so Account
 	// lives here — theme, switch name, sign out — rather than only on md+.
 	let {
@@ -41,7 +42,8 @@
 
 	function open(path: string) {
 		onClose();
-		goto(resolve(path as '/'));
+		const [pathname, search = ''] = path.split('?');
+		goto(resolve(pathname as '/') + (search ? `?${search}` : ''));
 	}
 
 	const isOwner = $derived(auth.grant === 'owner');
@@ -168,6 +170,7 @@
 			<SectionLabel>Workspace</SectionLabel>
 			{#if isOwner}
 				{@render row('Providers', '/providers', null)}
+				{@render row('Integrations', SETTINGS_INTEGRATIONS_HREF, 'Gmail · Calendar')}
 			{/if}
 			{@render row('Usage', '/usage', null)}
 			{@render row('Settings', '/settings', isOwner ? null : 'Spend status only')}

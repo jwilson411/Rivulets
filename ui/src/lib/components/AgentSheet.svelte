@@ -12,8 +12,11 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import type { Tool } from '$lib/api/tools';
 	import type { TeamDetail } from '$lib/api/teams';
+	import { integrations } from '$lib/api/integrations';
 	import {
 		inviteGrantMayAssignTool,
+		isGoogleIntegrationTool,
+		SETTINGS_INTEGRATIONS_SEARCH,
 		toolDescriptionLine,
 		toolDisplayName,
 		toolsByGroup
@@ -116,6 +119,19 @@
 			return listed ? inviteGrantMayAssignTool(listed) : false;
 		});
 	}
+
+	// null = still loading or the list failed (invite grant 403). Only
+	// show the connect hint once we know zero Google accounts exist (#471).
+	let googleAccountCount = $state<number | null>(null);
+	integrations
+		.list()
+		.then((accounts) => {
+			googleAccountCount = accounts.filter((row) => row.provider === 'google').length;
+		})
+		.catch(() => {
+			googleAccountCount = null;
+		});
+	const needsGoogleAccount = $derived(googleAccountCount === 0);
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -447,6 +463,17 @@
 							{#each groupedTools as group (group.key)}
 								<div class="flex flex-col gap-2">
 									<SectionLabel>{group.label}</SectionLabel>
+									{#if group.key === 'integrations' && needsGoogleAccount}
+										<p class="text-[13px] leading-snug text-muted dark:text-muted-dark">
+											These tools need a connected Google account.
+											<a
+												href={`${resolve('/settings')}${SETTINGS_INTEGRATIONS_SEARCH}`}
+												class="text-accent underline dark:text-accent-dark"
+											>
+												Settings → Integrations
+											</a>
+										</p>
+									{/if}
 									{#each group.tools as tool (tool.id)}
 										<label
 											class="flex min-h-12 cursor-pointer items-start gap-3 rounded-lg border border-line px-4 py-2.5 dark:border-line-dark"
@@ -470,6 +497,11 @@
 												{#if tool.description}
 													<span class="text-[13px] leading-snug text-muted dark:text-muted-dark">
 														{toolDescriptionLine(tool.description)}
+													</span>
+												{/if}
+												{#if needsGoogleAccount && isGoogleIntegrationTool(tool.name)}
+													<span class="text-[13px] leading-snug text-muted dark:text-muted-dark">
+														Needs a connected account
 													</span>
 												{/if}
 											</span>

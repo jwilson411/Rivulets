@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { formatBytes, formatClock, paletteShortcutLabel, timeAgo } from './format';
+import {
+	compareLastActivity,
+	formatBytes,
+	formatClock,
+	paletteShortcutLabel,
+	timeAgo
+} from './format';
 
 describe('paletteShortcutLabel', () => {
 	afterEach(() => {
@@ -40,6 +46,20 @@ describe('formatClock', () => {
 	it('formats an ISO timestamp as a localized hour:minute string', () => {
 		const result = formatClock('2024-06-01T15:04:00Z');
 		expect(result).toMatch(/\d{1,2}:\d{2}/);
+	});
+});
+
+describe('compareLastActivity', () => {
+	it('orders by lastAt so a reply beats a newer-but-idle thread', () => {
+		const olderReplied = { lastAt: '2026-01-02T12:00:00Z', createdAt: '2026-01-01T00:00:00Z' };
+		const newerIdle = { lastAt: '2026-01-01T12:00:00Z', createdAt: '2026-01-01T12:00:00Z' };
+		expect([newerIdle, olderReplied].sort(compareLastActivity)).toEqual([olderReplied, newerIdle]);
+	});
+
+	it('falls back to createdAt when lastAt is missing', () => {
+		const older = { lastAt: null, createdAt: '2026-01-01T00:00:00Z' };
+		const newer = { createdAt: '2026-01-02T00:00:00Z' };
+		expect([older, newer].sort(compareLastActivity)).toEqual([newer, older]);
 	});
 });
 

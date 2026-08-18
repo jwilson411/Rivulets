@@ -8,7 +8,7 @@
 	import { providers, type Provider } from '$lib/api/providers';
 	import { agents, type Agent } from '$lib/api/agents';
 	import { files as filesApi } from '$lib/api/files';
-	import { formatClock } from '$lib/format';
+	import { compareLastActivity, formatClock } from '$lib/format';
 	import { lockedTeamComposerHint, teamComposerHint } from '$lib/teamRouting';
 	import { agentInkMap, INK_AVATAR, HUMAN_AVATAR } from '$lib/ink';
 	import Button from '$lib/ui/Button.svelte';
@@ -105,24 +105,18 @@
 
 	async function loadRecent() {
 		const open = channelList.filter((c) => !c.archived);
-		const lastOpen: Record<string, Rivulet> = {};
 		const perChannel = await Promise.all(
 			open.map(async (channel) => {
 				const list = await rivulets.listForChannel(channel.id).catch(() => [] as Rivulet[]);
-				const newestOpen = list.find((r) => r.status !== 'closed');
-				if (newestOpen) lastOpen[channel.id] = newestOpen;
 				return list
 					.filter((rivulet) => rivulet.status !== 'closed')
 					.map((rivulet) => ({ rivulet, channel }));
 			})
 		);
-		lastOpenByChannel = lastOpen;
-		const all = perChannel
-			.flat()
-			.sort((a, b) => b.rivulet.created_at.localeCompare(a.rivulet.created_at))
-			.slice(0, 8);
-		recent = await Promise.all(
-			all.map(async ({ rivulet, channel }) => {
+		// lastAt is loaded for every open thread so a reply on an older one
+		// still ranks above newer-but-idle threads, including the top-8 cut.
+		const items = await Promise.all(
+			perChannel.flat().map(async ({ rivulet, channel }) => {
 				const msgs = await rivulets.listMessages(rivulet.id).catch(() => [] as Message[]);
 				const spoken = msgs.filter((m) => m.content_type === 'text');
 				const root = spoken.find((m) => m.sender_type === 'human');
@@ -141,6 +135,18 @@
 				};
 			})
 		);
+		items.sort((a, b) =>
+			compareLastActivity(
+				{ lastAt: a.lastAt, createdAt: a.rivulet.created_at },
+				{ lastAt: b.lastAt, createdAt: b.rivulet.created_at }
+			)
+		);
+		const lastOpen: Record<string, Rivulet> = {};
+		for (const item of items) {
+			if (!lastOpen[item.channel.id]) lastOpen[item.channel.id] = item.rivulet;
+		}
+		lastOpenByChannel = lastOpen;
+		recent = items.slice(0, 8);
 	}
 
 	load();

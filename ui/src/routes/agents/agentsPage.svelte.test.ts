@@ -10,6 +10,7 @@ import { agents, type Agent } from '$lib/api/agents';
 import { providers } from '$lib/api/providers';
 import { teams } from '$lib/api/teams';
 import { tools } from '$lib/api/tools';
+import { integrations } from '$lib/api/integrations';
 
 const authState = vi.hoisted(() => ({ grant: 'owner' as string | null }));
 
@@ -42,6 +43,7 @@ vi.mock('$lib/api/agents', () => ({
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
 vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn(), get: vi.fn(), update: vi.fn() } }));
 vi.mock('$lib/api/tools', () => ({ tools: { list: vi.fn(), listScopes: vi.fn() } }));
+vi.mock('$lib/api/integrations', () => ({ integrations: { list: vi.fn() } }));
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -98,6 +100,7 @@ function seed(
 	});
 	vi.mocked(tools.list).mockResolvedValue([]);
 	vi.mocked(tools.listScopes).mockResolvedValue([]);
+	vi.mocked(integrations.list).mockResolvedValue([]);
 	vi.mocked(agents.getRoutingRules).mockResolvedValue([]);
 	vi.mocked(agents.getToolIds).mockResolvedValue({ tool_ids: [] });
 	vi.mocked(agents.getToolScopes).mockResolvedValue({ scopes: [] });
@@ -411,6 +414,76 @@ describe('agents/+page.svelte', () => {
 			)
 			.toBeInTheDocument();
 		await expect.element(page.getByText('web_search', { exact: true })).not.toBeInTheDocument();
+	});
+
+	it('tells Gmail/Calendar tool rows they need a connected account (#471)', async () => {
+		seed();
+		vi.mocked(integrations.list).mockResolvedValue([]);
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-gmail',
+				name: 'google_gmail_search',
+				description: 'Search Gmail.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Google Gmail search',
+				group: 'integrations'
+			}
+		]);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('More options').click();
+
+		await expect.element(page.getByText('Integrations', { exact: true })).toBeInTheDocument();
+		await expect
+			.element(page.getByText('These tools need a connected Google account.'))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('link', { name: 'Settings → Integrations' }))
+			.toHaveAttribute('href', '/settings?tab=integrations');
+		await expect.element(page.getByText('Needs a connected account')).toBeInTheDocument();
+	});
+
+	it('hides the Gmail/Calendar connect hint once an account exists (#471)', async () => {
+		seed();
+		vi.mocked(integrations.list).mockResolvedValue([
+			{
+				id: 'acct-1',
+				provider: 'google',
+				label: 'Work',
+				account_email: 'ada@example.com',
+				status: 'connected',
+				scopes: [],
+				last_error: null
+			}
+		]);
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-gmail',
+				name: 'google_gmail_search',
+				description: 'Search Gmail.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Google Gmail search',
+				group: 'integrations'
+			}
+		]);
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: /Assistant/ }).click();
+		await page.getByText('More options').click();
+
+		await expect
+			.element(page.getByRole('checkbox', { name: /Google Gmail search/ }))
+			.toBeInTheDocument();
+		await expect.element(page.getByText('Needs a connected account')).not.toBeInTheDocument();
 	});
 
 	it('opens an agent card into the edit sheet with its extras fetched just-in-time', async () => {
