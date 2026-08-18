@@ -27,11 +27,6 @@
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let dragOver = $state(false);
 
-	// The API identifies documents by file_id only — no filename comes back.
-	// Names of files ingested in THIS session are remembered here so the
-	// rows read like the mockup where possible.
-	let namesByFileId = $state<Record<string, string>>({});
-
 	async function load(id: string) {
 		loadError = null;
 		try {
@@ -63,7 +58,6 @@
 		uploadError = null;
 		try {
 			const uploaded = await files.upload(file);
-			namesByFileId[uploaded.file_id] = file.name;
 			await knowledgeBases.ingestDocument(kb.id, uploaded.file_id);
 			await load(kb.id);
 		} catch {
@@ -99,7 +93,7 @@
 	}
 
 	function docLabel(doc: KnowledgeBaseDocument): string {
-		return namesByFileId[doc.file_id] ?? `file ${doc.file_id.slice(0, 8)}…`;
+		return doc.filename || `file ${doc.file_id.slice(0, 8)}…`;
 	}
 
 	const statusTone: Record<KnowledgeBaseDocument['status'], 'accent' | 'warn' | 'danger'> = {
