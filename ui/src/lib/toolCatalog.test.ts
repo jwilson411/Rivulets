@@ -4,6 +4,9 @@ import {
 	defaultNewAgentScopes,
 	defaultNewAgentToolIds,
 	humanizeToolName,
+	isGoogleIntegrationTool,
+	SETTINGS_INTEGRATIONS_HREF,
+	SETTINGS_INTEGRATIONS_SEARCH,
 	toolDescriptionLine,
 	toolDisplayName,
 	toolGroup,
@@ -58,6 +61,16 @@ describe('toolDisplayName / toolGroup', () => {
 		expect(toolGroup(tool({ id: '3', name: 'create_agent' }))).toBe('workspace_admin');
 		expect(toolGroup(tool({ id: '5', name: 'google_gmail_search' }))).toBe('integrations');
 		expect(toolGroup(tool({ id: '4', name: 'mine', tool_type: 'custom' }))).toBe('custom');
+	});
+});
+
+describe('isGoogleIntegrationTool', () => {
+	it('marks Gmail and Calendar tools, not model-provider tools', () => {
+		expect(isGoogleIntegrationTool('google_gmail_search')).toBe(true);
+		expect(isGoogleIntegrationTool('google_calendar_list')).toBe(true);
+		expect(isGoogleIntegrationTool('web_search')).toBe(false);
+		expect(SETTINGS_INTEGRATIONS_SEARCH).toBe('?tab=integrations');
+		expect(SETTINGS_INTEGRATIONS_HREF).toBe('/settings?tab=integrations');
 	});
 });
 

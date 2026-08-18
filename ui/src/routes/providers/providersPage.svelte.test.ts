@@ -59,7 +59,7 @@ describe('providers/+page.svelte', () => {
 		render(ProvidersPage);
 
 		await expect.element(page.getByText('Anthropic', { exact: true }).first()).toBeInTheDocument();
-		await expect.element(page.getByText('Connected')).toBeInTheDocument();
+		await expect.element(page.getByText('Connected', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('Key stays on this machine')).toBeInTheDocument();
 	});
 
@@ -68,12 +68,34 @@ describe('providers/+page.svelte', () => {
 
 		render(ProvidersPage);
 
-		for (const label of ['Anthropic', 'OpenAI', 'Google', 'xAI', 'Ollama', 'OpenAI-compatible']) {
+		for (const label of [
+			'Anthropic',
+			'OpenAI',
+			'Google AI',
+			'xAI',
+			'Ollama',
+			'OpenAI-compatible'
+		]) {
 			await expect
 				.element(page.getByRole('button', { name: label, exact: true }))
 				.toBeInTheDocument();
 		}
 		expect(document.querySelector('select')).toBeNull();
+	});
+
+	it('points Gmail and Calendar at Settings → Integrations, not this key (#471)', async () => {
+		seed();
+
+		render(ProvidersPage);
+
+		await expect
+			.element(
+				page.getByText('Gmail and Calendar need a connected Google account', { exact: false })
+			)
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('link', { name: 'Settings → Integrations' }))
+			.toHaveAttribute('href', '/settings?tab=integrations');
 	});
 
 	it('saves a key for the picked provider with an auto-derived label', async () => {

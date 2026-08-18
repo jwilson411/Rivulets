@@ -11,6 +11,7 @@ import { agents } from '$lib/api/agents';
 import { teams } from '$lib/api/teams';
 import { mcpServers } from '$lib/api/mcpServers';
 import { theme } from '$lib/theme.svelte';
+import { goto } from '$app/navigation';
 
 const authState = vi.hoisted(() => ({
 	displayName: 'Riley' as string | null,
@@ -79,6 +80,28 @@ describe('MoreSheet.svelte', () => {
 			.not.toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
 		await expect.element(page.getByRole('group', { name: 'Theme' })).toBeInTheDocument();
+	});
+
+	it('puts Integrations on More for the owner (#471)', async () => {
+		seedLists();
+		const onClose = vi.fn();
+		render(MoreSheet, { onClose, onOpenPalette: vi.fn() });
+
+		await expect.element(page.getByRole('button', { name: /Integrations/ })).toBeInTheDocument();
+		await page.getByRole('button', { name: /Integrations/ }).click();
+		expect(onClose).toHaveBeenCalledOnce();
+		expect(goto).toHaveBeenCalledWith('/settings?tab=integrations');
+	});
+
+	it('hides Integrations from guests (#471)', async () => {
+		seedLists();
+		authState.grant = 'guest';
+		render(MoreSheet, { onClose: vi.fn(), onOpenPalette: vi.fn() });
+
+		await expect.element(page.getByText('Guest')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: /Integrations/ }))
+			.not.toBeInTheDocument();
 	});
 
 	it('signs out and closes the sheet', async () => {
