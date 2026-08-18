@@ -175,6 +175,35 @@ async def test_discover_tools_omits_server_params_when_no_headers(
     assert captured["server_params"] is None
 
 
+async def test_discover_tools_pin_public_uses_pinned_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#477: invite-grant / agent-driven discover must pin connect, but
+    still carry timeout_seconds so we don't regress the 30s-default
+    swap the test above guards."""
+    from datetime import timedelta
+
+    from rivulets.agentos.mcp import (
+        PublicStreamableHTTPClientParams,
+        create_public_mcp_http_client,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_mcp_tools(**kwargs: Any) -> _FakeMCPTools:
+        captured.update(kwargs)
+        return _FakeMCPTools(on_connect=None, functions={})
+
+    monkeypatch.setattr("rivulets.agentos.mcp.MCPTools", _fake_mcp_tools)
+
+    await discover_tools("http://mcp.example.com/mcp", timeout_seconds=7, pin_public=True)
+
+    server_params = captured["server_params"]
+    assert isinstance(server_params, PublicStreamableHTTPClientParams)
+    assert server_params.httpx_client_factory is create_public_mcp_http_client
+    assert server_params.timeout == timedelta(seconds=7)
+
+
 async def test_discover_tools_passes_command_and_env_to_mcp_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -264,6 +293,7 @@ def _patch_discover_tools(
         command: str | None = None,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        pin_public: bool = False,  # noqa: ARG001
     ) -> list[DiscoveredTool]:
         if capture_headers is not None:
             capture_headers.append(headers)

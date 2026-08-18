@@ -13,12 +13,18 @@ therefore followed manually rather than via httpx's own
 follow_redirects=True, which only validates the first URL — a server
 that validated the request URL and then redirected somewhere internal
 would otherwise sail straight through.
+
+The first hop (and each redirect hop) is also *pinned* to the addresses
+that just passed the check (security/network.py's PublicHTTPTransport).
+Checking then letting httpx resolve the name again is the DNS-rebinding
+hole: a name public at check time and loopback at connect time would
+otherwise reach this node's own services (#477).
 """
 
 import httpx
 from agno.tools import tool
 
-from rivulets.security.network import BlockedHostError, check_host_is_public
+from rivulets.security.network import BlockedHostError, assert_public_http_url, public_http_client
 
 _TIMEOUT_SECONDS = 15.0
 _MAX_RESPONSE_CHARS = 20_000  # keep tool output out of an agent's context budget
@@ -27,11 +33,7 @@ _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 
 
 def _check_url_is_allowed(url: httpx.URL) -> None:
-    if url.scheme not in ("http", "https"):
-        raise BlockedHostError(f"Unsupported URL scheme {url.scheme!r}")
-    if not url.host:
-        raise BlockedHostError(f"URL has no host: {url!r}")
-    check_host_is_public(url.host)
+    assert_public_http_url(url)
 
 
 @tool
@@ -45,7 +47,7 @@ def http_request(
     target = httpx.URL(url)
     _check_url_is_allowed(target)
 
-    with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
+    with public_http_client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
         response = client.request(method.upper(), str(target), headers=headers, content=body)
         redirects_followed = 0
         while response.status_code in _REDIRECT_STATUS_CODES and "location" in response.headers:

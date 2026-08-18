@@ -3058,6 +3058,7 @@ def test_mcp_server_register_does_not_fail_when_sync_engine_not_running(
         url: str,  # noqa: ARG001
         timeout_seconds: int = 10,  # noqa: ARG001
         headers: dict[str, str] | None = None,  # noqa: ARG001
+        **_kwargs: object,
     ) -> list[object]:
         return []
 

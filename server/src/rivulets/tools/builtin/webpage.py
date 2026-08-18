@@ -2,8 +2,9 @@
 
 Pairs with web_search: search finds URLs, this reads one. Same SSRF
 posture as http_request -- every hostname (original URL and each
-redirect hop) must resolve to a public address. GET only; arbitrary
-methods stay on http_request.
+redirect hop) must resolve to a public address, and the connect is
+pinned to those addresses (#477). GET only; arbitrary methods stay on
+http_request.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from html import unescape
 import httpx
 from agno.tools import tool
 
-from rivulets.security.network import BlockedHostError, check_host_is_public
+from rivulets.security.network import BlockedHostError, assert_public_http_url, public_http_client
 
 _TIMEOUT_SECONDS = 15.0
 _MAX_RESPONSE_CHARS = 20_000
@@ -28,11 +29,7 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _check_url_is_allowed(url: httpx.URL) -> None:
-    if url.scheme not in ("http", "https"):
-        raise BlockedHostError(f"Unsupported URL scheme {url.scheme!r}")
-    if not url.host:
-        raise BlockedHostError(f"URL has no host: {url!r}")
-    check_host_is_public(url.host)
+    assert_public_http_url(url)
 
 
 def html_to_text(html: str) -> str:
@@ -47,7 +44,7 @@ def fetch_webpage(url: str) -> str:
     target = httpx.URL(url)
     _check_url_is_allowed(target)
 
-    with httpx.Client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
+    with public_http_client(timeout=_TIMEOUT_SECONDS, follow_redirects=False) as client:
         response = client.get(
             str(target), headers={"User-Agent": _USER_AGENT, "Accept": "text/html"}
         )

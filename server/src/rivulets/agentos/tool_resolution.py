@@ -44,11 +44,15 @@ from typing import Any
 
 from agno.tools.function import Function
 from agno.tools.mcp import MCPTools
-from agno.tools.mcp.params import StreamableHTTPClientParams
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rivulets.agentos.mcp import build_stdio_command, get_server_env, get_server_headers
+from rivulets.agentos.mcp import (
+    build_stdio_command,
+    get_server_env,
+    get_server_headers,
+    public_streamable_http_params,
+)
 from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
 from rivulets.db.models import Agent, AgentTool, AgentToolScope, MCPServer, Tool
 from rivulets.tools.builtin import (
@@ -408,6 +412,14 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                 else:
                     # Enforced at create time: url is required for
                     # streamable-http transport.
+                    # #477: pin every invoke-time connect, not only
+                    # register/reconnect. agno connects this MCPTools
+                    # later; the factory on server_params is what
+                    # actually dials, so a rebinding name cannot wait
+                    # until then to flip to loopback. Agent-driven
+                    # calls have no owner session to exempt a local
+                    # MCP URL -- same rule as the register/reconnect
+                    # triggers.
                     assert server.url is not None
                     headers = get_server_headers(server)
                     resolved.append(
@@ -415,11 +427,7 @@ async def resolve_agent_tools(db: AsyncSession, agent_row: Agent) -> list[Any]:
                             url=server.url,
                             transport="streamable-http",
                             include_tools=[tool_row.mcp_tool_name],
-                            server_params=(
-                                StreamableHTTPClientParams(url=server.url, headers=headers)
-                                if headers
-                                else None
-                            ),
+                            server_params=public_streamable_http_params(server.url, headers),
                         )
                     )
         except Exception:

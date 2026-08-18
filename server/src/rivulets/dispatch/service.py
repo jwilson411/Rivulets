@@ -4001,7 +4001,11 @@ async def _sync_mcp_server_tools(db: AsyncSession, server: MCPServer) -> None:
             )
         else:
             assert server.url is not None
-            discovered = await discover_tools(server.url, headers=get_server_headers(server))
+            # Agent-driven register/reconnect always pins (#477): there
+            # is no owner session to exempt a local MCP URL.
+            discovered = await discover_tools(
+                server.url, headers=get_server_headers(server), pin_public=True
+            )
     except MCPConnectionError:
         logger.warning(
             "Could not connect to MCP server %r (transport=%s) -- url=%s command=%s",

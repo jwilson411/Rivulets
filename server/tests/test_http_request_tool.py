@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable
 from typing import Any, cast
 
+import httpcore
 import httpx
 import pytest
 
@@ -54,13 +55,16 @@ def _fake_getaddrinfo_public(ip: str) -> Any:
 
 
 def _mock_client_factory(handler: Any) -> Any:
-    """Patched in place of httpx.Client so the tool's real client
+    """Patched in place of public_http_client so the tool's real client
     construction routes through a MockTransport instead of the network --
-    must reference the pre-patch _RealClient, not httpx.Client, since
-    patching httpx.Client would otherwise make this recurse into itself."""
-    return lambda **kwargs: _RealClient(  # pyright: ignore[reportUnknownLambdaType]
-        transport=httpx.MockTransport(handler), **kwargs
-    )
+    drop an incoming transport= (the production helper always passes
+    PublicHTTPTransport) so the mock wins."""
+
+    def factory(**kwargs: Any) -> httpx.Client:
+        kwargs.pop("transport", None)
+        return _RealClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    return factory
 
 
 def test_blocks_localhost_hostname() -> None:
@@ -106,8 +110,8 @@ def test_allows_public_address_and_returns_response(monkeypatch: pytest.MonkeyPa
         return httpx.Response(200, text="hello")
 
     monkeypatch.setattr(
-        http_request_module.httpx,
-        "Client",
+        http_request_module,
+        "public_http_client",
         _mock_client_factory(handler),
     )
 
@@ -130,8 +134,8 @@ def test_redirect_to_private_address_is_blocked(monkeypatch: pytest.MonkeyPatch)
         return httpx.Response(302, headers={"location": "http://127.0.0.1/secret"})
 
     monkeypatch.setattr(
-        http_request_module.httpx,
-        "Client",
+        http_request_module,
+        "public_http_client",
         _mock_client_factory(handler),
     )
 
@@ -152,8 +156,8 @@ def test_follows_redirect_to_another_public_address(monkeypatch: pytest.MonkeyPa
         return httpx.Response(200, text="redirected ok")
 
     monkeypatch.setattr(
-        http_request_module.httpx,
-        "Client",
+        http_request_module,
+        "public_http_client",
         _mock_client_factory(handler),
     )
 
@@ -198,6 +202,33 @@ def test_blocks_when_any_resolved_address_is_private_even_with_a_public_one_too(
         _call(url="http://multi-answer.example/")
 
 
+def test_connect_is_pinned_to_the_resolved_public_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#477: httpcore is handed the checked IP, not the hostname it
+    would resolve again. A rebind-after-check is covered on the
+    transport itself in test_network.py."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo_public("93.184.216.34"))
+    seen: list[str] = []
+
+    def connect_tcp(
+        self: object,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> object:
+        seen.append(host)
+        raise httpcore.ConnectError("do not actually connect")
+
+    monkeypatch.setattr("httpcore.SyncBackend.connect_tcp", connect_tcp)
+
+    with pytest.raises(httpx.ConnectError):
+        _call(url="http://rebind.example/")
+    assert seen == ["93.184.216.34"]
+
+
 def test_redirect_loop_raises_instead_of_returning_unfollowed_redirect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,8 +248,8 @@ def test_redirect_loop_raises_instead_of_returning_unfollowed_redirect(
         return httpx.Response(302, headers={"location": "http://example.com/next"})
 
     monkeypatch.setattr(
-        http_request_module.httpx,
-        "Client",
+        http_request_module,
+        "public_http_client",
         _mock_client_factory(handler),
     )
 
