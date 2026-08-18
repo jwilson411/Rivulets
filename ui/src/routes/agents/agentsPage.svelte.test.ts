@@ -147,7 +147,7 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('Writer')).not.toBeInTheDocument();
 	});
 
-	it('starts a new agent with every tool and permission checked', async () => {
+	it('starts a new agent with every everyday tool and permission checked', async () => {
 		seed([]);
 		vi.mocked(tools.list).mockResolvedValue([
 			{
@@ -173,9 +173,24 @@ describe('agents/+page.svelte', () => {
 				available: true,
 				display_name: 'HTTP request',
 				group: 'chat'
+			},
+			{
+				id: 'tool-gmail-send',
+				name: 'google_gmail_send',
+				description: 'Send an email from the connected Google account.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'integrations:google:write',
+				available: true,
+				display_name: 'Google Gmail send',
+				group: 'integrations'
 			}
 		]);
-		vi.mocked(tools.listScopes).mockResolvedValue(['sensitive_tools:manage']);
+		vi.mocked(tools.listScopes).mockResolvedValue([
+			'sensitive_tools:manage',
+			'integrations:google:write'
+		]);
 		vi.mocked(agents.create).mockResolvedValueOnce({ ...writer, id: 'agent-3' });
 		vi.mocked(agents.setToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
 
@@ -185,6 +200,11 @@ describe('agents/+page.svelte', () => {
 
 		await expect.element(page.getByRole('checkbox', { name: /Web search/ })).toBeChecked();
 		await expect.element(page.getByRole('checkbox', { name: /HTTP request/ })).toBeChecked();
+		await expect.element(page.getByRole('checkbox', { name: /Google Gmail send/ })).toBeChecked();
+		await page.getByText('Advanced', { exact: true }).click();
+		await expect
+			.element(page.getByRole('checkbox', { name: 'integrations:google:write' }))
+			.not.toBeChecked();
 
 		await page.getByLabelText('Name').fill('Writer');
 		await page.getByLabelText('What this agent does').fill('Drafts and edits prose.');
@@ -193,7 +213,7 @@ describe('agents/+page.svelte', () => {
 
 		expect(agents.create).toHaveBeenCalledWith(
 			expect.objectContaining({
-				tool_ids: ['tool-search', 'tool-http']
+				tool_ids: ['tool-search', 'tool-http', 'tool-gmail-send']
 			})
 		);
 		expect(agents.setToolScopes).toHaveBeenCalledWith('agent-3', ['sensitive_tools:manage']);
@@ -484,6 +504,9 @@ describe('agents/+page.svelte', () => {
 			.element(page.getByRole('checkbox', { name: /Google Gmail search/ }))
 			.toBeInTheDocument();
 		await expect.element(page.getByText('Needs a connected account')).not.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Send, draft, and write stay off until you grant'))
+			.toBeInTheDocument();
 	});
 
 	it('opens an agent card into the edit sheet with its extras fetched just-in-time', async () => {

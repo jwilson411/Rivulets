@@ -36,7 +36,9 @@ set_working_directory, execute_python, Google write, workspace
 settings, and invites stay off until the owner grants them on that
 agent. A #459 seed that checked every builtin and every scope is
 retracted on the next login via ensure_starter_agents_chat_safe_tools;
-a starter the owner already customized is left alone.
+a starter the owner already customized is left alone. Connecting
+Google only enables read until the owner grants
+`integrations:google:write` on that agent (#463).
 """
 
 from dataclasses import dataclass
@@ -51,7 +53,7 @@ from rivulets.agentos.agent_lifecycle import (
     set_agent_tools,
 )
 from rivulets.agentos.models import AUTO_MODEL
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES, TOOL_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -290,7 +292,9 @@ async def ensure_starter_agents_chat_safe_tools(db: AsyncSession) -> None:
     grant. A starter whose assignment already differs -- owner unchecked
     something, granted a subset, or still on the pre-#459 curated set --
     is left alone. Idempotent. Publishes the join-row diff so a peer
-    drops the same grant rather than syncing it back."""
+    drops the same grant rather than syncing it back. Also matches a
+    leftover that has every default scope except
+    integrations:google:write (#463)."""
     tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
     builtin_rows = list(tool_result.scalars().all())
     id_by_name = {row.name: row.id for row in builtin_rows}
@@ -317,7 +321,7 @@ async def ensure_starter_agents_chat_safe_tools(db: AsyncSession) -> None:
                 )
             ).all()
         )
-        if existing_scopes != set(TOOL_SCOPES):
+        if existing_scopes != set(TOOL_SCOPES) and existing_scopes != set(DEFAULT_AGENT_SCOPES):
             continue
         if not _UNRESTRICTED_STARTER_MARKERS <= assigned_names:
             continue

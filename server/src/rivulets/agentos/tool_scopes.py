@@ -31,8 +31,16 @@ TOOL_SCOPES: frozenset[str] = frozenset(
         "invites:manage",
         "sensitive_tools:manage",
         "integrations:google",
+        "integrations:google:write",
     }
 )
+
+# Connecting Google + the read scope must not enable send-as-me in chat
+# (#463). New agent and hire_teammate grant every other catalog scope;
+# write stays off until an owner checks it on that agent. Starter
+# agents grant no scopes at all (#462).
+DEFAULT_WITHHELD_SCOPES: frozenset[str] = frozenset({"integrations:google:write"})
+DEFAULT_AGENT_SCOPES: frozenset[str] = TOOL_SCOPES - DEFAULT_WITHHELD_SCOPES
 
 # Populated by each sub-issue (#189-#193) as it adds new builtin tools
 # with real reach. #189 is the first: its five mutating channel tools all
@@ -118,11 +126,12 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 # human to the workspace), so a workspace owner may want to grant one
 # without the other.
 #
-# #458: Google Workspace tools share one "integrations:google"
-# scope. Connecting an account in Settings does not make every agent
-# eligible -- assignment plus this grant, same split as every category
-# above. Write tools (draft/send/create/update/append) are additionally
-# marked sensitive so unattended use goes through tool_audit.py.
+# #458 / #463: Google read tools (search / read / list) share
+# "integrations:google". Write tools (draft / send / create / update /
+# append) need a second owner grant, "integrations:google:write", so
+# connecting an account only enables read until write is turned on for
+# a specific agent. Write tools are also marked sensitive so
+# unattended use still goes through tool_audit.py.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -159,16 +168,16 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "query_workspace_db": "sensitive_tools:manage",
     "google_gmail_search": "integrations:google",
     "google_gmail_read": "integrations:google",
-    "google_gmail_draft": "integrations:google",
-    "google_gmail_send": "integrations:google",
+    "google_gmail_draft": "integrations:google:write",
+    "google_gmail_send": "integrations:google:write",
     "google_calendar_list": "integrations:google",
-    "google_calendar_create": "integrations:google",
-    "google_calendar_update": "integrations:google",
+    "google_calendar_create": "integrations:google:write",
+    "google_calendar_update": "integrations:google:write",
     "google_drive_search": "integrations:google",
     "google_drive_read": "integrations:google",
-    "google_drive_write": "integrations:google",
+    "google_drive_write": "integrations:google:write",
     "google_docs_read": "integrations:google",
-    "google_docs_append": "integrations:google",
+    "google_docs_append": "integrations:google:write",
     "google_sheets_read": "integrations:google",
-    "google_sheets_update": "integrations:google",
+    "google_sheets_update": "integrations:google:write",
 }

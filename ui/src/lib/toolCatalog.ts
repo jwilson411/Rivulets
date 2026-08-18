@@ -124,11 +124,15 @@ export function inviteGrantMayAssignTool(
 	return !tool.sensitive;
 }
 
+// #463: connecting Google must not enable send-as-me just because a
+// new agent starts with every other tool and permission checked.
+export const DEFAULT_WITHHELD_SCOPES = new Set(['integrations:google:write']);
+
 export function defaultNewAgentToolIds(tools: Tool[], grant: string | null = 'owner'): string[] {
 	const pool = grant === 'owner' ? tools : tools.filter(inviteGrantMayAssignTool);
 	return pool.map((tool) => tool.id);
 }
 
 export function defaultNewAgentScopes(scopes: string[], grant: string | null = 'owner'): string[] {
-	return grant === 'owner' ? [...scopes] : [];
+	return grant === 'owner' ? scopes.filter((scope) => !DEFAULT_WITHHELD_SCOPES.has(scope)) : [];
 }

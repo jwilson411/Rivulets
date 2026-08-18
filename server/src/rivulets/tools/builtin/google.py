@@ -6,9 +6,12 @@ read / list) and write tools (draft / send / create / update / append)
 are separate so an owner can assign Gmail read without send-as-me, or
 Drive read without Drive write.
 
-All of these require the `integrations:google` scope. Write tools are
-also `sensitive` so unattended send/create/write goes through the
-existing approval queue.
+Read tools require the `integrations:google` scope. Write tools
+(draft / send / create / update / append) require
+`integrations:google:write` so connecting an account only enables
+read until an owner grants write on a specific agent (#463). Write
+tools are also `sensitive` so unattended send/create/write still
+goes through the existing approval queue.
 
 OAuth client id/secret needed for refresh live in a process cache the
 API writes (and startup reloads). Tools cannot open the async session

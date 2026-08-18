@@ -407,6 +407,7 @@ def test_list_tool_scopes_returns_the_known_catalog(
         "agents_teams:manage",
         "channels:manage",
         "integrations:google",
+        "integrations:google:write",
         "invites:manage",
         "mcp_servers:manage",
         "sensitive_tools:manage",

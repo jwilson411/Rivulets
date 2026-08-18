@@ -9,7 +9,7 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from fastapi.testclient import TestClient
 
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES
 from rivulets.db.models import Agent
 from rivulets.dispatch.engine import AgentDispatchInfo, DispatchMethod, DispatchResult
 from rivulets.dispatch.orchestration import apply_orchestrator_lock, format_team_roster
@@ -461,7 +461,7 @@ def test_hire_teammate_starts_with_new_agent_tools_and_scopes(
     assigned = client.get(f"/api/v1/agents/{hired['id']}/tools", headers=auth_headers).json()
     scopes = client.get(f"/api/v1/agents/{hired['id']}/tool-scopes", headers=auth_headers).json()
     assert set(assigned["tool_ids"]) == {tool["id"] for tool in catalog}
-    assert set(scopes["scopes"]) == set(TOOL_SCOPES)
+    assert set(scopes["scopes"]) == set(DEFAULT_AGENT_SCOPES)
 
 
 def test_non_orchestrator_hire_is_ignored(

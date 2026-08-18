@@ -20,7 +20,7 @@ from rivulets.agentos.starter_content import (
     seed_starter_teams,
 )
 from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
-from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.agentos.tool_scopes import DEFAULT_AGENT_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -134,7 +134,7 @@ async def test_ensure_starter_agents_chat_safe_tools_retracts_unrestricted_seed(
     )
     for tool_row in builtins:
         db_session.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id))
-    for scope in TOOL_SCOPES:
+    for scope in DEFAULT_AGENT_SCOPES:
         db_session.add(AgentToolScope(agent_id=agent.id, scope=scope))
     await db_session.commit()
 
