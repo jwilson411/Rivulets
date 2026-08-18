@@ -9,11 +9,13 @@ import { auth } from './auth.svelte';
 
 const RESUME_STORAGE_KEY = 'rivulets-invite-resume';
 const OWNER_STAY_STORAGE_KEY = 'rivulets-owner-stay';
+const OAUTH_HOP_STORAGE_KEY = 'rivulets-oauth-hop';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
 	localStorage.removeItem(RESUME_STORAGE_KEY);
+	sessionStorage.removeItem(OAUTH_HOP_STORAGE_KEY);
 	auth.forgetOwnerStay();
 });
 
@@ -556,6 +558,67 @@ describe('auth', () => {
 			mnemonic: 'apple banana cherry',
 			humanId: 'human-1'
 		});
+	});
+
+	it('parkOAuthHop() parks the current session and consumeOAuthHop() restores it once (#464)', () => {
+		auth.applySession({
+			token: 'tok-hop',
+			expires_at: '2099-01-01',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+
+		auth.parkOAuthHop();
+		expect(JSON.parse(sessionStorage.getItem(OAUTH_HOP_STORAGE_KEY)!)).toEqual({
+			token: 'tok-hop',
+			expires_at: '2099-01-01',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+
+		// Full-page return drops in-memory state; consume must rebuild it.
+		auth.applySession({
+			token: 'tmp',
+			expires_at: 'x',
+			human_id: '',
+			display_name: '',
+			grant: 'owner'
+		});
+
+		expect(auth.consumeOAuthHop()).toBe(true);
+		expect(auth.token).toBe('tok-hop');
+		expect(auth.humanId).toBe('human-1');
+		expect(auth.displayName).toBe('Ada');
+		expect(auth.grant).toBe('owner');
+		expect(sessionStorage.getItem(OAUTH_HOP_STORAGE_KEY)).toBeNull();
+		expect(auth.consumeOAuthHop()).toBe(false);
+	});
+
+	it('consumeOAuthHop() ignores a corrupt park and treats absence as false (#464)', () => {
+		sessionStorage.setItem(OAUTH_HOP_STORAGE_KEY, '{not-json');
+		expect(auth.consumeOAuthHop()).toBe(false);
+		expect(sessionStorage.getItem(OAUTH_HOP_STORAGE_KEY)).toBeNull();
+
+		expect(auth.consumeOAuthHop()).toBe(false);
+	});
+
+	it('logout() drops a parked OAuth hop (#464)', async () => {
+		auth.applySession({
+			token: 'tok-hop',
+			expires_at: '2099-01-01',
+			human_id: 'human-1',
+			display_name: 'Ada',
+			grant: 'owner'
+		});
+		auth.parkOAuthHop();
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+		await auth.logout();
+
+		expect(sessionStorage.getItem(OAUTH_HOP_STORAGE_KEY)).toBeNull();
+		expect(auth.consumeOAuthHop()).toBe(false);
 	});
 
 	it('logout() drops the owner stay credential (#407)', async () => {

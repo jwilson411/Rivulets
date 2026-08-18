@@ -115,8 +115,15 @@ async def _google_oauth_app(db: DbSession) -> IntegrationOAuthApp | None:
     return await db.get(IntegrationOAuthApp, PROVIDER)
 
 
+# Settings tabs live in the SPA URL (#471 / #464). The callback is a
+# full-page load outside the SPA, so it has to name the Integrations tab
+# or the owner lands on Safety and thinks connect failed.
+_SETTINGS_INTEGRATIONS = "/settings?tab=integrations"
+
+
 def _callback_page(title: str, body: str, *, ok: bool) -> HTMLResponse:
     tone = "Connected." if ok else "Couldn't connect."
+    dest = _SETTINGS_INTEGRATIONS
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -131,8 +138,8 @@ def _callback_page(title: str, body: str, *, ok: bool) -> HTMLResponse:
 <body>
   <h1>{escape(tone)}</h1>
   <p>{escape(body)}</p>
-  <p><a href="/settings">Back to Settings</a></p>
-  {"<script>location.replace('/settings');</script>" if ok else ""}
+  <p><a href="{dest}">Back to Settings</a></p>
+  {f"<script>location.replace('{dest}');</script>" if ok else ""}
 </body>
 </html>"""
     return HTMLResponse(html, status_code=200 if ok else 400)

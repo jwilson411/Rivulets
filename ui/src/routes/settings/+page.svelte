@@ -180,7 +180,9 @@
 		integrationsError = null;
 		try {
 			const { authorization_url } = await integrationsApi.connectGoogle();
-			window.location.assign(authorization_url);
+			// Same-tab Google trip drops the memory-only JWT (#464). Park
+			// it so return to ?tab=integrations is already signed in.
+			auth.leaveForOAuth(authorization_url);
 		} catch (err) {
 			integrationsError = err instanceof Error ? err.message : "Couldn't start Google sign-in.";
 			connectingGoogle = false;
