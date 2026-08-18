@@ -61,8 +61,10 @@ from rivulets.agentos import run_agent, sync_agents
 from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.agent_lifecycle import (
     generate_and_store_routing_rules,
+    grant_new_agent_defaults,
     publish_agent_change,
     publish_agent_teams_change,
+    publish_agent_tool_scopes_change,
     publish_agent_tools_change,
     record_agent_version,
     register_agent_with_agentos,
@@ -2414,7 +2416,12 @@ async def _handle_hire_teammate(
     db.add(new_agent)
     await db.flush()
     await record_agent_version(db, new_agent)
+    # #468: match the New agent sheet so a hire can do the assignment
+    # they were hired for (tools + scopes) instead of landing chat-only.
+    tool_diff, scope_diff = await grant_new_agent_defaults(db, new_agent.id)
     await db.commit()
+    await publish_agent_tools_change(db, new_agent.id, *tool_diff)
+    await publish_agent_tool_scopes_change(db, new_agent.id, *scope_diff)
     await publish_agent_change(db, new_agent)
     await replace_routing_rules(db, new_agent.id, [("mention_only", "", 0)])
     await register_agent_with_agentos(db, new_agent)

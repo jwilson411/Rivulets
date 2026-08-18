@@ -1,6 +1,6 @@
-"""Shared agent-mutation side effects: tool/team assignment, #104 version
-snapshots, FR-3.3 routing-rule generation, FR-3.2 AgentOS registration, and
-FR-9.1 sync publish.
+"""Shared agent-mutation side effects: tool/team/scope assignment, #104
+version snapshots, FR-3.3 routing-rule generation, FR-3.2 AgentOS
+registration, and FR-9.1 sync publish.
 
 Originally private helpers inside api/agents.py (`_set_tools`, `_set_teams`,
 `_generate_and_store_routing_rules`, `_publish_agent_change`,
@@ -18,8 +18,17 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.service import live_agentos_id, sync_agents
-from rivulets.db.models import Agent, AgentRoutingRule, AgentTool, AgentVersion, TeamAgent
-from rivulets.sync.apply import AGENT_TOOL_SPEC, TEAM_AGENT_SPEC
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
+from rivulets.db.models import (
+    Agent,
+    AgentRoutingRule,
+    AgentTool,
+    AgentToolScope,
+    AgentVersion,
+    TeamAgent,
+    Tool,
+)
+from rivulets.sync.apply import AGENT_TOOL_SCOPE_SPEC, AGENT_TOOL_SPEC, TEAM_AGENT_SPEC
 from rivulets.sync.publish import (
     publish_current_state,
     publish_tombstone,
@@ -63,6 +72,52 @@ async def publish_agent_tools_change(
         {(agent_id, tool_id) for tool_id in old_tool_ids},
         {(agent_id, tool_id) for tool_id in new_tool_ids},
     )
+
+
+async def set_agent_tool_scopes(
+    db: AsyncSession, agent_id: str, scopes: list[str]
+) -> tuple[set[str], set[str]]:
+    """Delete+recreate of AgentToolScope, same no-commit/returns-the-diff
+    contract as set_agent_tools. Callers that originate a grant still
+    own authorization (the owner-only HTTP route, or hire after the
+    human already agreed). Unknown names are stored as given -- the
+    HTTP layer rejects typos before it gets here."""
+    old_ids = set(
+        (
+            await db.scalars(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent_id)
+            )
+        ).all()
+    )
+    await db.execute(delete(AgentToolScope).where(AgentToolScope.agent_id == agent_id))
+    new_ids = set(dict.fromkeys(scopes))
+    for scope in new_ids:
+        db.add(AgentToolScope(agent_id=agent_id, scope=scope))
+    return old_ids, new_ids
+
+
+async def publish_agent_tool_scopes_change(
+    db: AsyncSession, agent_id: str, old_scopes: set[str], new_scopes: set[str]
+) -> None:
+    await replace_join_entities(
+        db,
+        "agent_tool_scope",
+        AGENT_TOOL_SCOPE_SPEC,
+        {(agent_id, scope) for scope in old_scopes},
+        {(agent_id, scope) for scope in new_scopes},
+    )
+
+
+async def grant_new_agent_defaults(
+    db: AsyncSession, agent_id: str
+) -> tuple[tuple[set[str], set[str]], tuple[set[str], set[str]]]:
+    """Same starting kit as the New agent sheet: every catalog tool and
+    every capability scope. Hire uses this so a teammate can actually do
+    the work they were hired for (#468). Does not commit."""
+    tool_ids = list((await db.scalars(select(Tool.id))).all())
+    tool_diff = await set_agent_tools(db, agent_id, tool_ids)
+    scope_diff = await set_agent_tool_scopes(db, agent_id, list(TOOL_SCOPES))
+    return tool_diff, scope_diff
 
 
 async def set_agent_teams(
