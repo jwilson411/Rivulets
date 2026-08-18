@@ -184,6 +184,23 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect.element(page.getByRole('button', { name: 'Choose' })).toBeInTheDocument();
 	});
 
+	it('labels a chosen channel folder as This channel, not This conversation', async () => {
+		seed({
+			channel: {
+				...generalChannel,
+				working_directory: '/Users/me/river',
+				effective_working_directory: '/Users/me/river'
+			}
+		});
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('/Users/me/river')).toBeInTheDocument();
+		await expect.element(page.getByText('This channel')).toBeInTheDocument();
+		await expect.element(page.getByText('This conversation')).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Use Settings' })).toBeInTheDocument();
+	});
+
 	it('shows the empty state when the channel has no conversations', async () => {
 		seed();
 

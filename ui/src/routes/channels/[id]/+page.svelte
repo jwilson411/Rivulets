@@ -365,6 +365,7 @@
 					? null
 					: (channel?.effective_working_directory ?? null)}
 				inheritedLabel="Settings"
+				overrideLabel="This channel"
 				canEdit={isOwner}
 				busy={folderBusy}
 				error={folderError}

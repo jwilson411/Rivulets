@@ -49,6 +49,24 @@ describe('WorkingDirectoryControl.svelte', () => {
 		expect(onSave).toHaveBeenCalledWith(null);
 	});
 
+	it('labels a channel override as This channel, not This conversation', async () => {
+		const onSave = vi.fn();
+		render(WorkingDirectoryControl, {
+			storedPath: '/Users/me/river',
+			inheritedPath: '/Users/me/settings',
+			inheritedLabel: 'Settings',
+			overrideLabel: 'This channel',
+			canEdit: true,
+			onSave
+		});
+
+		await expect.element(page.getByText('This channel')).toBeInTheDocument();
+		await expect.element(page.getByText('This conversation')).not.toBeInTheDocument();
+		await page.getByRole('button', { name: 'Use Settings' }).click();
+
+		expect(onSave).toHaveBeenCalledWith(null);
+	});
+
 	it('opens the folder picker from Choose', async () => {
 		vi.mocked(settings.listDirectories).mockResolvedValue({
 			path: '/Users/me',
