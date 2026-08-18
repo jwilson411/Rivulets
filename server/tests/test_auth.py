@@ -277,6 +277,25 @@ def test_login_seeds_starter_agents_and_team_on_first_workspace_creation(
     assert writer_rules[0]["rule_type"] == "keyword"
     assert "draft" in writer_rules[0]["pattern"]
 
+    catalog = {tool["name"]: tool for tool in client.get("/api/v1/tools", headers=headers).json()}
+    assistant_tools = client.get(f"/api/v1/agents/{assistant_id}/tools", headers=headers).json()
+    assistant_scopes = client.get(
+        f"/api/v1/agents/{assistant_id}/tool-scopes", headers=headers
+    ).json()
+    assigned_names = {
+        tool["name"] for tool in catalog.values() if tool["id"] in set(assistant_tools["tool_ids"])
+    }
+    assert assigned_names == {"web_search", "read_attached_file", "search_knowledge_base"}
+    assert assistant_scopes["scopes"] == []
+    for blocked in (
+        "set_working_directory",
+        "create_invite",
+        "execute_python",
+        "update_workspace_settings",
+        "google_gmail_send",
+    ):
+        assert catalog[blocked]["id"] not in assistant_tools["tool_ids"]
+
 
 def test_login_reregisters_after_restart_with_locked_fallback(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

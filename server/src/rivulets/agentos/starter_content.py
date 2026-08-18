@@ -28,14 +28,15 @@ on their own reply, so this does not become a self-loop.
 #410: specialists get a few real keywords at seed time (not an LLM
 catch-all or an invalid URL regex) so the sheet can show them.
 
-Every starter agent is granted every builtin tool and every capability
-scope (TOOL_SCOPES). Assignment without the matching AgentToolScope
-leaves scoped tools inert (tool_resolution.py's resolve_agent_tools),
-so the seed has to do both or the roster would advertise tools that
-never resolve. Existing workspaces that still have the original curated
-tool set (or Writer's empty set) are upgraded once via
-ensure_starter_agents_have_all_tools; an owner who already changed
-that set is left alone.
+Starter agents ship with a chat-safe tool kit (search, attachments,
+knowledge-base lookup; Coder also gets unscoped file reads) and no
+capability scopes (#462). Handoff / engage_team attach unconditionally
+in agentos/service.py, so they are not part of this assignment.
+set_working_directory, execute_python, Google write, workspace
+settings, and invites stay off until the owner grants them on that
+agent. A #459 seed that checked every builtin and every scope is
+retracted on the next login via ensure_starter_agents_chat_safe_tools;
+a starter the owner already customized is left alone.
 """
 
 from dataclasses import dataclass
@@ -43,6 +44,12 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.agent_lifecycle import (
+    publish_agent_tool_scopes_change,
+    publish_agent_tools_change,
+    set_agent_tool_scopes,
+    set_agent_tools,
+)
 from rivulets.agentos.models import AUTO_MODEL
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.db.models import (
@@ -168,15 +175,31 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
     ),
 )
 
-# Pre-all-tools seed assignments. Used only to recognize a starter that
-# has never been customized, so the login repair can upgrade it without
-# undoing an owner's later unchecks.
-_LEGACY_STARTER_TOOL_NAMES: dict[str, frozenset[str]] = {
-    "Assistant": frozenset({"web_search", "read_attached_file", "search_knowledge_base"}),
-    "Coder": frozenset({"read_file", "write_file", "list_files", "execute_python"}),
-    "Researcher": frozenset({"web_search", "http_request"}),
-    "Writer": frozenset(),
+# Chat-safe defaults (#462). No required_scope, no sensitive blast-radius
+# tools. Coder keeps unscoped reads so the role can inspect a folder the
+# owner already pointed the channel at; write/exec stay off.
+_CHAT_SAFE_STARTER_TOOLS: frozenset[str] = frozenset(
+    {"web_search", "read_attached_file", "search_knowledge_base"}
+)
+_STARTER_TOOL_NAMES: dict[str, frozenset[str]] = {
+    "Assistant": _CHAT_SAFE_STARTER_TOOLS,
+    "Coder": frozenset({"read_file", "list_files", "read_attached_file"}),
+    "Researcher": _CHAT_SAFE_STARTER_TOOLS,
+    "Writer": frozenset({"read_attached_file", "search_knowledge_base"}),
 }
+# Signature of the #459 "every tool + every scope" seed. Matching this
+# (not "differs from chat-safe") is what the login repair retracts, so a
+# later builtin does not hide the hole and an owner who only granted
+# execute_python is not reset.
+_UNRESTRICTED_STARTER_MARKERS: frozenset[str] = frozenset(
+    {
+        "set_working_directory",
+        "create_invite",
+        "update_workspace_settings",
+        "execute_python",
+        "google_gmail_send",
+    }
+)
 
 _STARTER_TEAM_NAME = "Starter Team"
 _STARTER_TEAM_DESCRIPTION = (
@@ -232,67 +255,52 @@ async def seed_starter_agents(db: AsyncSession) -> None:
     await db.commit()
     created = [starter.name for starter in _STARTER_AGENTS if starter.name not in existing_names]
     if created:
-        await _grant_all_tools_to_named_agents(db, created)
-    await ensure_starter_agents_have_all_tools(db)
+        await _grant_chat_safe_tools_to_named_agents(db, created)
+    await ensure_starter_agents_chat_safe_tools(db)
     await ensure_assistant_always_rule(db)
     await ensure_assistant_orchestrator_instructions(db)
     await repair_generated_routing_rules(db)
 
 
-async def _grant_all_tools_to_named_agents(db: AsyncSession, names: list[str]) -> None:
+async def _grant_chat_safe_tools_to_named_agents(db: AsyncSession, names: list[str]) -> None:
     tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
-    builtin_ids = {row.id for row in tool_result.scalars().all()}
-    if not builtin_ids or not names:
+    id_by_name = {row.name: row.id for row in tool_result.scalars().all()}
+    if not id_by_name or not names:
         return
     agents = list((await db.scalars(select(Agent).where(Agent.name.in_(tuple(names))))).all())
-    await _grant_all_tools(db, agents, builtin_ids)
-
-
-async def _grant_all_tools(db: AsyncSession, agents: list[Agent], builtin_ids: set[str]) -> None:
     changed = False
     for agent in agents:
+        desired_ids = {
+            id_by_name[name] for name in _STARTER_TOOL_NAMES[agent.name] if name in id_by_name
+        }
         existing_tool_ids = set(
             (
                 await db.scalars(select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id))
             ).all()
         )
-        missing_tool_ids = builtin_ids - existing_tool_ids
-        for tool_id in missing_tool_ids:
+        for tool_id in desired_ids - existing_tool_ids:
             db.add(AgentTool(agent_id=agent.id, tool_id=tool_id))
-
-        existing_scopes = set(
-            (
-                await db.scalars(
-                    select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
-                )
-            ).all()
-        )
-        missing_scopes = TOOL_SCOPES - existing_scopes
-        for scope in missing_scopes:
-            db.add(AgentToolScope(agent_id=agent.id, scope=scope))
-
-        if missing_tool_ids or missing_scopes:
             changed = True
-
     if changed:
         await db.commit()
 
 
-async def ensure_starter_agents_have_all_tools(db: AsyncSession) -> None:
-    """Upgrade a starter that still has its original curated tool set
-    (or Writer's empty set) to every builtin + every scope. A starter
-    whose assignment already differs -- owner unchecked something, or
-    already on the full set -- is left alone. Idempotent."""
+async def ensure_starter_agents_chat_safe_tools(db: AsyncSession) -> None:
+    """Retract a starter that still has the #459 every-tool + every-scope
+    grant. A starter whose assignment already differs -- owner unchecked
+    something, granted a subset, or still on the pre-#459 curated set --
+    is left alone. Idempotent. Publishes the join-row diff so a peer
+    drops the same grant rather than syncing it back."""
     tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
     builtin_rows = list(tool_result.scalars().all())
-    builtin_ids = {row.id for row in builtin_rows}
+    id_by_name = {row.name: row.id for row in builtin_rows}
     name_by_id = {row.id: row.name for row in builtin_rows}
-    if not builtin_ids:
+    if not id_by_name:
         return
 
     starter_names = tuple(starter.name for starter in _STARTER_AGENTS)
     agents = list((await db.scalars(select(Agent).where(Agent.name.in_(starter_names)))).all())
-    to_upgrade: list[Agent] = []
+    published: list[tuple[str, set[str], set[str], set[str], set[str]]] = []
     for agent in agents:
         existing_tool_ids = set(
             (
@@ -302,10 +310,29 @@ async def ensure_starter_agents_have_all_tools(db: AsyncSession) -> None:
         assigned_names = frozenset(
             name_by_id[tool_id] for tool_id in existing_tool_ids if tool_id in name_by_id
         )
-        legacy = _LEGACY_STARTER_TOOL_NAMES.get(agent.name)
-        if legacy is not None and assigned_names == legacy:
-            to_upgrade.append(agent)
-    await _grant_all_tools(db, to_upgrade, builtin_ids)
+        existing_scopes = set(
+            (
+                await db.scalars(
+                    select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+                )
+            ).all()
+        )
+        if existing_scopes != set(TOOL_SCOPES):
+            continue
+        if not _UNRESTRICTED_STARTER_MARKERS <= assigned_names:
+            continue
+        desired = _STARTER_TOOL_NAMES[agent.name]
+        desired_ids = [id_by_name[name] for name in sorted(desired) if name in id_by_name]
+        tool_diff = await set_agent_tools(db, agent.id, desired_ids)
+        scope_diff = await set_agent_tool_scopes(db, agent.id, [])
+        published.append((agent.id, tool_diff[0], tool_diff[1], scope_diff[0], scope_diff[1]))
+
+    if not published:
+        return
+    await db.commit()
+    for agent_id, old_tools, new_tools, old_scopes, new_scopes in published:
+        await publish_agent_tools_change(db, agent_id, old_tools, new_tools)
+        await publish_agent_tool_scopes_change(db, agent_id, old_scopes, new_scopes)
 
 
 async def ensure_assistant_always_rule(db: AsyncSession) -> None:

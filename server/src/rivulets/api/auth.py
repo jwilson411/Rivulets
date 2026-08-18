@@ -64,7 +64,7 @@ from rivulets.agentos.agent_lifecycle import record_registration_flags
 from rivulets.agentos.starter_content import (
     ensure_assistant_always_rule,
     ensure_assistant_orchestrator_instructions,
-    ensure_starter_agents_have_all_tools,
+    ensure_starter_agents_chat_safe_tools,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
@@ -188,11 +188,12 @@ async def login(body: LoginRequest, request: Request, db: DbSession) -> LoginRes
     # #406: existing workspaces seeded Assistant with generated keywords
     # (or no rule). First-create seed already writes `always`; this
     # backfills the same default on later logins unless the owner set
-    # mention-only.
+    # mention-only. #462: retract the #459 every-tool/every-scope grant
+    # on starters the owner never customized.
     try:
         await ensure_assistant_always_rule(db)
         await ensure_assistant_orchestrator_instructions(db)
-        await ensure_starter_agents_have_all_tools(db)
+        await ensure_starter_agents_chat_safe_tools(db)
     except Exception:
         logger.warning(
             "Failed to ensure Assistant orchestrator defaults after login", exc_info=True

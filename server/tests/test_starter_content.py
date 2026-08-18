@@ -10,9 +10,11 @@ from rivulets.agentos.starter_content import (
     _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_AGENTS,  # pyright: ignore[reportPrivateUsage]
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
+    _STARTER_TOOL_NAMES,  # pyright: ignore[reportPrivateUsage]
+    _UNRESTRICTED_STARTER_MARKERS,  # pyright: ignore[reportPrivateUsage]
     ensure_assistant_always_rule,
     ensure_assistant_orchestrator_instructions,
-    ensure_starter_agents_have_all_tools,
+    ensure_starter_agents_chat_safe_tools,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
@@ -59,14 +61,9 @@ async def test_seed_starter_agents_is_idempotent(db_session: AsyncSession) -> No
     assert len(names) == len(set(names))
 
 
-async def test_seed_starter_agents_assigns_every_builtin_tool(db_session: AsyncSession) -> None:
+async def test_seed_starter_agents_assigns_chat_safe_tools(db_session: AsyncSession) -> None:
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
-
-    builtin_names = set(
-        (await db_session.execute(select(Tool.name).where(Tool.tool_type == "builtin"))).scalars()
-    )
-    assert builtin_names
 
     for starter_name in _STARTER_AGENT_NAMES:
         agent = (
@@ -81,10 +78,11 @@ async def test_seed_starter_agents_assigns_every_builtin_tool(db_session: AsyncS
                 )
             ).scalars()
         )
-        assert assigned == builtin_names
+        assert assigned == set(_STARTER_TOOL_NAMES[starter_name])
+        assert assigned.isdisjoint(_UNRESTRICTED_STARTER_MARKERS)
 
 
-async def test_seed_starter_agents_grants_every_capability_scope(db_session: AsyncSession) -> None:
+async def test_seed_starter_agents_grants_no_capability_scopes(db_session: AsyncSession) -> None:
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
@@ -99,54 +97,55 @@ async def test_seed_starter_agents_grants_every_capability_scope(db_session: Asy
                 )
             ).scalars()
         )
-        assert scopes == set(TOOL_SCOPES)
+        assert scopes == set()
 
 
-async def test_seed_starter_agents_sensitive_tools_actually_resolve(
+async def test_seed_starter_agents_sensitive_tools_do_not_resolve(
     db_session: AsyncSession,
 ) -> None:
-    """resolve_agent_tools returns every seeded builtin, including scoped
-    ones -- assignment plus the matching AgentToolScope grant."""
+    """#462: assignment + scope are both withheld, so resolve_agent_tools
+    cannot return admin or sensitive builtins for a starter."""
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
-    builtin_names = set(
-        (await db_session.execute(select(Tool.name).where(Tool.tool_type == "builtin"))).scalars()
-    )
     for starter_name in _STARTER_AGENT_NAMES:
         agent = (
             await db_session.execute(select(Agent).where(Agent.name == starter_name))
         ).scalar_one()
         resolved = {fn.name for fn in await resolve_agent_tools(db_session, agent)}
-        assert resolved == builtin_names
+        assert resolved == set(_STARTER_TOOL_NAMES[starter_name])
+        assert resolved.isdisjoint(_UNRESTRICTED_STARTER_MARKERS)
 
 
-async def test_ensure_starter_agents_have_all_tools_backfills_legacy_set(
+async def test_ensure_starter_agents_chat_safe_tools_retracts_unrestricted_seed(
     db_session: AsyncSession,
 ) -> None:
     await seed_builtin_tools(db_session)
     agent = Agent(
         name="Assistant",
-        description="legacy starter with a curated tool set",
+        description="the #459 every-tool seed",
         instructions="You are helpful.",
         model=AUTO_MODEL,
     )
     db_session.add(agent)
     await db_session.flush()
-    for name in ("web_search", "read_attached_file", "search_knowledge_base"):
-        tool_row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+    builtins = list(
+        (await db_session.execute(select(Tool).where(Tool.tool_type == "builtin"))).scalars()
+    )
+    for tool_row in builtins:
         db_session.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id))
+    for scope in TOOL_SCOPES:
+        db_session.add(AgentToolScope(agent_id=agent.id, scope=scope))
     await db_session.commit()
 
-    await ensure_starter_agents_have_all_tools(db_session)
+    await ensure_starter_agents_chat_safe_tools(db_session)
 
-    builtin_ids = set(
-        (await db_session.execute(select(Tool.id).where(Tool.tool_type == "builtin"))).scalars()
-    )
     assigned = set(
         (
             await db_session.execute(
-                select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id)
+                select(Tool.name)
+                .join(AgentTool, AgentTool.tool_id == Tool.id)
+                .where(AgentTool.agent_id == agent.id)
             )
         ).scalars()
     )
@@ -157,11 +156,93 @@ async def test_ensure_starter_agents_have_all_tools_backfills_legacy_set(
             )
         ).scalars()
     )
-    assert assigned == builtin_ids
-    assert scopes == set(TOOL_SCOPES)
+    assert assigned == set(_STARTER_TOOL_NAMES["Assistant"])
+    assert scopes == set()
 
 
-async def test_ensure_starter_agents_have_all_tools_leaves_customized_starter(
+async def test_ensure_starter_agents_chat_safe_tools_leaves_legacy_curated_set(
+    db_session: AsyncSession,
+) -> None:
+    """Pre-#459 Coder (write + exec, no scopes) is not upgraded and not
+    stripped -- the owner never got the all-permissions grant."""
+    await seed_builtin_tools(db_session)
+    agent = Agent(
+        name="Coder",
+        description="legacy starter with a curated tool set",
+        instructions="You write code.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    for name in ("read_file", "write_file", "list_files", "execute_python"):
+        tool_row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        db_session.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id))
+    await db_session.commit()
+
+    await ensure_starter_agents_chat_safe_tools(db_session)
+
+    assigned = set(
+        (
+            await db_session.execute(
+                select(Tool.name)
+                .join(AgentTool, AgentTool.tool_id == Tool.id)
+                .where(AgentTool.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    assert assigned == {"read_file", "write_file", "list_files", "execute_python"}
+    assert scopes == set()
+
+
+async def test_ensure_starter_agents_chat_safe_tools_leaves_explicit_owner_grant(
+    db_session: AsyncSession,
+) -> None:
+    """Owner granted execute_python + its scope, not the all-scopes seed."""
+    await seed_builtin_tools(db_session)
+    agent = Agent(
+        name="Coder",
+        description="owner enabled code exec",
+        instructions="You write code.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    for name in ("read_file", "list_files", "execute_python"):
+        tool_row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        db_session.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id))
+    db_session.add(AgentToolScope(agent_id=agent.id, scope="sensitive_tools:manage"))
+    await db_session.commit()
+
+    await ensure_starter_agents_chat_safe_tools(db_session)
+
+    assigned = set(
+        (
+            await db_session.execute(
+                select(Tool.name)
+                .join(AgentTool, AgentTool.tool_id == Tool.id)
+                .where(AgentTool.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    assert assigned == {"read_file", "list_files", "execute_python"}
+    assert scopes == {"sensitive_tools:manage"}
+
+
+async def test_ensure_starter_agents_chat_safe_tools_leaves_customized_starter(
     db_session: AsyncSession,
 ) -> None:
     await seed_builtin_tools(db_session)
@@ -179,7 +260,7 @@ async def test_ensure_starter_agents_have_all_tools_leaves_customized_starter(
     db_session.add(AgentTool(agent_id=agent.id, tool_id=web_search.id))
     await db_session.commit()
 
-    await ensure_starter_agents_have_all_tools(db_session)
+    await ensure_starter_agents_chat_safe_tools(db_session)
 
     assigned = list(
         (
