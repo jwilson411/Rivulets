@@ -36,7 +36,7 @@ vi.mock('$lib/api/auth.svelte', () => ({
 }));
 
 vi.mock('$lib/api/channels', () => ({
-	channels: { get: vi.fn(), update: vi.fn() }
+	channels: { get: vi.fn(), update: vi.fn(), remove: vi.fn(), unarchive: vi.fn() }
 }));
 
 vi.mock('$lib/api/rivulets', () => ({
@@ -665,12 +665,40 @@ describe('channels/[id]/+page.svelte', () => {
 		render(ChannelPage);
 		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
 
-		await page.getByRole('button', { name: 'Archive', exact: true }).click();
+		await page.getByRole('button', { name: 'Archive', exact: true }).nth(1).click();
 		await expect.element(page.getByText('Archive this conversation?')).toBeInTheDocument();
 		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
 
 		expect(rivulets.close).toHaveBeenCalledWith('riv-1');
 		await expect.element(page.getByText('Kickoff message')).not.toBeInTheDocument();
+	});
+
+	it('archives the channel from the header after confirming', async () => {
+		seed({ rivulets: [kickoffRivulet] });
+		vi.mocked(channels.remove).mockResolvedValueOnce(undefined);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('Kickoff message')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Archive', exact: true }).first().click();
+		await expect.element(page.getByText('Archive this channel?')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Archive', exact: true }).last().click();
+
+		expect(channels.remove).toHaveBeenCalledWith('chan-1');
+		expect(goto).toHaveBeenCalledWith('/channels');
+	});
+
+	it('hides the composer on an archived channel and unarchives via the banner', async () => {
+		seed({ channel: { ...generalChannel, archived: true }, rivulets: [kickoffRivulet] });
+		vi.mocked(channels.unarchive).mockResolvedValueOnce(generalChannel);
+
+		render(ChannelPage);
+		await expect.element(page.getByText('This channel is archived.')).toBeInTheDocument();
+		await expect.element(page.getByPlaceholder('Start a conversation…')).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Unarchive' }).first().click();
+		expect(channels.unarchive).toHaveBeenCalledWith('chan-1');
+		await expect.element(page.getByText('This channel is archived.')).not.toBeInTheDocument();
 	});
 
 	it('continues the last conversation instead of creating a new one', async () => {

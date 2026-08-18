@@ -59,6 +59,10 @@
 	let archiving = $state<Rivulet | null>(null);
 	let archiveBusy = $state(false);
 	let archiveError = $state<string | null>(null);
+	let confirmingChannelArchive = $state(false);
+	let channelArchiveBusy = $state(false);
+	let channelArchiveError = $state<string | null>(null);
+	let channelUnarchiveBusy = $state(false);
 	let listError = $state<string | null>(null);
 
 	let routedTeam = $derived(teamList.find((t) => t.id === channel?.team_id) ?? null);
@@ -279,6 +283,34 @@
 		}
 	}
 
+	async function handleChannelArchive() {
+		if (!channel) return;
+		channelArchiveBusy = true;
+		channelArchiveError = null;
+		try {
+			await channels.remove(channel.id);
+			confirmingChannelArchive = false;
+			goto(resolve('/channels'));
+		} catch {
+			channelArchiveError = "Couldn't archive this channel. Try again.";
+		} finally {
+			channelArchiveBusy = false;
+		}
+	}
+
+	async function handleChannelUnarchive() {
+		if (!channel) return;
+		channelUnarchiveBusy = true;
+		listError = null;
+		try {
+			channel = await channels.unarchive(channel.id);
+		} catch {
+			listError = "Couldn't unarchive this channel. Try again.";
+		} finally {
+			channelUnarchiveBusy = false;
+		}
+	}
+
 	function dotClass(rivulet: Rivulet, index: number): string {
 		const latest = latestRunByRivulet[rivulet.id];
 		if (latest?.status === 'error') return 'bg-danger';
@@ -322,6 +354,11 @@
 			</p>
 		</div>
 		<div class="relative ml-auto flex max-w-full flex-none flex-col items-end gap-1.5">
+			{#if channel && !channel.archived}
+				<Button variant="secondary" size="md" onclick={() => (confirmingChannelArchive = true)}>
+					Archive
+				</Button>
+			{/if}
 			<WorkingDirectoryControl
 				storedPath={channel?.working_directory ?? null}
 				inheritedPath={channel?.working_directory
@@ -446,6 +483,23 @@
 	</header>
 
 	<div class="flex-1 overflow-y-auto px-4 py-6 md:px-10">
+		{#if channel?.archived}
+			<div
+				class="mb-4 flex flex-wrap items-center gap-3.5 rounded-xl border border-line bg-surface px-5 py-4 dark:border-line-dark dark:bg-surface-dark"
+			>
+				<span class="text-[15px] font-semibold text-ink dark:text-ink-dark">
+					This channel is archived.
+				</span>
+				<Button
+					variant="secondary"
+					class="ml-auto"
+					onclick={handleChannelUnarchive}
+					disabled={channelUnarchiveBusy}
+				>
+					{channelUnarchiveBusy ? 'Unarchiving…' : 'Unarchive'}
+				</Button>
+			</div>
+		{/if}
 		{#if agentsNotReady}
 			<ErrorBanner
 				class="mb-4"
@@ -552,38 +606,40 @@
 		{/if}
 	</div>
 
-	<div class="px-4 pb-24 md:px-10 md:pb-7">
-		{#if lastOpen}
-			<div class="mb-3 flex flex-wrap gap-2">
-				<FilterChip selected={!continueLast} onclick={() => (continueLast = false)}>
-					New conversation
-				</FilterChip>
-				<FilterChip selected={continueLast} onclick={() => (continueLast = true)}>
-					Continue last
-				</FilterChip>
-			</div>
-		{/if}
-		{#if posting}
-			<div class="mb-3 flex items-center gap-2 pl-1 text-sm">
-				<span
-					class="flex h-6 items-center gap-1.5 rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
-				>
-					<span class="breath h-1.5 w-1.5 rounded-full bg-current"></span>
-					Routing…
-				</span>
-			</div>
-		{/if}
-		<StreamBar
-			bind:this={composer}
-			placeholder={composerPlaceholder}
-			{helper}
-			busy={posting}
-			error={postError}
-			slashWorkflows={workflowList}
-			{mentionCandidates}
-			onSend={handlePost}
-		/>
-	</div>
+	{#if !channel?.archived}
+		<div class="px-4 pb-24 md:px-10 md:pb-7">
+			{#if lastOpen}
+				<div class="mb-3 flex flex-wrap gap-2">
+					<FilterChip selected={!continueLast} onclick={() => (continueLast = false)}>
+						New conversation
+					</FilterChip>
+					<FilterChip selected={continueLast} onclick={() => (continueLast = true)}>
+						Continue last
+					</FilterChip>
+				</div>
+			{/if}
+			{#if posting}
+				<div class="mb-3 flex items-center gap-2 pl-1 text-sm">
+					<span
+						class="flex h-6 items-center gap-1.5 rounded-full bg-accent-soft px-2.5 text-[13px] font-semibold text-accent dark:bg-accent-soft-dark dark:text-accent-dark"
+					>
+						<span class="breath h-1.5 w-1.5 rounded-full bg-current"></span>
+						Routing…
+					</span>
+				</div>
+			{/if}
+			<StreamBar
+				bind:this={composer}
+				placeholder={composerPlaceholder}
+				{helper}
+				busy={posting}
+				error={postError}
+				slashWorkflows={workflowList}
+				{mentionCandidates}
+				onSend={handlePost}
+			/>
+		</div>
+	{/if}
 </div>
 
 {#if archiving}
@@ -598,6 +654,27 @@
 			<Button variant="secondary" onclick={() => (archiving = null)}>Cancel</Button>
 			<Button variant="destructive" onclick={handleArchive} disabled={archiveBusy}>
 				{archiveBusy ? 'Archiving…' : 'Archive'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if confirmingChannelArchive}
+	<Sheet
+		title="Archive this channel?"
+		onClose={() => (confirmingChannelArchive = false)}
+		width={480}
+	>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			It leaves the channel list. You can find it under Archived and restore it.
+		</p>
+		{#if channelArchiveError}
+			<p class="text-sm text-danger">{channelArchiveError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (confirmingChannelArchive = false)}>Cancel</Button>
+			<Button variant="destructive" onclick={handleChannelArchive} disabled={channelArchiveBusy}>
+				{channelArchiveBusy ? 'Archiving…' : 'Archive'}
 			</Button>
 		{/snippet}
 	</Sheet>
