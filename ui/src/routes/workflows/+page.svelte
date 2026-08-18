@@ -47,6 +47,18 @@
 		})
 	);
 
+	// Filter-empty is not the same as an empty library — Published/Draft
+	// should not read as if every workflow was deleted (#479).
+	let emptyMessage = $derived(
+		workflowList.length === 0
+			? 'No workflows yet.'
+			: filter === 'published'
+				? 'No published workflows.'
+				: filter === 'draft'
+					? 'No drafts.'
+					: 'No workflows yet.'
+	);
+
 	async function refresh() {
 		loadError = null;
 		try {
@@ -145,7 +157,7 @@
 	{:else if loadError}
 		<ErrorBanner message={loadError} onRetry={refresh} />
 	{:else if visible.length === 0}
-		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">No workflows yet.</p>
+		<p class="py-8 text-center text-base text-muted dark:text-muted-dark">{emptyMessage}</p>
 	{:else}
 		<div class="flex flex-col gap-3">
 			{#each visible as workflow (workflow.id)}
