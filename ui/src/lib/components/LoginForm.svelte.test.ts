@@ -172,6 +172,35 @@ describe('LoginForm.svelte', () => {
 		expect(auth.login).toHaveBeenCalledWith(VALID_PHRASE, 'extra word', undefined);
 	});
 
+	it('names the passphrase in stay-signed-in copy when one will be stored (#478)', async () => {
+		vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+		render(LoginForm);
+		await openPhraseEntry();
+
+		await page.getByRole('button', { name: 'Add a passphrase' }).click();
+		await page.getByLabelText('Passphrase').fill('extra word');
+		await page.getByText('Stay signed in on this machine').click();
+
+		await expect
+			.element(
+				page.getByText('Stores your recovery phrase and passphrase in this browser', {
+					exact: false
+				})
+			)
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText('Stay signed in stores this next to the phrase', { exact: false }))
+			.toBeInTheDocument();
+		await expect
+			.element(page.getByText("You'll need this every time", { exact: false }))
+			.not.toBeInTheDocument();
+
+		await page.getByLabelText('Workspace recovery phrase').fill(VALID_PHRASE);
+		await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+		expect(auth.rememberOwnerStay).toHaveBeenCalledWith(VALID_PHRASE, 'extra word');
+	});
+
 	it('shows the error message and keeps the input when login fails', async () => {
 		vi.mocked(auth.login).mockRejectedValueOnce(new Error('Incorrect recovery phrase'));
 		render(LoginForm);
@@ -251,6 +280,29 @@ describe('LoginForm.svelte', () => {
 			await page.getByRole('button', { name: 'Enter workspace' }).click();
 
 			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, 'extra word', undefined);
+		});
+
+		it('names the passphrase in stay-signed-in copy when one is set (#478)', async () => {
+			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+			await page.getByRole('button', { name: 'Add a passphrase' }).click();
+			await page.getByLabelText('Passphrase').fill('extra word');
+			await page.getByText('Stay signed in on this machine').click();
+
+			await expect
+				.element(
+					page.getByText('Stores your recovery phrase and passphrase in this browser', {
+						exact: false
+					})
+				)
+				.toBeInTheDocument();
+
+			await page.getByText("I've saved this phrase somewhere safe").click();
+			await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+			expect(auth.rememberOwnerStay).toHaveBeenCalledWith(STUB_PHRASE, 'extra word');
 		});
 
 		it('copies the generated phrase to the clipboard', async () => {

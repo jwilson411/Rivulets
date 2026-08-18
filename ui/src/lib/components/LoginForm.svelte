@@ -52,6 +52,14 @@
 	// unlocking again doesn't silently drop the preference.
 	let staySignedIn = $state(auth.ownerStayEnabled);
 
+	// #478: rememberOwnerStay writes the passphrase next to the phrase.
+	// The checkbox (and the passphrase hint) have to name that, because
+	// "Add a passphrase" is otherwise framed as something you type every
+	// unlock. Empty field → phrase-only copy, matching what we persist.
+	const stayWillStorePassphrase = $derived(
+		(view === 'generated' ? generatedPassphrase : passphrase).trim().length > 0
+	);
+
 	// #350: an invite-redeemed browser holds a persisted resume credential
 	// and no mnemonic — after a sign-out or an expired session, this button
 	// is its way back in. auth.resumeDisplayName goes null (and the offer
@@ -192,8 +200,9 @@
 			<span class="text-[15px] text-ink dark:text-ink-dark">Stay signed in on this machine</span>
 			<span class="text-[13px] text-muted dark:text-muted-dark">
 				{#if staySignedIn}
-					Stores your recovery phrase in this browser so refresh and new tabs keep you signed in.
-					Anyone with access to this browser can unlock the workspace. Sign out to remove it.
+					Stores your recovery phrase{stayWillStorePassphrase ? ' and passphrase' : ''} in this browser
+					so refresh and new tabs keep you signed in. Anyone with access to this browser can unlock the
+					workspace. Sign out to remove it.
 				{:else}
 					Refreshing or opening a new tab will sign you out.
 				{/if}
@@ -264,7 +273,12 @@
 					class={inputClass}
 				/>
 				<p class="text-[13px] text-muted dark:text-muted-dark">
-					Optional. You'll need this every time, along with the phrase. There is no reset.
+					{#if staySignedIn}
+						Optional. There is no reset. Stay signed in stores this next to the phrase in this
+						browser.
+					{:else}
+						Optional. You'll need this every time, along with the phrase. There is no reset.
+					{/if}
 				</p>
 			</div>
 		{/if}
@@ -354,7 +368,12 @@
 						class={inputClass}
 					/>
 					<p class="text-[13px] text-muted dark:text-muted-dark">
-						Optional. You'll need this every time, along with the phrase. There is no reset.
+						{#if staySignedIn}
+							Optional. There is no reset. Stay signed in stores this next to the phrase in this
+							browser.
+						{:else}
+							Optional. You'll need this every time, along with the phrase. There is no reset.
+						{/if}
 					</p>
 				</div>
 			{/if}
