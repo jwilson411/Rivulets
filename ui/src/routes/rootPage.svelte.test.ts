@@ -12,6 +12,7 @@ import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 import { teams } from '$lib/api/teams';
 import { providers, type Provider } from '$lib/api/providers';
 import { agents, type Agent } from '$lib/api/agents';
+import { workflows, type Workflow } from '$lib/api/workflows';
 import { goto } from '$app/navigation';
 
 const authState = vi.hoisted(() => ({ grant: 'owner', displayName: 'Riley' }));
@@ -49,9 +50,10 @@ vi.mock('$lib/api/rivulets', () => ({
 		postMessage: vi.fn()
 	}
 }));
-vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn() } }));
+vi.mock('$lib/api/teams', () => ({ teams: { list: vi.fn(), get: vi.fn() } }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn(), create: vi.fn() } }));
 vi.mock('$lib/api/agents', () => ({ agents: { list: vi.fn() } }));
+vi.mock('$lib/api/workflows', () => ({ workflows: { list: vi.fn() } }));
 vi.mock('$lib/api/files', () => ({ files: { upload: vi.fn() } }));
 
 afterEach(() => {
@@ -140,6 +142,13 @@ function seedComplete() {
 	]);
 	vi.mocked(providers.list).mockResolvedValue([provider]);
 	vi.mocked(agents.list).mockResolvedValue([assistant]);
+	vi.mocked(teams.get).mockResolvedValue({
+		id: 'team-1',
+		name: 'Starter Team',
+		description: null,
+		agent_ids: ['agent-1']
+	});
+	vi.mocked(workflows.list).mockResolvedValue([]);
 	vi.mocked(rivulets.listForChannel).mockResolvedValue([rivulet]);
 	vi.mocked(rivulets.listMessages).mockResolvedValue(messages);
 }
@@ -481,6 +490,86 @@ describe('routes/+page.svelte (Home)', () => {
 		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-older', 'Following up', []);
 		expect(rivulets.create).not.toHaveBeenCalled();
 		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-older');
+	});
+
+	it('opens an @mention picker for the selected channel team (#466)', async () => {
+		seedComplete();
+
+		render(HomePage);
+		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
+
+		const input = page.getByPlaceholder('Start a conversation…');
+		await input.fill('@');
+		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
+
+		await page.getByRole('option', { name: /@Assistant/ }).click();
+		await expect.element(input).toHaveValue('@Assistant ');
+	});
+
+	it('lists published slash workflows from the Home composer (#466)', async () => {
+		const summarize: Workflow = {
+			id: 'wf-1',
+			name: 'summarize',
+			description: 'Summarize the thread',
+			published: true,
+			on_failure_workflow_id: null,
+			on_call_agent_id: null,
+			created_at: '2026-01-01T00:00:00Z',
+			updated_at: '2026-01-01T00:00:00Z'
+		};
+		seedComplete();
+		vi.mocked(workflows.list).mockResolvedValue([summarize]);
+
+		render(HomePage);
+		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
+
+		await page.getByPlaceholder('Start a conversation…').fill('/');
+		await expect.element(page.getByRole('menuitem', { name: /\/summarize/ })).toBeInTheDocument();
+	});
+
+	it('switches mention candidates when the Home channel chip changes (#466)', async () => {
+		const researcher: Agent = {
+			...assistant,
+			id: 'agent-2',
+			name: 'Researcher',
+			description: 'Looks things up',
+			agentos_agent_id: 'agent-2'
+		};
+		const other: Channel = {
+			...general,
+			id: 'chan-2',
+			name: 'research',
+			team_id: 'team-2',
+			position: 1
+		};
+		seedComplete();
+		vi.mocked(channels.list).mockResolvedValue([general, other]);
+		vi.mocked(agents.list).mockResolvedValue([assistant, researcher]);
+		vi.mocked(teams.list).mockResolvedValue([
+			{ id: 'team-1', name: 'Starter Team', description: null },
+			{ id: 'team-2', name: 'Research', description: null }
+		]);
+		vi.mocked(teams.get).mockImplementation(async (id: string) =>
+			id === 'team-2'
+				? { id: 'team-2', name: 'Research', description: null, agent_ids: ['agent-2'] }
+				: { id: 'team-1', name: 'Starter Team', description: null, agent_ids: ['agent-1'] }
+		);
+		vi.mocked(rivulets.listForChannel).mockImplementation(async (id) =>
+			id === general.id ? [rivulet] : []
+		);
+
+		render(HomePage);
+		await expect.element(page.getByRole('button', { name: '#research' })).toBeInTheDocument();
+
+		const input = page.getByPlaceholder('Start a conversation…');
+		await input.fill('@');
+		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
+		await expect.element(page.getByRole('option', { name: /@Researcher/ })).not.toBeInTheDocument();
+
+		await page.getByRole('button', { name: '#research' }).click();
+		await input.fill('@');
+		await expect.element(page.getByRole('option', { name: /@Researcher/ })).toBeInTheDocument();
+		await expect.element(page.getByRole('option', { name: /@Assistant/ })).toBeInTheDocument();
 	});
 
 	it('continues the last conversation in the picked channel', async () => {

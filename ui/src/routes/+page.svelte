@@ -4,11 +4,13 @@
 	import { auth } from '$lib/api/auth.svelte';
 	import { channels, type Channel } from '$lib/api/channels';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
-	import { teams, type Team } from '$lib/api/teams';
+	import { teams, type Team, type TeamDetail } from '$lib/api/teams';
 	import { providers, type Provider } from '$lib/api/providers';
 	import { agents, type Agent } from '$lib/api/agents';
+	import { workflows, type Workflow } from '$lib/api/workflows';
 	import { files as filesApi } from '$lib/api/files';
 	import { compareLastActivity, formatClock } from '$lib/format';
+	import type { MentionCandidate } from '$lib/mentions';
 	import { lockedTeamComposerHint, teamComposerHint } from '$lib/teamRouting';
 	import { agentInkMap, INK_AVATAR, HUMAN_AVATAR } from '$lib/ink';
 	import Button from '$lib/ui/Button.svelte';
@@ -41,6 +43,9 @@
 	let teamList = $state<Team[]>([]);
 	let providerList = $state<Provider[]>([]);
 	let agentList = $state<Agent[]>([]);
+	let teamMembers = $state<Agent[]>([]);
+	let workflowList = $state<Workflow[]>([]);
+	let teamMembersLoad = 0;
 	let recent = $state<RecentConversation[]>([]);
 	let selectedChannelId = $state<string | null>(null);
 	let sendError = $state<string | null>(null);
@@ -80,21 +85,51 @@
 	let composerPlaceholder = $derived(
 		continueLast && lastOpen ? 'Reply to the last conversation…' : 'Start a conversation…'
 	);
+	// Same roster as the channel / conversation Stream Bar: the selected
+	// room's team plus Assistant, so Home's helper is not a dead promise.
+	let mentionCandidates = $derived<MentionCandidate[]>(
+		teamMembers.map((member) => ({ id: member.id, name: member.name, kind: 'agent' }))
+	);
+
+	async function loadTeamMembers(teamId: string | null, knownAgents: Agent[]) {
+		const seq = ++teamMembersLoad;
+		let next: Agent[] = [];
+		try {
+			const byId = new Map(knownAgents.map((agent) => [agent.id, agent]));
+			if (teamId) {
+				const detail = (await teams.get(teamId)) as TeamDetail;
+				next = detail.agent_ids
+					.map((id) => byId.get(id))
+					.filter((a): a is Agent => a !== undefined);
+			}
+			const assistant = knownAgents.find((agent) => agent.name.toLowerCase() === 'assistant');
+			if (assistant && !next.some((member) => member.id === assistant.id)) {
+				next = [assistant, ...next];
+			}
+		} catch {
+			// Picker just stays empty — typing the exact name still works.
+		}
+		if (seq !== teamMembersLoad) return;
+		teamMembers = next;
+	}
 
 	async function load() {
 		loading = true;
 		loadError = null;
 		try {
-			const [loadedChannels, loadedTeams, loadedProviders, loadedAgents] = await Promise.all([
-				channels.list(),
-				teams.list().catch(() => []),
-				isOwner ? providers.list().catch(() => [] as Provider[]) : Promise.resolve([]),
-				agents.list().catch(() => [] as Agent[])
-			]);
+			const [loadedChannels, loadedTeams, loadedProviders, loadedAgents, loadedWorkflows] =
+				await Promise.all([
+					channels.list(),
+					teams.list().catch(() => []),
+					isOwner ? providers.list().catch(() => [] as Provider[]) : Promise.resolve([]),
+					agents.list().catch(() => [] as Agent[]),
+					workflows.list().catch(() => [] as Workflow[])
+				]);
 			channelList = loadedChannels;
 			teamList = loadedTeams;
 			providerList = loadedProviders;
 			agentList = loadedAgents;
+			workflowList = loadedWorkflows;
 			await loadRecent();
 		} catch {
 			loadError = "Couldn't load conversations.";
@@ -150,6 +185,10 @@
 	}
 
 	load();
+
+	$effect(() => {
+		void loadTeamMembers(selectedChannel?.team_id ?? null, agentList);
+	});
 
 	async function handleSend(text: string, files: File[]): Promise<boolean> {
 		if (!selectedChannel) return false;
@@ -326,6 +365,8 @@
 				{helper}
 				busy={sending}
 				error={sendError}
+				slashWorkflows={workflowList}
+				{mentionCandidates}
 				onSend={handleSend}
 			/>
 		</div>
