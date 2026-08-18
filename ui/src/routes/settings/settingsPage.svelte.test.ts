@@ -19,6 +19,7 @@ import { teams } from '$lib/api/teams';
 
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
 const routeState = vi.hoisted(() => ({ search: '' }));
+const leaveForOAuthMock = vi.hoisted(() => vi.fn());
 
 vi.mock('$app/state', () => ({
 	page: {
@@ -56,12 +57,14 @@ vi.mock('$lib/api/auth.svelte', () => ({
 	auth: {
 		get grant() {
 			return authState.grant;
-		}
+		},
+		leaveForOAuth: leaveForOAuthMock
 	}
 }));
 
 afterEach(() => {
 	vi.clearAllMocks();
+	vi.unstubAllGlobals();
 	authState.grant = 'owner';
 	routeState.search = '';
 });
@@ -237,6 +240,28 @@ describe('settings/+page.svelte', () => {
 			.element(page.getByText('integrations:google:write', { exact: false }))
 			.toBeInTheDocument();
 		await expect.element(page.getByText('How conversations stop')).not.toBeInTheDocument();
+	});
+
+	it('parks the session and opens Google when connecting an account (#464)', async () => {
+		seed();
+		vi.mocked(integrations.googleOAuthApp).mockResolvedValue({
+			provider: 'google',
+			client_id: 'client-123',
+			has_client_secret: true,
+			redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+		});
+		vi.mocked(integrations.connectGoogle).mockResolvedValue({
+			authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=abc'
+		});
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Integrations' }).click();
+		await page.getByRole('button', { name: 'Connect Google account' }).click();
+
+		expect(integrations.connectGoogle).toHaveBeenCalledOnce();
+		expect(leaveForOAuthMock).toHaveBeenCalledWith(
+			'https://accounts.google.com/o/oauth2/v2/auth?state=abc'
+		);
 	});
 
 	it('lets the owner save a Google OAuth client and connect an account', async () => {

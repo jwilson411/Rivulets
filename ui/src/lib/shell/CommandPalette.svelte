@@ -83,11 +83,11 @@
 				hint: null,
 				run: () => go('/providers')
 			});
-			// Gmail / Calendar live on Settings → Integrations, not Providers (#471).
+			// Google Workspace lives on Settings → Integrations, not Providers (#471).
 			list.push({
 				group: 'Actions',
 				label: 'Open Integrations',
-				hint: 'Gmail · Calendar',
+				hint: 'Gmail · Drive · Calendar',
 				run: () => go(SETTINGS_INTEGRATIONS_HREF)
 			});
 			list.push({ group: 'Actions', label: 'Open Sync', hint: null, run: () => go('/sync') });

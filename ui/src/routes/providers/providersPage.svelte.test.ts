@@ -83,14 +83,16 @@ describe('providers/+page.svelte', () => {
 		expect(document.querySelector('select')).toBeNull();
 	});
 
-	it('points Gmail and Calendar at Settings → Integrations, not this key (#471)', async () => {
+	it('points Gmail/Calendar/Drive at Settings → Integrations, not this key (#471)', async () => {
 		seed();
 
 		render(ProvidersPage);
 
 		await expect
 			.element(
-				page.getByText('Gmail and Calendar need a connected Google account', { exact: false })
+				page.getByText('Gmail, Calendar, Drive, Docs, and Sheets need a connected Google', {
+					exact: false
+				})
 			)
 			.toBeInTheDocument();
 		await expect

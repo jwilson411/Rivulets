@@ -505,7 +505,7 @@ describe('agents/+page.svelte', () => {
 			.toBeInTheDocument();
 		await expect.element(page.getByText('Needs a connected account')).not.toBeInTheDocument();
 		await expect
-			.element(page.getByText('Send, draft, and create stay off until you grant'))
+			.element(page.getByText('Send, draft, and write stay off until you grant'))
 			.toBeInTheDocument();
 	});
 

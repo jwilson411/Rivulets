@@ -180,7 +180,9 @@
 		integrationsError = null;
 		try {
 			const { authorization_url } = await integrationsApi.connectGoogle();
-			window.location.assign(authorization_url);
+			// Same-tab Google trip drops the memory-only JWT (#464). Park
+			// it so return to ?tab=integrations is already signed in.
+			auth.leaveForOAuth(authorization_url);
 		} catch (err) {
 			integrationsError = err instanceof Error ? err.message : "Couldn't start Google sign-in.";
 			connectingGoogle = false;
@@ -705,13 +707,14 @@
 			<section class="flex flex-col gap-3">
 				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
-					Connect a Google account so assigned agents can read Gmail and list Calendar. Sending mail
-					and creating events stay off until you grant
+					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs, and
+					Sheets. Sending mail, creating events, and writing files stay off until you grant
 					<code class="font-mono text-[13px] text-ink dark:text-ink-dark"
 						>integrations:google:write</code
 					>
 					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
-					store, not the workspace database.
+					store, not the workspace database. Already connected? Disconnect and connect again to grant
+					Drive, Docs, and Sheets.
 				</p>
 				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:

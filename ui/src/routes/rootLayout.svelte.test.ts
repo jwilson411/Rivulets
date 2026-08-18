@@ -22,6 +22,7 @@ const authState = vi.hoisted(() => ({
 
 const resumeInviteSessionMock = vi.hoisted(() => vi.fn());
 const resumeOwnerSessionMock = vi.hoisted(() => vi.fn());
+const consumeOAuthHopMock = vi.hoisted(() => vi.fn(() => false));
 
 const routeState = vi.hoisted(() => ({ pathname: '/' }));
 
@@ -61,6 +62,7 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		},
 		resumeInviteSession: resumeInviteSessionMock,
 		resumeOwnerSession: resumeOwnerSessionMock,
+		consumeOAuthHop: consumeOAuthHopMock,
 		logout: vi.fn(),
 		claimIdentity: vi.fn(),
 		clearIdentity: vi.fn()
@@ -89,6 +91,8 @@ function childrenSnippet(text: string) {
 
 afterEach(() => {
 	vi.clearAllMocks();
+	consumeOAuthHopMock.mockReset();
+	consumeOAuthHopMock.mockReturnValue(false);
 	authState.isAuthenticated = false;
 	authState.humanId = null;
 	authState.displayName = null;
@@ -198,6 +202,30 @@ describe('routes/+layout.svelte', () => {
 		await expect
 			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
 			.toBeInTheDocument();
+	});
+
+	it('restores a parked OAuth-hop session on load instead of showing Unlock (#464)', async () => {
+		authState.isAuthenticated = false;
+		consumeOAuthHopMock.mockImplementation(() => {
+			authState.isAuthenticated = true;
+			authState.humanId = 'human-1';
+			authState.displayName = 'Ada';
+			authState.grant = 'owner';
+			return true;
+		});
+		const { channels } = await import('$lib/api/channels');
+		const { approvals } = await import('$lib/api/approvals');
+		vi.mocked(channels.list).mockResolvedValue([]);
+		vi.mocked(approvals.list).mockResolvedValue([]);
+
+		render(RootLayout, { children: childrenSnippet('channel content') });
+
+		expect(consumeOAuthHopMock).toHaveBeenCalledOnce();
+		await expect.element(page.getByText('channel content')).toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Generate a recovery phrase' }))
+			.not.toBeInTheDocument();
+		expect(resumeOwnerSessionMock).not.toHaveBeenCalled();
 	});
 
 	it('does not attempt a resume when no invite credential is stored', async () => {

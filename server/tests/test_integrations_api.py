@@ -110,6 +110,9 @@ def test_connect_returns_google_authorization_url(
     assert query["access_type"] == ["offline"]
     assert "state" in query
     assert "gmail.readonly" in query["scope"][0]
+    assert "drive.readonly" in query["scope"][0]
+    assert "documents.readonly" in query["scope"][0]
+    assert "spreadsheets.readonly" in query["scope"][0]
 
 
 def test_invite_grant_cannot_connect_or_list(
@@ -184,6 +187,8 @@ def test_callback_stores_token_outside_workspace_db(
     )
     assert callback.status_code == 200, callback.text
     assert "ada@example.com" in callback.text
+    assert "/settings?tab=integrations" in callback.text
+    assert "location.replace('/settings?tab=integrations')" in callback.text
     assert "ya29.access" not in callback.text
     assert "1//refresh" not in callback.text
 
@@ -212,6 +217,8 @@ def test_callback_rejects_unknown_state(client: TestClient) -> None:
     )
     assert response.status_code == 400
     assert "invalid or has expired" in response.text
+    assert 'href="/settings?tab=integrations"' in response.text
+    assert "location.replace" not in response.text
 
 
 def test_disconnect_revokes_and_fails_closed(

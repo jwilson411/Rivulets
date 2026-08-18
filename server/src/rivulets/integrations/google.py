@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -35,12 +35,22 @@ REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 CALENDAR_API = "https://www.googleapis.com/calendar/v3/calendars/primary"
+DRIVE_API = "https://www.googleapis.com/drive/v3"
+DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
+DOCS_API = "https://docs.googleapis.com/v1/documents"
+SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 
 SCOPE_GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 SCOPE_GMAIL_COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
 SCOPE_GMAIL_SEND = "https://www.googleapis.com/auth/gmail.send"
 SCOPE_CALENDAR_READONLY = "https://www.googleapis.com/auth/calendar.readonly"
 SCOPE_CALENDAR_EVENTS = "https://www.googleapis.com/auth/calendar.events"
+SCOPE_DRIVE_READONLY = "https://www.googleapis.com/auth/drive.readonly"
+SCOPE_DRIVE = "https://www.googleapis.com/auth/drive"
+SCOPE_DOCS_READONLY = "https://www.googleapis.com/auth/documents.readonly"
+SCOPE_DOCS = "https://www.googleapis.com/auth/documents"
+SCOPE_SHEETS_READONLY = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SCOPE_SHEETS = "https://www.googleapis.com/auth/spreadsheets"
 SCOPE_EMAIL = "email"
 SCOPE_OPENID = "openid"
 
@@ -52,7 +62,19 @@ CONNECT_SCOPES: tuple[str, ...] = (
     SCOPE_GMAIL_SEND,
     SCOPE_CALENDAR_READONLY,
     SCOPE_CALENDAR_EVENTS,
+    SCOPE_DRIVE_READONLY,
+    SCOPE_DRIVE,
+    SCOPE_DOCS_READONLY,
+    SCOPE_DOCS,
+    SCOPE_SHEETS_READONLY,
+    SCOPE_SHEETS,
 )
+
+_MAX_READ_CHARS = 20_000
+_MAX_MEDIA_BYTES = 1_000_000
+_GOOGLE_DOC = "application/vnd.google-apps.document"
+_GOOGLE_SHEET = "application/vnd.google-apps.spreadsheet"
+_GOOGLE_SLIDE = "application/vnd.google-apps.presentation"
 
 _PENDING_TTL_SECONDS = 600.0
 _TIMEOUT_SECONDS = 20.0
@@ -265,10 +287,22 @@ def _google_error_message(response: httpx.Response, fallback: str) -> str:
         return fallback
     if payload is None:
         return fallback
-    description = as_str(payload.get("error_description")) or as_str(payload.get("error"))
-    if description and description.strip():
-        return description
-    return fallback
+    description = as_str(payload.get("error_description"))
+    if not description:
+        error = payload.get("error")
+        if isinstance(error, str):
+            description = error
+        else:
+            nested = as_dict(error) or {}
+            description = as_str(nested.get("message"))
+    if not description or not description.strip():
+        description = fallback
+    if response.status_code == 403 and "scope" in description.lower():
+        return (
+            f"{description} Reconnect the account in Settings → Integrations "
+            "to grant Drive, Docs, and Sheets access."
+        )
+    return description
 
 
 def resolve_access_token(
@@ -479,6 +513,293 @@ def calendar_create(
     return f"Event created. event_id={event_id}\n{html_link}".rstrip()
 
 
+def calendar_update(
+    access_token: str,
+    event_id: str,
+    *,
+    summary: str | None,
+    start: str | None,
+    end: str | None,
+    description: str | None,
+) -> str:
+    body: dict[str, object] = {}
+    if summary and summary.strip():
+        body["summary"] = summary.strip()
+    if start and start.strip():
+        body["start"] = _event_body_time(start)
+    if end and end.strip():
+        body["end"] = _event_body_time(end)
+    if description is not None:
+        body["description"] = description
+    if not body:
+        return "Nothing to update — pass a summary, start, end, or description."
+    response = google_request(
+        "PATCH",
+        f"{CALENDAR_API}/events/{event_id.strip()}",
+        access_token=access_token,
+        json_body=body,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't update the calendar event.")
+    payload = as_dict(response.json()) or {}
+    updated_id = as_str(payload.get("id")) or event_id
+    html_link = as_str(payload.get("htmlLink")) or ""
+    return f"Event updated. event_id={updated_id}\n{html_link}".rstrip()
+
+
+def drive_search(access_token: str, query: str, max_results: int) -> str:
+    bounded = max(1, min(max_results, 25))
+    response = google_request(
+        "GET",
+        f"{DRIVE_API}/files",
+        access_token=access_token,
+        params={
+            "q": query,
+            "pageSize": bounded,
+            "fields": "files(id,name,mimeType,modifiedTime,size,webViewLink)",
+            "spaces": "drive",
+        },
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Drive search failed.")
+    payload = as_dict(response.json()) or {}
+    files = as_list(payload.get("files")) or []
+    if not files:
+        return "No files matched."
+    lines: list[str] = []
+    for item in files[:bounded]:
+        row = as_dict(item)
+        if row is None:
+            continue
+        file_id = as_str(row.get("id")) or ""
+        name = as_str(row.get("name")) or "(untitled)"
+        mime = as_str(row.get("mimeType")) or ""
+        modified = as_str(row.get("modifiedTime")) or ""
+        link = as_str(row.get("webViewLink")) or ""
+        lines.append(f"{file_id}\n{name}\n{mime}\n{modified}\n{link}".rstrip())
+    return "\n\n".join(lines) if lines else "No files matched."
+
+
+def drive_read(access_token: str, file_id: str) -> str:
+    file_id = file_id.strip()
+    meta_response = google_request(
+        "GET",
+        f"{DRIVE_API}/files/{file_id}",
+        access_token=access_token,
+        params={"fields": "id,name,mimeType,modifiedTime,size,webViewLink,description"},
+    )
+    if meta_response.status_code >= 400:
+        return _google_error_message(meta_response, "Couldn't read that Drive file.")
+    meta = as_dict(meta_response.json()) or {}
+    name = as_str(meta.get("name")) or "(untitled)"
+    mime = as_str(meta.get("mimeType")) or ""
+    modified = as_str(meta.get("modifiedTime")) or ""
+    link = as_str(meta.get("webViewLink")) or ""
+    description = as_str(meta.get("description")) or ""
+    header = [f"id: {file_id}", f"name: {name}", f"mimeType: {mime}"]
+    if modified:
+        header.append(f"modified: {modified}")
+    if link:
+        header.append(link)
+    if description:
+        header.append(description)
+
+    export_mime = _drive_export_mime(mime)
+    if export_mime is not None:
+        exported = google_request_bytes(
+            "GET",
+            f"{DRIVE_API}/files/{file_id}/export",
+            access_token=access_token,
+            params={"mimeType": export_mime},
+        )
+        if exported.status_code >= 400:
+            return (
+                "\n".join(header)
+                + "\n\n"
+                + _google_error_message(exported, "Couldn't export that Google file.")
+            )
+        return _clip("\n".join(header) + "\n\n" + exported.text)
+
+    if not _looks_like_text(mime):
+        return "\n".join(header) + "\n\nBinary file — content not shown."
+    size = meta.get("size")
+    if isinstance(size, str) and size.isdigit() and int(size) > _MAX_MEDIA_BYTES:
+        return "\n".join(header) + "\n\nFile is too large to read here."
+    media = google_request_bytes(
+        "GET",
+        f"{DRIVE_API}/files/{file_id}",
+        access_token=access_token,
+        params={"alt": "media"},
+    )
+    if media.status_code >= 400:
+        return (
+            "\n".join(header)
+            + "\n\n"
+            + _google_error_message(media, "Couldn't download that Drive file.")
+        )
+    return _clip("\n".join(header) + "\n\n" + media.text)
+
+
+def drive_write(
+    access_token: str,
+    *,
+    name: str,
+    content: str,
+    file_id: str | None,
+    mime_type: str | None,
+) -> str:
+    mime = (mime_type or "").strip() or "text/plain"
+    existing = (file_id or "").strip()
+    if existing:
+        if name.strip():
+            renamed = google_request(
+                "PATCH",
+                f"{DRIVE_API}/files/{existing}",
+                access_token=access_token,
+                json_body={"name": name.strip()},
+            )
+            if renamed.status_code >= 400:
+                return _google_error_message(renamed, "Couldn't rename that Drive file.")
+        if content:
+            uploaded = google_request_bytes(
+                "PATCH",
+                f"{DRIVE_UPLOAD_API}/files/{existing}",
+                access_token=access_token,
+                params={"uploadType": "media"},
+                content=content.encode("utf-8"),
+                content_type=mime,
+            )
+            if uploaded.status_code >= 400:
+                return _google_error_message(uploaded, "Couldn't update that Drive file.")
+        return f"File updated. file_id={existing}"
+
+    created = google_request(
+        "POST",
+        f"{DRIVE_API}/files",
+        access_token=access_token,
+        json_body={"name": name.strip() or "Untitled", "mimeType": mime},
+    )
+    if created.status_code >= 400:
+        return _google_error_message(created, "Couldn't create the Drive file.")
+    payload = as_dict(created.json()) or {}
+    new_id = as_str(payload.get("id"))
+    if not new_id:
+        return "Couldn't create the Drive file."
+    if content:
+        uploaded = google_request_bytes(
+            "PATCH",
+            f"{DRIVE_UPLOAD_API}/files/{new_id}",
+            access_token=access_token,
+            params={"uploadType": "media"},
+            content=content.encode("utf-8"),
+            content_type=mime,
+        )
+        if uploaded.status_code >= 400:
+            return _google_error_message(
+                uploaded, "Created the file but couldn't write its content."
+            )
+    return f"File created. file_id={new_id}"
+
+
+def docs_read(access_token: str, document_id: str) -> str:
+    response = google_request(
+        "GET",
+        f"{DOCS_API}/{document_id.strip()}",
+        access_token=access_token,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't read that Google Doc.")
+    payload = as_dict(response.json()) or {}
+    title = as_str(payload.get("title")) or "(untitled)"
+    text = _docs_text(payload)
+    return _clip(f"{title}\n\n{text}".rstrip())
+
+
+def docs_append(access_token: str, document_id: str, text: str) -> str:
+    document_id = document_id.strip()
+    fetched = google_request(
+        "GET",
+        f"{DOCS_API}/{document_id}",
+        access_token=access_token,
+        params={"fields": "body(content(endIndex)),title"},
+    )
+    if fetched.status_code >= 400:
+        return _google_error_message(fetched, "Couldn't open that Google Doc.")
+    payload = as_dict(fetched.json()) or {}
+    end_index = _docs_end_index(payload)
+    insert_at = max(1, end_index - 1)
+    to_insert = text if text.startswith("\n") or insert_at == 1 else f"\n{text}"
+    response = google_request(
+        "POST",
+        f"{DOCS_API}/{document_id}:batchUpdate",
+        access_token=access_token,
+        json_body={
+            "requests": [{"insertText": {"location": {"index": insert_at}, "text": to_insert}}]
+        },
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't append to that Google Doc.")
+    title = as_str(payload.get("title")) or document_id
+    return f"Appended to {title}."
+
+
+def sheets_read(access_token: str, spreadsheet_id: str, range_a1: str) -> str:
+    bounded_range = range_a1.strip() or "A1:Z100"
+    response = google_request(
+        "GET",
+        f"{SHEETS_API}/{spreadsheet_id.strip()}/values/{quote(bounded_range, safe='')}",
+        access_token=access_token,
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't read that Google Sheet.")
+    payload = as_dict(response.json()) or {}
+    values = as_list(payload.get("values")) or []
+    if not values:
+        return "Sheet range is empty."
+    lines: list[str] = []
+    for row in values:
+        cells = as_list(row) or []
+        lines.append("\t".join(as_str(cell) or "" for cell in cells))
+    resolved = as_str(payload.get("range")) or bounded_range
+    return _clip(f"{resolved}\n\n" + "\n".join(lines))
+
+
+def sheets_update(access_token: str, spreadsheet_id: str, range_a1: str, values: str) -> str:
+    rows = _sheet_values(values)
+    if not rows:
+        return "No values to write."
+    target = range_a1.strip() or "A1"
+    response = google_request(
+        "PUT",
+        f"{SHEETS_API}/{spreadsheet_id.strip()}/values/{quote(target, safe='')}",
+        access_token=access_token,
+        params={"valueInputOption": "USER_ENTERED"},
+        json_body={"range": target, "majorDimension": "ROWS", "values": rows},
+    )
+    if response.status_code >= 400:
+        return _google_error_message(response, "Couldn't update that Google Sheet.")
+    payload = as_dict(response.json()) or {}
+    updated = payload.get("updatedCells")
+    updated_range = as_str(payload.get("updatedRange")) or target
+    return f"Updated {updated_range} ({updated} cells)."
+
+
+def google_request_bytes(
+    method: str,
+    url: str,
+    *,
+    access_token: str,
+    params: dict[str, str | int] | None = None,
+    content: bytes | None = None,
+    content_type: str | None = None,
+) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
+        return client.request(method, url, params=params, content=content, headers=headers)
+
+
 def _now_rfc3339() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -559,6 +880,101 @@ def _b64url_decode(value: str) -> str:
         return base64.urlsafe_b64decode(value + padding).decode("utf-8", errors="replace")
     except (ValueError, UnicodeDecodeError):
         return ""
+
+
+def _clip(text: str) -> str:
+    if len(text) <= _MAX_READ_CHARS:
+        return text
+    return f"{text[:_MAX_READ_CHARS]}\n…(truncated)"
+
+
+def _drive_export_mime(mime: str) -> str | None:
+    if mime == _GOOGLE_DOC or mime == _GOOGLE_SLIDE:
+        return "text/plain"
+    if mime == _GOOGLE_SHEET:
+        return "text/csv"
+    return None
+
+
+def _looks_like_text(mime: str) -> bool:
+    if mime.startswith("text/"):
+        return True
+    return mime in {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "application/yaml",
+    }
+
+
+def _docs_text(payload: object) -> str:
+    data = as_dict(payload) or {}
+    body = as_dict(data.get("body")) or {}
+    return _docs_structural_text(body.get("content"))
+
+
+def _docs_structural_text(content: object) -> str:
+    parts: list[str] = []
+    for item in as_list(content) or []:
+        row = as_dict(item)
+        if row is None:
+            continue
+        paragraph = as_dict(row.get("paragraph"))
+        if paragraph is not None:
+            for element in as_list(paragraph.get("elements")) or []:
+                el = as_dict(element) or {}
+                run = as_dict(el.get("textRun")) or {}
+                text = as_str(run.get("content"))
+                if text:
+                    parts.append(text)
+            continue
+        table = as_dict(row.get("table"))
+        if table is not None:
+            for table_row in as_list(table.get("tableRows")) or []:
+                tr = as_dict(table_row) or {}
+                for cell in as_list(tr.get("tableCells")) or []:
+                    cell_data = as_dict(cell) or {}
+                    parts.append(_docs_structural_text(cell_data.get("content")))
+            continue
+        toc = as_dict(row.get("tableOfContents"))
+        if toc is not None:
+            parts.append(_docs_structural_text(toc.get("content")))
+    return "".join(parts)
+
+
+def _docs_end_index(payload: object) -> int:
+    data = as_dict(payload) or {}
+    body = as_dict(data.get("body")) or {}
+    last_end = 1
+    for item in as_list(body.get("content")) or []:
+        row = as_dict(item) or {}
+        end = row.get("endIndex")
+        if isinstance(end, int):
+            last_end = end
+    return last_end
+
+
+def _sheet_values(raw: str) -> list[list[str]]:
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        try:
+            parsed: object = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        rows = as_list(parsed)
+        if rows is not None:
+            result: list[list[str]] = []
+            for row in rows:
+                cells = as_list(row)
+                if cells is None:
+                    result.append([as_str(row) or ""])
+                else:
+                    result.append([as_str(cell) or "" for cell in cells])
+            return result
+    return [line.split("\t") for line in stripped.splitlines()]
 
 
 def load_client_secret(client_secret_ref: str | None) -> str | None:

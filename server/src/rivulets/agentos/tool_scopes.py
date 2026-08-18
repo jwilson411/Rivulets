@@ -36,8 +36,9 @@ TOOL_SCOPES: frozenset[str] = frozenset(
 )
 
 # Connecting Google + the read scope must not enable send-as-me in chat
-# (#463). Starter agents, New agent, and hire_teammate grant every other
-# catalog scope; write stays off until an owner checks it on that agent.
+# (#463). New agent and hire_teammate grant every other catalog scope;
+# write stays off until an owner checks it on that agent. Starter
+# agents grant no scopes at all (#462).
 DEFAULT_WITHHELD_SCOPES: frozenset[str] = frozenset({"integrations:google:write"})
 DEFAULT_AGENT_SCOPES: frozenset[str] = TOOL_SCOPES - DEFAULT_WITHHELD_SCOPES
 
@@ -126,11 +127,11 @@ DEFAULT_AGENT_SCOPES: frozenset[str] = TOOL_SCOPES - DEFAULT_WITHHELD_SCOPES
 # without the other.
 #
 # #458 / #463: Google read tools (search / read / list) share
-# "integrations:google". Write tools (draft / send / create) need a
-# second owner grant, "integrations:google:write", so connecting an
-# account only enables read until send/create is turned on for a
-# specific agent. Write tools are also marked sensitive so unattended
-# use still goes through tool_audit.py.
+# "integrations:google". Write tools (draft / send / create / update /
+# append) need a second owner grant, "integrations:google:write", so
+# connecting an account only enables read until write is turned on for
+# a specific agent. Write tools are also marked sensitive so
+# unattended use still goes through tool_audit.py.
 BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "create_channel": "channels:manage",
     "update_channel": "channels:manage",
@@ -171,4 +172,12 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "google_gmail_send": "integrations:google:write",
     "google_calendar_list": "integrations:google",
     "google_calendar_create": "integrations:google:write",
+    "google_calendar_update": "integrations:google:write",
+    "google_drive_search": "integrations:google",
+    "google_drive_read": "integrations:google",
+    "google_drive_write": "integrations:google:write",
+    "google_docs_read": "integrations:google",
+    "google_docs_append": "integrations:google:write",
+    "google_sheets_read": "integrations:google",
+    "google_sheets_update": "integrations:google:write",
 }

@@ -473,10 +473,10 @@
 												>
 													Settings → Integrations
 												</a>
-												Send, draft, and create stay off until you also grant
+												Send, draft, and write stay off until you also grant
 												<code class="font-mono">integrations:google:write</code> under Permissions.
 											{:else}
-												Send, draft, and create stay off until you grant
+												Send, draft, and write stay off until you grant
 												<code class="font-mono">integrations:google:write</code> under Permissions.
 											{/if}
 										</p>
@@ -519,7 +519,7 @@
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
 							{isOwner
-								? "New agents start with every tool checked. Google send, draft, and calendar create stay inert until you grant integrations:google:write. Sensitive tools still need the owner's OK for unattended runs."
+								? "New agents start with every tool checked. Google send, draft, and file writes stay inert until you grant integrations:google:write. Sensitive tools still need the owner's OK for unattended runs."
 								: guestCannotRewriteTools
 									? 'This agent already has tools only the owner can assign, so the set stays as-is.'
 									: 'New agents start with every tool you can assign. Uncheck any you want to hold back.'}

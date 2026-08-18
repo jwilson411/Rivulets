@@ -20,6 +20,12 @@
 	// than needing LoginForm/IdentityPicker to grow an invite-aware branch.
 	let isInviteRoute = $derived(page.url.pathname.startsWith('/invite/'));
 
+	// #464: a just-completed Google connect parks the memory-only JWT in
+	// sessionStorage for this tab. Consume it synchronously so the first
+	// paint is already signed in — otherwise Unlock flashes (or sticks,
+	// when stay-signed-in is off).
+	if (!auth.isAuthenticated) auth.consumeOAuthHop();
+
 	// #350 / #407: a browser that opted into persistence holds a re-entry
 	// credential (invite resume token, or the owner's stay-signed-in
 	// phrase). The session JWT itself is memory-only, so it never survives
