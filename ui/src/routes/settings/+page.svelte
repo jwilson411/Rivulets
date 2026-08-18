@@ -16,6 +16,7 @@
 	import { agents as agentsApi, type Agent } from '$lib/api/agents';
 	import { teams as teamsApi, type Team } from '$lib/api/teams';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
+	import FolderPickerSheet from '$lib/components/FolderPickerSheet.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import FilterChip from '$lib/ui/FilterChip.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
@@ -42,6 +43,8 @@
 	let modelOverride = $state('');
 	let eagerFilesLan = $state(true);
 	let eagerFilesWan = $state(false);
+	let workingDirectory = $state<string | null>(null);
+	let pickingFolder = $state(false);
 
 	let hitRate = $state<HitRate | null>(null);
 	let providersList = $state<Provider[]>([]);
@@ -93,6 +96,7 @@
 			modelOverride = loaded['dispatcher.model_override'] ?? '';
 			eagerFilesLan = loaded['sync.eager_files_lan'];
 			eagerFilesWan = loaded['sync.eager_files_wan'];
+			workingDirectory = loaded['tools.working_directory'];
 		} catch {
 			loadError = "Couldn't load settings.";
 		}
@@ -183,6 +187,13 @@
 		if (trimmedOverride !== loaded['dispatcher.model_override'])
 			patch['dispatcher.model_override'] = trimmedOverride;
 		await saveSettings(patch);
+	}
+
+	async function saveWorkingDirectory(path: string | null) {
+		pickingFolder = false;
+		workingDirectory = path;
+		await saveSettings({ 'tools.working_directory': path });
+		if (loaded) workingDirectory = loaded['tools.working_directory'];
 	}
 
 	// Toggles save on flip — no separate Save step for a switch.
@@ -541,6 +552,40 @@
 		{:else}
 			<div class="flex flex-col gap-4">
 				<div
+					class="flex flex-col gap-4 rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
+				>
+					{@render settingRow(
+						'Project folder',
+						'Agents read and write here when they build and work. Pick a folder on this machine.'
+					)}
+					{#if workingDirectory}
+						<p
+							class="truncate font-mono text-[13px] text-ink dark:text-ink-dark"
+							title={workingDirectory}
+						>
+							{workingDirectory}
+						</p>
+					{:else}
+						<p class="text-sm text-muted dark:text-muted-dark">
+							Using the built-in sandbox until you pick a folder.
+						</p>
+					{/if}
+					<div class="flex flex-wrap items-center gap-3">
+						<Button variant="secondary" size="md" onclick={() => (pickingFolder = true)}>
+							{workingDirectory ? 'Change folder' : 'Choose folder'}
+						</Button>
+						{#if workingDirectory}
+							<button
+								type="button"
+								onclick={() => saveWorkingDirectory(null)}
+								class="text-sm font-semibold text-accent hover:underline dark:text-accent-dark"
+							>
+								Use built-in sandbox
+							</button>
+						{/if}
+					</div>
+				</div>
+				<div
 					class="flex min-h-16 items-center gap-4 rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
 				>
 					{@render settingRow(
@@ -668,6 +713,14 @@
 		</div>
 	{/if}
 </div>
+
+{#if pickingFolder}
+	<FolderPickerSheet
+		initialPath={workingDirectory}
+		onClose={() => (pickingFolder = false)}
+		onSelect={(path) => saveWorkingDirectory(path)}
+	/>
+{/if}
 
 {#if addingCap}
 	<Sheet title="Add a cap" onClose={() => (addingCap = false)} width={480}>

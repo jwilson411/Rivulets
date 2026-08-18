@@ -71,9 +71,9 @@ class SandboxUnavailableError(RuntimeError):
 
 
 def _sandbox_root() -> Path:
-    root = get_settings().workspace_dir / "tool_code_exec"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    from rivulets.working_directory import code_exec_root
+
+    return code_exec_root()
 
 
 def is_available() -> bool:

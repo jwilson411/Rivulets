@@ -19,10 +19,28 @@ export interface WorkspaceSettings {
 	'sync.eager_files_lan': boolean;
 	'sync.eager_files_wan': boolean;
 	'ui.port': number;
+	'tools.working_directory': string | null;
+}
+
+export interface DirectoryEntry {
+	name: string;
+	path: string;
+}
+
+export interface DirectoryListing {
+	path: string;
+	parent: string | null;
+	entries: DirectoryEntry[];
 }
 
 export const settings = {
 	get: () => api.get<WorkspaceSettings>('/settings', auth.token ?? undefined),
 	update: (patch: Partial<WorkspaceSettings>) =>
-		api.patch<WorkspaceSettings>('/settings', patch, auth.token ?? undefined)
+		api.patch<WorkspaceSettings>('/settings', patch, auth.token ?? undefined),
+	listDirectories: (path?: string | null) => {
+		const query = path ? `?path=${encodeURIComponent(path)}` : '';
+		return api.get<DirectoryListing>(`/settings/directories${query}`, auth.token ?? undefined);
+	},
+	createDirectory: (parent: string, name: string) =>
+		api.post<DirectoryListing>('/settings/directories', { parent, name }, auth.token ?? undefined)
 };

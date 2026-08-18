@@ -18,7 +18,7 @@ import { teams } from '$lib/api/teams';
 const authState = vi.hoisted(() => ({ grant: 'owner' }));
 
 vi.mock('$lib/api/settings', () => ({
-	settings: { get: vi.fn(), update: vi.fn() }
+	settings: { get: vi.fn(), update: vi.fn(), listDirectories: vi.fn(), createDirectory: vi.fn() }
 }));
 vi.mock('$lib/api/dispatch', () => ({ dispatch: { hitRate: vi.fn() } }));
 vi.mock('$lib/api/update', () => ({ update: { status: vi.fn(), apply: vi.fn() } }));
@@ -57,7 +57,8 @@ const defaults: WorkspaceSettings = {
 	'rivulet.recent_messages_kept': 20,
 	'sync.eager_files_lan': true,
 	'sync.eager_files_wan': false,
-	'ui.port': 8484
+	'ui.port': 8484,
+	'tools.working_directory': null
 };
 
 const workspaceCap: BudgetStatus = {
@@ -189,6 +190,52 @@ describe('settings/+page.svelte', () => {
 		expect(settings.get).not.toHaveBeenCalled();
 		expect(update.status).not.toHaveBeenCalled();
 		expect(backups.list).not.toHaveBeenCalled();
+	});
+
+	it('lets the owner pick a project folder for agents', async () => {
+		seed();
+		vi.mocked(settings.listDirectories).mockResolvedValue({
+			path: '/Users/ada/src',
+			parent: '/Users/ada',
+			entries: [{ name: 'rivulets', path: '/Users/ada/src/rivulets' }]
+		});
+		vi.mocked(settings.update).mockResolvedValueOnce({
+			...defaults,
+			'tools.working_directory': '/Users/ada/src'
+		});
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Files' }).click();
+
+		await expect.element(page.getByText('Project folder')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('Using the built-in sandbox until you pick a folder.'))
+			.toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Choose folder' }).click();
+		await expect.element(page.getByText('rivulets')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Use this folder' }).click();
+
+		expect(settings.update).toHaveBeenCalledWith({
+			'tools.working_directory': '/Users/ada/src'
+		});
+	});
+
+	it('can clear the project folder back to the built-in sandbox', async () => {
+		seed();
+		vi.mocked(settings.get).mockResolvedValue({
+			...defaults,
+			'tools.working_directory': '/Users/ada/src/app'
+		});
+		vi.mocked(settings.update).mockResolvedValueOnce(defaults);
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Files' }).click();
+
+		await expect.element(page.getByText('/Users/ada/src/app')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Use built-in sandbox' }).click();
+
+		expect(settings.update).toHaveBeenCalledWith({ 'tools.working_directory': null });
 	});
 
 	it('saves the file-copy toggles the moment they flip', async () => {

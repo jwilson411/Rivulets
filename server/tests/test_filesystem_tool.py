@@ -7,6 +7,7 @@ WORKSPACE_DIR), so these tests read/write real files under
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -79,6 +80,20 @@ def test_write_file_relative_escape_is_blocked() -> None:
 def test_list_files_relative_escape_is_blocked() -> None:
     with pytest.raises(ValueError, match="escapes the workspace sandbox"):
         _list_files(directory="..")
+
+
+def test_configured_working_directory_is_the_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(
+        "rivulets.tools.builtin.filesystem.filesystem_root", lambda: project.resolve()
+    )
+    result = _write_file(path="hello.txt", content="ship it")
+    assert result == "Wrote 7 bytes to hello.txt"
+    assert (project / "hello.txt").read_text() == "ship it"
+    assert _list_files() == ["hello.txt"]
 
 
 def test_absolute_path_does_not_bypass_the_sandbox() -> None:

@@ -4412,9 +4412,10 @@ _SETTINGS_DEFAULTS: dict[str, object] = {
     "sync.eager_files_wan": False,
     "ui.port": 8484,
     "workflows.default_on_call_agent_id": None,
+    "tools.working_directory": None,
 }
 
-_NOT_SYNCED_SETTINGS_KEYS = frozenset({"ui.port"})
+_NOT_SYNCED_SETTINGS_KEYS = frozenset({"ui.port", "tools.working_directory"})
 
 
 async def _handle_get_workspace_settings_trigger(
@@ -4469,6 +4470,22 @@ async def _handle_update_workspace_settings_trigger(
                 f"{'is' if len(unknown) == 1 else 'are'} not a known setting.",
             )
         ]
+
+    if "tools.working_directory" in settings:
+        from rivulets.working_directory import normalize_working_directory
+
+        try:
+            settings["tools.working_directory"] = normalize_working_directory(
+                settings["tools.working_directory"]
+            )
+        except ValueError as exc:
+            return [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to set the working directory, but {exc}",
+                )
+            ]
 
     for key, value in settings.items():
         row = await db.get(WorkspaceSetting, key)
