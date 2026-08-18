@@ -48,6 +48,7 @@ from rivulets.api.deps import (
     CurrentStreamClaims,
     CurrentWorkspaceId,
     DbSession,
+    OwnerGrant,
 )
 from rivulets.api.files import publish_file_change
 from rivulets.db.models import Channel, File, Human, Message, Rivulet
@@ -65,6 +66,7 @@ from rivulets.workflows import (
     resume_workflow,
     run_workflow,
 )
+from rivulets.working_directory import normalize_working_directory, resolve_effective_path
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +129,35 @@ class RivuletOut(BaseModel):
     status: str
     created_by: str
     created_at: str
+    working_directory: str | None = None
+    effective_working_directory: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class RivuletUpdate(BaseModel):
+    working_directory: str | None = None
+
+
+def _to_rivulet_out(rivulet: Rivulet, channel: Channel | None = None) -> RivuletOut:
+    channel_path = channel.working_directory if channel is not None else None
+    return RivuletOut(
+        id=rivulet.id,
+        channel_id=rivulet.channel_id,
+        title=rivulet.title,
+        status=rivulet.status,
+        created_by=rivulet.created_by,
+        created_at=rivulet.created_at,
+        working_directory=rivulet.working_directory,
+        effective_working_directory=resolve_effective_path(
+            rivulet.working_directory, channel_path
+        ),
+    )
+
+
+async def _rivulet_out(db: DbSession, rivulet: Rivulet) -> RivuletOut:
+    channel = await db.get(Channel, rivulet.channel_id)
+    return _to_rivulet_out(rivulet, channel)
 
 
 async def _get_channel_or_404(db: DbSession, channel_id: str) -> Channel:
@@ -362,12 +391,14 @@ async def _attachments_by_message(db: DbSession, message_ids: list[str]) -> dict
 
 
 @router.get("/channels/{channel_id}/rivulets", response_model=list[RivuletOut])
-async def list_rivulets(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> list[Rivulet]:
-    await _get_channel_or_404(db, channel_id)
+async def list_rivulets(
+    channel_id: str, db: DbSession, _: CurrentWorkspaceId
+) -> list[RivuletOut]:
+    channel = await _get_channel_or_404(db, channel_id)
     result = await db.execute(
         select(Rivulet).where(Rivulet.channel_id == channel_id).order_by(Rivulet.created_at.desc())
     )
-    return list(result.scalars().all())
+    return [_to_rivulet_out(rivulet, channel) for rivulet in result.scalars().all()]
 
 
 @router.post(
@@ -382,7 +413,7 @@ async def create_rivulet(
     _: CurrentWorkspaceId,
     human_id: CurrentHumanId,
     background_tasks: BackgroundTasks,
-) -> Rivulet:
+) -> RivuletOut:
     """Posting to the channel creates a rivulet with the human message as its
     root (FR-5.1), then schedules dispatch to the channel's team (FR-4.1)."""
     channel = await _get_channel_or_404(db, channel_id)
@@ -429,7 +460,7 @@ async def create_rivulet(
         await finish_trace(db, trace_ctx.trace_id)
         await db.commit()
         await db.refresh(rivulet)
-        return rivulet
+        return _to_rivulet_out(rivulet, channel)
 
     # #237: commit the human message (and its attachments) before dispatch
     # runs -- dispatch_and_respond's own agent invocations hold a SQLite
@@ -459,12 +490,34 @@ async def create_rivulet(
         file_ids=[file_row.id for file_row in attached_files],
         trace_id=trace_ctx.trace_id,
     )
-    return rivulet
+    return _to_rivulet_out(rivulet, channel)
 
 
 @router.get("/rivulets/{rivulet_id}", response_model=RivuletOut)
-async def get_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> Rivulet:
-    return await _get_rivulet_or_404(db, rivulet_id)
+async def get_rivulet(rivulet_id: str, db: DbSession, _: CurrentWorkspaceId) -> RivuletOut:
+    rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    return await _rivulet_out(db, rivulet)
+
+
+@router.patch("/rivulets/{rivulet_id}", response_model=RivuletOut)
+async def update_rivulet(
+    rivulet_id: str,
+    body: RivuletUpdate,
+    db: DbSession,
+    _: CurrentWorkspaceId,
+    _o: OwnerGrant,
+) -> RivuletOut:
+    """Set this conversation's project-folder override. Empty/null clears
+    it so the channel (river) default is used again. Never writes the
+    channel's own folder — that's a human river-level setting."""
+    rivulet = await _get_rivulet_or_404(db, rivulet_id)
+    try:
+        rivulet.working_directory = normalize_working_directory(body.working_directory)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await db.commit()
+    await db.refresh(rivulet)
+    return await _rivulet_out(db, rivulet)
 
 
 @router.get("/rivulets/{rivulet_id}/messages", response_model=list[MessageOut])
@@ -682,7 +735,7 @@ async def resume_rivulet(
     db: DbSession,
     _: CurrentWorkspaceId,
     background_tasks: BackgroundTasks,
-) -> Rivulet:
+) -> RivuletOut:
     """FR-7.5's explicit "Resume" affordance — equivalent to what posting
     any message already does, for when a human just wants to clear a
     pause without saying anything yet. A loop-guard pause (cycle / turn
@@ -740,7 +793,7 @@ async def resume_rivulet(
             from_agent_name=last_agent.sender_name,
             resume_fallback=True,
         )
-    return rivulet
+    return await _rivulet_out(db, rivulet)
 
 
 @router.delete("/rivulets/{rivulet_id}", status_code=status.HTTP_204_NO_CONTENT)

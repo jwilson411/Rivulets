@@ -65,7 +65,9 @@ const general: Channel = {
 	description: 'Default room',
 	team_id: 'team-1',
 	position: 0,
-	archived: false
+	archived: false,
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const provider: Provider = {
@@ -93,7 +95,9 @@ const rivulet: Rivulet = {
 	title: 'Welcome to Rivulets. Ask the team anything.',
 	status: 'active',
 	created_by: 'human-1',
-	created_at: '2026-01-01T00:00:00Z'
+	created_at: '2026-01-01T00:00:00Z',
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const messages: Message[] = [

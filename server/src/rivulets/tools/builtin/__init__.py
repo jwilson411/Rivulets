@@ -29,9 +29,14 @@ from rivulets.tools.builtin.channels import (
 )
 from rivulets.tools.builtin.code_exec import execute_python
 from rivulets.tools.builtin.db_query import query_workspace_db
-from rivulets.tools.builtin.files import read_attached_file
-from rivulets.tools.builtin.filesystem import list_files, read_file, write_file
 from rivulets.tools.builtin.engage_team import engage_team
+from rivulets.tools.builtin.files import read_attached_file
+from rivulets.tools.builtin.filesystem import (
+    list_files,
+    read_file,
+    set_working_directory,
+    write_file,
+)
 from rivulets.tools.builtin.handoff import handoff
 from rivulets.tools.builtin.http_request import http_request
 from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
@@ -92,6 +97,7 @@ __all__ = [
     "run_workflow",
     "schedule_workflow",
     "search_knowledge_base",
+    "set_working_directory",
     "unarchive_channel",
     "unpublish_workflow",
     "update_agent",

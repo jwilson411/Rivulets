@@ -54,7 +54,8 @@ vi.mock('$lib/api/auth.svelte', () => ({
 		// opening the EventSource -- returning a fixed, distinct value here
 		// is what proves the FakeEventSource URL assertion below is actually
 		// observing the ticket, not the raw session token.
-		mintStreamTicket: vi.fn(async () => 'test-ticket')
+		mintStreamTicket: vi.fn(async () => 'test-ticket'),
+		grant: 'owner'
 	}
 }));
 
@@ -69,7 +70,8 @@ vi.mock('$lib/api/rivulets', () => ({
 		postMessage: vi.fn(),
 		resume: vi.fn(),
 		engageTeam: vi.fn(),
-		close: vi.fn()
+		close: vi.fn(),
+		update: vi.fn()
 	}
 }));
 
@@ -135,7 +137,9 @@ const generalChannel: Channel = {
 	description: null,
 	team_id: null,
 	position: 0,
-	archived: false
+	archived: false,
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const activeRivulet: Rivulet = {
@@ -144,7 +148,9 @@ const activeRivulet: Rivulet = {
 	title: null,
 	status: 'active',
 	created_by: 'user-1',
-	created_at: new Date().toISOString()
+	created_at: new Date().toISOString(),
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const humanMessage: Message = {
@@ -281,6 +287,16 @@ describe('channels/[id]/rivulets/[rivuletId]/+page.svelte', () => {
 		// rivulet has no explicit title) and as the human message body.
 		await expect.element(page.getByText('Kickoff message').first()).toBeInTheDocument();
 		await expect.element(page.getByText('On it')).toBeInTheDocument();
+	});
+
+	it('shows this conversation can override the channel project folder', async () => {
+		seed([humanMessage, agentMessage]);
+
+		render(RivuletPage);
+
+		await expect.element(page.getByText('Built-in sandbox')).toBeInTheDocument();
+		await expect.element(page.getByText('channel default', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Choose' })).toBeInTheDocument();
 	});
 
 	it('lets the human unlock a locked team', async () => {

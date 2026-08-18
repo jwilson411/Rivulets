@@ -158,6 +158,10 @@ class Channel(Base):
     team_id: Mapped[str | None] = mapped_column(ForeignKey("team.id"), default=None)
     position: Mapped[int] = mapped_column(default=0)
     archived: Mapped[bool] = mapped_column(default=False)
+    # Node-local project folder for agents in this channel (river). Not
+    # synced — an absolute path is meaningless on another peer. A rivulet
+    # may override this on its own row without mutating the river default.
+    working_directory: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)
     vector_clock: Mapped[int] = mapped_column(default=0)
@@ -1429,6 +1433,10 @@ class Rivulet(Base):
     title: Mapped[str | None] = mapped_column(default=None)
     agentos_session_id: Mapped[str | None] = mapped_column(default=None)
     status: Mapped[str] = mapped_column(default="active")  # active | paused | closed
+    # Node-local override of the channel (river) project folder. None
+    # means inherit. Not synced. Agents may change this; they must not
+    # change Channel.working_directory.
+    working_directory: Mapped[str | None] = mapped_column(default=None)
     created_by: Mapped[str]  # 'human' or agent_id or workflow_schedule_id
     created_at: Mapped[str] = mapped_column(default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(default=utcnow_iso)

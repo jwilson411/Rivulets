@@ -19,6 +19,7 @@ def test_group_for_splits_builtins_and_user_tools() -> None:
     assert group_for("web_search", "builtin") == "chat"
     assert group_for("http_request", "builtin") == "chat"
     assert group_for("read_file", "builtin") == "files"
+    assert group_for("set_working_directory", "builtin") == "files"
     assert group_for("execute_python", "builtin") == "files"
     assert group_for("create_agent", "builtin") == "workspace_admin"
     assert group_for("cancel_schedule", "builtin") == "workspace_admin"

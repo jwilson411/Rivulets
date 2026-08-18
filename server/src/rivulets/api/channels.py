@@ -14,6 +14,7 @@ from rivulets.api.deps import CurrentWorkspaceId, DbSession, SessionClaims, get_
 from rivulets.api.teams import team_holds_owner_scoped_agent
 from rivulets.db.models import Channel, Team
 from rivulets.sync.publish import publish_current_state
+from rivulets.working_directory import normalize_working_directory, resolve_effective_path
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
@@ -33,6 +34,7 @@ class ChannelUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     team_id: str | None = None
+    working_directory: str | None = None
 
 
 class ChannelOut(BaseModel):
@@ -42,8 +44,23 @@ class ChannelOut(BaseModel):
     team_id: str | None
     position: int
     archived: bool
+    working_directory: str | None = None
+    effective_working_directory: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+def _to_channel_out(channel: Channel) -> ChannelOut:
+    return ChannelOut(
+        id=channel.id,
+        name=channel.name,
+        description=channel.description,
+        team_id=channel.team_id,
+        position=channel.position,
+        archived=channel.archived,
+        working_directory=channel.working_directory,
+        effective_working_directory=resolve_effective_path(channel.working_directory),
+    )
 
 
 class ReorderRequest(BaseModel):
@@ -58,9 +75,9 @@ async def _get_or_404(db: DbSession, channel_id: str) -> Channel:
 
 
 @router.get("", response_model=list[ChannelOut])
-async def list_channels(db: DbSession, _: CurrentWorkspaceId) -> list[Channel]:
+async def list_channels(db: DbSession, _: CurrentWorkspaceId) -> list[ChannelOut]:
     result = await db.execute(select(Channel).order_by(Channel.position))
-    return list(result.scalars().all())
+    return [_to_channel_out(channel) for channel in result.scalars().all()]
 
 
 async def _require_assignable_team(db: DbSession, claims: SessionClaims, team_id: str) -> None:
@@ -82,7 +99,7 @@ async def create_channel(
     db: DbSession,
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
-) -> Channel:
+) -> ChannelOut:
     if not (3 <= len(body.name) <= 80):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "name must be 3-80 chars")
     if body.team_id is not None:
@@ -92,7 +109,7 @@ async def create_channel(
     await db.commit()
     await db.refresh(channel)
     await _publish_channel_change(db, channel)
-    return channel
+    return _to_channel_out(channel)
 
 
 @router.patch("/reorder", status_code=status.HTTP_204_NO_CONTENT)
@@ -106,8 +123,8 @@ async def reorder_channels(body: ReorderRequest, db: DbSession, _: CurrentWorksp
 
 
 @router.get("/{channel_id}", response_model=ChannelOut)
-async def get_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> Channel:
-    return await _get_or_404(db, channel_id)
+async def get_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> ChannelOut:
+    return _to_channel_out(await _get_or_404(db, channel_id))
 
 
 @router.patch("/{channel_id}", response_model=ChannelOut)
@@ -117,7 +134,7 @@ async def update_channel(
     db: DbSession,
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
-) -> Channel:
+) -> ChannelOut:
     channel = await _get_or_404(db, channel_id)
     if (
         claims.grant != "owner"
@@ -134,14 +151,31 @@ async def update_channel(
             status.HTTP_403_FORBIDDEN,
             "Owner access required to point a channel at a team with a capability-scoped agent",
         )
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    if "working_directory" in updates:
+        if claims.grant != "owner":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Owner access required to set a channel project folder",
+            )
+        try:
+            updates["working_directory"] = normalize_working_directory(updates["working_directory"])
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    synced_changed = any(field != "working_directory" for field in updates)
+    for field, value in updates.items():
         setattr(channel, field, value)
     channel.updated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    channel.vector_clock += 1
+    # working_directory is node-local and excluded from CHANNEL_SPEC —
+    # bumping the clock / publishing for a folder-only change would
+    # gossip a no-op rivulet-unrelated channel revision to peers.
+    if synced_changed:
+        channel.vector_clock += 1
     await db.commit()
     await db.refresh(channel)
-    await _publish_channel_change(db, channel)
-    return channel
+    if synced_changed:
+        await _publish_channel_change(db, channel)
+    return _to_channel_out(channel)
 
 
 @router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -154,10 +188,10 @@ async def archive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId)
 
 
 @router.post("/{channel_id}/unarchive", response_model=ChannelOut)
-async def unarchive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> Channel:
+async def unarchive_channel(channel_id: str, db: DbSession, _: CurrentWorkspaceId) -> ChannelOut:
     channel = await _get_or_404(db, channel_id)
     channel.archived = False
     await db.commit()
     await db.refresh(channel)
     await _publish_channel_change(db, channel)
-    return channel
+    return _to_channel_out(channel)

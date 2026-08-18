@@ -809,6 +809,21 @@ def _find_get_workspace_settings_call(run_output: RunOutput) -> bool:
     )
 
 
+def _find_set_working_directory_call(run_output: RunOutput) -> str | None:
+    """set_working_directory (tools/builtin/filesystem.py). Empty string
+    is a real call (clear the rivulet override). Missing/non-string path
+    is ignored so a malformed model call is a no-op rather than a
+    surprise write."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "set_working_directory":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        path = args.get("path", "")
+        if isinstance(path, str):
+            return path
+    return None
+
+
 def _find_update_workspace_settings_call(run_output: RunOutput) -> dict[str, object] | None:
     """Same shape as _find_update_agent_routing_rules_call, for the
     update_workspace_settings tool (tools/builtin/settings.py, #193).
@@ -1582,15 +1597,19 @@ async def _invoke_agent(
         model_used = await resolve_tier_model(db, model_tier)
 
     assert rivulet.agentos_session_id is not None  # set by the top-level call before any agent runs
-    run_output, exc, served_model, fallback_used = await _run_agent_with_fallback(
-        db,
-        rivulet.agentos_session_id,
-        agent,
-        prompt,
-        on_token,
-        on_status,
-        model_used=model_used,
-    )
+    from rivulets.working_directory import resolve_effective_root, using_working_directory
+
+    tool_root = resolve_effective_root(rivulet.working_directory, channel.working_directory)
+    with using_working_directory(tool_root):
+        run_output, exc, served_model, fallback_used = await _run_agent_with_fallback(
+            db,
+            rivulet.agentos_session_id,
+            agent,
+            prompt,
+            on_token,
+            on_status,
+            model_used=model_used,
+        )
     # The model that was actually asked for, before any fallback -- kept
     # for accounting (AgentRun.requested_model) below. Only differs from
     # served_model when fallback_used.
@@ -2063,6 +2082,16 @@ async def apply_builtin_tool_triggers(
         new_messages.extend(
             await _handle_update_workspace_settings_trigger(
                 db, rivulet, agent, update_workspace_settings_call
+            )
+        )
+
+    set_working_directory_call = _find_set_working_directory_call(run_output)
+    if set_working_directory_call is not None and await _authorize_builtin_call(
+        db, agent, "set_working_directory"
+    ):
+        new_messages.extend(
+            await _handle_set_working_directory_trigger(
+                db, rivulet, agent, set_working_directory_call
             )
         )
 
@@ -4509,6 +4538,45 @@ async def _handle_update_workspace_settings_trigger(
         rivulet.id,
         "system_alert",
         {"type": "workspace_settings_updated", "keys": sorted(settings), "agent_id": agent.id},
+    )
+    return [message]
+
+
+async def _handle_set_working_directory_trigger(
+    db: AsyncSession, rivulet: Rivulet, agent: Agent, path: str
+) -> list[Message]:
+    """Persist a rivulet-only project-folder override. Never writes
+    Channel.working_directory — the river default stays put."""
+    from rivulets.working_directory import normalize_working_directory
+
+    try:
+        normalized = normalize_working_directory(path)
+    except ValueError as exc:
+        return [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to set this conversation's project folder, but {exc}",
+            )
+        ]
+    rivulet.working_directory = normalized
+    await db.commit()
+    if normalized is None:
+        content = (
+            f"@{agent.name} cleared this conversation's project folder — "
+            "it now inherits the channel default."
+        )
+    else:
+        content = f"@{agent.name} set this conversation's project folder to {normalized}."
+    message = _system_message(db, rivulet, content)
+    publish(
+        rivulet.id,
+        "system_alert",
+        {
+            "type": "working_directory_updated",
+            "path": normalized,
+            "agent_id": agent.id,
+        },
     )
     return [message]
 

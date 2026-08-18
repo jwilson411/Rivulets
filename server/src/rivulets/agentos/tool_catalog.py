@@ -41,6 +41,7 @@ FILES_TOOL_NAMES: frozenset[str] = frozenset(
         "execute_python",
         "list_files",
         "read_file",
+        "set_working_directory",
         "write_file",
     }
 )

@@ -96,6 +96,17 @@ describe('rivulets', () => {
 		expect(init.body).toBe(JSON.stringify({}));
 	});
 
+	it('update() PATCHes /rivulets/:id with the project folder', async () => {
+		const fetchMock = mockFetch({ id: 'r1', working_directory: '/tmp/app' });
+
+		await rivulets.update('r1', { working_directory: '/tmp/app' });
+
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/v1/rivulets/r1');
+		expect(init.method).toBe('PATCH');
+		expect(init.body).toBe(JSON.stringify({ working_directory: '/tmp/app' }));
+	});
+
 	it('close() DELETEs /rivulets/:id', async () => {
 		const fetchMock = mockFetch(null, 204);
 

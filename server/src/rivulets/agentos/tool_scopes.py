@@ -140,6 +140,7 @@ BUILTIN_TOOL_SCOPES: dict[str, str] = {
     "unpublish_workflow": "workflows:manage",
     "get_workspace_settings": "settings:manage",
     "update_workspace_settings": "settings:manage",
+    "set_working_directory": "settings:manage",
     "create_invite": "invites:manage",
     "list_invites": "invites:manage",
     "revoke_invite": "invites:manage",

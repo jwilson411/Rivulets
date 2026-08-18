@@ -16,6 +16,7 @@
 	import { mentionNamesOf, type MentionCandidate } from '$lib/mentions';
 	import { isTeamEngaged, lockedTeamComposerHint, teamComposerHint } from '$lib/teamRouting';
 	import { renderMarkdown } from '$lib/markdown';
+	import WorkingDirectoryControl from '$lib/components/WorkingDirectoryControl.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
@@ -44,6 +45,9 @@
 	let confirmingArchive = $state(false);
 	let archiveBusy = $state(false);
 	let archiveError = $state<string | null>(null);
+	let folderBusy = $state(false);
+	let folderError = $state<string | null>(null);
+	let isOwner = $derived(auth.grant === 'owner');
 	let downloadError = $state<string | null>(null);
 	let scroller = $state<HTMLDivElement | null>(null);
 	// Issue #10: this node's own node_id, fetched once, so a remotely
@@ -491,6 +495,19 @@
 		}
 	}
 
+	async function handleWorkingDirectory(path: string | null) {
+		if (!rivulet) return;
+		folderBusy = true;
+		folderError = null;
+		try {
+			rivulet = await rivulets.update(rivulet.id, { working_directory: path });
+		} catch {
+			folderError = "Couldn't save that folder. Try again.";
+		} finally {
+			folderBusy = false;
+		}
+	}
+
 	async function handleArchive() {
 		const rivuletId = page.params.rivuletId!;
 		archiveBusy = true;
@@ -522,11 +539,26 @@
 			>
 				{title}
 			</div>
-			{#if rivulet && rivulet.status !== 'closed'}
-				<Button variant="secondary" size="md" onclick={() => (confirmingArchive = true)}>
-					Archive
-				</Button>
-			{/if}
+			<div class="flex flex-none flex-col items-end gap-2">
+				{#if rivulet && rivulet.status !== 'closed'}
+					<Button variant="secondary" size="md" onclick={() => (confirmingArchive = true)}>
+						Archive
+					</Button>
+				{/if}
+				<WorkingDirectoryControl
+					storedPath={rivulet?.working_directory ?? null}
+					inheritedPath={rivulet?.working_directory
+						? null
+						: (rivulet?.effective_working_directory ??
+							channel?.effective_working_directory ??
+							null)}
+					inheritedLabel="channel default"
+					canEdit={isOwner && rivulet?.status !== 'closed'}
+					busy={folderBusy}
+					error={folderError}
+					onSave={handleWorkingDirectory}
+				/>
+			</div>
 		</div>
 		{#if latestRun?.status === 'running' || latestRun?.status === 'error' || latestRun?.status === 'cancelled'}
 			<p class="mt-2 text-sm {latestRun.status === 'error' ? 'text-danger' : 'text-warn'}">

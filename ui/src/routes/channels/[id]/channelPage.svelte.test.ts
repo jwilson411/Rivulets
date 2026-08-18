@@ -31,6 +31,10 @@ vi.mock('$app/paths', () => ({
 	}
 }));
 
+vi.mock('$lib/api/auth.svelte', () => ({
+	auth: { grant: 'owner', token: 'test-token' }
+}));
+
 vi.mock('$lib/api/channels', () => ({
 	channels: { get: vi.fn(), update: vi.fn() }
 }));
@@ -72,7 +76,9 @@ const generalChannel: Channel = {
 	description: null,
 	team_id: null,
 	position: 0,
-	archived: false
+	archived: false,
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const supportTeam: Team = { id: 'team-1', name: 'Support', description: null };
@@ -83,7 +89,9 @@ const kickoffRivulet: Rivulet = {
 	title: null,
 	status: 'active',
 	created_by: 'user-1',
-	created_at: new Date().toISOString()
+	created_at: new Date().toISOString(),
+	working_directory: null,
+	effective_working_directory: null
 };
 
 const humanMessage: Message = {
@@ -165,6 +173,15 @@ describe('channels/[id]/+page.svelte', () => {
 		await expect
 			.element(page.getByText('Last run is stuck — no steps recorded.'))
 			.toBeInTheDocument();
+	});
+
+	it('shows a project folder control for the channel default', async () => {
+		seed();
+
+		render(ChannelPage);
+
+		await expect.element(page.getByText('Built-in sandbox')).toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: 'Choose' })).toBeInTheDocument();
 	});
 
 	it('shows the empty state when the channel has no conversations', async () => {

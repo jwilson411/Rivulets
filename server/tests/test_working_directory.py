@@ -7,12 +7,17 @@ import pytest
 
 from rivulets.config import get_settings
 from rivulets.working_directory import (
+    bind_working_directory,
     create_directory,
     default_filesystem_root,
     filesystem_root,
     list_directories,
+    live_directory,
     normalize_working_directory,
+    resolve_effective_path,
+    resolve_effective_root,
     stored_working_directory,
+    using_working_directory,
 )
 
 
@@ -73,6 +78,52 @@ def test_create_directory_makes_the_folder(tmp_path: Path) -> None:
     created = create_directory(str(tmp_path), "workspace")
     assert created == (tmp_path / "workspace").resolve()
     assert created.is_dir()
+
+
+def test_resolve_effective_path_prefers_rivulet_then_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rivulet = tmp_path / "rivulet"
+    channel = tmp_path / "channel"
+    workspace = tmp_path / "workspace"
+    rivulet.mkdir()
+    channel.mkdir()
+    workspace.mkdir()
+    monkeypatch.setattr(
+        "rivulets.working_directory.stored_working_directory", lambda: workspace.resolve()
+    )
+    assert resolve_effective_path(str(rivulet), str(channel)) == str(rivulet.resolve())
+    assert resolve_effective_path(None, str(channel)) == str(channel.resolve())
+    assert resolve_effective_path(None, None) == str(workspace.resolve())
+
+
+def test_resolve_effective_path_skips_missing_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = tmp_path / "channel"
+    channel.mkdir()
+    monkeypatch.setattr("rivulets.working_directory.stored_working_directory", lambda: None)
+    assert resolve_effective_path(str(tmp_path / "gone"), str(channel)) == str(channel.resolve())
+    assert resolve_effective_path(str(tmp_path / "gone"), None) is None
+    assert live_directory(str(tmp_path / "gone")) is None
+
+
+def test_using_working_directory_binds_filesystem_root(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    project.mkdir()
+    assert filesystem_root() == default_filesystem_root()
+    with using_working_directory(project):
+        assert filesystem_root() == project.resolve()
+        bind_working_directory(tmp_path)
+        assert filesystem_root() == tmp_path.resolve()
+    assert filesystem_root() == default_filesystem_root()
+
+
+def test_resolve_effective_root_falls_back_to_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("rivulets.working_directory.stored_working_directory", lambda: None)
+    assert resolve_effective_root(None, None) == default_filesystem_root()
 
 
 def test_create_directory_rejects_existing(tmp_path: Path) -> None:

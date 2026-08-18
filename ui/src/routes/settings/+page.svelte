@@ -555,8 +555,8 @@
 					class="flex flex-col gap-4 rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
 				>
 					{@render settingRow(
-						'Project folder',
-						'Agents read and write here when they build and work. Pick a folder on this machine.'
+						'Default project folder',
+						'Agents read and write here when they build and work, unless a channel picks its own folder. A conversation can override the channel without changing it.'
 					)}
 					{#if workingDirectory}
 						<p
