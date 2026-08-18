@@ -165,12 +165,15 @@ def start_authorization(
     *,
     account_id: str | None = None,
     login_hint: str | None = None,
+    scopes: tuple[str, ...] | None = None,
 ) -> str:
     """Remember a PKCE verifier under a CSRF `state` and return Google's URL.
 
     `account_id` marks an in-place reconnect so the callback updates that
     row instead of inserting a second account. `login_hint` steers the
-    Google picker toward the already-connected email.
+    Google picker toward the already-connected email. `scopes` defaults
+    to the full Workspace set; the Settings API usually passes the
+    owner-selected subset.
     """
     now = time.monotonic()
     _purge_expired_pending(now)
@@ -186,7 +189,7 @@ def start_authorization(
         "client_id": client_id,
         "redirect_uri": callback_redirect_uri(),
         "response_type": "code",
-        "scope": " ".join(CONNECT_SCOPES),
+        "scope": " ".join(scopes if scopes is not None else CONNECT_SCOPES),
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",

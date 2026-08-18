@@ -48,6 +48,10 @@ def test_oauth_app_starts_empty(client: TestClient, auth_headers: dict[str, str]
     assert body["has_client_secret"] is False
     assert body["redirect_uri"].startswith("http://127.0.0.1:")
     assert body["redirect_uri"].endswith("/api/v1/integrations/google/callback")
+    assert "gmail_read" in body["default_capabilities"]
+    assert "gmail_write" not in body["default_capabilities"]
+    writes = [item for item in body["capabilities"] if item["id"] == "gmail_write"]
+    assert writes and writes[0]["write"] is True
 
 
 def test_put_oauth_app_never_returns_secret(
@@ -110,12 +114,57 @@ def test_connect_returns_google_authorization_url(
     assert query["access_type"] == ["offline"]
     assert "state" in query
     assert "gmail.readonly" in query["scope"][0]
+    assert "gmail.send" not in query["scope"][0]
     assert "drive.readonly" in query["scope"][0]
     assert "documents.readonly" in query["scope"][0]
     assert "spreadsheets.readonly" in query["scope"][0]
     assert "contacts.readonly" in query["scope"][0]
     assert "tasks.readonly" in query["scope"][0]
-    assert "meetings.space.created" in query["scope"][0]
+    assert "meetings.space.created" not in query["scope"][0]
+
+
+def test_connect_requests_only_selected_capabilities(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    client.put(
+        "/api/v1/integrations/google/oauth-app",
+        json={"client_id": "client-123"},
+        headers=auth_headers,
+    )
+    response = client.post(
+        "/api/v1/integrations/google/connect",
+        json={"capabilities": ["gmail_write"]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    scope = parse_qs(urlparse(response.json()["authorization_url"]).query)["scope"][0]
+    assert "gmail.send" in scope
+    assert "gmail.compose" in scope
+    assert "gmail.readonly" in scope
+    assert "drive" not in scope
+    assert "calendar" not in scope
+
+
+def test_connect_rejects_unknown_or_empty_capabilities(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    client.put(
+        "/api/v1/integrations/google/oauth-app",
+        json={"client_id": "client-123"},
+        headers=auth_headers,
+    )
+    unknown = client.post(
+        "/api/v1/integrations/google/connect",
+        json={"capabilities": ["not_a_surface"]},
+        headers=auth_headers,
+    )
+    assert unknown.status_code == 422
+    empty = client.post(
+        "/api/v1/integrations/google/connect",
+        json={"capabilities": []},
+        headers=auth_headers,
+    )
+    assert empty.status_code == 422
 
 
 def test_invite_grant_cannot_connect_or_list(
@@ -207,6 +256,7 @@ def test_callback_stores_token_outside_workspace_db(
     assert len(accounts) == 1
     assert accounts[0]["account_email"] == "ada@example.com"
     assert accounts[0]["status"] == "connected"
+    assert accounts[0]["capabilities"] == ["gmail_read"]
     assert "credential_ref" not in accounts[0]
     assert "ya29.access" not in listed.text
 
@@ -370,12 +420,16 @@ def test_reconnect_keeps_account_id_and_replaces_tokens(
     assert load_tokens(first.credential_ref).access_token == "ya29.access"  # noqa: S105
 
     reconnect = client.post(
-        f"/api/v1/integrations/{account_id}/reconnect", json={}, headers=auth_headers
+        f"/api/v1/integrations/{account_id}/reconnect",
+        json={"capabilities": ["gmail_write", "contacts_read"]},
+        headers=auth_headers,
     )
     assert reconnect.status_code == 200
     query = parse_qs(urlparse(reconnect.json()["authorization_url"]).query)
     assert query["login_hint"] == ["ada@example.com"]
+    assert "gmail.send" in query["scope"][0]
     assert "contacts.readonly" in query["scope"][0]
+    assert "drive" not in query["scope"][0]
     state = query["state"][0]
 
     def handler(request: httpx.Request) -> httpx.Response:

@@ -9,7 +9,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from rivulets.integrations.google import cache_oauth_client
+from rivulets.integrations.google import CONNECT_SCOPES, cache_oauth_client
 from rivulets.integrations.registry import ConnectedAccount, upsert_connected_account
 from rivulets.integrations.tokens import StoredTokens, store_tokens
 from rivulets.tools.builtin.google import (
@@ -79,14 +79,15 @@ def _mock_client_factory(handler: Any) -> Any:
     )
 
 
-def _connect_account() -> None:
+def _connect_account(*, scopes: tuple[str, ...] | None = None) -> None:
+    granted = scopes if scopes is not None else CONNECT_SCOPES
     store_tokens(
         "acct-1",
         StoredTokens(
             access_token="ya29.live",  # noqa: S106
             refresh_token="1//refresh",  # noqa: S106
             expiry=datetime.now(UTC) + timedelta(hours=1),
-            scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+            scopes=granted,
         ),
     )
     upsert_connected_account(
@@ -96,7 +97,7 @@ def _connect_account() -> None:
             label="Work",
             account_email="ada@example.com",
             status="connected",
-            scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+            scopes=granted,
             credential_ref="integration:acct-1",
         )
     )
@@ -484,6 +485,22 @@ def test_insufficient_scopes_asks_to_reconnect(monkeypatch: pytest.MonkeyPatch) 
         assert "Reconnect" in result
 
 
+def test_ungranted_access_fails_before_google_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_account(scopes=("https://www.googleapis.com/auth/gmail.readonly",))
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"files": []})
+
+    monkeypatch.setattr(google_mod.httpx, "Client", _mock_client_factory(handler))
+    result = _drive_search(query="name contains 'x'")
+    assert "not granted that access" in result
+    assert called is False
+    assert "Reconnect" in _send(to="ada@example.com", subject="Hi", body="Hello")
+
+
 def test_drive_read_downloads_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
     _connect_account()
 
@@ -650,9 +667,7 @@ def test_tasks_list_walks_lists(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/users/@me/lists"):
-            return httpx.Response(
-                200, json={"items": [{"id": "@default", "title": "My Tasks"}]}
-            )
+            return httpx.Response(200, json={"items": [{"id": "@default", "title": "My Tasks"}]})
         assert request.url.path.endswith("/lists/@default/tasks")
         return httpx.Response(
             200,
