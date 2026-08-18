@@ -271,10 +271,16 @@ def _set_env(server: MCPServer, env: dict[str, str] | None) -> None:
         server.env_names_json = None
 
 
-async def _connect_and_sync_tools(db: DbSession, server: MCPServer) -> None:
+async def _connect_and_sync_tools(
+    db: DbSession, server: MCPServer, *, pin_public: bool = False
+) -> None:
     """(Re)discover `server`'s tools and replace its Tool rows with the
     current set — used by both registration and /reconnect. Doesn't
-    commit; callers own the transaction."""
+    commit; callers own the transaction.
+
+    `pin_public` is True for every invite-grant connect (#477): the
+    hostname was just checked, but discover_tools would otherwise let
+    the MCP SDK resolve it again."""
     await db.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
     try:
         if server.transport == "stdio":
@@ -284,7 +290,9 @@ async def _connect_and_sync_tools(db: DbSession, server: MCPServer) -> None:
                 env=get_server_env(server),
             )
         else:
-            discovered = await discover_tools(server.url, headers=get_server_headers(server))
+            discovered = await discover_tools(
+                server.url, headers=get_server_headers(server), pin_public=pin_public
+            )
     except MCPConnectionError:
         logger.warning(
             "Could not connect to MCP server %r (transport=%s) -- url=%s command=%s",
@@ -349,6 +357,7 @@ async def register_mcp_server(
             assert body.url is not None
             _ensure_url_host_is_public(body.url)
 
+    pin_public = body.transport == "streamable-http" and claims.grant != "owner"
     server = MCPServer(
         name=body.name,
         transport=body.transport,
@@ -360,7 +369,7 @@ async def register_mcp_server(
     await db.flush()  # populates server.id (uuid7 default), needed by _set_headers' keychain ref
     _set_headers(server, body.headers)
     _set_env(server, body.env)
-    await _connect_and_sync_tools(db, server)
+    await _connect_and_sync_tools(db, server, pin_public=pin_public)
     await db.commit()
     await db.refresh(server)
     await publish_current_state(db, "mcp_server", server.id)
@@ -473,7 +482,7 @@ async def reconnect_mcp_server(
         # exempt, same as at registration -- an owner reconnecting a
         # local/LAN MCP server is the supported self-hosted use case.
         _ensure_url_host_is_public(server.url)
-    await _connect_and_sync_tools(db, server)
+    await _connect_and_sync_tools(db, server, pin_public=claims.grant != "owner")
     await db.commit()
     await db.refresh(server)
     return await _to_detail(db, server)

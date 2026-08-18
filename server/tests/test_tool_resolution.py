@@ -6,11 +6,11 @@ from pathlib import Path
 
 from agno.tools.function import Function
 from agno.tools.mcp import MCPTools
-from agno.tools.mcp.params import StreamableHTTPClientParams
 from mcp import StdioServerParameters
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rivulets.agentos.mcp import PublicStreamableHTTPClientParams, create_public_mcp_http_client
 from rivulets.agentos.tool_resolution import (
     is_builtin_tool_authorized,
     resolve_agent_tools,
@@ -638,6 +638,12 @@ async def test_resolve_agent_tools_resolves_mcp(db_session: AsyncSession) -> Non
     assert len(resolved) == 1
     assert isinstance(resolved[0], MCPTools)
     assert resolved[0].initialized is False
+    # #477: invoke-time connect must pin, not wait for a later
+    # register/reconnect check. server_params carries the factory
+    # streamablehttp_client will use when agno connects this object.
+    server_params = resolved[0].server_params
+    assert isinstance(server_params, PublicStreamableHTTPClientParams)
+    assert server_params.httpx_client_factory is create_public_mcp_http_client
 
 
 async def test_resolve_agent_tools_resolves_mcp_with_headers(db_session: AsyncSession) -> None:
@@ -676,8 +682,9 @@ async def test_resolve_agent_tools_resolves_mcp_with_headers(db_session: AsyncSe
     assert len(resolved) == 1
     assert isinstance(resolved[0], MCPTools)
     server_params = resolved[0].server_params
-    assert isinstance(server_params, StreamableHTTPClientParams)
+    assert isinstance(server_params, PublicStreamableHTTPClientParams)
     assert server_params.headers == {"Authorization": "Bearer sk-real"}
+    assert server_params.httpx_client_factory is create_public_mcp_http_client
 
 
 async def test_resolve_agent_tools_resolves_stdio_mcp(db_session: AsyncSession) -> None:

@@ -16,16 +16,18 @@ import asyncio
 import json
 import logging
 import shlex
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
+import httpx
 from agno.tools.mcp import MCPTools
 from agno.tools.mcp.params import StreamableHTTPClientParams
 
 from rivulets.db.models import MCPServer
 from rivulets.security.credentials import CredentialStoreError, get_secret
+from rivulets.security.network import create_public_mcp_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,34 @@ def get_server_env(server: MCPServer) -> dict[str, str] | None:
     return json.loads(raw)
 
 
+@dataclass
+class PublicStreamableHTTPClientParams(StreamableHTTPClientParams):
+    """StreamableHTTPClientParams that pins TCP connect to the addresses
+    check_host_is_public just allowed (#477). asdict()'d into
+    streamablehttp_client, so the extra factory field is forwarded.
+
+    timeout is set by the caller to MCPTools.timeout_seconds (or
+    discover_tools' timeout_seconds) -- the parent default of 30s would
+    otherwise replace the 10s connect-phase timeout MCPTools uses when
+    server_params is omitted (see discover_tools).
+    """
+
+    httpx_client_factory: Callable[..., httpx.AsyncClient] = create_public_mcp_http_client
+
+
+def public_streamable_http_params(
+    url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+) -> PublicStreamableHTTPClientParams:
+    return PublicStreamableHTTPClientParams(
+        url=url,
+        headers=headers,
+        timeout=timedelta(seconds=timeout_seconds),
+    )
+
+
 def build_stdio_command(command: str, args: Sequence[str] | None = None) -> str:
     """Joins a stored `command`/`args` pair (MCPServer.command/args_json)
     back into the single command-line string agno's MCPTools expects for
@@ -121,16 +151,22 @@ async def discover_tools(
     command: str | None = None,
     args: Sequence[str] | None = None,
     env: dict[str, str] | None = None,
+    pin_public: bool = False,
 ) -> list[DiscoveredTool]:
     """Connect to an MCP server, list its tools, then disconnect. Either
     `url` (streamable-http, the original transport) or `command` (#187:
     stdio, a locally-spawned subprocess) must be given — callers pass
     exactly one, matching whichever transport the MCPServer row is
-    configured for. Raises MCPConnectionError on any failure (bad URL/
-    command, connection refused, protocol/handshake error, timeout,
-    subprocess spawn failure) — callers decide whether that's fatal or
-    something to degrade gracefully from (api/mcp_servers.py does the
-    latter, matching NFR-2.4's pattern for every other unreachable-
+    configured for. `pin_public=True` (#477) makes the handshake dial
+    only the addresses that pass check_host_is_public -- required for
+    every untrusted-input-driven connect (invite-grant register/
+    reconnect, every agent-driven call). Owner-driven local MCP leaves
+    this False so a self-hosted loopback server still works. Raises
+    MCPConnectionError on any failure (bad URL/ command, connection
+    refused, protocol/handshake error, timeout, subprocess spawn
+    failure) — callers decide whether that's fatal or something to
+    degrade gracefully from (api/mcp_servers.py does the latter,
+    matching NFR-2.4's pattern for every other unreachable-
     external-service case in this app).
 
     Runs the actual handshake in its own asyncio Task rather than inline.
@@ -151,7 +187,15 @@ async def discover_tools(
     """
     target = url if command is None else command
     task: asyncio.Task[list[DiscoveredTool]] = asyncio.ensure_future(
-        _run_handshake(url, timeout_seconds, headers, command=command, args=args, env=env)
+        _run_handshake(
+            url,
+            timeout_seconds,
+            headers,
+            command=command,
+            args=args,
+            env=env,
+            pin_public=pin_public,
+        )
     )
     try:
         return await asyncio.wait_for(
@@ -171,6 +215,7 @@ async def _run_handshake(
     command: str | None = None,
     args: Sequence[str] | None = None,
     env: dict[str, str] | None = None,
+    pin_public: bool = False,
 ) -> list[DiscoveredTool]:
     target = url if command is None else command
     mcp_tools: MCPTools | None = None
@@ -191,21 +236,27 @@ async def _run_handshake(
             # Callers pass exactly one of url/command (see discover_tools'
             # docstring); command is None here, so url must be set.
             assert url is not None
-            # Only build server_params when there are headers to carry --
-            # passing StreamableHTTPClientParams unconditionally would
+            # Only build server_params when there are headers to carry
+            # or the connect must be pinned -- passing
+            # StreamableHTTPClientParams unconditionally would
             # substitute its own 30s default `timeout` for the
             # connect-phase read timeout MCPTools would otherwise derive
             # from `timeout_seconds` (see agno's MCPTools._connect:
             # `params_timeout = streamable_http_params.get("timeout",
             # self.timeout_seconds)`), silently changing behavior for
-            # every server that has no headers configured.
-            server_params = (
-                StreamableHTTPClientParams(
+            # every server that has no headers configured. When we do
+            # build params (headers and/or pin_public) we pass the same
+            # timeout_seconds so that substitution doesn't happen.
+            if pin_public:
+                server_params = public_streamable_http_params(
+                    url, headers, timeout_seconds=timeout_seconds
+                )
+            elif headers:
+                server_params = StreamableHTTPClientParams(
                     url=url, headers=headers, timeout=timedelta(seconds=timeout_seconds)
                 )
-                if headers
-                else None
-            )
+            else:
+                server_params = None
             mcp_tools = MCPTools(
                 url=url,
                 transport="streamable-http",

@@ -31,9 +31,11 @@ def _fake_getaddrinfo_public(ip: str) -> Any:
 
 
 def _mock_client_factory(handler: Any) -> Any:
-    return lambda **kwargs: _RealClient(  # pyright: ignore[reportUnknownLambdaType]
-        transport=httpx.MockTransport(handler), **kwargs
-    )
+    def factory(**kwargs: Any) -> httpx.Client:
+        kwargs.pop("transport", None)
+        return _RealClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    return factory
 
 
 def test_html_to_text_strips_markup_and_scripts() -> None:
@@ -59,7 +61,7 @@ def test_returns_readable_text(monkeypatch: pytest.MonkeyPatch) -> None:
             text="<html><body><h1>Title</h1><p>Body copy.</p></body></html>",
         )
 
-    monkeypatch.setattr(webpage_module.httpx, "Client", _mock_client_factory(handler))
+    monkeypatch.setattr(webpage_module, "public_http_client", _mock_client_factory(handler))
 
     result = _call(url="https://example.com/page")
     assert result.startswith("HTTP 200\n")
