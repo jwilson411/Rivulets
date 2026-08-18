@@ -265,6 +265,80 @@ describe('settings/+page.svelte', () => {
 		);
 	});
 
+	it('shows a human status and last_error on a connected Google account (#480)', async () => {
+		seed();
+		vi.mocked(integrations.googleOAuthApp).mockResolvedValue({
+			provider: 'google',
+			client_id: 'client-123',
+			has_client_secret: true,
+			redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+		});
+		vi.mocked(integrations.list).mockResolvedValue([
+			{
+				id: 'acct-ok',
+				provider: 'google',
+				label: 'Work',
+				account_email: 'ada@example.com',
+				status: 'connected',
+				scopes: [],
+				last_error: null
+			},
+			{
+				id: 'acct-bad',
+				provider: 'google',
+				label: 'Home',
+				account_email: 'ada.home@example.com',
+				status: 'needs_reauth',
+				scopes: [],
+				last_error: 'Refresh token was revoked.'
+			}
+		]);
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Integrations' }).click();
+
+		await expect.element(page.getByText('ada@example.com')).toBeInTheDocument();
+		await expect.element(page.getByText('Connected', { exact: true })).toBeInTheDocument();
+		await expect.element(page.getByText('connected', { exact: true })).not.toBeInTheDocument();
+		await expect.element(page.getByText('ada.home@example.com')).toBeInTheDocument();
+		await expect.element(page.getByText('Needs reconnect')).toBeInTheDocument();
+		await expect.element(page.getByText('Refresh token was revoked.')).toBeInTheDocument();
+		await expect.element(page.getByText('needs_reauth')).not.toBeInTheDocument();
+	});
+
+	it('disconnects a Google account behind a confirm sheet (#480)', async () => {
+		seed();
+		vi.mocked(integrations.googleOAuthApp).mockResolvedValue({
+			provider: 'google',
+			client_id: 'client-123',
+			has_client_secret: true,
+			redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+		});
+		vi.mocked(integrations.list).mockResolvedValue([
+			{
+				id: 'acct-1',
+				provider: 'google',
+				label: 'Work',
+				account_email: 'ada@example.com',
+				status: 'error',
+				scopes: [],
+				last_error: 'Token refresh failed.'
+			}
+		]);
+		vi.mocked(integrations.disconnect).mockResolvedValueOnce(undefined);
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Integrations' }).click();
+		await expect.element(page.getByText('Token refresh failed.')).toBeInTheDocument();
+		await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+
+		expect(integrations.disconnect).not.toHaveBeenCalled();
+		await expect.element(page.getByText('Disconnect ada@example.com?')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Disconnect', exact: true }).last().click();
+		expect(integrations.disconnect).toHaveBeenCalledWith('acct-1');
+	});
+
 	it('lets the owner save a Google OAuth client and connect an account', async () => {
 		seed();
 		vi.mocked(integrations.saveGoogleOAuthApp).mockResolvedValue({

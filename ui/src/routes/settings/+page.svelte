@@ -101,7 +101,8 @@
 	let savingGoogleApp = $state(false);
 	let connectingGoogle = $state(false);
 	let reconnectingId = $state<string | null>(null);
-	let disconnectingId = $state<string | null>(null);
+	let disconnectingAccount = $state<IntegrationAccount | null>(null);
+	let disconnecting = $state(false);
 
 	const isOwner = $derived(auth.grant === 'owner');
 
@@ -202,17 +203,24 @@
 		}
 	}
 
-	async function handleDisconnect(id: string) {
-		disconnectingId = id;
+	async function confirmDisconnect() {
+		if (!disconnectingAccount) return;
+		disconnecting = true;
 		integrationsError = null;
 		try {
-			await integrationsApi.disconnect(id);
+			await integrationsApi.disconnect(disconnectingAccount.id);
+			disconnectingAccount = null;
 			await refreshIntegrations();
 		} catch {
 			integrationsError = "Couldn't disconnect that account.";
 		} finally {
-			disconnectingId = null;
+			disconnecting = false;
 		}
+	}
+
+	function integrationStatusLabel(status: string): string {
+		if (status === 'connected') return 'Connected';
+		return 'Needs reconnect';
 	}
 
 	async function refreshBudgets() {
@@ -795,13 +803,25 @@
 				{:else}
 					<div class="flex flex-col gap-2">
 						{#each googleAccounts as account (account.id)}
+							{@const troubled = account.status !== 'connected'}
 							<div
 								class="flex min-h-14 flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4.5 py-2 dark:border-line-dark dark:bg-surface-dark"
 							>
-								<span class="min-w-0 truncate text-base text-ink dark:text-ink-dark">
-									{account.account_email ?? account.label}
+								<span class="min-w-0 flex-1">
+									<span class="block truncate text-base text-ink dark:text-ink-dark">
+										{account.account_email ?? account.label}
+									</span>
+									<span
+										class="block text-[13px] {troubled
+											? 'text-danger'
+											: 'text-muted dark:text-muted-dark'}"
+									>
+										{integrationStatusLabel(account.status)}
+									</span>
+									{#if account.last_error}
+										<span class="mt-0.5 block text-[13px] text-danger">{account.last_error}</span>
+									{/if}
 								</span>
-								<span class="text-[13px] text-muted dark:text-muted-dark">{account.status}</span>
 								<div class="ml-auto flex items-center gap-3">
 									<button
 										type="button"
@@ -813,11 +833,10 @@
 									</button>
 									<button
 										type="button"
-										onclick={() => handleDisconnect(account.id)}
-										disabled={disconnectingId === account.id}
-										class="text-sm font-medium text-danger hover:underline disabled:opacity-50"
+										onclick={() => (disconnectingAccount = account)}
+										class="text-sm font-medium text-danger hover:underline"
 									>
-										{disconnectingId === account.id ? 'Disconnecting…' : 'Disconnect'}
+										Disconnect
 									</button>
 								</div>
 							</div>
@@ -1034,6 +1053,27 @@
 				onclick={handleCreateBudgetCap}
 			>
 				{creatingCap ? 'Adding…' : 'Add cap'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{/if}
+
+{#if disconnectingAccount}
+	<Sheet
+		title="Disconnect {disconnectingAccount.account_email ?? disconnectingAccount.label}?"
+		onClose={() => (disconnectingAccount = null)}
+		width={480}
+	>
+		<p class="text-base leading-normal text-ink dark:text-ink-dark">
+			Agents lose access to this Google account until you connect it again.
+		</p>
+		{#if integrationsError}
+			<p class="text-sm text-danger">{integrationsError}</p>
+		{/if}
+		{#snippet footer()}
+			<Button variant="secondary" onclick={() => (disconnectingAccount = null)}>Cancel</Button>
+			<Button variant="destructive" onclick={confirmDisconnect} disabled={disconnecting}>
+				{disconnecting ? 'Disconnecting…' : 'Disconnect'}
 			</Button>
 		{/snippet}
 	</Sheet>
