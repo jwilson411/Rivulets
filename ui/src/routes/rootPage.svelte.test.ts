@@ -300,6 +300,116 @@ describe('routes/+page.svelte (Home)', () => {
 		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-2');
 	});
 
+	it('lists an older conversation first after a new reply (#469)', async () => {
+		const older: Rivulet = {
+			...rivulet,
+			id: 'riv-older',
+			title: 'Older thread we just replied to',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		const newerIdle: Rivulet = {
+			...rivulet,
+			id: 'riv-newer',
+			title: 'Newer idle thread',
+			created_at: '2026-01-02T00:00:00Z'
+		};
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([newerIdle, older]);
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id) => {
+			if (id === older.id) {
+				return [
+					{
+						...messages[0],
+						id: 'msg-old-root',
+						rivulet_id: older.id,
+						content: older.title ?? 'Conversation',
+						created_at: older.created_at
+					},
+					{
+						...messages[0],
+						id: 'msg-old-reply',
+						rivulet_id: older.id,
+						content: 'Just replied',
+						created_at: '2026-01-03T12:00:00Z'
+					}
+				];
+			}
+			return [
+				{
+					...messages[0],
+					id: 'msg-new-root',
+					rivulet_id: newerIdle.id,
+					content: newerIdle.title ?? 'Conversation',
+					created_at: newerIdle.created_at
+				}
+			];
+		});
+
+		render(HomePage);
+
+		const olderCard = page.getByRole('link', { name: /Older thread we just replied to/ });
+		const newerCard = page.getByRole('link', { name: /Newer idle thread/ });
+		await expect.element(olderCard).toBeInTheDocument();
+		await expect.element(newerCard).toBeInTheDocument();
+		const olderEl = olderCard.element();
+		const newerEl = newerCard.element();
+		expect(
+			olderEl.compareDocumentPosition(newerEl) & Node.DOCUMENT_POSITION_FOLLOWING
+		).toBeTruthy();
+	});
+
+	it('keeps an old reply in the top 8 instead of dropping it for newer starts (#469)', async () => {
+		const extras: Rivulet[] = Array.from({ length: 8 }, (_, i) => ({
+			...rivulet,
+			id: `riv-idle-${i}`,
+			title: `Idle thread ${i + 1}`,
+			created_at: `2026-01-${(10 + i).toString().padStart(2, '0')}T00:00:00Z`
+		}));
+		const bumped: Rivulet = {
+			...rivulet,
+			id: 'riv-bumped',
+			title: 'Bumped by a reply',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([...extras, bumped]);
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id) => {
+			if (id === bumped.id) {
+				return [
+					{
+						...messages[0],
+						id: 'msg-bumped-root',
+						rivulet_id: bumped.id,
+						content: bumped.title ?? 'Conversation',
+						created_at: bumped.created_at
+					},
+					{
+						...messages[0],
+						id: 'msg-bumped-reply',
+						rivulet_id: bumped.id,
+						content: 'Latest word',
+						created_at: '2026-02-01T00:00:00Z'
+					}
+				];
+			}
+			const extra = extras.find((r) => r.id === id);
+			return [
+				{
+					...messages[0],
+					id: `msg-${id}`,
+					rivulet_id: id,
+					content: extra?.title ?? 'Conversation',
+					created_at: extra?.created_at ?? '2026-01-10T00:00:00Z'
+				}
+			];
+		});
+
+		render(HomePage);
+
+		await expect.element(page.getByRole('link', { name: /Bumped by a reply/ })).toBeInTheDocument();
+		await expect.element(page.getByRole('link', { name: /Idle thread 1/ })).not.toBeInTheDocument();
+	});
+
 	it('omits archived conversations from Recent conversations', async () => {
 		seedComplete();
 		vi.mocked(rivulets.listForChannel).mockResolvedValue([
@@ -313,6 +423,64 @@ describe('routes/+page.svelte (Home)', () => {
 
 		await expect.element(page.getByText('No conversations yet.')).toBeInTheDocument();
 		await expect.element(page.getByText('Old archived thread')).not.toBeInTheDocument();
+	});
+
+	it('continues the conversation with the latest reply in the picked channel (#469)', async () => {
+		const older: Rivulet = {
+			...rivulet,
+			id: 'riv-older',
+			title: 'Older thread we just replied to',
+			created_at: '2026-01-01T00:00:00Z'
+		};
+		const newerIdle: Rivulet = {
+			...rivulet,
+			id: 'riv-newer',
+			title: 'Newer idle thread',
+			created_at: '2026-01-02T00:00:00Z'
+		};
+		seedComplete();
+		vi.mocked(rivulets.listForChannel).mockResolvedValue([newerIdle, older]);
+		vi.mocked(rivulets.listMessages).mockImplementation(async (id) => {
+			if (id === older.id) {
+				return [
+					{
+						...messages[0],
+						id: 'msg-old-root',
+						rivulet_id: older.id,
+						content: older.title ?? 'Conversation',
+						created_at: older.created_at
+					},
+					{
+						...messages[0],
+						id: 'msg-old-reply',
+						rivulet_id: older.id,
+						content: 'Just replied',
+						created_at: '2026-01-03T12:00:00Z'
+					}
+				];
+			}
+			return [
+				{
+					...messages[0],
+					id: 'msg-new-root',
+					rivulet_id: newerIdle.id,
+					content: newerIdle.title ?? 'Conversation',
+					created_at: newerIdle.created_at
+				}
+			];
+		});
+		vi.mocked(rivulets.postMessage).mockResolvedValueOnce(messages[0]);
+
+		render(HomePage);
+		await expect.element(page.getByText('Older thread we just replied to')).toBeInTheDocument();
+
+		await page.getByRole('button', { name: 'Continue last' }).click();
+		await page.getByPlaceholder('Reply to the last conversation…').fill('Following up');
+		await page.getByRole('button', { name: 'Send' }).click();
+
+		expect(rivulets.postMessage).toHaveBeenCalledWith('riv-older', 'Following up', []);
+		expect(rivulets.create).not.toHaveBeenCalled();
+		expect(goto).toHaveBeenCalledWith('/channels/chan-1/rivulets/riv-older');
 	});
 
 	it('continues the last conversation in the picked channel', async () => {
