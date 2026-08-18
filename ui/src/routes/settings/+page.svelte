@@ -7,6 +7,11 @@
 	import { formatBytes, timeAgo } from '$lib/format';
 	import { providers as providersApi, type Provider } from '$lib/api/providers';
 	import {
+		integrations as integrationsApi,
+		type IntegrationAccount,
+		type GoogleOAuthApp
+	} from '$lib/api/integrations';
+	import {
 		budgets as budgetsApi,
 		type BudgetStatus,
 		type BudgetScope,
@@ -22,12 +27,12 @@
 	import Icon from '$lib/ui/Icon.svelte';
 	import Sheet from '$lib/ui/Sheet.svelte';
 
-	// Settings (06-screens.md → Settings, mockup 1l): four tabs — Safety,
-	// Spend, Files, Updates & backups — in plain language (09-copy-deck.md).
-	// Guests see spend status only (#351: everything else on this page reads
-	// owner-only endpoints).
+	// Settings (06-screens.md → Settings, mockup 1l): five tabs — Safety,
+	// Spend, Files, Integrations, Updates & backups — in plain language
+	// (09-copy-deck.md). Guests see spend status only (#351: everything
+	// else on this page reads owner-only endpoints).
 
-	type Tab = 'safety' | 'spend' | 'files' | 'updates';
+	type Tab = 'safety' | 'spend' | 'files' | 'integrations' | 'updates';
 	let tab = $state<Tab>('safety');
 
 	let loaded = $state<WorkspaceSettings | null>(null);
@@ -80,6 +85,15 @@
 	let createCapError = $state<string | null>(null);
 	let overridingCapId = $state<string | null>(null);
 
+	let googleApp = $state<GoogleOAuthApp | null>(null);
+	let googleAccounts = $state<IntegrationAccount[]>([]);
+	let integrationsError = $state<string | null>(null);
+	let googleClientId = $state('');
+	let googleClientSecret = $state('');
+	let savingGoogleApp = $state(false);
+	let connectingGoogle = $state(false);
+	let disconnectingId = $state<string | null>(null);
+
 	const isOwner = $derived(auth.grant === 'owner');
 
 	const inputClass =
@@ -120,6 +134,64 @@
 		}
 	}
 
+	async function refreshIntegrations() {
+		integrationsError = null;
+		try {
+			const [app, accounts] = await Promise.all([
+				integrationsApi.googleOAuthApp(),
+				integrationsApi.list()
+			]);
+			googleApp = app;
+			googleClientId = app.client_id;
+			googleAccounts = accounts.filter((row) => row.provider === 'google');
+		} catch {
+			integrationsError = "Couldn't load integrations.";
+		}
+	}
+
+	async function handleSaveGoogleApp() {
+		savingGoogleApp = true;
+		integrationsError = null;
+		try {
+			const body: { client_id: string; client_secret?: string } = {
+				client_id: googleClientId.trim()
+			};
+			if (googleClientSecret.trim()) body.client_secret = googleClientSecret.trim();
+			googleApp = await integrationsApi.saveGoogleOAuthApp(body);
+			googleClientId = googleApp.client_id;
+			googleClientSecret = '';
+		} catch {
+			integrationsError = "Couldn't save the Google OAuth client.";
+		} finally {
+			savingGoogleApp = false;
+		}
+	}
+
+	async function handleConnectGoogle() {
+		connectingGoogle = true;
+		integrationsError = null;
+		try {
+			const { authorization_url } = await integrationsApi.connectGoogle();
+			window.location.assign(authorization_url);
+		} catch (err) {
+			integrationsError = err instanceof Error ? err.message : "Couldn't start Google sign-in.";
+			connectingGoogle = false;
+		}
+	}
+
+	async function handleDisconnect(id: string) {
+		disconnectingId = id;
+		integrationsError = null;
+		try {
+			await integrationsApi.disconnect(id);
+			await refreshIntegrations();
+		} catch {
+			integrationsError = "Couldn't disconnect that account.";
+		} finally {
+			disconnectingId = null;
+		}
+	}
+
 	async function refreshBudgets() {
 		budgetsError = null;
 		try {
@@ -145,6 +217,7 @@
 			.catch(() => {});
 		refreshUpdateStatus();
 		refreshBackups();
+		refreshIntegrations();
 	} else {
 		tab = 'spend';
 	}
@@ -352,6 +425,9 @@
 		<FilterChip selected={tab === 'spend'} onclick={() => (tab = 'spend')}>Spend</FilterChip>
 		{#if isOwner}
 			<FilterChip selected={tab === 'files'} onclick={() => (tab = 'files')}>Files</FilterChip>
+			<FilterChip selected={tab === 'integrations'} onclick={() => (tab = 'integrations')}>
+				Integrations
+			</FilterChip>
 			<FilterChip selected={tab === 'updates'} onclick={() => (tab = 'updates')}>
 				Updates & backups
 			</FilterChip>
@@ -616,6 +692,104 @@
 				{/if}
 			</div>
 		{/if}
+	{:else if tab === 'integrations'}
+		<div class="flex flex-col gap-6">
+			<section class="flex flex-col gap-3">
+				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">Google</div>
+				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
+					Connect a Google account so assigned agents can read Gmail and list Calendar. Sending mail
+					and creating events stay extra-gated. Tokens live in this machine's credential store, not
+					the workspace database.
+				</p>
+				<p class="max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
+					Create an OAuth client in Google Cloud (Desktop app) and add this redirect URI:
+					<span class="font-mono text-[13px] text-ink dark:text-ink-dark"
+						>{googleApp?.redirect_uri ??
+							'http://127.0.0.1:8484/api/v1/integrations/google/callback'}</span
+					>
+				</p>
+				<div
+					class="flex flex-col gap-4 rounded-2xl border border-line bg-surface px-6 py-5 dark:border-line-dark dark:bg-surface-dark"
+				>
+					<label class="flex flex-col gap-1.5">
+						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Client ID</span>
+						<input
+							type="text"
+							bind:value={googleClientId}
+							autocomplete="off"
+							aria-label="Google OAuth client ID"
+							class={inputClass}
+						/>
+					</label>
+					<label class="flex flex-col gap-1.5">
+						<span class="text-sm font-semibold text-ink dark:text-ink-dark">
+							Client secret
+							{#if googleApp?.has_client_secret}
+								<span class="font-normal text-muted dark:text-muted-dark"> (already saved)</span>
+							{/if}
+						</span>
+						<input
+							type="password"
+							bind:value={googleClientSecret}
+							autocomplete="new-password"
+							placeholder={googleApp?.has_client_secret
+								? 'Leave blank to keep the saved secret'
+								: 'Optional for Desktop clients'}
+							aria-label="Google OAuth client secret"
+							class={inputClass}
+						/>
+					</label>
+					<Button
+						class="self-start"
+						size="md"
+						onclick={handleSaveGoogleApp}
+						disabled={savingGoogleApp || !googleClientId.trim()}
+					>
+						{savingGoogleApp ? 'Saving…' : 'Save client'}
+					</Button>
+				</div>
+			</section>
+
+			<section class="flex flex-col gap-3">
+				<div class="font-display text-lg font-semibold text-ink dark:text-ink-dark">
+					Connected accounts
+				</div>
+				<Button
+					class="self-start"
+					onclick={handleConnectGoogle}
+					disabled={connectingGoogle || !googleApp?.client_id}
+				>
+					{connectingGoogle ? 'Opening Google…' : 'Connect Google account'}
+				</Button>
+				{#if googleAccounts.length === 0}
+					<p class="text-sm text-muted dark:text-muted-dark">No Google account connected yet.</p>
+				{:else}
+					<div class="flex flex-col gap-2">
+						{#each googleAccounts as account (account.id)}
+							<div
+								class="flex min-h-14 flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4.5 py-2 dark:border-line-dark dark:bg-surface-dark"
+							>
+								<span class="min-w-0 truncate text-base text-ink dark:text-ink-dark">
+									{account.account_email ?? account.label}
+								</span>
+								<span class="text-[13px] text-muted dark:text-muted-dark">{account.status}</span>
+								<button
+									type="button"
+									onclick={() => handleDisconnect(account.id)}
+									disabled={disconnectingId === account.id}
+									class="ml-auto text-sm font-medium text-danger hover:underline disabled:opacity-50"
+								>
+									{disconnectingId === account.id ? 'Disconnecting…' : 'Disconnect'}
+								</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</section>
+			{#if integrationsError}
+				<p class="text-sm text-danger">{integrationsError}</p>
+			{/if}
+		</div>
 	{:else if tab === 'updates'}
 		<div class="flex flex-col gap-8">
 			<section class="flex flex-col gap-3">

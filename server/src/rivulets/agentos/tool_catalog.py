@@ -19,6 +19,8 @@ from __future__ import annotations
 # "Db"). Everything else is first-word capitalized, rest lower.
 _TOKEN_OVERRIDES: dict[str, str] = {
     "db": "DB",
+    "gmail": "Gmail",
+    "google": "Google",
     "http": "HTTP",
     "mcp": "MCP",
     "python": "Python",
@@ -47,8 +49,20 @@ FILES_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+INTEGRATION_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "google_calendar_create",
+        "google_calendar_list",
+        "google_gmail_draft",
+        "google_gmail_read",
+        "google_gmail_search",
+        "google_gmail_send",
+    }
+)
+
 TOOL_GROUP_CHAT = "chat"
 TOOL_GROUP_FILES = "files"
+TOOL_GROUP_INTEGRATIONS = "integrations"
 TOOL_GROUP_WORKSPACE_ADMIN = "workspace_admin"
 TOOL_GROUP_CUSTOM = "custom"
 TOOL_GROUP_MCP = "mcp"
@@ -83,6 +97,8 @@ def group_for(name: str, tool_type: str) -> str:
         return TOOL_GROUP_CHAT
     if name in FILES_TOOL_NAMES:
         return TOOL_GROUP_FILES
+    if name in INTEGRATION_TOOL_NAMES:
+        return TOOL_GROUP_INTEGRATIONS
     return TOOL_GROUP_WORKSPACE_ADMIN
 
 

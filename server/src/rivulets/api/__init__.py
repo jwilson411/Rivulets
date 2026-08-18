@@ -20,6 +20,7 @@ from rivulets.api import (
     files,
     health,
     humans,
+    integrations,
     invites,
     knowledge_bases,
     mcp_servers,
@@ -53,6 +54,7 @@ api_router.include_router(files.router)
 api_router.include_router(settings_routes.router)
 api_router.include_router(sync.router)
 api_router.include_router(providers.router)
+api_router.include_router(integrations.router)
 api_router.include_router(backups.router)
 api_router.include_router(usage.router)
 api_router.include_router(dispatch.router)

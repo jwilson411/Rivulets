@@ -1,6 +1,7 @@
 // Browser-mode component test for Settings (06-screens.md → Settings,
-// mockup 1l): four tabs — Safety, Spend, Files, Updates & backups — in
-// plain language, with guests seeing spend status only (#351).
+// mockup 1l): five tabs — Safety, Spend, Files, Integrations, Updates
+// & backups — in plain language, with guests seeing spend status only
+// (#351).
 
 import { page } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +12,7 @@ import { dispatch } from '$lib/api/dispatch';
 import { update } from '$lib/api/update';
 import { backups, type Backup } from '$lib/api/backups';
 import { providers } from '$lib/api/providers';
+import { integrations } from '$lib/api/integrations';
 import { budgets, type BudgetStatus } from '$lib/api/budgets';
 import { agents } from '$lib/api/agents';
 import { teams } from '$lib/api/teams';
@@ -26,6 +28,15 @@ vi.mock('$lib/api/backups', () => ({
 	backups: { list: vi.fn(), create: vi.fn(), restore: vi.fn() }
 }));
 vi.mock('$lib/api/providers', () => ({ providers: { list: vi.fn() } }));
+vi.mock('$lib/api/integrations', () => ({
+	integrations: {
+		list: vi.fn(),
+		googleOAuthApp: vi.fn(),
+		saveGoogleOAuthApp: vi.fn(),
+		connectGoogle: vi.fn(),
+		disconnect: vi.fn()
+	}
+}));
 vi.mock('$lib/api/budgets', () => ({
 	budgets: { list: vi.fn(), create: vi.fn(), remove: vi.fn(), override: vi.fn() }
 }));
@@ -99,6 +110,13 @@ function seed() {
 	});
 	vi.mocked(backups.list).mockResolvedValue([]);
 	vi.mocked(providers.list).mockResolvedValue([]);
+	vi.mocked(integrations.list).mockResolvedValue([]);
+	vi.mocked(integrations.googleOAuthApp).mockResolvedValue({
+		provider: 'google',
+		client_id: '',
+		has_client_secret: false,
+		redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+	});
 	vi.mocked(budgets.list).mockResolvedValue([]);
 	vi.mocked(agents.list).mockResolvedValue([]);
 	vi.mocked(teams.list).mockResolvedValue([]);
@@ -186,10 +204,37 @@ describe('settings/+page.svelte', () => {
 
 		await expect.element(page.getByText('Whole workspace')).toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Safety' })).not.toBeInTheDocument();
+		await expect
+			.element(page.getByRole('button', { name: 'Integrations' }))
+			.not.toBeInTheDocument();
 		await expect.element(page.getByRole('button', { name: 'Add a cap' })).not.toBeInTheDocument();
 		expect(settings.get).not.toHaveBeenCalled();
 		expect(update.status).not.toHaveBeenCalled();
 		expect(backups.list).not.toHaveBeenCalled();
+		expect(integrations.list).not.toHaveBeenCalled();
+	});
+
+	it('lets the owner save a Google OAuth client and connect an account', async () => {
+		seed();
+		vi.mocked(integrations.saveGoogleOAuthApp).mockResolvedValue({
+			provider: 'google',
+			client_id: 'client-123',
+			has_client_secret: false,
+			redirect_uri: 'http://127.0.0.1:8484/api/v1/integrations/google/callback'
+		});
+
+		render(SettingsPage);
+		await page.getByRole('button', { name: 'Integrations' }).click();
+
+		await expect
+			.element(page.getByText('Connect a Google account so assigned agents', { exact: false }))
+			.toBeInTheDocument();
+		await page.getByLabelText('Google OAuth client ID').fill('client-123');
+		await page.getByRole('button', { name: 'Save client' }).click();
+		expect(integrations.saveGoogleOAuthApp).toHaveBeenCalledWith({ client_id: 'client-123' });
+		await expect
+			.element(page.getByRole('button', { name: 'Connect Google account' }))
+			.toBeInTheDocument();
 	});
 
 	it('lets the owner pick a project folder for agents', async () => {

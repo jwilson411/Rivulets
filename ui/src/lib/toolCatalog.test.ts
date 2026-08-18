@@ -35,6 +35,7 @@ describe('humanizeToolName', () => {
 		expect(humanizeToolName('execute_python')).toBe('Execute Python');
 		expect(humanizeToolName('query_workspace_db')).toBe('Query workspace DB');
 		expect(humanizeToolName('list_mcp_servers')).toBe('List MCP servers');
+		expect(humanizeToolName('google_gmail_search')).toBe('Google Gmail search');
 	});
 });
 
@@ -55,6 +56,7 @@ describe('toolDisplayName / toolGroup', () => {
 		expect(toolGroup(tool({ id: '1', name: 'http_request' }))).toBe('chat');
 		expect(toolGroup(tool({ id: '2', name: 'read_file' }))).toBe('files');
 		expect(toolGroup(tool({ id: '3', name: 'create_agent' }))).toBe('workspace_admin');
+		expect(toolGroup(tool({ id: '5', name: 'google_gmail_search' }))).toBe('integrations');
 		expect(toolGroup(tool({ id: '4', name: 'mine', tool_type: 'custom' }))).toBe('custom');
 	});
 });
