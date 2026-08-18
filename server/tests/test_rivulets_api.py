@@ -74,6 +74,73 @@ def test_list_rivulets_returns_created_rivulets_newest_first(
     assert ids == [second.json()["id"], first.json()["id"]]
 
 
+def test_rivulet_working_directory_overrides_channel(
+    client: TestClient, auth_headers: dict[str, str], tmp_path
+) -> None:
+    river = tmp_path / "river"
+    stream = tmp_path / "stream"
+    river.mkdir()
+    stream.mkdir()
+    channel = client.post("/api/v1/channels", json={"name": "wd-inherit"}, headers=auth_headers)
+    channel_id = channel.json()["id"]
+    client.patch(
+        f"/api/v1/channels/{channel_id}",
+        json={"working_directory": str(river)},
+        headers=auth_headers,
+    )
+    created = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "start"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["working_directory"] is None
+    assert created.json()["effective_working_directory"] == str(river.resolve())
+
+    rivulet_id = created.json()["id"]
+    overridden = client.patch(
+        f"/api/v1/rivulets/{rivulet_id}",
+        json={"working_directory": str(stream)},
+        headers=auth_headers,
+    )
+    assert overridden.status_code == 200, overridden.text
+    assert overridden.json()["working_directory"] == str(stream.resolve())
+    assert overridden.json()["effective_working_directory"] == str(stream.resolve())
+
+    channel_after = client.get(f"/api/v1/channels/{channel_id}", headers=auth_headers).json()
+    assert channel_after["working_directory"] == str(river.resolve())
+
+    cleared = client.patch(
+        f"/api/v1/rivulets/{rivulet_id}",
+        json={"working_directory": None},
+        headers=auth_headers,
+    )
+    assert cleared.json()["working_directory"] is None
+    assert cleared.json()["effective_working_directory"] == str(river.resolve())
+
+
+def test_rivulet_working_directory_is_owner_only(
+    client: TestClient, auth_headers: dict[str, str], tmp_path
+) -> None:
+    from tests.test_channels import _invite_headers
+
+    project = tmp_path / "guest-cannot"
+    project.mkdir()
+    channel = client.post("/api/v1/channels", json={"name": "wd-guest"}, headers=auth_headers)
+    created = client.post(
+        f"/api/v1/channels/{channel.json()['id']}/rivulets",
+        json={"content": "start"},
+        headers=auth_headers,
+    )
+    guest = _invite_headers(client, auth_headers)
+    response = client.patch(
+        f"/api/v1/rivulets/{created.json()['id']}",
+        json={"working_directory": str(project)},
+        headers=guest,
+    )
+    assert response.status_code == 403
+
+
 def test_close_archives_a_rivulet_without_destroying_it(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

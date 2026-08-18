@@ -43,7 +43,9 @@ def update_channel(channel: str, name: str | None = None, description: str | Non
     """Rename and/or change the description of an existing channel.
     `channel` is the channel's id or its current name. Only the fields
     you provide are changed; omit `name` or `description` to leave it
-    as-is."""
+    as-is. Cannot change the channel's project folder — that stays a
+    human river-level setting. Use set_working_directory to override
+    the folder for this conversation only."""
     return f"Requested update to channel {channel!r}."
 
 

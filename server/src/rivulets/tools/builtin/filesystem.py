@@ -12,7 +12,12 @@ from pathlib import Path
 
 from agno.tools import tool
 
-from rivulets.working_directory import filesystem_root
+from rivulets.working_directory import (
+    bind_working_directory,
+    filesystem_root,
+    normalize_working_directory,
+    resolve_effective_root,
+)
 
 
 def _sandbox_root() -> Path:
@@ -59,3 +64,25 @@ def write_file(path: str, content: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"Wrote {len(content)} bytes to {path}"
+
+
+@tool
+def set_working_directory(path: str = "") -> str:
+    """Set the project folder for this conversation only. Does not change
+    the channel (river) default — later conversations in the same channel
+    keep using that default unless they override too. Pass an empty path
+    to clear this conversation's override and inherit the channel folder
+    (or Settings, or the built-in sandbox). The folder must already exist
+    on this machine."""
+    try:
+        normalized = normalize_working_directory(path)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if normalized is None:
+        bind_working_directory(resolve_effective_root(None))
+        return (
+            "This conversation now inherits the channel project folder "
+            "(or the Settings default if the channel has none)."
+        )
+    bind_working_directory(Path(normalized))
+    return f"This conversation's project folder is now {normalized}."

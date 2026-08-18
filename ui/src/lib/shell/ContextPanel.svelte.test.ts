@@ -43,7 +43,9 @@ const testChannel: Channel = {
 	description: null,
 	team_id: null,
 	position: 0,
-	archived: false
+	archived: false,
+	working_directory: null,
+	effective_working_directory: null
 };
 
 describe('ContextPanel.svelte', () => {

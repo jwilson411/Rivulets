@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 
@@ -81,6 +83,48 @@ def test_duplicate_active_channel_name_returns_409_via_global_handler(
     assert body["error"]["code"] == "conflict"
     assert "sqlite" not in second.text.lower()
     assert "INSERT INTO" not in second.text
+
+
+def test_channel_working_directory_round_trip(
+    client: TestClient, auth_headers: dict[str, str], tmp_path: Path
+) -> None:
+    project = tmp_path / "river-project"
+    project.mkdir()
+    created = client.post("/api/v1/channels", json={"name": "build-room"}, headers=auth_headers)
+    assert created.status_code == 201, created.text
+    assert created.json()["working_directory"] is None
+
+    patched = client.patch(
+        f"/api/v1/channels/{created.json()['id']}",
+        json={"working_directory": str(project)},
+        headers=auth_headers,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["working_directory"] == str(project.resolve())
+    assert patched.json()["effective_working_directory"] == str(project.resolve())
+
+    cleared = client.patch(
+        f"/api/v1/channels/{created.json()['id']}",
+        json={"working_directory": None},
+        headers=auth_headers,
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["working_directory"] is None
+
+
+def test_channel_working_directory_rejects_invite_grant(
+    client: TestClient, auth_headers: dict[str, str], tmp_path: Path
+) -> None:
+    project = tmp_path / "nope"
+    project.mkdir()
+    created = client.post("/api/v1/channels", json={"name": "invite-wd"}, headers=auth_headers)
+    guest = _invite_headers(client, auth_headers)
+    response = client.patch(
+        f"/api/v1/channels/{created.json()['id']}",
+        json={"working_directory": str(project)},
+        headers=guest,
+    )
+    assert response.status_code == 403
 
 
 def test_reorder_channels(client: TestClient, auth_headers: dict[str, str]) -> None:

@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { auth } from '$lib/api/auth.svelte';
 	import { channels, type Channel } from '$lib/api/channels';
 	import { rivulets, type Rivulet, type Message } from '$lib/api/rivulets';
 	import { teams, type Team, type TeamDetail } from '$lib/api/teams';
@@ -13,6 +14,7 @@
 	import { formatClock } from '$lib/format';
 	import type { MentionCandidate } from '$lib/mentions';
 	import { lockedTeamComposerHint, teamComposerHint, teamSpeakSummary } from '$lib/teamRouting';
+	import WorkingDirectoryControl from '$lib/components/WorkingDirectoryControl.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Disc from '$lib/ui/Disc.svelte';
 	import ErrorBanner from '$lib/ui/ErrorBanner.svelte';
@@ -47,6 +49,9 @@
 	let loadError = $state<string | null>(null);
 	let teamMenuOpen = $state(false);
 	let teamChangeError = $state<string | null>(null);
+	let folderBusy = $state(false);
+	let folderError = $state<string | null>(null);
+	let isOwner = $derived(auth.grant === 'owner');
 	let posting = $state(false);
 	let postError = $state<string | null>(null);
 	let showArchived = $state(false);
@@ -191,6 +196,19 @@
 		}
 	}
 
+	async function handleWorkingDirectory(path: string | null) {
+		if (!channel) return;
+		folderBusy = true;
+		folderError = null;
+		try {
+			channel = await channels.update(channel.id, { working_directory: path });
+		} catch {
+			folderError = "Couldn't save that folder. Try again.";
+		} finally {
+			folderBusy = false;
+		}
+	}
+
 	async function handlePost(text: string, files: File[]): Promise<boolean> {
 		const channelId = page.params.id!;
 		posting = true;
@@ -294,6 +312,17 @@
 			</p>
 		</div>
 		<div class="relative ml-auto flex max-w-full flex-none flex-col items-end gap-1.5">
+			<WorkingDirectoryControl
+				storedPath={channel?.working_directory ?? null}
+				inheritedPath={channel?.working_directory
+					? null
+					: (channel?.effective_working_directory ?? null)}
+				inheritedLabel="Settings"
+				canEdit={isOwner}
+				busy={folderBusy}
+				error={folderError}
+				onSave={handleWorkingDirectory}
+			/>
 			<div
 				class="flex h-10 items-center rounded-lg border border-line bg-surface hover:border-accent dark:border-line-dark dark:bg-surface-dark dark:hover:border-accent-dark"
 			>

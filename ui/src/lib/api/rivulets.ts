@@ -10,6 +10,8 @@ export interface Rivulet {
 	status: 'active' | 'paused' | 'closed';
 	created_by: string;
 	created_at: string;
+	working_directory: string | null;
+	effective_working_directory: string | null;
 }
 
 export type SenderType = 'human' | 'agent' | 'system';
@@ -67,6 +69,8 @@ export const rivulets = {
 	resume: (id: string) => api.post<Rivulet>(`/rivulets/${id}/resume`, {}, auth.token ?? undefined),
 	engageTeam: (id: string, reason = 'The human unlocked the team.') =>
 		api.post<Message>(`/rivulets/${id}/engage-team`, { reason }, auth.token ?? undefined),
+	update: (id: string, patch: { working_directory?: string | null }) =>
+		api.patch<Rivulet>(`/rivulets/${id}`, patch, auth.token ?? undefined),
 	// #412: DELETE is a soft archive (status=closed), not a destroy.
 	close: (id: string) => api.delete<void>(`/rivulets/${id}`, auth.token ?? undefined)
 };

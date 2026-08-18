@@ -60,9 +60,10 @@ _DEFAULTS: dict[str, object] = {
     # _maybe_notify_on_call_agent already tolerates a stale/deleted
     # agent id gracefully (skips notifying rather than erroring).
     "workflows.default_on_call_agent_id": None,
-    # Node-local project folder the filesystem / code-exec tools work in.
-    # None means the built-in sandbox under workspace_dir. Never synced
-    # (an absolute path is meaningless on another peer).
+    # Workspace-wide default project folder. A channel (river) can set
+    # its own, and a rivulet can override that without mutating the
+    # river. None means the built-in sandbox under workspace_dir. Never
+    # synced (an absolute path is meaningless on another peer).
     WORKING_DIRECTORY_KEY: None,
 }
 

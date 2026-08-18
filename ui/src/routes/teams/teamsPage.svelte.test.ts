@@ -69,7 +69,9 @@ function seed() {
 			description: null,
 			team_id: 'team-1',
 			position: 0,
-			archived: false
+			archived: false,
+			working_directory: null,
+			effective_working_directory: null
 		}
 	]);
 }

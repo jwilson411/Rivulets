@@ -280,6 +280,11 @@ async def test_seed_builtin_tools_sets_settings_manage_scope(db_session: AsyncSe
     ).scalar_one()
     assert update_row.required_scope == "settings:manage"
 
+    folder_row = (
+        await db_session.execute(select(Tool).where(Tool.name == "set_working_directory"))
+    ).scalar_one()
+    assert folder_row.required_scope == "settings:manage"
+
 
 async def test_update_workspace_settings_tool_skipped_without_settings_manage_grant(
     db_session: AsyncSession,

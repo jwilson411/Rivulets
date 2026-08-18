@@ -3,25 +3,39 @@
 Rivulets' own data lives under `workspace_dir` (`~/.rivulets` by default).
 The filesystem and code-execution tools used to be confined to hidden
 sandbox subfolders there, which meant agents could not work on a real
-project. The owner picks a folder on this machine in Settings; that path
-is stored as `tools.working_directory` and is never synced — an absolute
-path is meaningless on another peer.
+project. The owner picks a folder on this machine; that path is stored
+and is never synced — an absolute path is meaningless on another peer.
 
-When the setting is unset (or the folder has disappeared), tools fall
-back to the original sandbox directories so existing installs keep
-working.
+Resolution, most specific first:
+
+  1. The rivulet's own override (`rivulet.working_directory`)
+  2. The channel (river) default (`channel.working_directory`)
+  3. The workspace Settings default (`tools.working_directory`)
+  4. The original sandbox directories so existing installs keep working
+
+A rivulet can change (1) without touching the river default. Channel
+tools must not write the river folder — only the human Settings/channel
+UI (or a rivulet-scoped tool) may.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from rivulets.config import get_settings
 
 SETTING_KEY = "tools.working_directory"
+
+# Bound for the duration of one agent run so filesystem / code-exec tools
+# see the rivulet/channel/workspace resolution for *this* conversation,
+# not the process-wide Settings default. Unset outside a run.
+_active_root: ContextVar[Path | None] = ContextVar("working_directory_root", default=None)
 
 # Single path-segment names only — a slash would let create_directory
 # write outside the listed parent.
@@ -64,22 +78,68 @@ def normalize_working_directory(value: object) -> str | None:
     return str(resolved)
 
 
-def stored_working_directory() -> Path | None:
-    """The configured folder, if it is still a directory on disk."""
-    raw = _read_stored_value()
-    if not raw:
+def live_directory(value: str | None) -> Path | None:
+    """A stored path that is still a directory on this machine."""
+    if not value or not value.strip():
         return None
-    path = Path(raw)
+    path = Path(value)
     if not path.is_dir():
         return None
     return path.resolve()
 
 
+def stored_working_directory() -> Path | None:
+    """The workspace Settings folder, if it is still a directory on disk."""
+    return live_directory(_read_stored_value())
+
+
+def resolve_effective_path(*candidates: str | None) -> str | None:
+    """First still-on-disk candidate, then the workspace Settings default.
+
+    Returns None when every layer is unset or missing — callers that need
+    a sandbox fall through to `filesystem_root` / `code_exec_root`.
+    """
+    for raw in candidates:
+        live = live_directory(raw)
+        if live is not None:
+            return str(live)
+    stored = stored_working_directory()
+    return str(stored) if stored is not None else None
+
+
+def resolve_effective_root(*candidates: str | None) -> Path:
+    """Same resolution as `resolve_effective_path`, with the filesystem
+    sandbox as the last resort so tools always have a directory."""
+    resolved = resolve_effective_path(*candidates)
+    return Path(resolved) if resolved is not None else default_filesystem_root()
+
+
+@contextmanager
+def using_working_directory(root: Path) -> Generator[None]:
+    """Bind `filesystem_root` / `code_exec_root` for this task."""
+    token = _active_root.set(root.resolve())
+    try:
+        yield
+    finally:
+        _active_root.reset(token)
+
+
+def bind_working_directory(root: Path) -> None:
+    """Replace the bound root mid-run (rivulet override, same conversation)."""
+    _active_root.set(root.resolve())
+
+
 def filesystem_root() -> Path:
+    bound = _active_root.get()
+    if bound is not None:
+        return bound
     return stored_working_directory() or default_filesystem_root()
 
 
 def code_exec_root() -> Path:
+    bound = _active_root.get()
+    if bound is not None:
+        return bound
     return stored_working_directory() or default_code_exec_root()
 
 

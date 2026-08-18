@@ -207,7 +207,7 @@ describe('settings/+page.svelte', () => {
 		render(SettingsPage);
 		await page.getByRole('button', { name: 'Files' }).click();
 
-		await expect.element(page.getByText('Project folder')).toBeInTheDocument();
+		await expect.element(page.getByText('Default project folder')).toBeInTheDocument();
 		await expect
 			.element(page.getByText('Using the built-in sandbox until you pick a folder.'))
 			.toBeInTheDocument();

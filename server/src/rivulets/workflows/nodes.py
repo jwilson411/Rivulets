@@ -41,9 +41,10 @@ from rivulets.agentos import run_agent
 from rivulets.agentos.accounting import record_agent_run
 from rivulets.agentos.models import resolve_model
 from rivulets.agentos.tool_audit import ensure_unattended_tools_allowed
-from rivulets.db.models import Agent, Rivulet, WorkflowNode
+from rivulets.db.models import Agent, Channel, Rivulet, WorkflowNode
 from rivulets.sync.publish import publish_current_state
 from rivulets.tracing import TraceContext, finish_span, start_span
+from rivulets.working_directory import resolve_effective_root, using_working_directory
 
 NODE_TYPES = (
     "agent",
@@ -155,9 +156,19 @@ async def execute_agent_node(
     try:
         if unattended:
             await ensure_unattended_tools_allowed(db, agent)
-        run_output = await run_agent(
-            db, agent.id, input_content, session_id=session_id, user_id="workflow"
-        )
+        rivulet_path = None
+        channel_path = None
+        if rivulet_id is not None:
+            rivulet_row = await db.get(Rivulet, rivulet_id)
+            if rivulet_row is not None:
+                rivulet_path = rivulet_row.working_directory
+                channel_row = await db.get(Channel, rivulet_row.channel_id)
+                if channel_row is not None:
+                    channel_path = channel_row.working_directory
+        with using_working_directory(resolve_effective_root(rivulet_path, channel_path)):
+            run_output = await run_agent(
+                db, agent.id, input_content, session_id=session_id, user_id="workflow"
+            )
     except Exception:
         # _run_node_with_retries retries/reports this uniformly with every
         # other node failure -- just close out the span first so it
