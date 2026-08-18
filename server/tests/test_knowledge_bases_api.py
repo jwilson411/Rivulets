@@ -192,10 +192,15 @@ def test_ingest_document_chunks_and_embeds_a_text_file(
     # 2500 chars at chunk_size=1000/overlap=100 -> chunks at [0:1000),
     # [900:1900), [1800:2500) = 3 chunks.
     assert body["chunk_count"] == 3
+    # #467: File.filename is stored at upload; the document payload
+    # must include it so a refresh can still render the original name.
+    assert body["filename"] == "notes.txt"
 
     listed = client.get(f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers)
     assert listed.status_code == 200
-    assert [d["id"] for d in listed.json()] == [body["id"]]
+    listed_body = listed.json()
+    assert [d["id"] for d in listed_body] == [body["id"]]
+    assert listed_body[0]["filename"] == "notes.txt"
 
     kb_after = client.get(f"/api/v1/knowledge-bases/{kb_id}", headers=auth_headers)
     assert kb_after.json()["document_count"] == 1
@@ -271,6 +276,7 @@ async def test_ingest_document_blocked_by_a_tripped_hard_stop_budget_cap(
         f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers
     ).json()
     assert documents[0]["status"] == "failed"
+    assert documents[0]["filename"] == "notes.txt"
 
 
 def test_ingest_document_rejects_non_text_file(
@@ -323,6 +329,7 @@ def test_ingest_document_without_embedding_provider_fails_clearly(
         f"/api/v1/knowledge-bases/{kb_id}/documents", headers=auth_headers
     ).json()
     assert documents[0]["status"] == "failed"
+    assert documents[0]["filename"] == "notes.txt"
 
 
 async def test_ingest_document_fetches_missing_content_from_a_known_source(

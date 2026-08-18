@@ -20,6 +20,7 @@ export interface KnowledgeBaseDocument {
 	id: string;
 	knowledge_base_id: string;
 	file_id: string;
+	filename: string;
 	status: 'pending' | 'ingested' | 'failed';
 	error_message: string | null;
 	chunk_count: number;

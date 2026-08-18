@@ -54,6 +54,7 @@ const ingestedDoc: KnowledgeBaseDocument = {
 	id: 'doc-1',
 	knowledge_base_id: 'kb-1',
 	file_id: 'file-abc12345',
+	filename: 'launch-notes.md',
 	status: 'ingested',
 	error_message: null,
 	chunk_count: 12
@@ -84,6 +85,9 @@ describe('knowledge-bases/[id]/+page.svelte', () => {
 
 		render(KnowledgeBaseDetailPage);
 
+		// Filename comes from the document API (#467), not session memory —
+		// this is the same payload a refresh would get.
+		await expect.element(page.getByText('launch-notes.md')).toBeInTheDocument();
 		await expect.element(page.getByText('Ready')).toBeInTheDocument();
 		await expect.element(page.getByText('12 chunks')).toBeInTheDocument();
 	});

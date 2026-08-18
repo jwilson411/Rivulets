@@ -104,6 +104,10 @@ class KnowledgeBaseDocumentOut(BaseModel):
     id: str
     knowledge_base_id: str
     file_id: str
+    # File.filename, joined from the uploaded File row -- the document
+    # table only stores file_id, so this has to be assembled here or the
+    # UI falls back to `file <id prefix>…` after a refresh (#467).
+    filename: str
     status: str
     error_message: str | None
     chunk_count: int
@@ -162,6 +166,24 @@ async def _kb_out(db: DbSession, kb: KnowledgeBase) -> KnowledgeBaseOut:
         team_id=kb.team_id,
         document_count=await _document_count(db, kb.id),
     )
+
+
+def _document_out(document: KnowledgeBaseDocument, filename: str) -> KnowledgeBaseDocumentOut:
+    return KnowledgeBaseDocumentOut(
+        id=document.id,
+        knowledge_base_id=document.knowledge_base_id,
+        file_id=document.file_id,
+        filename=filename,
+        status=document.status,
+        error_message=document.error_message,
+        chunk_count=document.chunk_count,
+    )
+
+
+def _filename_or_fallback(file_id: str, filename: str | None) -> str:
+    if filename:
+        return filename
+    return f"file {file_id[:8]}…"
 
 
 @router.get("", response_model=list[KnowledgeBaseOut])
@@ -235,12 +257,17 @@ async def delete_knowledge_base(
 @router.get("/{kb_id}/documents", response_model=list[KnowledgeBaseDocumentOut])
 async def list_documents(
     kb_id: str, db: DbSession, _: CurrentWorkspaceId
-) -> list[KnowledgeBaseDocument]:
+) -> list[KnowledgeBaseDocumentOut]:
     await _get_kb_or_404(db, kb_id)
     result = await db.execute(
-        select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id)
+        select(KnowledgeBaseDocument, File.filename)
+        .outerjoin(File, File.id == KnowledgeBaseDocument.file_id)
+        .where(KnowledgeBaseDocument.knowledge_base_id == kb_id)
     )
-    return list(result.scalars().all())
+    return [
+        _document_out(document, _filename_or_fallback(document.file_id, filename))
+        for document, filename in result.all()
+    ]
 
 
 @router.post(
@@ -254,7 +281,7 @@ async def ingest_document(
     db: DbSession,
     _: CurrentWorkspaceId,
     claims: Annotated[SessionClaims, Depends(get_session_claims)],
-) -> KnowledgeBaseDocument:
+) -> KnowledgeBaseDocumentOut:
     """Chunks and embeds an already-uploaded file (api/files.py's
     POST /files/upload) into this knowledge base. v1 is single-file,
     text-only, synchronous -- the request blocks until embedding
@@ -314,7 +341,7 @@ async def ingest_document(
         document.chunk_count = 0
         await db.commit()
         await db.refresh(document)
-        return document
+        return _document_out(document, file_row.filename)
 
     # #320: an embedding call is billed spend same as any agent LLM call,
     # but ingestion never checked budget caps at all before this -- an
@@ -358,7 +385,7 @@ async def ingest_document(
     document.chunk_count = len(chunks)
     await db.commit()
     await db.refresh(document)
-    return document
+    return _document_out(document, file_row.filename)
 
 
 @router.delete("/{kb_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
