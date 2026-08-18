@@ -84,7 +84,8 @@ describe('tools/+page.svelte', () => {
 
 		await expect.element(page.getByText('Built in')).toBeInTheDocument();
 		await expect.element(page.getByText('Yours')).toBeInTheDocument();
-		await expect.element(page.getByText('web_search')).toBeInTheDocument();
+		await expect.element(page.getByText('Web search')).toBeInTheDocument();
+		await expect.element(page.getByText('web_search', { exact: true })).not.toBeInTheDocument();
 		await expect.element(page.getByText('Available').first()).toBeInTheDocument();
 		await expect.element(page.getByText('Sensitive')).toBeInTheDocument();
 		await expect.element(page.getByText('Unavailable on this machine')).toBeInTheDocument();
@@ -153,7 +154,7 @@ describe('tools/+page.svelte', () => {
 		vi.mocked(tools.saveVersion).mockResolvedValueOnce(version);
 
 		render(ToolsPage);
-		await page.getByRole('button', { name: /fetch_notes/ }).click();
+		await page.getByRole('button', { name: /Fetch notes/ }).click();
 
 		const source = page.getByLabelText('Tool source code');
 		await expect.element(source).toHaveValue('def fetch_notes(): ...');
@@ -170,7 +171,7 @@ describe('tools/+page.svelte', () => {
 		vi.mocked(tools.rollback).mockResolvedValueOnce(customTool);
 
 		render(ToolsPage);
-		await page.getByRole('button', { name: /fetch_notes/ }).click();
+		await page.getByRole('button', { name: /Fetch notes/ }).click();
 		await page.getByRole('button', { name: 'Roll back' }).click();
 
 		expect(tools.rollback).toHaveBeenCalledWith('tool-3', 1);
@@ -182,7 +183,7 @@ describe('tools/+page.svelte', () => {
 		vi.mocked(tools.remove).mockResolvedValueOnce(undefined);
 
 		render(ToolsPage);
-		await page.getByRole('button', { name: /fetch_notes/ }).click();
+		await page.getByRole('button', { name: /Fetch notes/ }).click();
 		await page.getByRole('button', { name: 'Delete tool' }).click();
 
 		expect(tools.remove).not.toHaveBeenCalled();
@@ -196,11 +197,11 @@ describe('tools/+page.svelte', () => {
 		vi.mocked(tools.list).mockResolvedValue([customTool]);
 
 		render(ToolsPage);
-		await expect.element(page.getByText('fetch_notes')).toBeInTheDocument();
+		await expect.element(page.getByText('Fetch notes')).toBeInTheDocument();
 
 		await expect.element(page.getByRole('button', { name: 'New tool' })).not.toBeInTheDocument();
 		// Custom rows aren't clickable buttons for a guest.
-		await expect.element(page.getByRole('button', { name: /fetch_notes/ })).not.toBeInTheDocument();
+		await expect.element(page.getByRole('button', { name: /Fetch notes/ })).not.toBeInTheDocument();
 	});
 
 	it('shows a quiet error with retry when tools fail to load', async () => {

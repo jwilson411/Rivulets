@@ -203,8 +203,12 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByRole('checkbox', { name: /Google Gmail send/ })).toBeChecked();
 		await page.getByText('Advanced', { exact: true }).click();
 		await expect
-			.element(page.getByRole('checkbox', { name: 'integrations:google:write' }))
+			.element(page.getByRole('checkbox', { name: /Google send, draft, and write/ }))
 			.not.toBeChecked();
+		await expect.element(page.getByText('Sensitive tools', { exact: true })).toBeInTheDocument();
+		await expect
+			.element(page.getByText('integrations:google:write', { exact: true }))
+			.toBeInTheDocument();
 
 		await page.getByLabelText('Name').fill('Writer');
 		await page.getByLabelText('What this agent does').fill('Drafts and edits prose.');

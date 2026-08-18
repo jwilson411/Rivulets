@@ -111,6 +111,34 @@ export function humanizeToolName(name: string): string {
 	return words.join(' ') || name;
 }
 
+// #476: agent Permissions is the same catalog as TOOL_SCOPES, shown as
+// sentences so "uncheck what you want to hold back" is readable. Slug
+// stays the value the API stores.
+const SCOPE_LABELS: Record<string, string> = {
+	'channels:manage': 'Manage channels',
+	'agents_teams:manage': 'Manage agents and teams',
+	'mcp_servers:manage': 'Manage MCP servers',
+	'workflows:manage': 'Manage workflows',
+	'settings:manage': 'Manage settings',
+	'invites:manage': 'Manage invites',
+	'sensitive_tools:manage': 'Sensitive tools',
+	'integrations:google': 'Google Workspace',
+	'integrations:google:write': 'Google send, draft, and write'
+};
+
+export function scopeDisplayName(scope: string): string {
+	if (SCOPE_LABELS[scope]) return SCOPE_LABELS[scope];
+	const parts = scope.split(':').filter(Boolean);
+	if (parts.length === 0) return scope;
+	const verb = parts[parts.length - 1];
+	const resource = humanizeToolName(parts.slice(0, -1).join('_'));
+	if (verb === 'manage' && resource) return `Manage ${resource.toLowerCase()}`;
+	if ((verb === 'write' || verb === 'read') && resource) {
+		return `${resource} ${verb}`;
+	}
+	return parts.map((part) => humanizeToolName(part)).join(' ') || scope;
+}
+
 export function toolsByGroup(tools: Tool[]): { key: string; label: string; tools: Tool[] }[] {
 	return TOOL_GROUPS.map((group) => ({
 		...group,

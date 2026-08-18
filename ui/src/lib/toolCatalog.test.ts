@@ -6,6 +6,7 @@ import {
 	humanizeToolName,
 	inviteGrantMayAssignTool,
 	isGoogleIntegrationTool,
+	scopeDisplayName,
 	SETTINGS_INTEGRATIONS_HREF,
 	SETTINGS_INTEGRATIONS_SEARCH,
 	toolDescriptionLine,
@@ -80,6 +81,24 @@ describe('isGoogleIntegrationTool', () => {
 		expect(isGoogleIntegrationTool('web_search')).toBe(false);
 		expect(SETTINGS_INTEGRATIONS_SEARCH).toBe('?tab=integrations');
 		expect(SETTINGS_INTEGRATIONS_HREF).toBe('/settings?tab=integrations');
+	});
+});
+
+describe('scopeDisplayName', () => {
+	it('turns catalog slugs into sentences (#476)', () => {
+		expect(scopeDisplayName('channels:manage')).toBe('Manage channels');
+		expect(scopeDisplayName('agents_teams:manage')).toBe('Manage agents and teams');
+		expect(scopeDisplayName('mcp_servers:manage')).toBe('Manage MCP servers');
+		expect(scopeDisplayName('workflows:manage')).toBe('Manage workflows');
+		expect(scopeDisplayName('settings:manage')).toBe('Manage settings');
+		expect(scopeDisplayName('invites:manage')).toBe('Manage invites');
+		expect(scopeDisplayName('sensitive_tools:manage')).toBe('Sensitive tools');
+		expect(scopeDisplayName('integrations:google')).toBe('Google Workspace');
+		expect(scopeDisplayName('integrations:google:write')).toBe('Google send, draft, and write');
+	});
+
+	it('falls back from an unknown slug', () => {
+		expect(scopeDisplayName('channels:read')).toBe('Channels read');
 	});
 });
 

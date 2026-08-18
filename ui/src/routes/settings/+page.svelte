@@ -23,6 +23,7 @@
 	import { teams as teamsApi, type Team } from '$lib/api/teams';
 	import ModelPicker from '$lib/components/ModelPicker.svelte';
 	import FolderPickerSheet from '$lib/components/FolderPickerSheet.svelte';
+	import { scopeDisplayName } from '$lib/toolCatalog';
 	import Button from '$lib/ui/Button.svelte';
 	import FilterChip from '$lib/ui/FilterChip.svelte';
 	import Icon from '$lib/ui/Icon.svelte';
@@ -731,9 +732,7 @@
 					Connect a Google account so assigned agents can read Gmail, Calendar, Drive, Docs, Sheets,
 					Contacts, and Tasks, and create Meet links. Sending mail, creating events, adding tasks,
 					and writing files stay off until you grant
-					<code class="font-mono text-[13px] text-ink dark:text-ink-dark"
-						>integrations:google:write</code
-					>
+					{scopeDisplayName('integrations:google:write')}
 					on that agent (Agents → More options → Permissions). Tokens live in this machine's credential
 					store, not the workspace database. Reconnect an account to grant newly added Google scopes or
 					replace expired access without creating a second connection.

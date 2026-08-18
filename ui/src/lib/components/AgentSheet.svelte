@@ -16,6 +16,7 @@
 	import {
 		inviteGrantMayAssignTool,
 		isGoogleIntegrationTool,
+		scopeDisplayName,
 		SETTINGS_INTEGRATIONS_SEARCH,
 		toolDescriptionLine,
 		toolDisplayName,
@@ -474,10 +475,10 @@
 													Settings → Integrations
 												</a>
 												Send, draft, and write stay off until you also grant
-												<code class="font-mono">integrations:google:write</code> under Permissions.
+												{scopeDisplayName('integrations:google:write')} under Permissions.
 											{:else}
 												Send, draft, and write stay off until you grant
-												<code class="font-mono">integrations:google:write</code> under Permissions.
+												{scopeDisplayName('integrations:google:write')} under Permissions.
 											{/if}
 										</p>
 									{/if}
@@ -519,7 +520,7 @@
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
 							{isOwner
-								? "New agents start with every tool checked. Google send, draft, and file writes stay inert until you grant integrations:google:write. Sensitive tools still need the owner's OK for unattended runs."
+								? `New agents start with every tool checked. Google send, draft, and file writes stay inert until you grant ${scopeDisplayName('integrations:google:write')}. Sensitive tools still need the owner's OK for unattended runs.`
 								: guestCannotRewriteTools
 									? 'This agent already has tools only the owner can assign, so the set stays as-is.'
 									: 'New agents start with every tool you can assign. Uncheck any you want to hold back.'}
@@ -602,14 +603,19 @@
 							<div class="flex flex-col gap-2">
 								<span class="text-sm font-semibold text-ink dark:text-ink-dark">Permissions</span>
 								{#each scopeCatalog as scope (scope)}
-									<label class="flex cursor-pointer items-center gap-3">
+									<label class="flex cursor-pointer items-start gap-3">
 										<input
 											type="checkbox"
 											checked={selectedScopes.includes(scope)}
 											onchange={() => toggleScope(scope)}
-											class="accent-(--color-accent)"
+											class="mt-1 accent-(--color-accent)"
 										/>
-										<span class="font-mono text-sm text-ink dark:text-ink-dark">{scope}</span>
+										<span class="flex min-w-0 flex-1 flex-col gap-0.5">
+											<span class="text-[15px] text-ink dark:text-ink-dark">
+												{scopeDisplayName(scope)}
+											</span>
+											<span class="text-[13px] text-muted dark:text-muted-dark">{scope}</span>
+										</span>
 									</label>
 								{/each}
 								<p class="text-[13px] text-muted dark:text-muted-dark">
