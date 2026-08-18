@@ -3,7 +3,7 @@ callable; api/tools.py registers the ones a workspace enables against agents.
 
 `handoff` and `engage_team` are the exceptions — they're not opt-in like
 the rest of this library; agentos/service.py attaches both to every agent
-unconditionally (FR-6.1, orchestrator lock).
+unconditionally (FR-6.1). `hire_teammate` is attached only to Assistant.
 """
 
 from rivulets.tools.builtin.agents_teams import (
@@ -38,6 +38,7 @@ from rivulets.tools.builtin.filesystem import (
     write_file,
 )
 from rivulets.tools.builtin.handoff import handoff
+from rivulets.tools.builtin.hire_teammate import hire_teammate
 from rivulets.tools.builtin.http_request import http_request
 from rivulets.tools.builtin.invites import create_invite, list_invites, revoke_invite
 from rivulets.tools.builtin.knowledge_base import search_knowledge_base
@@ -78,6 +79,7 @@ __all__ = [
     "fetch_webpage",
     "get_workspace_settings",
     "handoff",
+    "hire_teammate",
     "http_request",
     "list_agents",
     "list_channels",

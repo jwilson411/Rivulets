@@ -6,14 +6,15 @@ messages (FR-4.1, FR-5.2, FR-12.1).
 Also recurses: an agent's own reply is itself re-dispatched (FR-5.6,
 AC-014's "Architect mentions @DBA, DBA responds" scenario). The speaker
 is excluded from unsolicited re-matching — an `always` agent answering a
-human must not then answer its own "how can I help?" — but an explicit
-@mention or a specialist keyword on a *teammate* still fires. Mention
-and handoff ping-pong is what loop-prevention guards (FR-7,
-dispatch/guards.py) bound; without recursion those loops are
-structurally impossible. Recursion depth is bounded by the guard checks
-running before each invocation, not by a separate depth counter: worst
-case is ~guard.turn_limit calls deep, comfortably under Python's
-recursion limit for the FR-7.4-documented range (1-100).
+human must not then answer its own "how can I help?" — and when Assistant
+is present, keyword rematch does not wake other specialists either.
+Specialists speak via @mention or handoff. Mention and handoff ping-pong
+is what loop-prevention guards (FR-7, dispatch/guards.py) bound; without
+recursion those loops are structurally impossible. Recursion depth is
+bounded by the guard checks running before each invocation, not by a
+separate depth counter: worst case is ~guard.turn_limit calls deep,
+comfortably under Python's recursion limit for the FR-7.4-documented
+range (1-100).
 
 Handoffs (FR-6) reuse the exact same invoke/error/persist/guard/recurse
 pipeline as ordinary dispatch — `_invoke_agent` and `_handle_handoff` call
@@ -53,7 +54,7 @@ from urllib.parse import urlsplit
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from croniter import CroniterError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos import run_agent, sync_agents
@@ -125,9 +126,12 @@ from rivulets.dispatch.orchestration import (
     TEAM_ENGAGED_CONTENT_TYPE,
     apply_orchestrator_lock,
     find_orchestrator_id,
+    format_team_roster,
+    is_orchestrator_name,
     is_team_engaged,
     load_orchestrator,
     merge_orchestrator,
+    wrap_with_roster,
 )
 from rivulets.dispatch.rules import Rule, RuleType, is_valid_regex
 from rivulets.security import keys
@@ -233,6 +237,28 @@ def _find_engage_team_call(run_output: RunOutput) -> str | None:
         reason = args.get("reason")
         if isinstance(reason, str) and reason.strip():
             return reason.strip()
+    return None
+
+
+class HireTeammateCall:
+    """Parsed args for a hire_teammate tool call."""
+
+    def __init__(self, name: str, args: dict[str, object]) -> None:
+        self.name = name
+        self.role = _str_or_none(args, "role") or ""
+        self.instructions = _str_or_none(args, "instructions") or ""
+        self.assignment = _str_or_none(args, "assignment") or ""
+
+
+def _find_hire_teammate_call(run_output: RunOutput) -> HireTeammateCall | None:
+    """Look for `hire_teammate(name, role, instructions, assignment)`."""
+    for tool_call in run_output.tools or []:
+        if tool_call.tool_name != "hire_teammate":
+            continue
+        args: dict[str, object] = tool_call.tool_args or {}
+        name = args.get("name")
+        if isinstance(name, str) and name.strip():
+            return HireTeammateCall(name.strip(), args)
     return None
 
 
@@ -1017,8 +1043,8 @@ async def _dispatch_and_respond(
                 method=DispatchMethod.DEFAULT,
                 llm_invoked=result.llm_invoked,
             )
-    # Locked threads: only Assistant (and explicit @mentions) may speak
-    # until engage_team / handoff / the human unlocks the roster.
+    # Assistant stays the traffic cop: mentions and explicit handoffs
+    # reach specialists; keyword rematch does not, even after engage.
     result = apply_orchestrator_lock(
         result,
         team_engaged=team_engaged,
@@ -1492,6 +1518,8 @@ async def _invoke_agent(
     prompt = await with_conversation_history(
         db, rivulet.id, message_content, exclude_message_id=triggering_message_id
     )
+    if is_orchestrator_name(agent.name):
+        prompt = wrap_with_roster(format_team_roster(team_agents), prompt)
 
     # #237: BEGIN IMMEDIATE takes SQLite's write lock for this section up
     # front (see db/session.py's begin_immediate) so a concurrent
@@ -1769,6 +1797,32 @@ async def _invoke_agent(
         )
         await db.commit()
         return new_messages
+
+    # Hire first so a same-turn handoff can see the new teammate.
+    hire_call = _find_hire_teammate_call(run_output)
+    if hire_call is not None:
+        if is_orchestrator_name(agent.name):
+            hired, hire_messages = await _handle_hire_teammate(
+                db, rivulet, channel, agent, hire_call
+            )
+            new_messages.extend(hire_messages)
+            if hired is not None and all(existing.id != hired.id for existing, _ in team_agents):
+                team_agents.append(
+                    (
+                        hired,
+                        AgentDispatchInfo(
+                            agent_id=hired.id,
+                            name=hired.name,
+                            rules=[Rule(RuleType.MENTION_ONLY)],
+                            description=hired.description,
+                        ),
+                    )
+                )
+        else:
+            logger.warning(
+                "Agent %r called hire_teammate but is not the orchestrator — ignoring",
+                agent.name,
+            )
 
     handoff_call = _find_handoff_call(run_output)
     if handoff_call is not None:
@@ -2179,25 +2233,12 @@ async def _handle_handoff(
     return messages
 
 
-async def _latest_human_message(db: AsyncSession, rivulet_id: str) -> Message | None:
-    result = await db.execute(
-        select(Message)
-        .where(
-            Message.rivulet_id == rivulet_id,
-            Message.sender_type == "human",
-            Message.content_type == "text",
-        )
-        .order_by(Message.created_at.desc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def post_team_engaged_message(
     db: AsyncSession, rivulet: Rivulet, *, actor_name: str, reason: str
 ) -> Message | None:
-    """Persist the unlock marker. Returns None if the team is already
-    engaged so a second click / second tool call is a no-op."""
+    """Persist the "Assistant should pick someone" marker. Returns None
+    if that marker (or a handoff) is already in the thread so a second
+    click / second tool call is a no-op."""
     if await is_team_engaged(db, rivulet.id):
         return None
     message = Message(
@@ -2229,29 +2270,185 @@ async def _handle_engage_team(
     triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
-    """Unlock specialists and re-dispatch the last human turn so they
-    can actually join, instead of waiting for the next message."""
+    """Post the visible marker. Does not open keyword rematch — the
+    caller should hand off to the one teammate who should act."""
+    _ = (channel, guard_state, triggering_message_id, trace_ctx)
     engaged = await post_team_engaged_message(db, rivulet, actor_name=agent.name, reason=reason)
     if engaged is None:
         return []
-    messages: list[Message] = [engaged]
-    last_human = await _latest_human_message(db, rivulet.id)
-    if last_human is None or not last_human.content:
-        return messages
-    # Speaker is the orchestrator, so they are excluded from rematch;
-    # the last human text is now evaluated against an unlocked roster.
-    follow_up = await dispatch_and_respond(
+    return [engaged]
+
+
+def _hire_description(name: str, role: str) -> str:
+    role = role.strip()
+    if _AGENT_DESCRIPTION_MIN_LEN <= len(role) <= _AGENT_DESCRIPTION_MAX_LEN:
+        return role
+    if len(role) > _AGENT_DESCRIPTION_MAX_LEN:
+        return role[:_AGENT_DESCRIPTION_MAX_LEN]
+    filled = f"{name} specialist. {role}".strip()
+    if len(filled) < _AGENT_DESCRIPTION_MIN_LEN:
+        filled = f"{name} specialist hired onto this team."
+    return filled[:_AGENT_DESCRIPTION_MAX_LEN]
+
+
+async def _add_agent_to_channel_team(
+    db: AsyncSession, channel: Channel, agent: Agent
+) -> str | None:
+    """Add `agent` to the channel's team. Returns an error, or None."""
+    if channel.team_id is None:
+        return "this channel has no team assigned — assign a team first, then hire"
+    already = await db.scalar(
+        select(TeamAgent).where(
+            TeamAgent.team_id == channel.team_id, TeamAgent.agent_id == agent.id
+        )
+    )
+    if already is not None:
+        return None
+    old_ids = set(
+        (await db.scalars(select(TeamAgent.team_id).where(TeamAgent.agent_id == agent.id))).all()
+    )
+    max_pos = await db.scalar(
+        select(func.max(TeamAgent.position)).where(TeamAgent.team_id == channel.team_id)
+    )
+    db.add(
+        TeamAgent(
+            team_id=channel.team_id,
+            agent_id=agent.id,
+            position=(max_pos or 0) + 1,
+        )
+    )
+    await db.commit()
+    await publish_agent_teams_change(db, agent.id, old_ids, old_ids | {channel.team_id})
+    return None
+
+
+async def _handle_hire_teammate(
+    db: AsyncSession,
+    rivulet: Rivulet,
+    channel: Channel,
+    agent: Agent,
+    call: HireTeammateCall,
+) -> tuple[Agent | None, list[Message]]:
+    """Create or adopt a specialist, add them to this channel's team.
+
+    Does not invoke them — the orchestrator should handoff in the same
+    turn. Returns the agent so that handoff can see them on the roster.
+    """
+    if is_orchestrator_name(call.name):
+        return None, [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to hire {call.name!r}, but that name is reserved "
+                "for the channel orchestrator.",
+            )
+        ]
+    if not (_AGENT_NAME_MIN_LEN <= len(call.name) <= _AGENT_NAME_MAX_LEN):
+        return None, [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to hire {call.name!r}, but agent names must be "
+                f"{_AGENT_NAME_MIN_LEN}-{_AGENT_NAME_MAX_LEN} characters.",
+            )
+        ]
+    if channel.team_id is None:
+        return None, [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} tried to hire {call.name!r}, but this channel has no "
+                "team assigned — assign a team first, then hire.",
+            )
+        ]
+
+    existing = await db.scalar(select(Agent).where(Agent.name == call.name))
+    if existing is not None:
+        already_on_team = False
+        if channel.team_id is not None:
+            already_on_team = (
+                await db.scalar(
+                    select(TeamAgent).where(
+                        TeamAgent.team_id == channel.team_id,
+                        TeamAgent.agent_id == existing.id,
+                    )
+                )
+            ) is not None
+        error = await _add_agent_to_channel_team(db, channel, existing)
+        if error is not None:
+            return None, [
+                _system_message(
+                    db,
+                    rivulet,
+                    f"@{agent.name} tried to hire @{existing.name}, but {error}.",
+                )
+            ]
+        assignment = call.assignment.strip()
+        suffix = f": {assignment}" if assignment else "."
+        if already_on_team:
+            brought = f"@{agent.name} can already hand off to @{existing.name}{suffix}"
+        else:
+            brought = f"@{agent.name} brought @{existing.name} onto the team{suffix}"
+        message = _system_message(db, rivulet, brought)
+        publish(
+            rivulet.id,
+            "system_alert",
+            {
+                "type": "agent_hired",
+                "agent_id": existing.id,
+                "created": False,
+                "hired_by": agent.id,
+            },
+        )
+        return existing, [message]
+
+    description = _hire_description(call.name, call.role)
+    instructions = call.instructions.strip() or (
+        f"You are {call.name}. {description} Do the assignment you are handed "
+        "and report back clearly."
+    )
+    new_agent = Agent(
+        name=call.name,
+        description=description,
+        instructions=instructions,
+        model=AUTO_MODEL,
+    )
+    db.add(new_agent)
+    await db.flush()
+    await record_agent_version(db, new_agent)
+    await db.commit()
+    await publish_agent_change(db, new_agent)
+    await replace_routing_rules(db, new_agent.id, [("mention_only", "", 0)])
+    await register_agent_with_agentos(db, new_agent)
+    error = await _add_agent_to_channel_team(db, channel, new_agent)
+    if error is not None:
+        return new_agent, [
+            _system_message(
+                db,
+                rivulet,
+                f"@{agent.name} created @{new_agent.name} but could not add them to "
+                f"the team: {error}.",
+            )
+        ]
+
+    assignment = call.assignment.strip()
+    suffix = f": {assignment}" if assignment else "."
+    message = _system_message(
         db,
         rivulet,
-        channel,
-        last_human.content,
-        from_agent_id=agent.id,
-        from_agent_name=agent.name,
-        triggering_message_id=triggering_message_id or last_human.id,
-        trace_ctx=trace_ctx,
+        f"@{agent.name} hired @{new_agent.name} onto the team{suffix}",
     )
-    messages.extend(follow_up)
-    return messages
+    publish(
+        rivulet.id,
+        "system_alert",
+        {
+            "type": "agent_hired",
+            "agent_id": new_agent.id,
+            "created": True,
+            "hired_by": agent.id,
+        },
+    )
+    return new_agent, [message]
 
 
 async def _handle_run_workflow_trigger(

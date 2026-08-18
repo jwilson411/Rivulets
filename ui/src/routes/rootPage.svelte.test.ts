@@ -185,7 +185,7 @@ describe('routes/+page.svelte (Home)', () => {
 			.toBeInTheDocument();
 		await expect.element(page.getByText('#general', { exact: true }).first()).toBeInTheDocument();
 		await expect.element(page.getByPlaceholder('Start a conversation…')).toBeInTheDocument();
-		await expect.element(page.getByText(/Assistant is gathering context/)).toBeInTheDocument();
+		await expect.element(page.getByText(/Assistant is coordinating/)).toBeInTheDocument();
 	});
 
 	it('shows the empty inbox with a way into #general when no conversations exist', async () => {

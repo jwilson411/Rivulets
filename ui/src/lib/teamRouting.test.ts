@@ -33,14 +33,15 @@ describe('defaultChannelTeamId', () => {
 });
 
 describe('teamComposerHint', () => {
-	it('says the team answers only when a rule or mention matches', () => {
-		expect(teamComposerHint('Test Team')).toBe('Test Team answers when a rule or @mention matches');
+	it('says Assistant coordinates the team via handoff or mention', () => {
+		expect(teamComposerHint('Test Team')).toContain('Assistant coordinates Test Team');
+		expect(teamComposerHint('Test Team')).toContain('handoff');
 	});
 });
 
 describe('lockedTeamComposerHint', () => {
-	it('says Assistant is gathering context', () => {
-		expect(lockedTeamComposerHint()).toContain('Assistant is gathering context');
+	it('says Assistant is coordinating', () => {
+		expect(lockedTeamComposerHint()).toContain('Assistant is coordinating');
 	});
 });
 

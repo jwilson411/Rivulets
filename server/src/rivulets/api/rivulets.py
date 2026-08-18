@@ -55,7 +55,7 @@ from rivulets.db.models import Channel, File, Human, Message, Rivulet
 from rivulets.db.session import session_scope
 from rivulets.dispatch import dispatch_and_respond
 from rivulets.dispatch.guards import get_or_create_guard_state, reset_guard_state
-from rivulets.dispatch.orchestration import is_team_engaged, load_orchestrator
+from rivulets.dispatch.orchestration import HUMAN_PICK_NUDGE, is_team_engaged
 from rivulets.dispatch.service import post_team_engaged_message
 from rivulets.streaming import publish, subscribe, unsubscribe
 from rivulets.sync.publish import publish_current_state
@@ -654,7 +654,7 @@ async def _latest_agent_text_message(db: DbSession, rivulet_id: str) -> Message 
 
 
 class EngageTeamBody(BaseModel):
-    reason: str = "The human unlocked the team."
+    reason: str = "The human asked Assistant to pick a teammate."
 
 
 @router.post(
@@ -670,11 +670,9 @@ async def engage_team(
     background_tasks: BackgroundTasks,
     body: EngageTeamBody | None = None,
 ) -> MessageOut:
-    """Unlock specialists in this thread so keyword / always rules apply
-    again. Assistant (or a prior handoff) can also do this; this is the
-    human-facing button when the orchestrator is still gathering context.
-    Re-dispatches the last human message against the now-unlocked roster
-    so someone can answer without waiting for another send."""
+    """Ask Assistant to stop gathering context and pick a teammate.
+    Does not let keyword rematch wake the whole roster — Assistant
+    hands off to one specialist, or proposes a hire."""
     rivulet = await _get_rivulet_or_404(db, rivulet_id)
     if rivulet.status == "closed":
         raise HTTPException(
@@ -684,47 +682,33 @@ async def engage_team(
     if await is_team_engaged(db, rivulet.id):
         raise HTTPException(status.HTTP_409_CONFLICT, "The team is already engaged")
     human = await _get_human_or_404(db, human_id)
-    reason = (body.reason if body is not None else None) or "The human unlocked the team."
+    reason = (body.reason if body is not None else None) or (
+        "The human asked Assistant to pick a teammate."
+    )
     message = await post_team_engaged_message(
         db, rivulet, actor_name=human.display_name, reason=reason
     )
     if message is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "The team is already engaged")
 
-    last_human = (
-        await db.execute(
-            select(Message)
-            .where(
-                Message.rivulet_id == rivulet.id,
-                Message.sender_type == "human",
-                Message.content_type == "text",
-            )
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    orchestrator = await load_orchestrator(db)
-    if last_human is not None and last_human.content:
-        channel = await _get_channel_or_404(db, rivulet.channel_id)
-        trace_ctx = await start_trace(
-            db,
-            trigger_type="message",
-            label=last_human.content,
-            rivulet_id=rivulet.id,
-            channel_id=channel.id,
-        )
-        await db.commit()
-        _schedule_message_dispatch(
-            background_tasks,
-            rivulet_id=rivulet.id,
-            channel_id=channel.id,
-            message_id=last_human.id,
-            content=last_human.content,
-            file_ids=[],
-            trace_id=trace_ctx.trace_id,
-            from_agent_id=orchestrator[0].id if orchestrator is not None else None,
-            from_agent_name=orchestrator[0].name if orchestrator is not None else None,
-        )
+    channel = await _get_channel_or_404(db, rivulet.channel_id)
+    trace_ctx = await start_trace(
+        db,
+        trigger_type="message",
+        label=reason,
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+    )
+    await db.commit()
+    _schedule_message_dispatch(
+        background_tasks,
+        rivulet_id=rivulet.id,
+        channel_id=channel.id,
+        message_id=message.id,
+        content=HUMAN_PICK_NUDGE,
+        file_ids=[],
+        trace_id=trace_ctx.trace_id,
+    )
     await _publish_message_change(db, message)
     return _to_message_out(message, [])
 
