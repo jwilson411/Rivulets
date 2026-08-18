@@ -28,12 +28,14 @@ on their own reply, so this does not become a self-loop.
 #410: specialists get a few real keywords at seed time (not an LLM
 catch-all or an invalid URL regex) so the sheet can show them.
 
-#344: seed_starter_agents also grants each starter the AgentToolScope(s)
-its assigned tools need (BUILTIN_TOOL_SCOPES, #188) -- without this,
-Coder's execute_python/write_file and Researcher's http_request are
-assigned via AgentTool but never actually resolve (tool_resolution.py's
-resolve_agent_tools), despite both the README and the roster itself
-advertising them as working out of the box.
+Every starter agent is granted every builtin tool and every capability
+scope (TOOL_SCOPES). Assignment without the matching AgentToolScope
+leaves scoped tools inert (tool_resolution.py's resolve_agent_tools),
+so the seed has to do both or the roster would advertise tools that
+never resolve. Existing workspaces that still have the original curated
+tool set (or Writer's empty set) are upgraded once via
+ensure_starter_agents_have_all_tools; an owner who already changed
+that set is left alone.
 """
 
 from dataclasses import dataclass
@@ -42,7 +44,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rivulets.agentos.models import AUTO_MODEL
-from rivulets.agentos.tool_scopes import BUILTIN_TOOL_SCOPES
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -60,7 +62,6 @@ class _StarterAgent:
     name: str
     description: str
     instructions: str
-    tool_names: tuple[str, ...] = ()
 
 
 _ASSISTANT_NAME = "Assistant"
@@ -102,10 +103,6 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
         name="Assistant",
         description=_ASSISTANT_ORCHESTRATOR_DESCRIPTION,
         instructions=_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,
-        # #422: a small safe chat set so the Tools picker isn't an empty
-        # wall of unchecked names. None of these are in
-        # SENSITIVE_BUILTIN_TOOL_NAMES / BUILTIN_TOOL_SCOPES.
-        tool_names=("web_search", "read_attached_file", "search_knowledge_base"),
     ),
     _StarterAgent(
         name="Coder",
@@ -118,7 +115,6 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
             "work, and explain your reasoning concisely. Prefer small, correct changes over "
             "speculative rewrites."
         ),
-        tool_names=("read_file", "write_file", "list_files", "execute_python"),
     ),
     _StarterAgent(
         name="Researcher",
@@ -131,7 +127,6 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
             "information, cite what you find, and summarize it accurately rather than "
             "guessing from memory."
         ),
-        tool_names=("web_search", "http_request"),
     ),
     _StarterAgent(
         name="Writer",
@@ -146,6 +141,16 @@ _STARTER_AGENTS: tuple[_StarterAgent, ...] = (
         ),
     ),
 )
+
+# Pre-all-tools seed assignments. Used only to recognize a starter that
+# has never been customized, so the login repair can upgrade it without
+# undoing an owner's later unchecks.
+_LEGACY_STARTER_TOOL_NAMES: dict[str, frozenset[str]] = {
+    "Assistant": frozenset({"web_search", "read_attached_file", "search_knowledge_base"}),
+    "Coder": frozenset({"read_file", "write_file", "list_files", "execute_python"}),
+    "Researcher": frozenset({"web_search", "http_request"}),
+    "Writer": frozenset(),
+}
 
 _STARTER_TEAM_NAME = "Starter Team"
 _STARTER_TEAM_DESCRIPTION = (
@@ -175,9 +180,6 @@ async def seed_starter_agents(db: AsyncSession) -> None:
     result = await db.execute(select(Agent.name))
     existing_names = set(result.scalars().all())
 
-    tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
-    tool_ids_by_name = {row.name: row.id for row in tool_result.scalars().all()}
-
     for starter in _STARTER_AGENTS:
         if starter.name in existing_names:
             continue
@@ -188,28 +190,7 @@ async def seed_starter_agents(db: AsyncSession) -> None:
             model=AUTO_MODEL,
         )
         db.add(agent)
-        await db.flush()  # populate agent.id before referencing it in AgentTool rows
-        required_scopes: set[str] = set()
-        for tool_name in starter.tool_names:
-            tool_id = tool_ids_by_name.get(tool_name)
-            if tool_id is not None:
-                db.add(AgentTool(agent_id=agent.id, tool_id=tool_id))
-            scope = BUILTIN_TOOL_SCOPES.get(tool_name)
-            if scope is not None:
-                required_scopes.add(scope)
-        # #344: assignment (AgentTool above) isn't eligibility -- a tool
-        # whose Tool.required_scope is set (BUILTIN_TOOL_SCOPES, #188) only
-        # resolves once the agent also holds a matching AgentToolScope. A
-        # fresh workspace has no owner-UI grant surface to reach yet at
-        # this point in the flow, so creating the workspace (the one event
-        # this function runs on) doubles as the owner's implicit approval
-        # of the starter roster it's about to ship with -- otherwise
-        # Coder's execute_python/write_file and Researcher's http_request
-        # would silently never resolve (tool_resolution.py's
-        # resolve_agent_tools), even though the roster and README both
-        # advertise them working out of the box.
-        for scope in required_scopes:
-            db.add(AgentToolScope(agent_id=agent.id, scope=scope))
+        await db.flush()
         seeded = _starter_routing_rule(starter.name)
         if seeded is not None:
             rule_type, pattern, priority = seeded
@@ -223,9 +204,84 @@ async def seed_starter_agents(db: AsyncSession) -> None:
             )
 
     await db.commit()
+    created = [starter.name for starter in _STARTER_AGENTS if starter.name not in existing_names]
+    if created:
+        await _grant_all_tools_to_named_agents(db, created)
+    await ensure_starter_agents_have_all_tools(db)
     await ensure_assistant_always_rule(db)
     await ensure_assistant_orchestrator_instructions(db)
     await repair_generated_routing_rules(db)
+
+
+async def _grant_all_tools_to_named_agents(db: AsyncSession, names: list[str]) -> None:
+    tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
+    builtin_ids = {row.id for row in tool_result.scalars().all()}
+    if not builtin_ids or not names:
+        return
+    agents = list((await db.scalars(select(Agent).where(Agent.name.in_(tuple(names))))).all())
+    await _grant_all_tools(db, agents, builtin_ids)
+
+
+async def _grant_all_tools(
+    db: AsyncSession, agents: list[Agent], builtin_ids: set[str]
+) -> None:
+    changed = False
+    for agent in agents:
+        existing_tool_ids = set(
+            (
+                await db.scalars(select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id))
+            ).all()
+        )
+        missing_tool_ids = builtin_ids - existing_tool_ids
+        for tool_id in missing_tool_ids:
+            db.add(AgentTool(agent_id=agent.id, tool_id=tool_id))
+
+        existing_scopes = set(
+            (
+                await db.scalars(
+                    select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+                )
+            ).all()
+        )
+        missing_scopes = TOOL_SCOPES - existing_scopes
+        for scope in missing_scopes:
+            db.add(AgentToolScope(agent_id=agent.id, scope=scope))
+
+        if missing_tool_ids or missing_scopes:
+            changed = True
+
+    if changed:
+        await db.commit()
+
+
+async def ensure_starter_agents_have_all_tools(db: AsyncSession) -> None:
+    """Upgrade a starter that still has its original curated tool set
+    (or Writer's empty set) to every builtin + every scope. A starter
+    whose assignment already differs -- owner unchecked something, or
+    already on the full set -- is left alone. Idempotent."""
+    tool_result = await db.execute(select(Tool).where(Tool.tool_type == "builtin"))
+    builtin_rows = list(tool_result.scalars().all())
+    builtin_ids = {row.id for row in builtin_rows}
+    name_by_id = {row.id: row.name for row in builtin_rows}
+    if not builtin_ids:
+        return
+
+    starter_names = tuple(starter.name for starter in _STARTER_AGENTS)
+    agents = list((await db.scalars(select(Agent).where(Agent.name.in_(starter_names)))).all())
+    to_upgrade: list[Agent] = []
+    for agent in agents:
+        existing_tool_ids = set(
+            (
+                await db.scalars(select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id))
+            ).all()
+        )
+        assigned_names = frozenset(
+            name_by_id[tool_id] for tool_id in existing_tool_ids if tool_id in name_by_id
+        )
+        legacy = _LEGACY_STARTER_TOOL_NAMES.get(agent.name)
+        if legacy is not None and assigned_names == legacy:
+            to_upgrade.append(agent)
+    await _grant_all_tools(db, to_upgrade, builtin_ids)
 
 
 async def ensure_assistant_always_rule(db: AsyncSession) -> None:

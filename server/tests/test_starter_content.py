@@ -11,11 +11,13 @@ from rivulets.agentos.starter_content import (
     _STARTER_TEAM_NAME,  # pyright: ignore[reportPrivateUsage]
     ensure_assistant_always_rule,
     ensure_assistant_orchestrator_instructions,
+    ensure_starter_agents_have_all_tools,
     repair_generated_routing_rules,
     seed_starter_agents,
     seed_starter_teams,
 )
 from rivulets.agentos.tool_resolution import resolve_agent_tools, seed_builtin_tools
+from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.db.models import (
     Agent,
     AgentRoutingRule,
@@ -56,108 +58,136 @@ async def test_seed_starter_agents_is_idempotent(db_session: AsyncSession) -> No
     assert len(names) == len(set(names))
 
 
-async def test_seed_starter_agents_assigns_expected_tools(db_session: AsyncSession) -> None:
+async def test_seed_starter_agents_assigns_every_builtin_tool(db_session: AsyncSession) -> None:
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
-    coder = (await db_session.execute(select(Agent).where(Agent.name == "Coder"))).scalar_one()
-    result = await db_session.execute(
-        select(Tool.name)
-        .join(AgentTool, AgentTool.tool_id == Tool.id)
-        .where(AgentTool.agent_id == coder.id)
+    builtin_names = set(
+        (await db_session.execute(select(Tool.name).where(Tool.tool_type == "builtin"))).scalars()
     )
-    assert set(result.scalars().all()) == {
-        "read_file",
-        "write_file",
-        "list_files",
-        "execute_python",
-    }
+    assert builtin_names
 
-    assistant = (
-        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
-    ).scalar_one()
-    result = await db_session.execute(
-        select(Tool.name)
-        .join(AgentTool, AgentTool.tool_id == Tool.id)
-        .where(AgentTool.agent_id == assistant.id)
-    )
-    assert set(result.scalars().all()) == {
-        "web_search",
-        "read_attached_file",
-        "search_knowledge_base",
-    }
+    for starter_name in _STARTER_AGENT_NAMES:
+        agent = (
+            await db_session.execute(select(Agent).where(Agent.name == starter_name))
+        ).scalar_one()
+        assigned = set(
+            (
+                await db_session.execute(
+                    select(Tool.name)
+                    .join(AgentTool, AgentTool.tool_id == Tool.id)
+                    .where(AgentTool.agent_id == agent.id)
+                )
+            ).scalars()
+        )
+        assert assigned == builtin_names
 
 
-async def test_seed_starter_agents_grants_sensitive_tools_scope(db_session: AsyncSession) -> None:
-    """#344: Coder (execute_python, write_file) and Researcher (http_request)
-    are seeded with sensitive builtin tools assigned, but assignment alone
-    isn't eligibility (#188/#240) -- without a matching AgentToolScope grant
-    those tools silently never resolve. Assistant's #422 chat set and
-    Writer have no scoped tools, so they get no scope grant either."""
+async def test_seed_starter_agents_grants_every_capability_scope(db_session: AsyncSession) -> None:
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
-    coder = (await db_session.execute(select(Agent).where(Agent.name == "Coder"))).scalar_one()
-    researcher = (
-        await db_session.execute(select(Agent).where(Agent.name == "Researcher"))
-    ).scalar_one()
-    assistant = (
-        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
-    ).scalar_one()
-
-    coder_scopes = set(
-        (
-            await db_session.execute(
-                select(AgentToolScope.scope).where(AgentToolScope.agent_id == coder.id)
-            )
-        ).scalars()
-    )
-    researcher_scopes = set(
-        (
-            await db_session.execute(
-                select(AgentToolScope.scope).where(AgentToolScope.agent_id == researcher.id)
-            )
-        ).scalars()
-    )
-    assistant_scopes = set(
-        (
-            await db_session.execute(
-                select(AgentToolScope.scope).where(AgentToolScope.agent_id == assistant.id)
-            )
-        ).scalars()
-    )
-
-    assert coder_scopes == {"sensitive_tools:manage"}
-    assert researcher_scopes == {"sensitive_tools:manage"}
-    assert assistant_scopes == set()
+    for starter_name in _STARTER_AGENT_NAMES:
+        agent = (
+            await db_session.execute(select(Agent).where(Agent.name == starter_name))
+        ).scalar_one()
+        scopes = set(
+            (
+                await db_session.execute(
+                    select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+                )
+            ).scalars()
+        )
+        assert scopes == set(TOOL_SCOPES)
 
 
 async def test_seed_starter_agents_sensitive_tools_actually_resolve(
     db_session: AsyncSession,
 ) -> None:
-    """The end-to-end version of the test above: resolve_agent_tools (the
-    function that actually gates what an agent can call) returns Coder's
-    and Researcher's sensitive builtins post-seed, not just skips them with
-    a warning."""
+    """resolve_agent_tools returns every seeded builtin, including scoped
+    ones -- assignment plus the matching AgentToolScope grant."""
     await seed_builtin_tools(db_session)
     await seed_starter_agents(db_session)
 
-    coder = (await db_session.execute(select(Agent).where(Agent.name == "Coder"))).scalar_one()
-    researcher = (
-        await db_session.execute(select(Agent).where(Agent.name == "Researcher"))
+    builtin_names = set(
+        (await db_session.execute(select(Tool.name).where(Tool.tool_type == "builtin"))).scalars()
+    )
+    for starter_name in _STARTER_AGENT_NAMES:
+        agent = (
+            await db_session.execute(select(Agent).where(Agent.name == starter_name))
+        ).scalar_one()
+        resolved = {fn.name for fn in await resolve_agent_tools(db_session, agent)}
+        assert resolved == builtin_names
+
+
+async def test_ensure_starter_agents_have_all_tools_backfills_legacy_set(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = Agent(
+        name="Assistant",
+        description="legacy starter with a curated tool set",
+        instructions="You are helpful.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    for name in ("web_search", "read_attached_file", "search_knowledge_base"):
+        tool_row = (await db_session.execute(select(Tool).where(Tool.name == name))).scalar_one()
+        db_session.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id))
+    await db_session.commit()
+
+    await ensure_starter_agents_have_all_tools(db_session)
+
+    builtin_ids = set(
+        (await db_session.execute(select(Tool.id).where(Tool.tool_type == "builtin"))).scalars()
+    )
+    assigned = set(
+        (
+            await db_session.execute(
+                select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    scopes = set(
+        (
+            await db_session.execute(
+                select(AgentToolScope.scope).where(AgentToolScope.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    assert assigned == builtin_ids
+    assert scopes == set(TOOL_SCOPES)
+
+
+async def test_ensure_starter_agents_have_all_tools_leaves_customized_starter(
+    db_session: AsyncSession,
+) -> None:
+    await seed_builtin_tools(db_session)
+    agent = Agent(
+        name="Assistant",
+        description="owner already trimmed this starter's tools",
+        instructions="You are helpful.",
+        model=AUTO_MODEL,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    web_search = (
+        await db_session.execute(select(Tool).where(Tool.name == "web_search"))
     ).scalar_one()
+    db_session.add(AgentTool(agent_id=agent.id, tool_id=web_search.id))
+    await db_session.commit()
 
-    coder_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, coder)}
-    researcher_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, researcher)}
+    await ensure_starter_agents_have_all_tools(db_session)
 
-    assert {"read_file", "write_file", "list_files", "execute_python"} <= coder_tool_names
-    assert {"web_search", "http_request"} <= researcher_tool_names
-
-    assistant = (
-        await db_session.execute(select(Agent).where(Agent.name == "Assistant"))
-    ).scalar_one()
-    assistant_tool_names = {fn.name for fn in await resolve_agent_tools(db_session, assistant)}
-    assert {"web_search", "read_attached_file", "search_knowledge_base"} <= assistant_tool_names
+    assigned = list(
+        (
+            await db_session.execute(
+                select(AgentTool.tool_id).where(AgentTool.agent_id == agent.id)
+            )
+        ).scalars()
+    )
+    assert assigned == [web_search.id]
 
 
 async def test_seed_starter_agents_without_builtin_tools_still_creates_agents(

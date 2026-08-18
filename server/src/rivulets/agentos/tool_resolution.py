@@ -64,6 +64,7 @@ from rivulets.tools.builtin import (
     delete_team,
     delete_workflow,
     execute_python,
+    fetch_webpage,
     get_workspace_settings,
     http_request,
     list_agents,
@@ -115,6 +116,7 @@ _BUILTIN_FUNCTIONS: tuple[Function, ...] = (
     delete_team,
     delete_workflow,
     execute_python,
+    fetch_webpage,
     get_workspace_settings,
     http_request,
     list_agents,
@@ -162,7 +164,13 @@ _BUILTIN_REGISTRY: dict[str, Function] = {fn.name: fn for fn in _BUILTIN_FUNCTIO
 # live Tool.sensitive lookup for the two purpose-built builtin functions
 # that most matter (execute_python, http_request) — see tool_audit.py.
 SENSITIVE_BUILTIN_TOOL_NAMES = frozenset(
-    {"execute_python", "http_request", "write_file", "query_workspace_db"}
+    {
+        "execute_python",
+        "fetch_webpage",
+        "http_request",
+        "write_file",
+        "query_workspace_db",
+    }
 )
 
 

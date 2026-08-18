@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Tool } from '$lib/api/tools';
 import {
+	defaultNewAgentScopes,
+	defaultNewAgentToolIds,
 	humanizeToolName,
 	toolDescriptionLine,
 	toolDisplayName,
@@ -72,6 +74,21 @@ describe('toolDescriptionLine', () => {
 		).toBe(
 			'Read the content of a file attached to a rivulet message, given its file_id (as returned by the file upload API).'
 		);
+	});
+});
+
+describe('defaultNewAgentToolIds / defaultNewAgentScopes', () => {
+	it('starts a new agent with every listed tool and every scope', () => {
+		expect(
+			defaultNewAgentToolIds([
+				tool({ id: 'a', name: 'web_search' }),
+				tool({ id: 'b', name: 'execute_python' })
+			])
+		).toEqual(['a', 'b']);
+		expect(defaultNewAgentScopes(['channels:manage', 'settings:manage'])).toEqual([
+			'channels:manage',
+			'settings:manage'
+		]);
 	});
 });
 

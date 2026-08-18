@@ -133,6 +133,58 @@ describe('agents/+page.svelte', () => {
 		await expect.element(page.getByText('Writer')).not.toBeInTheDocument();
 	});
 
+	it('starts a new agent with every tool and permission checked', async () => {
+		seed([]);
+		vi.mocked(tools.list).mockResolvedValue([
+			{
+				id: 'tool-search',
+				name: 'web_search',
+				description: 'Search the public web.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: false,
+				required_scope: null,
+				available: true,
+				display_name: 'Web search',
+				group: 'chat'
+			},
+			{
+				id: 'tool-http',
+				name: 'http_request',
+				description: 'Make an HTTP request.',
+				tool_type: 'builtin',
+				source_path: null,
+				sensitive: true,
+				required_scope: 'sensitive_tools:manage',
+				available: true,
+				display_name: 'HTTP request',
+				group: 'chat'
+			}
+		]);
+		vi.mocked(tools.listScopes).mockResolvedValue(['sensitive_tools:manage']);
+		vi.mocked(agents.create).mockResolvedValueOnce({ ...writer, id: 'agent-3' });
+		vi.mocked(agents.setToolScopes).mockResolvedValue({ scopes: ['sensitive_tools:manage'] });
+
+		render(AgentsPage);
+		await page.getByRole('button', { name: 'New agent' }).click();
+		await page.getByText('More options').click();
+
+		await expect.element(page.getByRole('checkbox', { name: /Web search/ })).toBeChecked();
+		await expect.element(page.getByRole('checkbox', { name: /HTTP request/ })).toBeChecked();
+
+		await page.getByLabelText('Name').fill('Writer');
+		await page.getByLabelText('What this agent does').fill('Drafts and edits prose.');
+		await page.getByLabelText('How it should behave').fill('Keep the workspace voice.');
+		await page.getByRole('button', { name: 'Create agent' }).click();
+
+		expect(agents.create).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tool_ids: ['tool-search', 'tool-http']
+			})
+		);
+		expect(agents.setToolScopes).toHaveBeenCalledWith('agent-3', ['sensitive_tools:manage']);
+	});
+
 	it('creates an agent from the sheet with the everyday fields', async () => {
 		seed([]);
 		vi.mocked(agents.create).mockResolvedValueOnce({ ...writer, id: 'agent-3' });
@@ -219,7 +271,9 @@ describe('agents/+page.svelte', () => {
 		await page.getByRole('button', { name: /Assistant/ }).click();
 		await page.getByText('More options').click();
 
-		await expect.element(page.getByText('No tools until you pick some.')).toBeInTheDocument();
+		await expect
+			.element(page.getByText('No tools assigned. New agents start with every tool checked.'))
+			.toBeInTheDocument();
 		await expect.element(page.getByText('Chat', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('Files', { exact: true })).toBeInTheDocument();
 		await expect.element(page.getByText('Workspace admin', { exact: true })).toBeInTheDocument();

@@ -101,6 +101,7 @@ async def test_seed_builtin_tools_marks_only_the_documented_sensitive_set(
     sensitivity = {name: sensitive for name, sensitive in result.all()}
     assert sensitivity["execute_python"] is True
     assert sensitivity["http_request"] is True
+    assert sensitivity["fetch_webpage"] is True
     assert sensitivity["write_file"] is True
     assert sensitivity["query_workspace_db"] is True
     # Read-only/low-risk builtins stay unmarked.

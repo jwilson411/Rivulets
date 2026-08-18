@@ -14,6 +14,7 @@ export const TOOL_GROUPS = [
 ] as const;
 
 const CHAT_TOOLS = new Set([
+	'fetch_webpage',
 	'http_request',
 	'read_attached_file',
 	'search_knowledge_base',
@@ -73,4 +74,12 @@ export function toolsByGroup(tools: Tool[]): { key: string; label: string; tools
 		...group,
 		tools: tools.filter((tool) => toolGroup(tool) === group.key)
 	})).filter((group) => group.tools.length > 0);
+}
+
+export function defaultNewAgentToolIds(tools: Tool[]): string[] {
+	return tools.map((tool) => tool.id);
+}
+
+export function defaultNewAgentScopes(scopes: string[]): string[] {
+	return [...scopes];
 }

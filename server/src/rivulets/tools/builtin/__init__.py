@@ -51,6 +51,7 @@ from rivulets.tools.builtin.run_workflow import run_workflow
 from rivulets.tools.builtin.schedules import cancel_schedule, list_schedules, schedule_workflow
 from rivulets.tools.builtin.settings import get_workspace_settings, update_workspace_settings
 from rivulets.tools.builtin.web_search import web_search
+from rivulets.tools.builtin.webpage import fetch_webpage
 from rivulets.tools.builtin.workflows import (
     create_workflow,
     delete_workflow,
@@ -74,6 +75,7 @@ __all__ = [
     "delete_workflow",
     "engage_team",
     "execute_python",
+    "fetch_webpage",
     "get_workspace_settings",
     "handoff",
     "http_request",

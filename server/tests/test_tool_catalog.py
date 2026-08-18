@@ -17,6 +17,7 @@ def test_display_name_keeps_acronyms() -> None:
 
 def test_group_for_splits_builtins_and_user_tools() -> None:
     assert group_for("web_search", "builtin") == "chat"
+    assert group_for("fetch_webpage", "builtin") == "chat"
     assert group_for("http_request", "builtin") == "chat"
     assert group_for("read_file", "builtin") == "files"
     assert group_for("set_working_directory", "builtin") == "files"
@@ -30,9 +31,9 @@ def test_group_for_splits_builtins_and_user_tools() -> None:
 def test_one_line_description_takes_the_first_sentence() -> None:
     assert (
         one_line_description(
-            "Search the web via Brave Search and return titles, URLs, and snippets."
+            "Search the public web and return titles, URLs, and snippets."
         )
-        == "Search the web via Brave Search and return titles, URLs, and snippets."
+        == "Search the public web and return titles, URLs, and snippets."
     )
     assert (
         one_line_description(

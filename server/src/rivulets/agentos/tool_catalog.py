@@ -28,6 +28,7 @@ _TOKEN_OVERRIDES: dict[str, str] = {
 # (http_request vs web_search) plus the other read-oriented chat tools.
 CHAT_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        "fetch_webpage",
         "http_request",
         "read_attached_file",
         "search_knowledge_base",

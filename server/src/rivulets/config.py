@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # exists yet (see tools/builtin/code_exec.py) — this is the only knob.
     code_exec_network_access: bool = False
 
+    # Optional Brave Search key for the web_search builtin. When unset,
+    # web_search falls back to DuckDuckGo (no key). Never a tool argument.
+    brave_api_key: str | None = None
+
     @property
     def db_path(self) -> Path:
         return self.workspace_dir / "rivulets.db"

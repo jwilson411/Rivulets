@@ -402,7 +402,7 @@
 						<span class="text-sm font-semibold text-ink dark:text-ink-dark">Tools</span>
 						{#if selectedToolIds.length === 0}
 							<p class="text-[13px] text-muted dark:text-muted-dark">
-								No tools until you pick some.
+								No tools assigned. New agents start with every tool checked.
 							</p>
 						{/if}
 						<div class="flex flex-col gap-4">
@@ -440,8 +440,8 @@
 							{/each}
 						</div>
 						<p class="text-[13px] text-muted dark:text-muted-dark">
-							Sensitive tools need the owner's OK, and some only run once the owner grants the
-							matching permission below.
+							New agents start with every tool and permission. Uncheck any you want to hold
+							back. Sensitive tools still need the owner's OK for unattended runs.
 						</p>
 					</div>
 				{/if}
