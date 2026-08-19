@@ -101,6 +101,7 @@
 	function go(path: string) {
 		onClose();
 		const [pathname, search = ''] = path.split('?');
+		// eslint-disable-next-line svelte/no-navigation-without-resolve -- pathname is resolved; the rule can't see through the search-string concat
 		goto(resolve(pathname as '/') + (search ? `?${search}` : ''));
 	}
 

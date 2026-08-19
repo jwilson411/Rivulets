@@ -73,7 +73,10 @@ def test_resolve_public_addresses_blocks_mixed_public_and_private(
 def test_resolve_public_addresses_blocks_empty_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: [])
+    def getaddrinfo(_host: str, _port: object) -> list[tuple[object, ...]]:
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     with pytest.raises(BlockedHostError, match="Could not resolve host"):
         resolve_public_addresses("empty.example")
 

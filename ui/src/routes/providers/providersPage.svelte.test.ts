@@ -93,8 +93,9 @@ describe('providers/+page.svelte', () => {
 				page.getByText(
 					'Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks, and Meet need a connected Google',
 					{
-					exact: false
-				})
+						exact: false
+					}
+				)
 			)
 			.toBeInTheDocument();
 		await expect

@@ -75,13 +75,9 @@ describe('ContextPanel.svelte', () => {
 
 		render(ContextPanel, { onOpenPalette: vi.fn() });
 
-		await expect
-			.element(page.getByLabelText('People', { includeHidden: true }))
-			.toBeInTheDocument();
-		await expect.element(page.getByText('Agents', { includeHidden: true })).toBeInTheDocument();
-		await expect
-			.element(page.getByText('Providers', { includeHidden: true }))
-			.not.toBeInTheDocument();
+		await expect.element(page.getByLabelText('People')).toBeInTheDocument();
+		await expect.element(page.getByText('Agents')).toBeInTheDocument();
+		await expect.element(page.getByText('Providers')).not.toBeInTheDocument();
 	});
 
 	it('shows a load error when the channel list fails', async () => {
