@@ -227,7 +227,7 @@ class PublicHTTPTransport(httpx.HTTPTransport):
     def __init__(self) -> None:
         super().__init__()
         # httpx 0.28 does not take network_backend=; pin after construct.
-        setattr(self._pool, "_network_backend", _PublicSyncBackend())
+        self._pool._network_backend = _PublicSyncBackend()  # pyright: ignore[reportPrivateUsage]
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         token = _pin_request(request.url)
@@ -242,7 +242,7 @@ class PublicAsyncHTTPTransport(httpx.AsyncHTTPTransport):
 
     def __init__(self) -> None:
         super().__init__()
-        setattr(self._pool, "_network_backend", _PublicAsyncBackend())
+        self._pool._network_backend = _PublicAsyncBackend()  # pyright: ignore[reportPrivateUsage]
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         token = _pin_request(request.url)

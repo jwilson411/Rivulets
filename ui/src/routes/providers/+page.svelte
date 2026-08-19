@@ -145,12 +145,13 @@
 		</h1>
 		<p class="mb-6 max-w-[60ch] text-sm leading-normal text-muted dark:text-muted-dark">
 			These keys are for models. Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks, and Meet
-			need a connected Google
-			account in
+			need a connected Google account in
+			<!-- eslint-disable svelte/no-navigation-without-resolve -->
 			<a
 				href={`${resolve('/settings')}${SETTINGS_INTEGRATIONS_SEARCH}`}
 				class="text-accent underline dark:text-accent-dark">Settings → Integrations</a
 			>, not an API key here.
+			<!-- eslint-enable svelte/no-navigation-without-resolve -->
 		</p>
 
 		{#if credentialBackend === 'fallback'}

@@ -468,12 +468,14 @@
 										<p class="text-[13px] leading-snug text-muted dark:text-muted-dark">
 											{#if needsGoogleAccount}
 												These tools need a connected Google account.
+												<!-- eslint-disable svelte/no-navigation-without-resolve -->
 												<a
 													href={`${resolve('/settings')}${SETTINGS_INTEGRATIONS_SEARCH}`}
 													class="text-accent underline dark:text-accent-dark"
 												>
 													Settings → Integrations
 												</a>
+												<!-- eslint-enable svelte/no-navigation-without-resolve -->
 												Send, draft, and write stay off until you also grant
 												{scopeDisplayName('integrations:google:write')} under Permissions.
 											{:else}
