@@ -218,6 +218,10 @@ CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs all of the ab
 - [`docs/infrastructure/security-and-dr.md`](./docs/infrastructure/security-and-dr.md) — backups, restore, and login rate limits
 - [`SECURITY.md`](./SECURITY.md) — how to report a vulnerability
 
+## Dispatch library
+
+The routing and dispatch core that powers Rivulets is also published as a standalone, MIT-licensed library: [rivulet-dispatch](https://github.com/jwilson411/rivulet-dispatch). If you just need deterministic message routing and handoff dispatch for your own project, use the library. Rivulets itself remains under the Business Source License.
+
 ## Security
 
 Rivulets runs entirely on your own machine with no cloud component, but the web UI is still a network service — see [`docs/security.md`](./docs/security.md) for the full threat model and [`docs/infrastructure/security-and-dr.md`](./docs/infrastructure/security-and-dr.md) for backups and rate limits. If you find a vulnerability, please report it through [GitHub's private security advisory form](https://github.com/jwilson411/Rivulets/security/advisories/new) rather than a public issue. See [`SECURITY.md`](./SECURITY.md).
