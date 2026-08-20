@@ -233,6 +233,60 @@ async def test_run_agent_synthesizes_completion_when_stream_ends_without_termina
     assert result.content == "partial"
 
 
+async def test_run_agent_collects_tool_calls_from_completion_events(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """Regression test: agno's RunCompletedEvent never carries the run's
+    tool calls (create_run_completed_event doesn't copy `tools` off the
+    RunOutput, in 2.8.6 and 2.8.7 alike), so reading `event.tools` alone
+    made every after-the-run tool-call inspection in dispatch/service.py
+    a silent no-op — an Assistant that called handoff() would *say* the
+    specialist was on it while nobody was ever invoked. The executions
+    must be collected from the ToolCallCompleted/Error events instead."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallStartedEvent(tool=ToolExecution(tool_name="handoff")),
+            ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_name="handoff",
+                    tool_args={"target_agent_name": "Researcher", "context": "find rankings"},
+                )
+            ),
+            ToolCallStartedEvent(tool=ToolExecution(tool_name="http_request")),
+            ToolCallErrorEvent(tool=ToolExecution(tool_name="http_request"), error="boom"),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert result.status is RunStatus.completed
+    assert [t.tool_name for t in result.tools or []] == ["handoff", "http_request"]
+    assert (result.tools or [])[0].tool_args == {
+        "target_agent_name": "Researcher",
+        "context": "find rankings",
+    }
+
+
+async def test_run_agent_synthesized_completion_carries_collected_tool_calls(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """The no-terminal-event fallback (ollama-style streams) keeps any
+    tool calls whose completion events did arrive, instead of dropping
+    them with the missing RunCompletedEvent."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            RunContentEvent(content="working"),
+            ToolCallCompletedEvent(tool=ToolExecution(tool_name="engage_team")),
+        ]
+    )
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert result.status is RunStatus.completed
+    assert [t.tool_name for t in result.tools or []] == ["engage_team"]
+
+
 async def test_run_agent_raises_when_stream_ends_with_no_content_and_no_terminal_event(
     db_session: AsyncSession, registered_agent: AgnoAgent
 ) -> None:

@@ -43,6 +43,7 @@ from collections.abc import Callable
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.models.base import Model
+from agno.models.response import ToolExecution
 from agno.os import AgentOS
 from agno.run.agent import (
     RunCompletedEvent,
@@ -367,6 +368,16 @@ async def run_agent(
 
     final: RunOutput | None = None
     accumulated_content = ""
+    # agno's RunCompletedEvent does NOT carry the run's tool calls — its
+    # create_run_completed_event never copies `tools` off the RunOutput
+    # (checked against agno 2.8.6 and 2.8.7), so `event.tools` on the
+    # terminal event is always None. dispatch/service.py detects handoff/
+    # engage_team/hire_teammate and every builtin trigger by inspecting
+    # RunOutput.tools after the run — relying on the terminal event made
+    # all of those silent no-ops on this streaming path (the Assistant
+    # would *say* it handed off while nobody was ever invoked). Collect
+    # the executions from the per-call completion events instead.
+    collected_tools: list[ToolExecution] = []
     # arun()'s overloads carry Unknown type args from agno's own generics —
     # reportUnknownMemberType is about that overload set, not this call.
     async for event in agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
@@ -385,6 +396,8 @@ async def run_agent(
                 else:
                     on_status("executing_tool", tool_name)
         elif isinstance(event, (ToolCallCompletedEvent, ToolCallErrorEvent)):
+            if event.tool is not None:
+                collected_tools.append(event.tool)
             # Tool call finished either way — back to "thinking" until the
             # next token, tool call, or the run itself completes.
             if on_status is not None:
@@ -392,15 +405,17 @@ async def run_agent(
         elif isinstance(event, RunErrorEvent):
             final = RunOutput(content=event.content, status=RunStatus.error)
         elif isinstance(event, RunCompletedEvent):
-            # `tools` carries any tool calls made during the run (e.g. a
+            # `tools` re-attaches the tool calls collected above (e.g. a
             # handoff() call — dispatch/service.py inspects this to detect
-            # and act on it after the run completes). `metrics` (tokens,
-            # #28's usage dashboard) only arrives on this terminal event —
-            # RunContentEvent deltas don't carry it.
+            # and act on it after the run completes); `event.tools` is
+            # preferred on the off chance a future agno starts populating
+            # it. `metrics` (tokens, #28's usage dashboard) only arrives
+            # on this terminal event — RunContentEvent deltas don't carry
+            # it.
             final = RunOutput(
                 content=event.content,
                 status=RunStatus.completed,
-                tools=event.tools,
+                tools=event.tools or collected_tools or None,
                 metrics=event.metrics,
             )
 
@@ -412,12 +427,13 @@ async def run_agent(
             # model finished normally and produced real content. Treating
             # that as an outright failure (the prior behavior) silently
             # discarded a perfectly good reply — synthesize a completed
-            # RunOutput from what streamed instead. `tools` is empty here
-            # since a real RunCompletedEvent is the only source for it;
-            # a handoff call from a provider that hits this path simply
-            # won't be detected, same as it wouldn't have been before this
-            # RunOutput existed at all.
-            final = RunOutput(content=accumulated_content, status=RunStatus.completed)
+            # RunOutput from what streamed instead, including any tool
+            # calls whose completion events did arrive.
+            final = RunOutput(
+                content=accumulated_content,
+                status=RunStatus.completed,
+                tools=collected_tools or None,
+            )
         else:
             # Nothing streamed at all — a genuine failure, not just a
             # provider that skips the terminal event. NFR-2.4's
