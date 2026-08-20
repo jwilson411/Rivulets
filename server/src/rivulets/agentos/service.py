@@ -380,8 +380,15 @@ async def run_agent(
     collected_tools: list[ToolExecution] = []
     # arun()'s overloads carry Unknown type args from agno's own generics —
     # reportUnknownMemberType is about that overload set, not this call.
+    # `stream_events=True` is load-bearing: agno resolves it to False by
+    # default even when stream=True, and without it the stream carries
+    # ONLY content deltas — no ToolCall* events (so the tool collection
+    # below and on_status's indicators never fire) and no RunCompleted/
+    # RunError terminal event (so every provider, not just ollama, used
+    # to fall through to the synthesized-completion path below, with no
+    # tool calls and no metrics).
     async for event in agno_agent.arun(  # pyright: ignore[reportUnknownMemberType]
-        message, stream=True, session_id=session_id, user_id=user_id
+        message, stream=True, stream_events=True, session_id=session_id, user_id=user_id
     ):
         if isinstance(event, RunContentEvent):
             if isinstance(event.content, str):
