@@ -233,6 +233,36 @@ async def test_run_agent_synthesizes_completion_when_stream_ends_without_termina
     assert result.content == "partial"
 
 
+async def test_run_agent_requests_lifecycle_events_from_arun(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """Regression test: agno resolves `stream_events` to False by default
+    even when stream=True, and then the stream carries ONLY content
+    deltas — no ToolCall* events (so handoff/engage_team/builtin-trigger
+    detection and the #30 status indicators silently never fire) and no
+    RunCompleted/RunError terminal event (so every provider fell through
+    to the synthesized-completion path, with no tool calls and no
+    metrics). run_agent must explicitly opt in. The other tests here
+    script arun() directly and ignore its kwargs, so only this test can
+    catch the flag going missing."""
+    captured_kwargs: dict[str, object] = {}
+
+    def capturing_arun(*_args: object, **kwargs: object):  # noqa: ANN202
+        captured_kwargs.update(kwargs)
+
+        async def gen() -> AsyncIterator[Any]:
+            yield RunCompletedEvent(content="done")
+
+        return gen()
+
+    registered_agent.arun = capturing_arun  # pyright: ignore[reportAttributeAccessIssue]
+
+    await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert captured_kwargs.get("stream") is True
+    assert captured_kwargs.get("stream_events") is True
+
+
 async def test_run_agent_collects_tool_calls_from_completion_events(
     db_session: AsyncSession, registered_agent: AgnoAgent
 ) -> None:
