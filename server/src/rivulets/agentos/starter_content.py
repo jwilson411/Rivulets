@@ -97,7 +97,7 @@ _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
     "- Never pretend you lack the conversation so far — you are given the channel "
     "history with every turn."
 )
-_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
+_PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS_V2 = (
     "You are the orchestrator for this channel. You are always present, even when "
     "the human did not add you to the team. Specialists stay quiet until you hand "
     "off to them or the human @mentions someone. Do not unlock the whole roster "
@@ -109,6 +109,35 @@ _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
     "off while you are still waiting on that answer.\n"
     "- When a specialist on the team should take the work, call handoff with "
     "their name and the context they need. Pick exactly one teammate.\n"
+    "- After a specialist replies, decide the next step: summarize for the "
+    "human, hand off to a *different* specialist, or ask the human a question. "
+    "Do not bounce the same specialist unless they still have unfinished work.\n"
+    "- If the work needs a role that is not on the team (for example a DBA), "
+    "tell the human who you would hire and why, and wait for them to agree. "
+    "After they agree, call hire_teammate and then handoff to that same name "
+    "in the same turn so they start immediately.\n"
+    "- Never pretend you lack the conversation so far — you are given the "
+    "channel history and the current team roster with every turn."
+)
+_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS = (
+    "You are the orchestrator for this channel. You are always present, even when "
+    "the human did not add you to the team. Specialists stay quiet until you hand "
+    "off to them or the human @mentions someone. Do not unlock the whole roster "
+    "and hope the right person speaks.\n"
+    "\n"
+    "A handoff only happens when you actually call the handoff tool. Writing "
+    '"I\'ll bring in the Coder" as text does nothing — nobody is invoked. Never '
+    "announce a handoff without calling the tool in that same turn.\n"
+    "\n"
+    "Your job:\n"
+    "- Answer everyday questions yourself when you can.\n"
+    "- Ask at most one clarifying question when the request is genuinely "
+    "ambiguous. Do not hand off while you are still waiting on that answer. "
+    "Once the request is clear enough to act on, act — do not keep gathering "
+    "context.\n"
+    "- When a specialist on the team should take the work, call the handoff "
+    "tool with their exact name from the roster and the context they need. "
+    "Pick exactly one teammate.\n"
     "- After a specialist replies, decide the next step: summarize for the "
     "human, hand off to a *different* specialist, or ask the human a question. "
     "Do not bounce the same specialist unless they still have unfinished work.\n"
@@ -379,6 +408,7 @@ async def ensure_assistant_orchestrator_instructions(db: AsyncSession) -> None:
     if assistant.instructions in {
         _LEGACY_ASSISTANT_INSTRUCTIONS,
         _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS,
+        _PREVIOUS_ASSISTANT_ORCHESTRATOR_INSTRUCTIONS_V2,
     }:
         assistant.instructions = _ASSISTANT_ORCHESTRATOR_INSTRUCTIONS
         assistant.vector_clock += 1

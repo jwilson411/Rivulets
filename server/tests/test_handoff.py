@@ -183,9 +183,12 @@ def test_handoff_posts_divider_and_invokes_target(
     assert messages[3]["content"] == "Schema looks fine to me."
 
 
-def test_handoff_to_unknown_agent_is_skipped_gracefully(
+def test_handoff_to_unknown_agent_posts_visible_alert(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Stabilization plan Phase 3.2: an off-roster handoff target used to
+    be a silent log line — the thread showed "Handing this off." and then
+    nothing, with no way for the human to see why. It must surface."""
     # keyword, not "always" — see the comment in the test above.
     architect_id = _create_agent(client, auth_headers, "Architect", "keyword", '["start"]')
 
@@ -212,8 +215,96 @@ def test_handoff_to_unknown_agent_is_skipped_gracefully(
     rivulet_id = rivulet.json()["id"]
 
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
-    assert [m["sender_type"] for m in messages] == ["human", "agent"]
+    assert [m["sender_type"] for m in messages] == ["human", "agent", "system"]
     assert messages[1]["content"] == "Handing this off."
+    assert messages[2]["content_type"] == "system_alert"
+    assert "@NoSuchAgent" in messages[2]["content"]
+    assert "isn't on this team" in messages[2]["content"]
+
+
+def test_handoff_ping_pong_trips_the_cycle_guard(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stabilization plan Phase 3.1: A hands to B, B hands back to A,
+    forever — the cycle guard (not the turn limit, and not a hang) must
+    stop it with a visible pause."""
+    architect_id = _create_agent(client, auth_headers, "Architect", "keyword", '["start"]')
+    dba_id = _create_agent(client, auth_headers, "DBA", "mention_only")
+
+    async def fake_run_agent(
+        _db: object, agent_id: str, _message: str, *_args: object, **_kwargs: object
+    ) -> Any:
+        target = "DBA" if agent_id == architect_id else "Architect"
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[_tool_execution("handoff", {"target_agent_name": target, "context": "ping"})],
+            get_content_as_string=lambda: f"Passing to {target}.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    channel_id = _create_channel_with_team(client, auth_headers, [architect_id, dba_id])
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "start"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    pauses = [
+        m
+        for m in messages
+        if m["content_type"] == "system_alert" and "repeating loop" in m["content"]
+    ]
+    assert len(pauses) == 1
+    # Guard defaults: cycle_threshold=3 within window=8, turn_limit=10 —
+    # the loop must stop on the cycle guard, well before an unbounded
+    # message pile-up.
+    assert len(messages) < 25
+    assert (
+        client.get(f"/api/v1/rivulets/{rivulet_id}", headers=auth_headers).json()["status"]
+        == "paused"
+    )
+
+
+def test_self_handoff_trips_the_cycle_guard(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stabilization plan Phase 3.1: an agent handing off to itself is the
+    tightest possible loop — the [A, A] interaction pair must accumulate
+    to the cycle threshold and pause, not run forever."""
+    architect_id = _create_agent(client, auth_headers, "Architect", "keyword", '["start"]')
+
+    async def fake_run_agent(*_args: object, **_kwargs: object) -> Any:
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=[
+                _tool_execution("handoff", {"target_agent_name": "Architect", "context": "again"})
+            ],
+            get_content_as_string=lambda: "Handing to myself.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+
+    channel_id = _create_channel_with_team(client, auth_headers, [architect_id])
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "start"},
+        headers=auth_headers,
+    )
+    assert rivulet.status_code == 201, rivulet.text
+    rivulet_id = rivulet.json()["id"]
+
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    pauses = [
+        m
+        for m in messages
+        if m["content_type"] == "system_alert" and "repeating loop" in m["content"]
+    ]
+    assert len(pauses) == 1
+    assert len(messages) < 25
 
 
 def test_handoff_publishes_sse_event(

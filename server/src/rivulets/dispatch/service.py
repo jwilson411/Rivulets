@@ -1496,6 +1496,37 @@ def _restore_guard_state(state: RivuletGuardState, snapshot: _GuardSnapshot) -> 
     ) = snapshot
 
 
+# Stabilization plan §3.1/Phase 2.3: an orchestrator reply that *announces*
+# a dispatch ("I'll hand this to the Coder", "engaging the team now") while
+# the run recorded no handoff/engage_team/hire_teammate tool call is the #1
+# observed failure mode — the model narrates the routing instead of doing
+# it. Deliberately a small, conservative keyphrase check (per the plan: do
+# not over-engineer); false negatives just fall back to the old silence,
+# false positives cost one extra orchestrator turn.
+_DISPATCH_INTENT_RE = re.compile(
+    r"(?:\bhand(?:ing)?\s+(?:this\s+|it\s+|that\s+)?(?:off|over\s+to)"
+    r"|\bhandoff\b"
+    r"|\bengag(?:e|ing)\s+the\s+team"
+    r"|\b(?:i(?:'|’)?ll|going\s+to|about\s+to|let\s+me)\s+(?:engage|bring\s+in|loop\s+in)"
+    r"|\bbring(?:ing)?\s+in\s+(?:the\s+)?@?[A-Za-z]"
+    r"|\bloop(?:ing)?\s+in\s+@?[A-Za-z])",
+    re.IGNORECASE,
+)
+
+_INTENT_REDRIVE_PROMPT = (
+    "[Your previous reply said you would hand off or engage the team, but no "
+    "handoff tool call was recorded, so nobody was invoked. If a teammate "
+    "should take this, call the handoff tool now with their exact name and "
+    "the context they need. If you no longer think a handoff is needed, "
+    "answer the human directly instead — do not describe a handoff without "
+    "calling the tool.]"
+)
+
+
+def _declares_dispatch_intent(content: str) -> bool:
+    return bool(_DISPATCH_INTENT_RE.search(content))
+
+
 async def _invoke_agent(
     db: AsyncSession,
     rivulet: Rivulet,
@@ -1509,6 +1540,7 @@ async def _invoke_agent(
     from_agent_name: str | None,
     triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
+    intent_redrive: bool = False,
 ) -> list[Message]:
     """Run one agent, persist its reply (or a failure notice), update
     guard state, then act on whatever the run implies: a handoff call
@@ -1827,6 +1859,19 @@ async def _invoke_agent(
             )
 
     handoff_call = _find_handoff_call(run_output)
+    engage_reason = _find_engage_team_call(run_output)
+    # Stabilization plan Phase 0.1: one line per run answering "did the
+    # routing tools fire" — the exact question every silent-handoff bug
+    # report needs answered first.
+    logger.debug(
+        "Agent %r run in rivulet %r recorded tools=%s -> hire=%s handoff=%s engage=%s",
+        agent.name,
+        rivulet.id,
+        [t.tool_name for t in run_output.tools or []] or "none",
+        hire_call is not None,
+        handoff_call is not None,
+        engage_reason is not None,
+    )
     if handoff_call is not None:
         target_name, handoff_context = handoff_call
         new_messages.extend(
@@ -1844,24 +1889,95 @@ async def _invoke_agent(
             )
         )
 
-    engage_reason = _find_engage_team_call(run_output)
     if engage_reason is not None:
-        new_messages.extend(
-            await _handle_engage_team(
-                db,
-                rivulet,
-                channel,
-                guard_state,
-                agent,
-                engage_reason,
-                triggering_message_id=triggering_message_id,
-                trace_ctx=child_trace_ctx,
+        if handoff_call is not None:
+            # This same turn already routed via handoff — record the
+            # marker, but don't run a second routing pass on top of it.
+            engaged = await post_team_engaged_message(
+                db, rivulet, actor_name=agent.name, reason=engage_reason
             )
-        )
+            if engaged is not None:
+                new_messages.append(engaged)
+        else:
+            new_messages.extend(
+                await _handle_engage_team(
+                    db,
+                    rivulet,
+                    channel,
+                    guard_state,
+                    agent,
+                    team_agents,
+                    engage_reason,
+                    triggering_message_id=triggering_message_id,
+                    trace_ctx=child_trace_ctx,
+                )
+            )
 
     new_messages.extend(
         await apply_builtin_tool_triggers(db, rivulet, agent, run_output, trace_ctx=child_trace_ctx)
     )
+
+    # Stabilization plan Phase 2.3: the orchestrator *said* it would route
+    # but recorded no routing tool call — the claim is prose, not dispatch.
+    # Re-drive it once with an explicit instruction to call the tool; if
+    # the re-driven turn still narrates without calling, surface a visible
+    # notice instead of leaving the thread looking handled.
+    if (
+        is_orchestrator_name(agent.name)
+        and hire_call is None
+        and handoff_call is None
+        and engage_reason is None
+        and not guard_state.paused
+        and _declares_dispatch_intent(content)
+    ):
+        if not intent_redrive:
+            logger.warning(
+                "Agent %r declared a dispatch without a tool call in rivulet %r — re-driving",
+                agent.name,
+                rivulet.id,
+            )
+            new_messages.extend(
+                await _invoke_agent(
+                    db,
+                    rivulet,
+                    channel,
+                    guard_state,
+                    agent,
+                    _INTENT_REDRIVE_PROMPT,
+                    team_agents,
+                    from_agent_id=agent.id,
+                    from_agent_name=agent.name,
+                    triggering_message_id=triggering_message_id,
+                    trace_ctx=child_trace_ctx,
+                    intent_redrive=True,
+                )
+            )
+        else:
+            logger.warning(
+                "Agent %r still declared a dispatch without a tool call after a re-drive "
+                "in rivulet %r — surfacing",
+                agent.name,
+                rivulet.id,
+            )
+            alert_text = (
+                f"@{agent.name} said it would hand off, but no handoff was actually made — "
+                "@mention the teammate who should take this to proceed."
+            )
+            alert = Message(
+                rivulet_id=rivulet.id,
+                sender_type="system",
+                sender_name="system",
+                content=alert_text,
+                content_type="system_alert",
+            )
+            db.add(alert)
+            await db.flush()
+            publish(
+                rivulet.id,
+                "system_alert",
+                {"type": "handoff_not_performed", "agent_name": agent.name, "message": alert_text},
+            )
+            new_messages.append(alert)
 
     # FR-5.6/AC-014: this agent's own message can itself trigger a
     # teammate (e.g. an @mention in its reply) — recurse.
@@ -2194,14 +2310,52 @@ async def _handle_handoff(
         None,
     )
     if target is None:
+        # Stabilization plan §3.4/Phase 3.2: a silent log line here left
+        # the thread showing "I'll hand this to X" followed by nothing —
+        # the human had no way to see why. Surface it.
         logger.warning(
             "Agent %r tried to hand off to unknown agent %r in rivulet %r",
             from_agent.name,
             target_agent_name,
             rivulet.id,
         )
-        return []
+        roster_names = [a.name for a, _ in team_agents if a.id != from_agent.id]
+        roster_hint = (
+            f" Teammates on this channel: {', '.join(roster_names)}."
+            if roster_names
+            else " There are no other teammates on this channel."
+        )
+        alert = Message(
+            rivulet_id=rivulet.id,
+            sender_type="system",
+            sender_name="system",
+            content=(
+                f"@{from_agent.name} tried to hand off to @{target_agent_name}, "
+                f"who isn't on this team — nobody was invoked.{roster_hint}"
+            ),
+            content_type="system_alert",
+        )
+        db.add(alert)
+        await db.flush()
+        publish(
+            rivulet.id,
+            "system_alert",
+            {
+                "type": "handoff_unknown_target",
+                "from_agent_id": from_agent.id,
+                "target_agent_name": target_agent_name,
+                "message": alert.content,
+            },
+        )
+        return [alert]
 
+    logger.info(
+        "Handoff: %r -> %r in rivulet %r (context: %.120s)",
+        from_agent.name,
+        target.name,
+        rivulet.id,
+        context,
+    )
     handoff_message = Message(
         rivulet_id=rivulet.id,
         sender_type="system",
@@ -2261,24 +2415,137 @@ async def post_team_engaged_message(
     return message
 
 
+def _specialist_candidates(
+    team_agents: list[tuple[Agent, AgentDispatchInfo]],
+) -> list[AgentDispatchInfo]:
+    """Who an engage_team routing pass may pick: every teammate except the
+    orchestrator and mention-only agents, with ALWAYS/MENTION_ONLY rules
+    stripped so only keyword/regex/semantic rules can deterministically
+    match (an agent left with no rules can still be picked by the LLM
+    fallback from its description)."""
+    candidates: list[AgentDispatchInfo] = []
+    for agent, info in team_agents:
+        if is_orchestrator_name(agent.name):
+            continue
+        if info.rules and all(rule.rule_type is RuleType.MENTION_ONLY for rule in info.rules):
+            continue
+        kept = [
+            rule
+            for rule in info.rules
+            if rule.rule_type in (RuleType.KEYWORD, RuleType.REGEX, RuleType.SEMANTIC)
+        ]
+        candidates.append(
+            AgentDispatchInfo(
+                agent_id=info.agent_id,
+                name=info.name,
+                rules=kept,
+                description=info.description,
+            )
+        )
+    return candidates
+
+
+async def _last_human_message_content(db: AsyncSession, rivulet_id: str) -> str | None:
+    return await db.scalar(
+        select(Message.content)
+        .where(Message.rivulet_id == rivulet_id, Message.sender_type == "human")
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(1)
+    )
+
+
 async def _handle_engage_team(
     db: AsyncSession,
     rivulet: Rivulet,
     channel: Channel,
     guard_state: RivuletGuardState,
     agent: Agent,
+    team_agents: list[tuple[Agent, AgentDispatchInfo]],
     reason: str,
     *,
     triggering_message_id: str | None = None,
     trace_ctx: TraceContext | None = None,
 ) -> list[Message]:
-    """Post the visible marker. Does not open keyword rematch — the
-    caller should hand off to the one teammate who should act."""
-    _ = (channel, guard_state, triggering_message_id, trace_ctx)
+    """Post the visible marker, then actually route (stabilization plan
+    Phase 1.3 — this used to stop at the marker, making engage_team a
+    semantic dead-end: the human saw "engaged the team" and then silence).
+
+    Routing is a specialist-only pass over the human's last message:
+    deterministic keyword/regex/semantic rules first, then the LLM
+    fallback, never the orchestrator and never mention-only agents. The
+    single best match is invoked through the shared handoff pipeline (so
+    the thread shows a normal handoff line and guard bookkeeping applies).
+    No match surfaces a visible notice instead of silence."""
+    messages: list[Message] = []
     engaged = await post_team_engaged_message(db, rivulet, actor_name=agent.name, reason=reason)
-    if engaged is None:
-        return []
-    return [engaged]
+    if engaged is not None:
+        messages.append(engaged)
+
+    candidates = _specialist_candidates(team_agents)
+    target_name: str | None = None
+    if candidates:
+        routing_input = await _last_human_message_content(db, rivulet.id) or reason
+        # #237: the routing pass below can invoke an LLM (its fallback
+        # stage) — close out any pending writes first, same as
+        # _dispatch_and_respond does before its own engine.dispatch.
+        await db.commit()
+        engine = DispatchEngine(llm_fallback=build_llm_fallback(db))
+        try:
+            routed = await engine.dispatch(routing_input, candidates)
+        except Exception:
+            logger.warning(
+                "engage_team routing pass failed in rivulet %r", rivulet.id, exc_info=True
+            )
+            routed = DispatchResult(agent_ids=[], method=DispatchMethod.NONE)
+        if routed.agent_ids:
+            picked = routed.agent_ids[0]
+            target_name = next((info.name for info in candidates if info.agent_id == picked), None)
+
+    if target_name is not None:
+        logger.info(
+            "engage_team: routing to %r in rivulet %r (%s)",
+            target_name,
+            rivulet.id,
+            reason,
+        )
+        messages.extend(
+            await _handle_handoff(
+                db,
+                rivulet,
+                channel,
+                guard_state,
+                agent,
+                team_agents,
+                target_name,
+                reason,
+                triggering_message_id=triggering_message_id,
+                trace_ctx=trace_ctx,
+            )
+        )
+        return messages
+
+    logger.warning("engage_team: no specialist matched in rivulet %r (%s)", rivulet.id, reason)
+    notice_text = (
+        f"@{agent.name} engaged the team, but no specialist matched this request — "
+        "@mention the teammate who should take it, or ask "
+        f"@{agent.name} to hire the missing role."
+    )
+    notice = Message(
+        rivulet_id=rivulet.id,
+        sender_type="system",
+        sender_name="system",
+        content=notice_text,
+        content_type="system_alert",
+    )
+    db.add(notice)
+    await db.flush()
+    publish(
+        rivulet.id,
+        "system_alert",
+        {"type": "engage_unrouted", "actor": agent.name, "message": notice_text},
+    )
+    messages.append(notice)
+    return messages
 
 
 def _hire_description(name: str, role: str) -> str:
