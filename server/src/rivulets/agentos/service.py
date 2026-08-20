@@ -404,7 +404,23 @@ async def run_agent(
                     on_status("executing_tool", tool_name)
         elif isinstance(event, (ToolCallCompletedEvent, ToolCallErrorEvent)):
             if event.tool is not None:
-                collected_tools.append(event.tool)
+                # agno emits BOTH ToolCallCompletedEvent (tool_call_error=
+                # True) and ToolCallErrorEvent for the same failed tool —
+                # reconcile by tool_call_id instead of appending both, so a
+                # failed call is one entry, not a duplicate that dispatch/
+                # service.py's after-the-run inspection double-counts.
+                existing_idx = next(
+                    (
+                        i
+                        for i, t in enumerate(collected_tools)
+                        if t.tool_call_id is not None and t.tool_call_id == event.tool.tool_call_id
+                    ),
+                    None,
+                )
+                if existing_idx is not None:
+                    collected_tools[existing_idx] = event.tool
+                else:
+                    collected_tools.append(event.tool)
             # Tool call finished either way — back to "thinking" until the
             # next token, tool call, or the run itself completes.
             if on_status is not None:
@@ -450,4 +466,14 @@ async def run_agent(
             raise RuntimeError(
                 f"Agent {agent_id!r}'s run ended without a completion or error event"
             )
+    # Dispatcher stabilization instrumentation: dispatch/service.py's
+    # handoff/engage_team routing rides entirely on this list — a handoff
+    # the model emitted but this loop dropped is invisible downstream, so
+    # log what actually got collected for every run.
+    logger.debug(
+        "run_agent %r finished (status=%s) with tool calls: %s",
+        agent_id,
+        final.status,
+        [(t.tool_name, t.tool_call_id, t.tool_call_error) for t in final.tools or []] or "none",
+    )
     return final

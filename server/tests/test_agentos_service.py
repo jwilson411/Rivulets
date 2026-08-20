@@ -5,13 +5,15 @@ etc). Drives a real AgnoAgent's arun() with a scripted async generator so
 these exercise the actual stream-consuming loop, not a stand-in for it.
 """
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.anthropic import Claude
-from agno.models.response import ToolExecution
+from agno.models.base import Model
+from agno.models.response import ModelResponse, ToolExecution
 from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
@@ -296,6 +298,145 @@ async def test_run_agent_collects_tool_calls_from_completion_events(
         "target_agent_name": "Researcher",
         "context": "find rankings",
     }
+
+
+async def test_run_agent_reconciles_failed_tool_events_by_tool_call_id(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """Stabilization plan Phase 1.2: agno emits BOTH ToolCallCompletedEvent
+    (tool_call_error=True) and ToolCallErrorEvent for the same failed tool.
+    Appending both double-counted the call; the collector must reconcile by
+    tool_call_id into a single entry."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallStartedEvent(tool=ToolExecution(tool_name="http_request", tool_call_id="t-1")),
+            ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_name="http_request", tool_call_id="t-1", tool_call_error=True
+                )
+            ),
+            ToolCallErrorEvent(
+                tool=ToolExecution(
+                    tool_name="http_request", tool_call_id="t-1", tool_call_error=True
+                ),
+                error="boom",
+            ),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert result.status is RunStatus.completed
+    tools = result.tools or []
+    assert [t.tool_name for t in tools] == ["http_request"]
+    assert tools[0].tool_call_error is True
+
+
+async def test_run_agent_keeps_separate_tool_calls_without_ids_distinct(
+    db_session: AsyncSession, registered_agent: AgnoAgent
+) -> None:
+    """Reconciliation is keyed on tool_call_id — two distinct calls whose
+    provider omitted ids (e.g. some local backends) must both survive."""
+    registered_agent.arun = _scripted_arun(  # pyright: ignore[reportAttributeAccessIssue]
+        [
+            ToolCallCompletedEvent(tool=ToolExecution(tool_name="web_search")),
+            ToolCallCompletedEvent(tool=ToolExecution(tool_name="handoff")),
+            RunCompletedEvent(content="done"),
+        ]
+    )
+
+    result = await run_agent(db_session, "agent-1", "hi", session_id="s-1")
+
+    assert [t.tool_name for t in result.tools or []] == ["web_search", "handoff"]
+
+
+class _ScriptedToolCallModel(Model):
+    """A real agno Model (not a monkeypatched arun) whose first turn emits
+    a handoff tool call and whose second turn finishes plainly — so a test
+    can drive agno's genuine stream pipeline (tool-call assembly, actual
+    tool execution, ToolCall*/RunCompleted event emission) end-to-end.
+    Stabilization plan Phase 0.2: the _scripted_arun tests above fake the
+    event stream itself, so they can never catch agno emitting events in a
+    shape run_agent doesn't collect."""
+
+    def __init__(self) -> None:
+        super().__init__(id="scripted-tool-model", name="ScriptedToolModel", provider="test")
+        self.calls = 0
+
+    def _tool_call_delta(self) -> ModelResponse:
+        return ModelResponse(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "handoff",
+                        "arguments": json.dumps(
+                            {"target_agent_name": "Researcher", "context": "find rankings"}
+                        ),
+                    },
+                }
+            ]
+        )
+
+    async def ainvoke_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ModelResponse]:
+        self.calls += 1
+        if self.calls == 1:
+            yield ModelResponse(content="Routing this to the researcher. ")
+            yield self._tool_call_delta()
+        else:
+            yield ModelResponse(content="Handed off.")
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        raise NotImplementedError
+
+    def invoke(self, *args: Any, **kwargs: Any) -> ModelResponse:
+        raise NotImplementedError
+
+    def invoke_stream(self, *args: Any, **kwargs: Any) -> Iterator[ModelResponse]:
+        raise NotImplementedError
+
+    def _parse_provider_response(self, response: Any, **kwargs: Any) -> ModelResponse:
+        raise NotImplementedError
+
+    def _parse_provider_response_delta(self, response: Any) -> ModelResponse:
+        raise NotImplementedError
+
+
+async def test_run_agent_collects_handoff_from_a_real_agno_agent_run(
+    db_session: AsyncSession,
+) -> None:
+    """End-to-end through agno's real streaming pipeline: the model emits
+    a handoff tool call, agno executes the actual builtin handoff tool and
+    emits the ToolCall* events, and run_agent's collector must surface the
+    call on RunOutput.tools — the exact chain (F1/F2 in the stabilization
+    plan) every monkeypatched test in the suite bypasses."""
+    from rivulets.tools.builtin.handoff import handoff as handoff_tool
+
+    reset_agentos_for_testing()
+    init_agentos()
+    agent = AgnoAgent(
+        id="agent-e2e",
+        name="Orchestrator",
+        model=_ScriptedToolCallModel(),
+        tools=[handoff_tool],
+    )
+    get_agentos().agents = [agent]  # pyright: ignore[reportAttributeAccessIssue]
+    try:
+        result = await run_agent(
+            db_session, "agent-e2e", "build me an NFL player tracker", session_id="s-e2e"
+        )
+    finally:
+        reset_agentos_for_testing()
+
+    assert result.status is RunStatus.completed
+    tools = result.tools or []
+    assert [t.tool_name for t in tools] == ["handoff"]
+    assert tools[0].tool_args == {"target_agent_name": "Researcher", "context": "find rankings"}
+    assert not tools[0].tool_call_error
+    # The stub tool really ran — its confirmation string is the tool result.
+    assert "Researcher" in str(tools[0].result)
 
 
 async def test_run_agent_synthesized_completion_carries_collected_tool_calls(

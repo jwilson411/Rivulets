@@ -136,7 +136,9 @@ def format_team_roster(agents: list[tuple[Agent, AgentDispatchInfo]]) -> str:
     return (
         "[Channel team]\n"
         + "\n".join(lines)
-        + "\nHand off to one of these by name. If a needed role is missing, "
+        + "\nHand off by calling the handoff tool with one of these exact names — "
+        "any other name fails visibly, and announcing a handoff in prose without "
+        "calling the tool invokes nobody. If a needed role is missing, "
         "ask the human whether to hire them, then call hire_teammate after they agree."
     )
 

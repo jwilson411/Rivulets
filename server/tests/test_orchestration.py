@@ -222,21 +222,37 @@ def test_human_engage_nudges_assistant_not_keyword_specialists(
     assert any("pick the right teammate" in message for message in seen)
 
 
-def test_assistant_engage_team_tool_does_not_unlock_keywords(
+def test_assistant_engage_team_routes_to_the_matching_specialist(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Stabilization plan Phase 1.3 (F3): engage_team used to post the
+    marker and stop — "engaged the team" followed by silence. It must now
+    run a specialist-only routing pass over the human's request and
+    actually invoke the one best match, via the normal handoff pipeline.
+    It still routes exactly one specialist, never the whole roster."""
     agents = client.get("/api/v1/agents", headers=auth_headers).json()
     assistant_id = next(a["id"] for a in agents if a["name"] == "Assistant")
     coder = _create_keyword_agent(client, auth_headers, "WidgetCoder")
+    writer = _create_keyword_agent(client, auth_headers, "WidgetWriter")
+    invoked: list[str] = []
 
     async def fake_run_agent(_db: object, agent_id: str, _message: str, **_kwargs: object) -> Any:
+        invoked.append(agent_id)
         if agent_id == assistant_id:
+            if invoked.count(assistant_id) == 1:
+                return SimpleNamespace(
+                    status=RunStatus.completed,
+                    tools=[
+                        ToolExecution(
+                            tool_name="engage_team", tool_args={"reason": "Need the coder"}
+                        )
+                    ],
+                    get_content_as_string=lambda: "Bringing the team in.",
+                )
             return SimpleNamespace(
                 status=RunStatus.completed,
-                tools=[
-                    ToolExecution(tool_name="engage_team", tool_args={"reason": "Need the coder"})
-                ],
-                get_content_as_string=lambda: "Bringing the team in.",
+                tools=None,
+                get_content_as_string=lambda: "Summarizing.",
             )
         return SimpleNamespace(
             status=RunStatus.completed,
@@ -245,7 +261,9 @@ def test_assistant_engage_team_tool_does_not_unlock_keywords(
         )
 
     monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
-    channel_id = _create_channel_with_team(client, auth_headers, [coder], name="tool-engage")
+    channel_id = _create_channel_with_team(
+        client, auth_headers, [coder, writer], name="tool-engage"
+    )
 
     rivulet = client.post(
         f"/api/v1/channels/{channel_id}/rivulets",
@@ -255,6 +273,154 @@ def test_assistant_engage_team_tool_does_not_unlock_keywords(
     rivulet_id = rivulet.json()["id"]
     messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
     assert any(m["content_type"] == "team_engaged" for m in messages)
+    # The engage routed through the handoff pipeline to the keyword match.
+    assert any(m["content_type"] == "handoff" for m in messages)
+    assert any(m["sender_name"] == "WidgetCoder" for m in messages)
+    # Exactly one specialist — engage still never wakes the whole roster.
+    assert invoked.count(coder) == 1
+    assert invoked.count(writer) == 0
+
+
+def test_assistant_engage_team_with_no_matching_specialist_surfaces_notice(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of Phase 1.3: no specialist matched must produce a
+    visible "tell me who" notice, not silence after the marker."""
+    agents = client.get("/api/v1/agents", headers=auth_headers).json()
+    assistant_id = next(a["id"] for a in agents if a["name"] == "Assistant")
+    coder = _create_keyword_agent(client, auth_headers, "WidgetCoder")
+    invoked: list[str] = []
+
+    async def fake_run_agent(_db: object, agent_id: str, _message: str, **_kwargs: object) -> Any:
+        invoked.append(agent_id)
+        if agent_id == assistant_id:
+            return SimpleNamespace(
+                status=RunStatus.completed,
+                tools=[ToolExecution(tool_name="engage_team", tool_args={"reason": "Someone act"})],
+                get_content_as_string=lambda: "Engaging.",
+            )
+        return SimpleNamespace(
+            status=RunStatus.completed, tools=None, get_content_as_string=lambda: "hi"
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    channel_id = _create_channel_with_team(client, auth_headers, [coder], name="engage-nomatch")
+
+    # "gadget" misses WidgetCoder's "widget" keyword; no LLM fallback is
+    # configured in tests, so the routing pass genuinely matches nobody.
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "help with the gadget"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert any(m["content_type"] == "team_engaged" for m in messages)
+    assert any(
+        m["content_type"] == "system_alert" and "no specialist matched" in m["content"]
+        for m in messages
+    )
+    assert invoked.count(coder) == 0
+
+
+def test_assistant_prose_handoff_claim_is_redriven_to_a_real_handoff(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stabilization plan Phase 2.3 (F1): the Assistant *says* "I'll bring
+    in the coder" without calling the handoff tool. The claim must be
+    detected and the Assistant re-driven once with an explicit "call the
+    tool now" — here the re-drive complies and the specialist runs."""
+    agents = client.get("/api/v1/agents", headers=auth_headers).json()
+    assistant_id = next(a["id"] for a in agents if a["name"] == "Assistant")
+    coder = _create_keyword_agent(client, auth_headers, "WidgetCoder")
+    assistant_prompts: list[str] = []
+
+    async def fake_run_agent(_db: object, agent_id: str, message: str, **_kwargs: object) -> Any:
+        if agent_id == assistant_id:
+            assistant_prompts.append(message)
+            if len(assistant_prompts) == 1:
+                return SimpleNamespace(
+                    status=RunStatus.completed,
+                    tools=None,
+                    get_content_as_string=lambda: "I'll engage the coder on this right away.",
+                )
+            if "no handoff tool call was recorded" in message:
+                return SimpleNamespace(
+                    status=RunStatus.completed,
+                    tools=[
+                        ToolExecution(
+                            tool_name="handoff",
+                            tool_args={
+                                "target_agent_name": "WidgetCoder",
+                                "context": "Build the widget",
+                            },
+                        )
+                    ],
+                    get_content_as_string=lambda: "Handing off now.",
+                )
+            return SimpleNamespace(
+                status=RunStatus.completed, tools=None, get_content_as_string=lambda: "Noted."
+            )
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=None,
+            get_content_as_string=lambda: "Widget built.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    channel_id = _create_channel_with_team(client, auth_headers, [coder], name="redrive-ok")
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "build me a widget tracker"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    # The re-drive happened and carried the explicit instruction.
+    assert len(assistant_prompts) >= 2
+    assert "no handoff tool call was recorded" in assistant_prompts[1]
+    # And it produced a real handoff that reached the specialist.
+    assert any(m["content_type"] == "handoff" for m in messages)
+    assert any(m["sender_name"] == "WidgetCoder" for m in messages)
+
+
+def test_assistant_prose_handoff_claim_surfaces_after_failed_redrive(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the re-driven turn still narrates a handoff without calling the
+    tool, the thread must show a visible notice — and the re-drive must
+    not loop."""
+    agents = client.get("/api/v1/agents", headers=auth_headers).json()
+    assistant_id = next(a["id"] for a in agents if a["name"] == "Assistant")
+    coder = _create_keyword_agent(client, auth_headers, "WidgetCoder")
+    assistant_runs = 0
+
+    async def fake_run_agent(_db: object, agent_id: str, _message: str, **_kwargs: object) -> Any:
+        nonlocal assistant_runs
+        if agent_id == assistant_id:
+            assistant_runs += 1
+        return SimpleNamespace(
+            status=RunStatus.completed,
+            tools=None,
+            get_content_as_string=lambda: "I'm going to engage the team for this.",
+        )
+
+    monkeypatch.setattr("rivulets.dispatch.service.run_agent", fake_run_agent)
+    channel_id = _create_channel_with_team(client, auth_headers, [coder], name="redrive-fail")
+
+    rivulet = client.post(
+        f"/api/v1/channels/{channel_id}/rivulets",
+        json={"content": "build me a widget tracker"},
+        headers=auth_headers,
+    )
+    rivulet_id = rivulet.json()["id"]
+    messages = client.get(f"/api/v1/rivulets/{rivulet_id}/messages", headers=auth_headers).json()
+    assert assistant_runs == 2  # original turn + exactly one re-drive
+    assert any(
+        m["content_type"] == "system_alert" and "no handoff was actually made" in m["content"]
+        for m in messages
+    )
     assert all(m["sender_name"] != "WidgetCoder" for m in messages)
 
 
