@@ -62,11 +62,12 @@ Layer 5: Credential Isolation
      surfaces the owner checked (read by default; send/write is opt-in).
 
 Layer 6: Sandboxed Code Execution
-  └─ The code execution tool runs inside firejail (Linux) or sandbox-exec
-     (macOS), restricted to the workspace directory with network access
-     denied by default. Unavailable on Windows and, by default, in the
-     published Docker image (see below) — the tool reports itself
-     unavailable and refuses to run rather than executing unsandboxed.
+  └─ The code execution tool runs inside firejail (Linux), sandbox-exec
+     (macOS), or an AppContainer (Windows), restricted to the workspace
+     directory with network access denied by default. Unavailable, by
+     default, in the published Docker image (see below) — there the tool
+     reports itself unavailable and refuses to run rather than executing
+     unsandboxed.
 ```
 
 ## Key derivation
@@ -93,13 +94,13 @@ All derived keys are computed at login time and held in memory only — they're 
   - **Owner stay-signed-in (#407):** an owner who checks "Stay signed in on this machine" persists the recovery phrase (and optional passphrase) in `localStorage` so a refresh, new tab, or typed URL can `POST /auth/login` again and re-claim the last identity. Off by default; explicit sign-out drops it. This is a real XSS/local-access tradeoff — the checkbox copy discloses that the phrase is stored in the browser, and names the passphrase too when one will be stored (#478). Leaving it unchecked still warns that refresh signs you out.
   - **OAuth connect hop (#464):** connecting Google is a same-tab trip off-origin. Without stay-signed-in, coming back would land on Unlock and then Settings → Safety. Immediately before leaving, the current session (JWT + identity claims — never the recovery phrase) is parked in `sessionStorage` and consumed once on the next load. Tab-scoped; deleted on consume, sign-out, or closing the tab. The callback returns to `/settings?tab=integrations` so the new account is visible.
 - **File permissions:** everything under `~/.rivulets/` (the database, keys, config, logs) is created with a restrictive umask (`0o077`, set once at process start in `main.py`) so it's readable only by the owning user. Directory and database file modes are also re-tightened to `0o700`/`0o600` on every startup (`Settings.ensure_workspace_dirs`), so an install predating this hardening gets fixed in place rather than only newly created ones.
-- **Sandboxed code execution:** the Code Execution tool runs under `firejail --private=<dir> --private-tmp --private-dev --caps.drop=all --seccomp`, with `--net=none` unless network access is explicitly allowed. On macOS, `sandbox-exec` provides the equivalent restriction. If neither is available on the host, the tool refuses to run rather than executing unsandboxed. This includes Windows (no sandbox backend implemented yet) and the published Docker image (see "Code execution under Docker" below).
+- **Sandboxed code execution:** the Code Execution tool runs under `firejail --private=<dir> --private-tmp --private-dev --caps.drop=all --seccomp`, with `--net=none` unless network access is explicitly allowed. On macOS, `sandbox-exec` provides the equivalent restriction. On Windows, the tool runs inside an AppContainer (the same OS sandbox Chromium and MSIX-packaged apps use) plus a kill-on-close job object: filesystem access is ACL-gated to the sandbox directory and the Python install (user-profile paths — the workspace DB, `~/.ssh` and friends — are unreadable by default), and the Windows Filtering Platform denies all network access unless the workspace opts in via `RIVULETS_CODE_EXEC_NETWORK_ACCESS=1` (see `code_exec_windows.py`; verified in CI on a real Windows runner). If the platform's sandbox backing is not available on the host, the tool refuses to run rather than executing unsandboxed. This includes the published Docker image (see "Code execution under Docker" below).
 - **Outbound request filtering:** the built-in `http_request` and `fetch_webpage` tools block requests to loopback, private, link-local, and other reserved IP ranges — including on redirect hops — since an agent's outbound requests can be driven by synced or otherwise untrusted content. Each hop is pinned to the addresses that just passed that check (the TCP connect uses those IPs, not a second DNS lookup), so a name that is public at check time and loopback a moment later cannot steer the request at localhost, RFC1918, or `169.254.169.254`. The same pin is applied when an agent invokes a streamable-http MCP tool, not only when the server is registered or reconnected. This closes off SSRF against the node's own localhost services and LAN.
 - **API docs disabled:** `/docs`, `/redoc`, and `/openapi.json` are turned off (`docs_url=None` etc. in `app.py`). Every other route already sits behind the workspace JWT; this just removes unauthenticated surface with no product cost, since the API has no external integrators to document for.
 
 ### Code execution under Docker
 
-The published Docker image does **not** install firejail, so the Code Execution tool reports itself unavailable under a stock `docker compose up` (it fails closed with `SandboxUnavailableError` rather than running agent-submitted code unsandboxed — same behavior as an unpatched Windows install).
+The published Docker image does **not** install firejail, so the Code Execution tool reports itself unavailable under a stock `docker compose up` (it fails closed with `SandboxUnavailableError` rather than running agent-submitted code unsandboxed).
 
 This is deliberate, not an oversight: firejail needs to create its own mount/user namespaces, which needs `CAP_SYS_ADMIN` — a capability outside Docker's default capability bounding set. Installing the firejail binary into the image without also granting that capability would leave it present but non-functional. Adding `CAP_SYS_ADMIN` to every container by default, to support one opt-in tool, would weaken this image's baseline hardening for every install to benefit the minority that use Code Execution under Docker.
 
@@ -123,7 +124,7 @@ Only do this if you understand and accept that it grants the container a capabil
 | Attacker on the same LAN intercepts sync traffic | libp2p noise encryption with the workspace key as PSK | An attacker who has the workspace key can decrypt — keep it secret. |
 | Attacker gets physical access to the machine | OS filesystem permissions on key material; OS keychain for provider keys | A root-level attacker can read memory or the keychain directly — out of scope for any local application. |
 | Workspace mnemonic is compromised, on an install with no OS keychain backend (#118) | The encrypted-SQLite provider-key fallback is only used when the OS keychain is unavailable; the UI discloses when it's active | Unlike the normal (keychain) case, the mnemonic now also decrypts provider API keys, not just workspace/sync access — an accepted tradeoff for keeping Docker/headless installs functional, not an oversight. Treat the mnemonic with the same care as your provider keys on those installs. |
-| Malicious tool code reads user files | firejail/sandbox-exec restricts execution to the workspace directory | A sandbox escape vulnerability would defeat this — sandbox versions should be kept current. |
+| Malicious tool code reads user files | firejail/sandbox-exec/AppContainer restricts execution to the workspace directory | A sandbox escape vulnerability would defeat this — sandbox versions should be kept current. |
 | XSS in the web UI reads the session token | JWT held in memory, not `localStorage`; CSP headers; Svelte's compile-time output escaping | A DOM-based XSS via a vulnerable dependency is still possible — keep dependencies current. An owner who opted into stay-signed-in (#407) also has the recovery phrase (and passphrase, if set) in `localStorage`, which that same XSS could read — the checkbox discloses this, and sign-out removes it. During a Google connect hop (#464) the JWT is briefly in `sessionStorage` for that tab; consume/sign-out/tab-close delete it. |
 | Workspace key is lost | BIP-39 mnemonic (+ optional passphrase) is human-writable and recoverable by the user | There is no server-side recovery. Losing both the mnemonic and passphrase means permanent loss of that workspace. |
 | MITM on LLM provider API calls | HTTPS enforced for all provider API traffic | Standard risk shared by any API consumer; depends on TLS integrity. |
