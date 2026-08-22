@@ -7,6 +7,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from rivulets.api.files import _MAX_FILE_BYTES
 from rivulets.config import get_settings
 from rivulets.db.models import File as FileRow
 from rivulets.db.session import session_scope
@@ -217,3 +218,39 @@ def test_file_info_returns_404_for_unknown_file(
 ) -> None:
     response = client.get("/api/v1/files/does-not-exist/info", headers=auth_headers)
     assert response.status_code == 404
+
+
+# --- FR-10.1 upload cap boundary (#522) -------------------------------------
+#
+# FR-10.1 documents "up to 100MB per file", meaning inclusive: a file of
+# exactly 100 MB (104,857,600 bytes) uploads fine, and one more byte is
+# rejected with a plain-language 413. The same 100 MB figure is enforced a
+# second time at the sync-transfer layer (sync/file_transfer.MAX_FILE_BYTES,
+# boundary pinned in test_sync.py) -- the equality test below is what keeps
+# the two constants from drifting apart.
+
+
+def test_upload_cap_matches_sync_transfer_cap_and_fr_10_1() -> None:
+    from rivulets.sync.file_transfer import MAX_FILE_BYTES
+
+    assert _MAX_FILE_BYTES == MAX_FILE_BYTES == 100 * 1024 * 1024
+
+
+def test_upload_of_exactly_100_mb_is_accepted(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    uploaded = _upload(client, auth_headers, "at-the-limit.bin", b"\0" * _MAX_FILE_BYTES)
+    assert uploaded["size_bytes"] == _MAX_FILE_BYTES
+
+
+def test_upload_of_100_mb_plus_one_byte_is_rejected_with_plain_language_413(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/files/upload",
+        files={"upload": ("over-the-limit.bin", b"\0" * (_MAX_FILE_BYTES + 1), "text/plain")},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "File exceeds 100MB limit"
