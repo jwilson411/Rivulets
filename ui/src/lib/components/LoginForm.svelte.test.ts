@@ -1,7 +1,9 @@
 // Browser-mode component test for the Unlock screen (06-screens.md →
 // Unlock, mockups 1a/1b): a landing view with two big choices, a
 // phrase-entry view, and the generated-phrase view with its acknowledge
-// gate — the one deliberately loud severity moment in the app.
+// gate — the one deliberately loud severity moment in the app — followed
+// by the #518 verify step that quizzes three words of the phrase before
+// the first login completes.
 
 import { page } from 'vitest/browser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,6 +48,14 @@ vi.mock('bip39', () => ({
 	generateMnemonic: vi.fn(() => STUB_PHRASE)
 }));
 
+// #518: pin the verify step's sampled positions so tests know which words
+// it will ask for — indices 2/6/10 → words 3 ("charlie"), 7 ("golf") and
+// 11 ("kilo") of STUB_PHRASE.
+vi.mock('$lib/mnemonic', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/mnemonic')>()),
+	sampleWordIndices: vi.fn(() => [2, 6, 10])
+}));
+
 // navigator.clipboard.writeText is stubbed since real clipboard access needs
 // OS-level permissions Playwright's headless Chromium doesn't grant by
 // default.
@@ -67,6 +77,18 @@ afterEach(() => {
 
 async function openPhraseEntry() {
 	await page.getByRole('button', { name: 'I already have a phrase' }).click();
+}
+
+// Walks the #518 confirm gate: acknowledge, continue to the verify step,
+// and answer the quiz correctly, leaving the flow at the final
+// Enter workspace button (which it clicks).
+async function acknowledgeAndVerify() {
+	await page.getByText("I've saved this phrase somewhere safe").click();
+	await page.getByRole('button', { name: 'Continue' }).click();
+	await page.getByLabelText('Word 3').fill('charlie');
+	await page.getByLabelText('Word 7').fill('golf');
+	await page.getByLabelText('Word 11').fill('kilo');
+	await page.getByRole('button', { name: 'Enter workspace' }).click();
 }
 
 describe('LoginForm.svelte', () => {
@@ -238,20 +260,19 @@ describe('LoginForm.svelte', () => {
 				await expect.element(page.getByText(word, { exact: true })).toBeInTheDocument();
 			}
 
-			const continueButton = page.getByRole('button', { name: 'Enter workspace' });
+			const continueButton = page.getByRole('button', { name: 'Continue' });
 			await expect.element(continueButton).toBeDisabled();
 
 			await page.getByText("I've saved this phrase somewhere safe").click();
 			await expect.element(continueButton).toBeEnabled();
 		});
 
-		it('logs in with the generated phrase once acknowledged and confirmed', async () => {
+		it('logs in with the generated phrase once acknowledged and verified (#518)', async () => {
 			vi.mocked(auth.login).mockResolvedValueOnce(undefined);
 			render(LoginForm);
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await acknowledgeAndVerify();
 
 			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined, undefined);
 			expect(auth.forgetOwnerStay).toHaveBeenCalledOnce();
@@ -263,8 +284,7 @@ describe('LoginForm.svelte', () => {
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByText('Stay signed in on this machine').click();
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await acknowledgeAndVerify();
 
 			expect(auth.rememberOwnerStay).toHaveBeenCalledWith(STUB_PHRASE, undefined);
 		});
@@ -275,9 +295,9 @@ describe('LoginForm.svelte', () => {
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByRole('button', { name: 'Add a passphrase' }).click();
-			await page.getByLabelText('Passphrase').fill('extra word');
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await page.getByLabelText('Passphrase', { exact: true }).fill('extra word');
+			await page.getByLabelText('Confirm passphrase').fill('extra word');
+			await acknowledgeAndVerify();
 
 			expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, 'extra word', undefined);
 		});
@@ -288,7 +308,8 @@ describe('LoginForm.svelte', () => {
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
 			await page.getByRole('button', { name: 'Add a passphrase' }).click();
-			await page.getByLabelText('Passphrase').fill('extra word');
+			await page.getByLabelText('Passphrase', { exact: true }).fill('extra word');
+			await page.getByLabelText('Confirm passphrase').fill('extra word');
 			await page.getByText('Stay signed in on this machine').click();
 
 			await expect
@@ -299,10 +320,28 @@ describe('LoginForm.svelte', () => {
 				)
 				.toBeInTheDocument();
 
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await acknowledgeAndVerify();
 
 			expect(auth.rememberOwnerStay).toHaveBeenCalledWith(STUB_PHRASE, 'extra word');
+		});
+
+		it('requires the passphrase to be typed twice before continuing (#518)', async () => {
+			render(LoginForm);
+
+			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+			await page.getByRole('button', { name: 'Add a passphrase' }).click();
+			await page.getByLabelText('Passphrase', { exact: true }).fill('extra word');
+			await page.getByText("I've saved this phrase somewhere safe").click();
+
+			const continueButton = page.getByRole('button', { name: 'Continue' });
+			await expect.element(continueButton).toBeDisabled();
+
+			await page.getByLabelText('Confirm passphrase').fill('extra wrod');
+			await expect.element(page.getByText("Passphrases don't match.")).toBeInTheDocument();
+			await expect.element(continueButton).toBeDisabled();
+
+			await page.getByLabelText('Confirm passphrase').fill('extra word');
+			await expect.element(continueButton).toBeEnabled();
 		});
 
 		it('copies the generated phrase to the clipboard', async () => {
@@ -315,21 +354,96 @@ describe('LoginForm.svelte', () => {
 			await expect.element(page.getByText('Copied')).toBeInTheDocument();
 		});
 
-		it('shows the error message on the generated-phrase screen when login fails', async () => {
+		it('shows the error message on the verify screen when login fails', async () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(new Error('Server unavailable'));
 			render(LoginForm);
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await acknowledgeAndVerify();
 
 			await expect.element(page.getByText('Server unavailable')).toBeInTheDocument();
-			// Login failure keeps the generated-phrase screen up (rather than
-			// clearing it back to the landing) so the user doesn't lose the
-			// phrase they were about to confirm.
+			// Login failure keeps the verify screen up (rather than clearing
+			// back to the landing) so the user doesn't lose the phrase they
+			// were about to confirm — it's still one "Show my phrase again"
+			// away.
 			await expect
-				.element(page.getByText("I've saved this phrase somewhere safe"))
+				.element(page.getByRole('button', { name: 'Show my phrase again' }))
 				.toBeInTheDocument();
+		});
+
+		describe('re-entry verification (#518)', () => {
+			async function openVerifyStep() {
+				await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
+				await page.getByText("I've saved this phrase somewhere safe").click();
+				await page.getByRole('button', { name: 'Continue' }).click();
+			}
+
+			it('asks for the sampled words and keeps submit disabled until all are filled', async () => {
+				render(LoginForm);
+				await openVerifyStep();
+
+				await expect
+					.element(page.getByText('Enter words 3, 7 and 11 of your recovery phrase.'))
+					.toBeInTheDocument();
+
+				const submit = page.getByRole('button', { name: 'Enter workspace' });
+				await expect.element(submit).toBeDisabled();
+
+				await page.getByLabelText('Word 3').fill('charlie');
+				await page.getByLabelText('Word 7').fill('golf');
+				await expect.element(submit).toBeDisabled();
+
+				await page.getByLabelText('Word 11').fill('kilo');
+				await expect.element(submit).toBeEnabled();
+			});
+
+			it('blocks a wrong re-entry without calling login, then proceeds once corrected', async () => {
+				vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+				render(LoginForm);
+				await openVerifyStep();
+
+				await page.getByLabelText('Word 3').fill('charlie');
+				await page.getByLabelText('Word 7').fill('gulf');
+				await page.getByLabelText('Word 11').fill('kilo');
+				await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+				await expect
+					.element(page.getByText("Those words don't match your phrase", { exact: false }))
+					.toBeInTheDocument();
+				expect(auth.login).not.toHaveBeenCalled();
+
+				await page.getByLabelText('Word 7').fill('golf');
+				await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+				expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined, undefined);
+			});
+
+			it('accepts words regardless of case and surrounding whitespace', async () => {
+				vi.mocked(auth.login).mockResolvedValueOnce(undefined);
+				render(LoginForm);
+				await openVerifyStep();
+
+				await page.getByLabelText('Word 3').fill('  Charlie ');
+				await page.getByLabelText('Word 7').fill('GOLF');
+				await page.getByLabelText('Word 11').fill('kilo');
+				await page.getByRole('button', { name: 'Enter workspace' }).click();
+
+				expect(auth.login).toHaveBeenCalledWith(STUB_PHRASE, undefined, undefined);
+			});
+
+			it('lets the user go back to re-read the phrase, then quizzes again', async () => {
+				render(LoginForm);
+				await openVerifyStep();
+
+				await page.getByRole('button', { name: 'Show my phrase again' }).click();
+
+				// The full phrase is visible again…
+				await expect.element(page.getByText('charlie', { exact: true })).toBeInTheDocument();
+				// …and continuing re-enters the quiz with empty fields.
+				await page.getByRole('button', { name: 'Continue' }).click();
+				await expect.element(page.getByLabelText('Word 3')).toHaveValue('');
+				expect(auth.login).not.toHaveBeenCalled();
+			});
 		});
 
 		it('returns to the landing without logging in', async () => {
@@ -445,13 +559,12 @@ describe('LoginForm.svelte', () => {
 			expect(auth.login).toHaveBeenLastCalledWith(VALID_PHRASE, undefined, 'correct-token');
 		});
 
-		it('reveals a setup-token field on the generated-phrase screen too', async () => {
+		it('reveals a setup-token field on the generated-phrase verify screen too', async () => {
 			vi.mocked(auth.login).mockRejectedValueOnce(bootstrapError).mockResolvedValueOnce(undefined);
 			render(LoginForm);
 
 			await page.getByRole('button', { name: 'Generate a recovery phrase' }).click();
-			await page.getByText("I've saved this phrase somewhere safe").click();
-			await page.getByRole('button', { name: 'Enter workspace' }).click();
+			await acknowledgeAndVerify();
 
 			const tokenInput = page.getByLabelText('Setup token');
 			await expect.element(tokenInput).toBeInTheDocument();
