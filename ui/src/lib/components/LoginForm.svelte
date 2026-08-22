@@ -9,11 +9,16 @@
 	//
 	// The generated-phrase warning card is deliberately the ONE loud
 	// severity moment in the whole app (HANDOFF.md invariant 6).
+	//
+	// #518: the phrase is the credential and there is no reset, so "I've
+	// saved it" alone isn't enough — before the first login completes, a
+	// verify step quizzes three random words of the phrase (the standard
+	// wallet pattern), and a passphrase added here must be typed twice.
 	import { generateMnemonic } from 'bip39';
 	import { auth } from '$lib/api/auth.svelte';
 	import { ApiError } from '$lib/api/client';
 	import { initials } from '$lib/ink';
-	import { isUnlockPhraseReady } from '$lib/mnemonic';
+	import { isUnlockPhraseReady, sampleWordIndices } from '$lib/mnemonic';
 	import Icon from '$lib/ui/Icon.svelte';
 
 	// Set by +layout.svelte's auth gate when it swaps back to LoginForm
@@ -21,7 +26,7 @@
 	// rather than the user simply never having logged in.
 	let { sessionExpired = false }: { sessionExpired?: boolean } = $props();
 
-	type View = 'landing' | 'enter' | 'generated';
+	type View = 'landing' | 'enter' | 'generated' | 'verify';
 	let view = $state<View>('landing');
 
 	let mnemonic = $state('');
@@ -32,9 +37,18 @@
 
 	let generatedWords = $state<string[] | null>(null);
 	let generatedPassphrase = $state('');
+	let generatedPassphraseConfirm = $state('');
 	let showGeneratedPassphrase = $state(false);
 	let acknowledged = $state(false);
 	let copied = $state(false);
+
+	// #518: which word positions the verify step asks for, and what the
+	// user typed for each. Resampled every time they enter the step, so
+	// bouncing Back to peek at the phrase draws a fresh quiz.
+	const VERIFY_WORD_COUNT = 3;
+	let verifyIndices = $state<number[]>([]);
+	let verifyEntries = $state<string[]>([]);
+	let verifyError = $state<string | null>(null);
 
 	// Only shown once a login attempt has actually hit the server's #247
 	// bootstrap-token gate (api/auth.py) -- there's no way to know in
@@ -129,19 +143,23 @@
 		// _MNEMONIC_STRENGTH_BITS (security/keys.py).
 		generatedWords = generateMnemonic(128).split(' ');
 		generatedPassphrase = '';
+		generatedPassphraseConfirm = '';
 		showGeneratedPassphrase = false;
 		acknowledged = false;
 		copied = false;
 		loginError = null;
+		verifyError = null;
 		view = 'generated';
 	}
 
 	function backToLanding() {
 		generatedWords = null;
 		generatedPassphrase = '';
+		generatedPassphraseConfirm = '';
 		acknowledged = false;
 		copied = false;
 		loginError = null;
+		verifyError = null;
 		view = 'landing';
 	}
 
@@ -151,16 +169,60 @@
 		copied = true;
 	}
 
-	async function confirmGeneratedPhrase() {
-		if (!generatedWords || !acknowledged) return;
-		if (await performLogin(generatedWords.join(' '), generatedPassphrase)) {
+	// A passphrase is as unrecoverable as the phrase itself, so it only
+	// counts once it's been typed the same way twice.
+	const generatedPassphraseMatches = $derived(
+		generatedPassphrase.length === 0 || generatedPassphrase === generatedPassphraseConfirm
+	);
+	const canContinueToVerify = $derived(acknowledged && generatedPassphraseMatches);
+
+	function startVerify() {
+		if (!generatedWords || !canContinueToVerify) return;
+		verifyIndices = sampleWordIndices(VERIFY_WORD_COUNT, generatedWords.length);
+		verifyEntries = Array(VERIFY_WORD_COUNT).fill('');
+		verifyError = null;
+		loginError = null;
+		view = 'verify';
+	}
+
+	function backToPhrase() {
+		verifyError = null;
+		loginError = null;
+		view = 'generated';
+	}
+
+	const verifyFilled = $derived(verifyEntries.every((entry) => entry.trim().length > 0));
+
+	async function confirmVerifiedPhrase() {
+		if (!generatedWords || !verifyFilled) return;
+		const words = generatedWords;
+		const allMatch = verifyIndices.every(
+			(wordIndex, i) => verifyEntries[i].trim().toLowerCase() === words[wordIndex]
+		);
+		if (!allMatch) {
+			verifyError = "Those words don't match your phrase. Check what you saved and try again.";
+			return;
+		}
+		verifyError = null;
+		if (await performLogin(words.join(' '), generatedPassphrase)) {
 			generatedWords = null;
 			generatedPassphrase = '';
+			generatedPassphraseConfirm = '';
 			acknowledged = false;
+			verifyIndices = [];
+			verifyEntries = [];
 			bootstrapToken = '';
 			needsBootstrapToken = false;
 		}
 	}
+
+	// "words 3, 7 and 11" for the verify prompt.
+	const verifyPositions = $derived.by(() => {
+		const positions = verifyIndices.map((i) => String(i + 1));
+		return positions.length <= 1
+			? positions.join('')
+			: `${positions.slice(0, -1).join(', ')} and ${positions[positions.length - 1]}`;
+	});
 
 	const inputClass =
 		'h-12 rounded-lg border border-line bg-surface px-4 text-base text-ink placeholder:text-muted focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:placeholder:text-muted-dark dark:focus:border-accent-dark';
@@ -280,10 +342,26 @@
 						Optional. You'll need this every time, along with the phrase. There is no reset.
 					{/if}
 				</p>
+				{#if generatedPassphrase.length > 0}
+					<label
+						class="mt-2 text-sm font-semibold text-ink dark:text-ink-dark"
+						for="generated-passphrase-confirm"
+					>
+						Confirm passphrase
+					</label>
+					<input
+						id="generated-passphrase-confirm"
+						type="password"
+						autocomplete="off"
+						bind:value={generatedPassphraseConfirm}
+						class={inputClass}
+					/>
+					{#if generatedPassphraseConfirm.length > 0 && !generatedPassphraseMatches}
+						<p class="text-[13px] text-danger">Passphrases don't match.</p>
+					{/if}
+				{/if}
 			</div>
 		{/if}
-
-		{@render bootstrapField('generated-bootstrap-token')}
 
 		<div class="mb-6">
 			{@render staySignedInField()}
@@ -304,16 +382,12 @@
 
 		<button
 			type="button"
-			disabled={loggingIn || !acknowledged}
-			onclick={confirmGeneratedPhrase}
+			disabled={!canContinueToVerify}
+			onclick={startVerify}
 			class="flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
 		>
-			{loggingIn ? 'Unlocking…' : 'Enter workspace'}
+			Continue
 		</button>
-
-		{#if loginError}
-			<p class="mt-4 text-sm text-danger">{loginError}</p>
-		{/if}
 
 		<div class="mt-4 flex items-center justify-center gap-6">
 			{#if !showGeneratedPassphrase}
@@ -331,6 +405,65 @@
 				class="text-sm text-muted hover:underline dark:text-muted-dark"
 			>
 				Back
+			</button>
+		</div>
+	{:else if view === 'verify' && generatedWords}
+		<h1
+			class="mb-3 font-display text-[32px] leading-tight font-semibold text-ink dark:text-ink-dark"
+		>
+			Check that you saved it.
+		</h1>
+		<p class="mb-8 text-base text-muted dark:text-muted-dark">
+			Enter words {verifyPositions} of your recovery phrase.
+		</p>
+
+		<div class="mb-6 flex flex-col gap-5">
+			{#each verifyIndices as wordIndex, i (wordIndex)}
+				<div class="flex flex-col gap-2">
+					<label
+						class="text-sm font-semibold text-ink dark:text-ink-dark"
+						for={`verify-word-${wordIndex}`}
+					>
+						Word {wordIndex + 1}
+					</label>
+					<input
+						id={`verify-word-${wordIndex}`}
+						type="text"
+						autocomplete="off"
+						autocapitalize="none"
+						spellcheck="false"
+						bind:value={verifyEntries[i]}
+						class="{inputClass} font-mono"
+					/>
+				</div>
+			{/each}
+		</div>
+
+		{@render bootstrapField('verify-bootstrap-token')}
+
+		<button
+			type="button"
+			disabled={loggingIn || !verifyFilled}
+			onclick={confirmVerifiedPhrase}
+			class="mt-1 flex h-14 w-full items-center justify-center rounded-xl bg-accent text-base font-semibold text-white transition-colors hover:bg-accent-deep disabled:opacity-40 dark:bg-accent-dark dark:text-paper-dark"
+		>
+			{loggingIn ? 'Unlocking…' : 'Enter workspace'}
+		</button>
+
+		{#if verifyError}
+			<p class="mt-4 text-sm text-danger">{verifyError}</p>
+		{/if}
+		{#if loginError}
+			<p class="mt-4 text-sm text-danger">{loginError}</p>
+		{/if}
+
+		<div class="mt-4 flex items-center justify-center">
+			<button
+				type="button"
+				onclick={backToPhrase}
+				class="text-sm text-muted hover:underline dark:text-muted-dark"
+			>
+				Show my phrase again
 			</button>
 		</div>
 	{:else if view === 'enter'}
