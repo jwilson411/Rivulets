@@ -1,7 +1,13 @@
 """Tool CRUD (FR-8.2 through FR-8.4).
 
-Simple-mode codegen (send a prompt to an LLM, review, approve) still
-needs an LLM client wired up — marked TODO. The advanced-mode editor
+Simple-mode codegen (FR-8.3, #517): POST /tools with mode="simple" sends
+body.prompt to a configured LLM (agentos/tool_codegen.py) and answers 200
+with a draft — just the generated source, no Tool/ToolVersion rows, no
+file in tools_dir. The approve step is deliberately not a new endpoint:
+the client creates the tool via the normal advanced-mode POST and
+registers the reviewed code via save_tool_version below, so generated
+code passes through exactly the same owner-gated compile/save/resync/
+publish path as hand-written code. The advanced-mode editor
 handoff is real on both ends now: open_tool_editor hands the UI a path
 to open in the OS's default editor (FR-8.4), and save_tool_version
 (below) is what a "Save" action in that flow calls — until it existed, a
@@ -25,12 +31,18 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from rivulets.agentos import sync_agents
 from rivulets.agentos.tool_catalog import display_name_for, group_for
+from rivulets.agentos.tool_codegen import (
+    ToolCodegenFailedError,
+    ToolCodegenUnavailableError,
+    generate_tool_code,
+)
 from rivulets.agentos.tool_scopes import TOOL_SCOPES
 from rivulets.api.deps import CurrentWorkspaceId, DbSession, OwnerGrant
 from rivulets.config import get_settings
@@ -88,6 +100,22 @@ class ToolCreate(BaseModel):
                 "(letters, digits, underscores; can't start with a digit)"
             )
         return value
+
+    @model_validator(mode="after")
+    def _require_prompt_for_simple(self) -> "ToolCreate":
+        if self.mode == "simple" and not (self.prompt or "").strip():
+            raise ValueError("Describe what the tool should do")
+        return self
+
+
+class ToolCodegenDraftOut(BaseModel):
+    """The mode="simple" answer from create_tool: generated source for the
+    user to review, deliberately carrying no tool id — nothing was
+    created. (Documented for the OpenAPI reader; create_tool returns it
+    via a JSONResponse since the route's declared response_model covers
+    the advanced-mode path.)"""
+
+    source_code: str
 
 
 class ToolUpdate(BaseModel):
@@ -185,15 +213,37 @@ async def _check_custom_name_available(db: DbSession, name: str) -> None:
 @router.post("", response_model=ToolOut, status_code=status.HTTP_201_CREATED)
 async def create_tool(
     body: ToolCreate, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
-) -> Tool:
-    if body.mode == "simple":
-        # TODO(FR-8.3): send body.prompt to an LLM, generate Agno tool code,
-        # return it for review before creating the Tool/ToolVersion rows.
-        raise HTTPException(
-            status.HTTP_501_NOT_IMPLEMENTED, "Simple-mode tool codegen not yet wired up"
-        )
-
+) -> Tool | JSONResponse:
     await _check_custom_name_available(db, body.name)
+
+    if body.mode == "simple":
+        # FR-8.3 (#517): generate code from body.prompt and hand it back as
+        # a 200 draft for review — no rows, no file. Approval is the client
+        # re-posting as advanced mode + save_tool_version (module
+        # docstring). Failures answer with a plain-language next step
+        # keyed to the cause, never a raw 501: a persona check, since
+        # simple mode exists precisely for people who can't fall back to
+        # writing the Python themselves.
+        assert body.prompt is not None  # _require_prompt_for_simple
+        try:
+            source_code = await generate_tool_code(db, body.name, body.description, body.prompt)
+        except ToolCodegenUnavailableError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Code can't be generated on this machine right now "
+                f"({exc}). Add a model provider in Settings > Providers, "
+                "or switch to pasting code.",
+            ) from exc
+        except ToolCodegenFailedError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "Generating the code didn't work this time. Try again, or "
+                "ask an agent in a channel to write it for you.",
+            ) from exc
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=ToolCodegenDraftOut(source_code=source_code).model_dump(),
+        )
 
     # #289: source_path is keyed off the tool's own id, not its (mutable,
     # collidable-in-flight-with-a-peer's) name -- generated up front so it

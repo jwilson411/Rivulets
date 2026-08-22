@@ -13,8 +13,11 @@
 
 	// Tools (06-screens.md → Tools, mockup 2i): grouped Built in / Yours /
 	// From MCP. Creating a custom tool leads with "describe what it should
-	// do"; pasting code lives behind More. Custom tools' source, versions,
-	// and delete live in a sheet (owner-only server-side, #321/#351).
+	// do"; pasting code lives behind More. Simple mode (#517) is a two-step
+	// flow: the server generates code from the description, the user
+	// reviews (and can edit) it, and only approval creates the tool.
+	// Custom tools' source, versions, and delete live in a sheet
+	// (owner-only server-side, #321/#351).
 
 	let toolList = $state<Tool[]>([]);
 	let loading = $state(true);
@@ -27,6 +30,11 @@
 	let prompt = $state('');
 	let createBusy = $state(false);
 	let createError = $state<string | null>(null);
+	// Simple-mode review step (#517): the generated draft being reviewed,
+	// and — once approval has created the (still empty) tool but before its
+	// code saved — the id to retry the save against without re-creating.
+	let reviewCode = $state<string | null>(null);
+	let approvedToolId = $state<string | null>(null);
 
 	let openTool = $state<Tool | null>(null);
 	let openVersions = $state<ToolVersion[]>([]);
@@ -57,33 +65,92 @@
 
 	refresh();
 
+	function closeCreate() {
+		creating = false;
+		name = '';
+		description = '';
+		prompt = '';
+		createError = null;
+		reviewCode = null;
+		approvedToolId = null;
+	}
+
+	// #517: generation returns a draft — nothing is created until the user
+	// approves it from the review step. Also serves "Regenerate" there.
+	async function generateDraft() {
+		createError = null;
+		createBusy = true;
+		try {
+			const draft = await tools.generateCode({
+				name: name.trim(),
+				description: description.trim(),
+				prompt: prompt.trim()
+			});
+			reviewCode = draft.source_code;
+		} catch (err) {
+			// #133: codegen isn't wired up on older servers (raw 501) —
+			// offer a concrete next step instead of leaving a non-coder stuck.
+			// Newer servers answer 502/503 with their own plain-language
+			// next step, surfaced verbatim below.
+			if (err instanceof ApiError && err.status === 501) {
+				createError =
+					"Describing a tool isn't available on this machine yet. Your name and description are kept — switch to pasting code, or ask an agent in a channel to write it for you.";
+			} else {
+				createError = err instanceof ApiError ? err.message : "Couldn't generate the code.";
+			}
+		} finally {
+			createBusy = false;
+		}
+	}
+
 	async function handleCreate(event: SubmitEvent) {
 		event.preventDefault();
 		createError = null;
 		if (!name.trim() || !description.trim()) return;
-		if (createMode === 'simple' && !prompt.trim()) return;
+		if (createMode === 'simple') {
+			if (!prompt.trim()) return;
+			await generateDraft();
+			return;
+		}
 		createBusy = true;
 		try {
 			await tools.create({
 				name: name.trim(),
 				description: description.trim(),
-				mode: createMode,
-				...(createMode === 'simple' ? { prompt: prompt.trim() } : {})
+				mode: 'advanced'
 			});
-			creating = false;
-			name = '';
-			description = '';
-			prompt = '';
+			closeCreate();
 			await refresh();
 		} catch (err) {
-			// #133: Simple mode's codegen isn't wired up on every server —
-			// offer a concrete next step instead of leaving a non-coder stuck.
-			if (err instanceof ApiError && err.status === 501) {
-				createError =
-					"Describing a tool isn't available on this machine yet. Your name and description are kept — switch to pasting code, or ask an agent in a channel to write it for you.";
-			} else {
-				createError = err instanceof ApiError ? err.message : "Couldn't create the tool.";
+			createError = err instanceof ApiError ? err.message : "Couldn't create the tool.";
+		} finally {
+			createBusy = false;
+		}
+	}
+
+	// The approve half of simple mode (#517): registers the reviewed code
+	// through the same create + saveVersion plumbing advanced mode uses. If
+	// the save fails after the create succeeded (e.g. the user edited the
+	// draft into invalid Python), the created id is kept so retrying only
+	// re-runs the save instead of hitting a name conflict.
+	async function handleApprove() {
+		if (reviewCode === null) return;
+		createError = null;
+		createBusy = true;
+		try {
+			if (!approvedToolId) {
+				const tool = await tools.create({
+					name: name.trim(),
+					description: description.trim(),
+					mode: 'advanced'
+				});
+				approvedToolId = tool.id;
 			}
+			await tools.saveVersion(approvedToolId, reviewCode);
+			closeCreate();
+			await refresh();
+		} catch (err) {
+			createError = err instanceof ApiError ? err.message : "Couldn't create the tool.";
 		} finally {
 			createBusy = false;
 		}
@@ -214,8 +281,49 @@
 	{/if}
 </div>
 
-{#if creating}
-	<Sheet title="New tool" onClose={() => (creating = false)}>
+{#if creating && reviewCode !== null}
+	<!-- #517 review step: the generated draft, editable before approval.
+	     Approving is what actually creates the tool (create + saveVersion,
+	     the same plumbing as pasting code). -->
+	<Sheet title="Review the code" onClose={closeCreate}>
+		<p class="text-[15px] text-muted dark:text-muted-dark">
+			A model wrote this from your description. Look it over — or just edit it — then approve to
+			create the tool. Nothing runs until you approve.
+		</p>
+		<textarea
+			rows="12"
+			bind:value={reviewCode}
+			aria-label="Generated tool code"
+			class="rounded-lg border border-line bg-surface px-4 py-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none dark:border-line-dark dark:bg-surface-dark dark:text-ink-dark dark:focus:border-accent-dark"
+		></textarea>
+		{#if createError}
+			<p class="text-sm text-danger">{createError}</p>
+		{/if}
+		{#snippet footer()}
+			{#if approvedToolId === null}
+				<!-- Once approval has partially succeeded (tool created, code
+				     not saved yet), going back to edit name/description would
+				     orphan the created tool — the ways forward are fixing the
+				     code here or cancelling. -->
+				<button
+					type="button"
+					onclick={() => {
+						reviewCode = null;
+						createError = null;
+					}}
+					class="mr-auto text-[15px] font-medium text-accent hover:underline dark:text-accent-dark"
+				>
+					Back
+				</button>
+			{/if}
+			<Button variant="secondary" disabled={createBusy} onclick={generateDraft}>Regenerate</Button>
+			<Button disabled={createBusy} onclick={handleApprove}>
+				{createBusy ? 'Working…' : 'Approve and create'}
+			</Button>
+		{/snippet}
+	</Sheet>
+{:else if creating}
+	<Sheet title="New tool" onClose={closeCreate}>
 		<form id="new-tool-form" onsubmit={handleCreate} class="flex flex-col gap-4">
 			<div class="flex flex-col gap-2">
 				<label class="text-sm font-semibold text-ink dark:text-ink-dark" for="new-tool-name">
@@ -278,7 +386,7 @@
 			{/if}
 		</form>
 		{#snippet footer()}
-			<Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
+			<Button variant="secondary" onclick={closeCreate}>Cancel</Button>
 			<Button
 				disabled={createBusy ||
 					!name.trim() ||
@@ -287,7 +395,11 @@
 				onclick={() =>
 					(document.getElementById('new-tool-form') as HTMLFormElement).requestSubmit()}
 			>
-				{createBusy ? 'Creating…' : 'Create tool'}
+				{#if createMode === 'simple'}
+					{createBusy ? 'Generating…' : 'Generate code'}
+				{:else}
+					{createBusy ? 'Creating…' : 'Create tool'}
+				{/if}
 			</Button>
 		{/snippet}
 	</Sheet>

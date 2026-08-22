@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import rivulets.api.tools as tools_api
+from rivulets.agentos.tool_codegen import ToolCodegenFailedError, ToolCodegenUnavailableError
 from rivulets.db.models import SyncPendingOutbound
 from rivulets.db.session import session_scope
 
@@ -312,15 +313,106 @@ def test_save_tool_version_rejected_for_builtin_tool(
     assert response.status_code == 400
 
 
-def test_create_tool_simple_mode_is_not_yet_implemented(
-    client: TestClient, auth_headers: dict[str, str]
+def test_create_tool_simple_mode_returns_a_draft_not_a_tool(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#517 (FR-8.3): mode="simple" answers 200 with generated source for
+    review -- no Tool/ToolVersion rows until the client approves via the
+    normal advanced-mode create + save_tool_version path."""
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_generate(_db: object, name: str, description: str, prompt: str) -> str:
+        calls.append((name, description, prompt))
+        return "generated source"
+
+    monkeypatch.setattr(tools_api, "generate_tool_code", fake_generate)
+
     response = client.post(
         "/api/v1/tools",
         json={"name": "codegen_tool", "description": "d", "mode": "simple", "prompt": "do a thing"},
         headers=auth_headers,
     )
-    assert response.status_code == 501
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"source_code": "generated source"}
+    assert calls == [("codegen_tool", "d", "do a thing")]
+    listed = client.get("/api/v1/tools", headers=auth_headers).json()
+    assert all(t["name"] != "codegen_tool" for t in listed)
+
+
+def test_create_tool_simple_mode_requires_a_prompt(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "codegen_tool", "description": "d", "mode": "simple"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_create_tool_simple_mode_taken_name_is_409_before_codegen(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name check runs before the LLM call -- a conflict the approve
+    step would reject anyway must not burn tokens first."""
+    _create_custom_tool(client, auth_headers)
+
+    async def exploding_generate(*_args: object) -> str:
+        raise AssertionError("codegen must not be invoked for a taken name")
+
+    monkeypatch.setattr(tools_api, "generate_tool_code", exploding_generate)
+
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "my_tool", "description": "d", "mode": "simple", "prompt": "do a thing"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 409
+
+
+def test_create_tool_simple_mode_unavailable_offers_a_next_step(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#517: never a raw 501 -- a missing provider becomes a 503 whose
+    detail tells a non-coder what to actually do."""
+
+    async def unavailable_generate(*_args: object) -> str:
+        raise ToolCodegenUnavailableError("no model provider is configured")
+
+    monkeypatch.setattr(tools_api, "generate_tool_code", unavailable_generate)
+
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "codegen_tool", "description": "d", "mode": "simple", "prompt": "do a thing"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert "no model provider is configured" in detail
+    assert "Settings > Providers" in detail
+    assert "pasting code" in detail
+
+
+def test_create_tool_simple_mode_failure_offers_retry(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_generate(*_args: object) -> str:
+        raise ToolCodegenFailedError("upstream timeout")
+
+    monkeypatch.setattr(tools_api, "generate_tool_code", failing_generate)
+
+    response = client.post(
+        "/api/v1/tools",
+        json={"name": "codegen_tool", "description": "d", "mode": "simple", "prompt": "do a thing"},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "Try again" in detail
+    assert "ask an agent" in detail
 
 
 def _create_custom_tool_named(

@@ -1,7 +1,7 @@
 // Custom tool CRUD + versioning client (FR-8.2 through FR-8.4,
-// server/api/tools.py). Simple-mode codegen (FR-8.3) is wired here but the
-// backend still 501s until an LLM client is hooked up server-side — see
-// create()'s doc comment.
+// server/api/tools.py). Simple-mode codegen (FR-8.3, #517) is generateCode():
+// the server answers with a draft to review, and approval reuses create() +
+// saveVersion() — see generateCode()'s doc comment.
 
 import { api } from './client';
 import { auth } from './auth.svelte';
@@ -42,6 +42,18 @@ export interface ToolCreateInput {
 	prompt?: string;
 }
 
+// The mode="simple" answer: generated source for the user to review.
+// Nothing was created server-side — no id, on purpose.
+export interface ToolCodegenDraft {
+	source_code: string;
+}
+
+export interface ToolCodegenInput {
+	name: string;
+	description: string;
+	prompt: string;
+}
+
 export interface ToolUpdateInput {
 	name?: string;
 	description?: string;
@@ -54,10 +66,17 @@ export const tools = {
 	// capability scopes" picker on the agents page.
 	listScopes: () => api.get<string[]>('/tools/scopes', auth.token ?? undefined),
 	get: (id: string) => api.get<Tool>(`/tools/${id}`, auth.token ?? undefined),
-	// Simple mode (FR-8.3) currently always rejects with 501 — the codegen
-	// path isn't wired up server-side yet. Advanced mode creates an empty
-	// custom tool ready for saveVersion()/open-editor.
+	// Advanced mode creates an empty custom tool ready for
+	// saveVersion()/open-editor — also the "approve" half of the simple-mode
+	// flow (generateCode below), which registers the reviewed code via those
+	// same two calls.
 	create: (body: ToolCreateInput) => api.post<Tool>('/tools', body, auth.token ?? undefined),
+	// Simple mode (FR-8.3, #517): the server generates Agno tool code from
+	// the description and returns it as a draft — the tool itself is only
+	// created when the user approves (create() + saveVersion()). An older
+	// server without codegen wired up still answers 501 here.
+	generateCode: (body: ToolCodegenInput) =>
+		api.post<ToolCodegenDraft>('/tools', { ...body, mode: 'simple' }, auth.token ?? undefined),
 	update: (id: string, body: ToolUpdateInput) =>
 		api.patch<Tool>(`/tools/${id}`, body, auth.token ?? undefined),
 	remove: (id: string) => api.delete<void>(`/tools/${id}`, auth.token ?? undefined),

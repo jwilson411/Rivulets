@@ -15,6 +15,7 @@ vi.mock('$lib/api/tools', () => ({
 	tools: {
 		list: vi.fn(),
 		create: vi.fn(),
+		generateCode: vi.fn(),
 		remove: vi.fn(),
 		listVersions: vi.fn(),
 		saveVersion: vi.fn(),
@@ -91,9 +92,11 @@ describe('tools/+page.svelte', () => {
 		await expect.element(page.getByText('Unavailable on this machine')).toBeInTheDocument();
 	});
 
-	it('leads tool creation with "describe what it should do"', async () => {
+	it('leads tool creation with "describe what it should do", generating a draft to review', async () => {
 		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(tools.create).mockResolvedValueOnce(customTool);
+		vi.mocked(tools.generateCode).mockResolvedValueOnce({
+			source_code: 'def fetch_notes(): ...'
+		});
 
 		render(ToolsPage);
 		await page.getByRole('button', { name: 'New tool' }).click();
@@ -101,14 +104,45 @@ describe('tools/+page.svelte', () => {
 		await page.getByLabelText('Name').fill('fetch_notes');
 		await page.getByLabelText('What agents see').fill('Fetches notes');
 		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
-		await page.getByRole('button', { name: 'Create tool' }).click();
+		await page.getByRole('button', { name: 'Generate code' }).click();
+
+		expect(tools.generateCode).toHaveBeenCalledWith({
+			name: 'fetch_notes',
+			description: 'Fetches notes',
+			prompt: 'Read the notes file'
+		});
+		// #517: a draft to review, not a created tool.
+		expect(tools.create).not.toHaveBeenCalled();
+		await expect
+			.element(page.getByLabelText('Generated tool code'))
+			.toHaveValue('def fetch_notes(): ...');
+	});
+
+	it('approving the reviewed draft creates the tool and saves the code (#517)', async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(tools.generateCode).mockResolvedValueOnce({
+			source_code: 'def fetch_notes(): ...'
+		});
+		vi.mocked(tools.create).mockResolvedValueOnce(customTool);
+		vi.mocked(tools.saveVersion).mockResolvedValueOnce(version);
+
+		render(ToolsPage);
+		await page.getByRole('button', { name: 'New tool' }).click();
+		await page.getByLabelText('Name').fill('fetch_notes');
+		await page.getByLabelText('What agents see').fill('Fetches notes');
+		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
+		await page.getByRole('button', { name: 'Generate code' }).click();
+
+		// The draft is editable before approval.
+		await page.getByLabelText('Generated tool code').fill('def fetch_notes(): return 2');
+		await page.getByRole('button', { name: 'Approve and create' }).click();
 
 		expect(tools.create).toHaveBeenCalledWith({
 			name: 'fetch_notes',
 			description: 'Fetches notes',
-			mode: 'simple',
-			prompt: 'Read the notes file'
+			mode: 'advanced'
 		});
+		expect(tools.saveVersion).toHaveBeenCalledWith('tool-3', 'def fetch_notes(): return 2');
 	});
 
 	it('offers pasting code instead, which creates an empty advanced tool', async () => {
@@ -130,21 +164,39 @@ describe('tools/+page.svelte', () => {
 		});
 	});
 
-	it('offers a concrete next step when describe-mode codegen is unavailable (#133)', async () => {
+	it('offers a concrete next step when an older server still 501s codegen (#133)', async () => {
 		vi.mocked(tools.list).mockResolvedValue([]);
-		vi.mocked(tools.create).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
+		vi.mocked(tools.generateCode).mockRejectedValueOnce(new ApiError(501, 'not implemented'));
 
 		render(ToolsPage);
 		await page.getByRole('button', { name: 'New tool' }).click();
 		await page.getByLabelText('Name').fill('fetch_notes');
 		await page.getByLabelText('What agents see').fill('Fetches notes');
 		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
-		await page.getByRole('button', { name: 'Create tool' }).click();
+		await page.getByRole('button', { name: 'Generate code' }).click();
 
 		await expect
 			.element(
 				page.getByText("Describing a tool isn't available on this machine yet.", { exact: false })
 			)
+			.toBeInTheDocument();
+	});
+
+	it("surfaces the server's own plain-language next step when generation fails (#517)", async () => {
+		vi.mocked(tools.list).mockResolvedValue([]);
+		vi.mocked(tools.generateCode).mockRejectedValueOnce(
+			new ApiError(502, "Generating the code didn't work this time. Try again.")
+		);
+
+		render(ToolsPage);
+		await page.getByRole('button', { name: 'New tool' }).click();
+		await page.getByLabelText('Name').fill('fetch_notes');
+		await page.getByLabelText('What agents see').fill('Fetches notes');
+		await page.getByLabelText('Describe what it should do').fill('Read the notes file');
+		await page.getByRole('button', { name: 'Generate code' }).click();
+
+		await expect
+			.element(page.getByText("Generating the code didn't work this time.", { exact: false }))
 			.toBeInTheDocument();
 	});
 
