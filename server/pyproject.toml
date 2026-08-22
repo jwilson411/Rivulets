@@ -127,3 +127,10 @@ testpaths = ["tests"]
 # showed up as "uncovered" despite dedicated passing tests exercising them.
 # Python 3.12's sys.monitoring-based tracer doesn't have this gap.
 core = "sysmon"
+# The Windows sandbox backend's real implementation sits behind
+# `sys.platform == "win32"` and can never execute under the ubuntu
+# coverage-gated CI job, which would count its entire body as missed.
+# It is exercised for real — on a windows-latest runner — by ci.yml's
+# `test-server-windows` job (which runs without the coverage gate), so
+# omitting it here trades a meaningless number for an actual test run.
+omit = ["*/tools/builtin/code_exec_windows.py"]

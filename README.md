@@ -66,7 +66,7 @@ Conversations behave like the small, natural flows the name is borrowed from: a 
 
 ### Local-first security posture
 
-- The web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed — on macOS and native Linux installs. The Code Execution tool isn't available on Windows or in the default Docker image (no sandbox backend on Windows yet; firejail isn't installed in the image — see [`docs/security.md`](docs/security.md)); it fails closed on those platforms rather than running unsandboxed.
+- The web UI binds to `127.0.0.1` by default, provider API keys live in your OS keychain, and code execution tools run sandboxed — firejail on native Linux, `sandbox-exec` on macOS, an AppContainer on Windows. The Code Execution tool isn't available in the default Docker image (firejail isn't installed there — see [`docs/security.md`](docs/security.md)); it fails closed rather than running unsandboxed.
 - **Multi-human workspaces via scoped invites** — a second person can join without ever seeing the recovery phrase; invite-based sessions are gated out of sensitive surfaces (provider credentials, sync control, settings) and never gain peer-to-peer mesh membership.
 
 ## Installation
@@ -84,7 +84,7 @@ The script is fetched from a tagged release rather than `main`, so a compromised
 
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is required for that signature check and the script refuses to install without it; pass `--insecure-checksum-only` (`curl ... | sh -s -- --insecure-checksum-only`) to accept checksum-only verification instead.
 
-**Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it. The Code Execution built-in tool is unavailable on Windows — there's no sandbox backend wired up yet (see [`docs/security.md`](docs/security.md)) — everything else works.
+**Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it. The Code Execution built-in tool runs inside an AppContainer sandbox on Windows 10+ (see [`docs/security.md`](docs/security.md)).
 
 **Intel Mac:** no native binary yet (only Apple Silicon `darwin-arm64` is built) — use Docker or build from source below.
 

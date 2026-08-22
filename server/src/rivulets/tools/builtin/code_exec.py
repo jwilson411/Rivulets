@@ -1,8 +1,9 @@
 """Code Execution built-in tool (FR-8.1, NFR-3.5, ADR-008).
 
 Runs agent-submitted Python inside a platform-native sandbox rather than
-directly in this process: firejail on Linux, `sandbox-exec` on macOS.
-Both backends give the same two guarantees:
+directly in this process: firejail on Linux, `sandbox-exec` on macOS, an
+AppContainer + job object on Windows (code_exec_windows.py). All backends
+give the same two guarantees:
 
   - Filesystem writes are confined to a workspace-bounded directory
     (`<workspace_dir>/tool_code_exec`). Reads are mostly left open — the
@@ -25,22 +26,25 @@ Both backends give the same two guarantees:
     RIVULETS_CODE_EXEC_NETWORK_ACCESS=1 (config.py) to allow it
     workspace-wide — there's no per-run toggle.
 
-Windows has no sandbox wired up. ADR-008 originally proposed Windows job
-objects, but a job object alone only bounds process/resource usage — it
-doesn't restrict filesystem or network access, so it can't actually meet
-NFR-3.5's MUST requirements on its own. Doing that properly needs a
-restricted token plus Windows Filtering Platform firewall rules, which
-is real, unwritten, unverified-on-this-project work. Rather than ship
-something that *looks* sandboxed but doesn't enforce the requirement,
-`is_available()` reports the tool unavailable on Windows until that
-lands — api/tools.py surfaces this so an agent can't be handed a tool
-that will only fail the first time it's actually invoked (the same
-"unavailable" pattern NFR-2.4 already uses for unreachable model
-providers). The same applies on Linux/macOS if the required sandbox
-binary isn't installed — including the published Docker image, which
-does not install firejail (see Dockerfile's runtime-stage comment and
-docs/security.md for why, and the opt-in profile for installs that want
-it anyway).
+On Windows the backend is an AppContainer (see code_exec_windows.py's
+module docstring for the full model). ADR-008 originally proposed Windows
+job objects, but a job object alone only bounds process/resource usage —
+it doesn't restrict filesystem or network access, so it can't meet
+NFR-3.5's MUST requirements on its own. The AppContainer covers those two
+(ACL-gated filesystem access, WFP-enforced network deny-by-default), and
+a job object still handles timeout/lifetime teardown. On Windows the
+write-confinement guarantee is the same as above, and the read posture is
+*stronger*: user-profile paths (the workspace DB, ~/.ssh and friends) are
+unreadable by default rather than deny-listed.
+
+If a platform's sandbox backing isn't present — firejail not installed on
+Linux (including the published Docker image, which deliberately doesn't
+install it; see Dockerfile's runtime-stage comment and docs/security.md),
+or a Windows install missing the AppContainer APIs — `is_available()`
+reports the tool unavailable rather than running unsandboxed, and
+api/tools.py surfaces this so an agent can't be handed a tool that will
+only fail the first time it's actually invoked (the same "unavailable"
+pattern NFR-2.4 already uses for unreachable model providers).
 """
 
 import shutil
@@ -52,6 +56,7 @@ from pathlib import Path
 from agno.tools import tool
 
 from rivulets.config import get_settings
+from rivulets.tools.builtin import code_exec_windows
 
 # Best-effort read denials layered on top of macOS's otherwise-unrestricted
 # (allow file-read*) -- see _macos_profile's docstring for why a full
@@ -82,6 +87,8 @@ def is_available() -> bool:
         return shutil.which("firejail") is not None
     if sys.platform == "darwin":
         return shutil.which("sandbox-exec") is not None
+    if sys.platform == "win32":
+        return code_exec_windows.is_supported()
     return False
 
 
@@ -206,6 +213,17 @@ def _run_linux(
     )
 
 
+def _run_windows(
+    script_path: Path, sandbox_dir: Path, allow_network: bool
+) -> subprocess.CompletedProcess[str]:
+    # AppContainer + kill-on-close job object; mirrors the other backends'
+    # subprocess.run contract, including raising subprocess.TimeoutExpired
+    # on timeout. See code_exec_windows.py's module docstring for the model.
+    return code_exec_windows.run_sandboxed(
+        script_path, sandbox_dir, allow_network, timeout=_TIMEOUT_SECONDS
+    )
+
+
 @tool
 def execute_python(code: str) -> str:
     """Execute Python code in a sandboxed environment (filesystem writes
@@ -214,8 +232,9 @@ def execute_python(code: str) -> str:
     if not is_available():
         raise SandboxUnavailableError(
             f"No sandbox backend available on this platform ({sys.platform}). "
-            "Install firejail (Linux) or use macOS (sandbox-exec ships with the "
-            "OS) to enable code execution."
+            "Install firejail (Linux) or use macOS (sandbox-exec ships with "
+            "the OS) or Windows 10+ (AppContainer support ships with the OS) "
+            "to enable code execution."
         )
 
     sandbox_dir = _sandbox_root()
@@ -228,7 +247,12 @@ def execute_python(code: str) -> str:
         script_path = Path(script_file.name)
 
     try:
-        run = _run_macos if sys.platform == "darwin" else _run_linux
+        if sys.platform == "darwin":
+            run = _run_macos
+        elif sys.platform == "win32":
+            run = _run_windows
+        else:
+            run = _run_linux
         result = run(script_path, sandbox_dir, allow_network)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(

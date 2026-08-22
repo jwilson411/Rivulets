@@ -72,6 +72,26 @@ jobs:
           uv sync --dev
           uv run pytest --cov-fail-under=95
 
+  # Real-kernel verification of the Windows AppContainer sandbox backend
+  # (#515, NFR-3.5) — the tool_code_exec suite only; the rest of the test
+  # matrix runs on ubuntu above. Without this job every Windows-only test
+  # would skip and the sandbox would ship claimed-but-unverified, which is
+  # exactly what #515 forbids. --no-cov: the coverage gate lives in
+  # test-server (ubuntu), where code_exec_windows.py is omitted (see
+  # server/pyproject.toml) because its win32 branch can't execute there.
+  test-server-windows:
+    name: Windows sandbox tests (server)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+      - working-directory: server
+        run: |
+          uv sync --dev
+          uv run pytest tests/test_code_exec_tool.py -v --no-cov
+
   lint-ui:
     name: Lint (ui)
     runs-on: ubuntu-latest

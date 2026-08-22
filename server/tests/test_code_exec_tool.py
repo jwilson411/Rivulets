@@ -2,12 +2,16 @@
 
 is_available()/unavailable-path tests run on every platform/CI. The real
 sandboxed-execution tests only run where this machine actually has the
-backend ADR-008 calls for (sandbox-exec on macOS, firejail on Linux) --
-GitHub-hosted `ubuntu-latest` runners have neither installed by default,
-so those are skipped there rather than failing the build, the same way
-this project already tolerates other environment-dependent gaps (see
-tests/conftest.py's in-memory keyring backend for the analogous CI gap
-on the credentials side).
+backend ADR-008 calls for (sandbox-exec on macOS, firejail on Linux, the
+AppContainer APIs on Windows) -- GitHub-hosted `ubuntu-latest` runners
+have neither Unix backend installed by default, so those are skipped
+there rather than failing the build, the same way this project already
+tolerates other environment-dependent gaps (see tests/conftest.py's
+in-memory keyring backend for the analogous CI gap on the credentials
+side). The Windows backend IS exercised for real in CI: ci.yml's
+`test-server-windows` job runs this file on a windows-latest runner, and
+test_windows_runner_has_sandbox_support pins that the real tests can't
+silently skip there.
 """
 
 import socket
@@ -62,12 +66,33 @@ def test_is_available_true_on_macos_with_sandbox_exec(monkeypatch: pytest.Monkey
     assert is_available() is True
 
 
-def test_is_available_false_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No sandbox is wired up for Windows at all (see module docstring) --
-    unavailable regardless of what's on PATH."""
+def test_is_available_on_windows_follows_backend_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows, availability is exactly code_exec_windows.is_supported()
+    (AppContainer APIs + icacls present) -- true when the backend reports
+    support, false when it doesn't."""
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/anything"))
+    monkeypatch.setattr(code_exec.code_exec_windows, "is_supported", lambda: True)
+    assert is_available() is True
+    monkeypatch.setattr(code_exec.code_exec_windows, "is_supported", lambda: False)
     assert is_available() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts the non-Windows stub")
+def test_windows_backend_reports_unsupported_off_windows() -> None:
+    from rivulets.tools.builtin import code_exec_windows
+
+    assert code_exec_windows.is_supported() is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_windows_runner_has_sandbox_support() -> None:
+    """On a stock Windows 10+ machine (including CI's windows-latest) the
+    backend must report supported -- this pins that the real sandboxed
+    tests below cannot all silently skip on the Windows CI job, which
+    would leave NFR-3.5 claimed but unverified (#515)."""
+    assert is_available() is True
 
 
 def test_execute_python_refuses_to_run_unsandboxed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,18 +125,22 @@ def test_execute_python_cannot_write_outside_the_sandbox_directory() -> None:
 
 
 @pytest.mark.skipif(
-    not (_sandbox_ready and sys.platform == "darwin"),
-    reason="macOS-only: firejail (Linux) replaces $HOME with sandbox_dir entirely, so this "
-    "class of gap doesn't exist there (see code_exec.py's module docstring)",
+    not (_sandbox_ready and sys.platform in ("darwin", "win32")),
+    reason="macOS/Windows-only: firejail (Linux) replaces $HOME with sandbox_dir entirely, "
+    "so this class of gap doesn't exist there (see code_exec.py's module docstring)",
 )
 def test_execute_python_cannot_read_workspace_dir_outside_the_sandbox_subpath() -> None:
-    """_macos_profile denies reads of workspace_dir except the
+    """On macOS, _macos_profile denies reads of workspace_dir except the
     tool_code_exec subpath -- regression test for a real bug caught by
     hand: workspace_dir under $TMPDIR (as it is in this very test suite,
     see conftest.py) lives under macOS's /var -> /private/var symlink,
     and a subpath rule built from the *unresolved* path silently never
     matched, leaving it fully readable. _macos_profile now .resolve()s
-    every path it builds a rule from."""
+    every path it builds a rule from.
+
+    On Windows the same guarantee falls out of the AppContainer model:
+    user-profile/temp paths carry no ACE for the sandbox SID, and the
+    only carve-outs granted are the sandbox dir + the Python install."""
     secret = get_settings().workspace_dir / "read_should_be_blocked.txt"
     secret.write_text("outside the sandbox subpath")
 
@@ -122,7 +151,11 @@ def test_execute_python_cannot_read_workspace_dir_outside_the_sandbox_subpath() 
     assert "PermissionError" in result
 
 
-@pytest.mark.skipif(not _sandbox_ready, reason="no sandbox backend installed on this machine")
+@pytest.mark.skipif(
+    not (_sandbox_ready and sys.platform != "win32"),
+    reason="Unix-only probe: AppContainer loopback semantics differ on Windows -- "
+    "see the win32-specific network tests below",
+)
 def test_execute_python_denies_network_by_default() -> None:
     """A local loopback socket bind is used as the probe rather than a
     real outbound connection -- this project's sandbox profiles deny all
@@ -140,7 +173,11 @@ def test_execute_python_denies_network_by_default() -> None:
     assert "PermissionError" in result
 
 
-@pytest.mark.skipif(not _sandbox_ready, reason="no sandbox backend installed on this machine")
+@pytest.mark.skipif(
+    not (_sandbox_ready and sys.platform != "win32"),
+    reason="Unix-only probe: AppContainer loopback semantics differ on Windows -- "
+    "see the win32-specific network tests below",
+)
 def test_execute_python_allows_network_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(get_settings(), "code_exec_network_access", True)
     result = _call(
@@ -152,6 +189,36 @@ def test_execute_python_allows_network_when_configured(monkeypatch: pytest.Monke
         )
     )
     assert "bound ok" in result
+
+
+# The Windows probes use a real outbound TCP connect instead of a loopback
+# bind: an AppContainer blocks loopback unconditionally (even with network
+# capabilities -- lifting that needs an admin-granted debugging exemption),
+# so a loopback probe can't distinguish deny-by-default from the opt-in
+# state there. github.com:443 is the one endpoint a GitHub-hosted runner
+# is guaranteed to reach, making the deny test self-validating: without
+# the sandbox the connect would succeed.
+_WINDOWS_NETWORK_PROBE = (
+    "import socket\n"
+    "s = socket.create_connection(('github.com', 443), timeout=10)\n"
+    "print('connected ok')\n"
+)
+
+
+@pytest.mark.skipif(not (_sandbox_ready and sys.platform == "win32"), reason="Windows-only probe")
+def test_execute_python_denies_network_by_default_windows() -> None:
+    result = _call(code=_WINDOWS_NETWORK_PROBE)
+    assert "connected ok" not in result
+    assert "Process exited with code" in result
+
+
+@pytest.mark.skipif(not (_sandbox_ready and sys.platform == "win32"), reason="Windows-only probe")
+def test_execute_python_allows_network_when_configured_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "code_exec_network_access", True)
+    result = _call(code=_WINDOWS_NETWORK_PROBE)
+    assert "connected ok" in result
 
 
 def test_run_linux_builds_the_expected_command_and_denies_network_by_default(
@@ -218,8 +285,12 @@ def test_execute_python_raises_timeout_error_when_the_sandbox_times_out(
     def fake_run_linux(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=["firejail"], timeout=30)
 
+    def fake_run_windows(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["appcontainer"], timeout=30)
+
     monkeypatch.setattr(code_exec, "_run_macos", fake_run_macos)
     monkeypatch.setattr(code_exec, "_run_linux", fake_run_linux)
+    monkeypatch.setattr(code_exec, "_run_windows", fake_run_windows)
 
     with pytest.raises(TimeoutError, match="30s sandbox timeout"):
         _call(code="import time; time.sleep(60)")
