@@ -8,7 +8,8 @@
 # script -- fetched fresh on every `curl | sh` run, not something users
 # re-review each time -- is exactly the kind of thing such a commit would
 # target (e.g. quietly dropping the cosign check below). Bump the pinned
-# tag here (and in README.md's Quick Install command) on every release.
+# tag here (and in README.md's Quick Install commands, and install.ps1's)
+# on every release.
 #
 # (get.rivulets.io is the intended short URL once that domain points here —
 # not live yet, so use the raw.githubusercontent.com form above for now.)

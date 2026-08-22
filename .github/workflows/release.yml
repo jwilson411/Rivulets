@@ -235,8 +235,8 @@ jobs:
             "${{ matrix.binary }}"
 
       # Release smoke test (issue #245): verify the signature this job just
-      # produced against the exact identity/issuer check install.sh and
-      # update.py apply to every download, so a broken cert/signature pair
+      # produced against the exact identity/issuer check install.sh,
+      # install.ps1, and update.py apply to every download, so a broken cert/signature pair
       # (or a workflow edit that silently weakens the identity regexp) fails
       # the release itself instead of only surfacing once a user installs.
       - name: Verify signature (release smoke test)
