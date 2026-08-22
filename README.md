@@ -84,9 +84,18 @@ The script is fetched from a tagged release rather than `main`, so a compromised
 
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is required for that signature check and the script refuses to install without it; pass `--insecure-checksum-only` (`curl ... | sh -s -- --insecure-checksum-only`) to accept checksum-only verification instead.
 
-**Windows:** the install script is POSIX-only. Download `rivulets-windows-amd64.exe` directly from the [releases page](https://github.com/jwilson411/Rivulets/releases) and run it. The Code Execution built-in tool runs inside an AppContainer sandbox on Windows 10+ (see [`docs/security.md`](docs/security.md)).
-
 **Intel Mac:** no native binary yet (only Apple Silicon `darwin-arm64` is built) — use Docker or build from source below.
+
+### Quick install (Windows)
+
+```powershell
+irm https://raw.githubusercontent.com/jwilson411/Rivulets/v0.7.1/scripts/install.ps1 | iex
+rivulets
+```
+
+Same guarantees as the POSIX script: fetched from a tagged release, downloads `rivulets-windows-amd64.exe` from GitHub Releases, verifies the SHA-256 checksum **and** the Sigstore signature, installs to `%LOCALAPPDATA%\Rivulets\bin`, and adds that directory to your user `PATH` (new terminals pick it up automatically). [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is required for the signature check and the script refuses to install without it — verification is never silently skipped. To explicitly accept checksum-only verification instead, set `$env:RIVULETS_INSECURE_CHECKSUM_ONLY = "1"` before running the command above (or download the script and run it with `-InsecureChecksumOnly`).
+
+The Code Execution built-in tool runs inside an AppContainer sandbox on Windows 10+ (see [`docs/security.md`](docs/security.md)).
 
 ### Docker
 
