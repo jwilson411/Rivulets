@@ -40,13 +40,16 @@ unreadable by default rather than deny-listed.
 If a platform's sandbox backing isn't present — firejail not installed on
 Linux (including the published Docker image, which deliberately doesn't
 install it; see Dockerfile's runtime-stage comment and docs/security.md),
-or a Windows install missing the AppContainer APIs — `is_available()`
+firejail installed but unable to create its namespaces (a container
+without the privileges it needs — `_firejail_works` probes for this), or
+a Windows install missing the AppContainer APIs — `is_available()`
 reports the tool unavailable rather than running unsandboxed, and
 api/tools.py surfaces this so an agent can't be handed a tool that will
 only fail the first time it's actually invoked (the same "unavailable"
 pattern NFR-2.4 already uses for unreachable model providers).
 """
 
+import functools
 import shutil
 import subprocess
 import sys
@@ -68,6 +71,7 @@ _SENSITIVE_HOME_DIRS = (".ssh", ".aws", ".gnupg", ".docker", ".kube")
 _SENSITIVE_HOME_FILES = (".netrc",)
 
 _TIMEOUT_SECONDS = 30
+_PROBE_TIMEOUT_SECONDS = 10
 _MAX_OUTPUT_CHARS = 20_000
 
 
@@ -81,10 +85,51 @@ def _sandbox_root() -> Path:
     return code_exec_root()
 
 
+@functools.lru_cache(maxsize=4)
+def _firejail_works(firejail: str) -> bool:
+    """Whether the firejail at *firejail* can actually build its sandbox here.
+
+    Binary presence alone isn't proof: creating firejail's mount/user
+    namespaces needs privileges a container commonly withholds
+    (CAP_SYS_ADMIN sits outside Docker's default bounding set, and
+    `no-new-privileges` blocks the setuid-root launcher), so an image that
+    installs firejail without granting them carries a binary that fails on
+    every real invocation. Probing with the same sandbox flags _run_linux
+    uses keeps is_available() truthful in that state (docs/security.md
+    "Code execution under Docker") instead of advertising a tool that can
+    only fail. Cached per-path for the process lifetime: a container's
+    capability set can't change while it runs, and api/tools.py re-checks
+    availability on every tool listing.
+    """
+    true_bin = shutil.which("true") or "/bin/true"
+    try:
+        probe = subprocess.run(  # noqa: S603
+            [
+                firejail,
+                "--quiet",
+                "--noprofile",
+                "--private-tmp",
+                "--private-dev",
+                "--seccomp",
+                "--caps.drop=all",
+                "--nonewprivs",
+                "--noroot",
+                "--net=none",
+                true_bin,
+            ],
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
 def is_available() -> bool:
     """Whether this platform has a working sandbox backend installed."""
     if sys.platform == "linux":
-        return shutil.which("firejail") is not None
+        firejail = shutil.which("firejail")
+        return firejail is not None and _firejail_works(firejail)
     if sys.platform == "darwin":
         return shutil.which("sandbox-exec") is not None
     if sys.platform == "win32":
@@ -230,6 +275,18 @@ def execute_python(code: str) -> str:
     confined to a workspace directory, network denied by default) and
     return its combined stdout/stderr."""
     if not is_available():
+        if sys.platform == "linux" and shutil.which("firejail") is not None:
+            # The half-configured state the availability probe exists to
+            # catch: the binary is there but can't build its sandbox —
+            # typically a container missing the privileges firejail needs
+            # (CAP_SYS_ADMIN, or setuid blocked by no-new-privileges).
+            raise SandboxUnavailableError(
+                "firejail is installed but cannot create its sandbox in this "
+                "environment — most likely a container that withholds the "
+                "privileges firejail needs. See docs/security.md ('Code "
+                "execution under Docker') for the opt-in container profile, "
+                "or run Rivulets natively to enable code execution."
+            )
         raise SandboxUnavailableError(
             f"No sandbox backend available on this platform ({sys.platform}). "
             "Install firejail (Linux) or use macOS (sandbox-exec ships with "

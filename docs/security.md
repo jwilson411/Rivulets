@@ -102,7 +102,7 @@ All derived keys are computed at login time and held in memory only — they're 
 
 The published Docker image does **not** install firejail, so the Code Execution tool reports itself unavailable under a stock `docker compose up` (it fails closed with `SandboxUnavailableError` rather than running agent-submitted code unsandboxed).
 
-This is deliberate, not an oversight: firejail needs to create its own mount/user namespaces, which needs `CAP_SYS_ADMIN` — a capability outside Docker's default capability bounding set. Installing the firejail binary into the image without also granting that capability would leave it present but non-functional. Adding `CAP_SYS_ADMIN` to every container by default, to support one opt-in tool, would weaken this image's baseline hardening for every install to benefit the minority that use Code Execution under Docker.
+This is deliberate, not an oversight: firejail needs to create its own mount/user namespaces, which needs `CAP_SYS_ADMIN` — a capability outside Docker's default capability bounding set. Installing the firejail binary into the image without also granting that capability would leave it present but non-functional — the availability check probes for exactly that state (it runs firejail once with the same sandbox flags a real invocation uses) and reports the tool unavailable rather than advertising one that can only fail. Adding `CAP_SYS_ADMIN` to every container by default, to support one opt-in tool, would weaken this image's baseline hardening for every install to benefit the minority that use Code Execution under Docker.
 
 If you need Code Execution under Docker, you can opt in and accept that tradeoff yourself:
 
@@ -114,6 +114,7 @@ If you need Code Execution under Docker, you can opt in and accept that tradeoff
    security_opt:
      - apparmor:unconfined
    ```
+   Note that this repo's `docker-compose.yml` baseline sets `security_opt: [no-new-privileges:true]`; the opt-in profile must **not** keep that entry — firejail's setuid-root launcher is exactly the kind of privilege transition `no-new-privileges` blocks, so with it set firejail stays non-functional even with `SYS_ADMIN` granted. (The availability probe will keep reporting the tool unavailable until the profile actually works, so a half-applied opt-in fails visibly rather than at first use.)
 
 Only do this if you understand and accept that it grants the container a capability capable of far more than firejail alone (mount manipulation, namespace creation) — it's a real reduction in the container's isolation from the host, not a free unlock.
 
