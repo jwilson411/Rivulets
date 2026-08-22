@@ -50,8 +50,9 @@ LABEL org.opencontainers.image.licenses="BUSL-1.1"
 # Docker's default bounding set. Installing the binary without also
 # granting that capability (and relaxing the container's seccomp/AppArmor
 # profile to allow the syscalls it uses) would just leave firejail present
-# but non-functional, and code_exec.is_available() would report the tool
-# available while every real invocation failed. Granting SYS_ADMIN to every
+# but non-functional (code_exec.is_available() probes for exactly that
+# state and reports the tool unavailable rather than advertising one that
+# can only fail). Granting SYS_ADMIN to every
 # container by default to support this one opt-in tool would weaken the
 # baseline hardening this image otherwise ships with for everyone, for a
 # feature most Docker installs won't use. Instead, the Code Execution

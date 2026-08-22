@@ -40,16 +40,84 @@ def _which_returning(path: str | None) -> Callable[[str], str | None]:
     return fake_which
 
 
+@pytest.fixture(autouse=True)
+def _clear_firejail_probe_cache() -> None:  # pyright: ignore[reportUnusedFunction]
+    # _firejail_works caches per-path for the process lifetime (right for
+    # production, wrong across tests that fake different probe outcomes
+    # for the same path).
+    code_exec._firejail_works.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def _probe_returning(returncode: int) -> tuple[Callable[..., Any], dict[str, Any]]:
+    """A fake subprocess.run for the firejail probe, capturing its cmd."""
+    captured: dict[str, Any] = {"calls": 0}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        captured["calls"] += 1
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=returncode, stdout=b"", stderr=b"")
+
+    return fake_run, captured
+
+
 def test_is_available_false_on_linux_without_firejail(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(code_exec.shutil, "which", _which_returning(None))
     assert is_available() is False
 
 
-def test_is_available_true_on_linux_with_firejail(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_available_true_on_linux_with_working_firejail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+    fake_run, captured = _probe_returning(0)
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
     assert is_available() is True
+    # The probe must exercise the same sandbox setup a real invocation
+    # uses -- binary presence alone proves nothing (see #516).
+    cmd = captured["cmd"]
+    assert cmd[0] == "/usr/bin/firejail"
+    assert "--net=none" in cmd
+    assert "--seccomp" in cmd
+    assert "--caps.drop=all" in cmd
+
+
+def test_is_available_false_on_linux_when_firejail_cannot_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Docker half-opt-in state (#516): the firejail binary is
+    installed but the container withholds the privileges it needs, so
+    every invocation fails. is_available() must report unavailable, not
+    advertise a tool that can only fail."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+    fake_run, _ = _probe_returning(1)
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
+    assert is_available() is False
+
+
+def test_is_available_false_on_linux_when_the_probe_itself_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+
+    def raising_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(code_exec.subprocess, "run", raising_run)
+    assert is_available() is False
+
+
+def test_firejail_probe_result_is_cached_per_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+    fake_run, captured = _probe_returning(0)
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
+    assert is_available() is True
+    assert is_available() is True
+    assert captured["calls"] == 1
 
 
 def test_is_available_false_on_macos_without_sandbox_exec(
@@ -99,7 +167,24 @@ def test_execute_python_refuses_to_run_unsandboxed(monkeypatch: pytest.MonkeyPat
     """The core guarantee: if no sandbox backend is available, code must
     never fall back to running directly in this process."""
     monkeypatch.setattr(code_exec, "is_available", lambda: False)
-    with pytest.raises(SandboxUnavailableError, match="No sandbox backend available"):
+    # match "sandbox" rather than a full message: which of the two
+    # unavailable messages fires depends on this machine's platform and
+    # whether a (non-functional) firejail happens to be installed.
+    with pytest.raises(SandboxUnavailableError, match="sandbox"):
+        _call(code="print('should never run')")
+
+
+def test_execute_python_explains_installed_but_broken_firejail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Docker user who installed firejail without the opt-in container
+    privileges (#516's persona) gets pointed at docs/security.md, not the
+    generic 'install firejail' advice that would send them in a circle."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(code_exec.shutil, "which", _which_returning("/usr/bin/firejail"))
+    fake_run, _ = _probe_returning(1)
+    monkeypatch.setattr(code_exec.subprocess, "run", fake_run)
+    with pytest.raises(SandboxUnavailableError, match="cannot create its sandbox"):
         _call(code="print('should never run')")
 
 
