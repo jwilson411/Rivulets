@@ -1,7 +1,11 @@
 """Workspace settings (key/value, JSON-encoded values — data-model.md).
 
-Export/import as YAML (NFR-8.1) is left as a TODO: it needs to walk
-agents/teams/channels/tools, not just this table.
+Export/import as YAML (NFR-8.1, #519) lives at GET /settings/export and
+POST /settings/import: it walks agents/teams/channels/custom tools plus
+this table — see workspace_yaml.py for the format, the merge-by-id-then-
+name semantics, and why import refuses to resurrect sync-tombstoned
+entities (#238). Node-local keys (_NOT_SYNCED_KEYS below) stay out of
+the export the same way they stay out of sync, and for the same reason.
 
 Also synced (FR-9.1) — all keys except `ui.port` and
 `tools.working_directory`, which are excluded: `ui.port` is this node's
@@ -16,7 +20,8 @@ thing on every node, not vary by which one happened to create a rivulet.
 
 import json
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -29,6 +34,7 @@ from rivulets.working_directory import (
     list_directories,
     normalize_working_directory,
 )
+from rivulets.workspace_yaml import ImportValidationError, apply_import, build_export
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -113,6 +119,57 @@ async def patch_settings(
         if key not in _NOT_SYNCED_KEYS:
             await publish_current_state(db, "workspace_setting", key)
     return await _current_settings(db)
+
+
+class ImportSummaryOut(BaseModel):
+    created: dict[str, int]
+    updated: dict[str, int]
+    skipped: list[str]
+    warnings: list[str]
+
+
+@router.get("/export", response_class=PlainTextResponse)
+async def export_workspace(
+    db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> PlainTextResponse:
+    """The workspace definition as YAML (NFR-8.1) — agents, teams,
+    channels, custom tools, and the synced settings above. Owner-only:
+    the export carries agent instructions and custom tool source, both
+    already owner-gated surfaces (api/tools.py's list_tool_versions)."""
+    values = {
+        key: value
+        for key, value in (await _current_settings(db)).items()
+        if key not in _NOT_SYNCED_KEYS
+    }
+    return PlainTextResponse(await build_export(db, values), media_type="application/yaml")
+
+
+@router.post("/import", response_model=ImportSummaryOut)
+async def import_workspace(
+    request: Request, db: DbSession, _: CurrentWorkspaceId, _o: OwnerGrant
+) -> ImportSummaryOut:
+    """Reconstructs the entities in a previously exported YAML document —
+    body is the raw YAML text, not JSON. Validates everything before
+    writing anything; a 400 lists every problem found at once."""
+    try:
+        text = (await request.body()).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Body must be UTF-8 YAML") from exc
+    try:
+        summary = await apply_import(
+            db,
+            text,
+            known_settings_keys=set(_DEFAULTS),
+            local_only_settings_keys=_NOT_SYNCED_KEYS,
+        )
+    except ImportValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=exc.errors) from exc
+    return ImportSummaryOut(
+        created=summary.created,
+        updated=summary.updated,
+        skipped=summary.skipped,
+        warnings=summary.warnings,
+    )
 
 
 class DirectoryEntryOut(BaseModel):
