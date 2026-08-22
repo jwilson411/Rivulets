@@ -4370,6 +4370,30 @@ def test_trio_request_file_rejects_oversized_declared_length(tmp_path: Path) -> 
     trio.run(main)
 
 
+def test_trio_request_file_accepts_declared_length_at_exactly_the_cap(tmp_path: Path) -> None:
+    """#522: FR-10.1's "up to 100MB per file" is inclusive. engine.py's
+    check is `length > MAX_FILE_BYTES`, so a peer declaring exactly
+    MAX_FILE_BYTES (104,857,600 bytes) must transfer, and only the
+    100 MB + 1 case (the test above) is rejected -- same boundary the
+    HTTP upload path pins in test_files_api.py."""
+    body = b"\0" * MAX_FILE_BYTES
+    response = HIT_PREFIX + struct.pack(">Q", MAX_FILE_BYTES) + body
+
+    class _FakeHost:
+        async def new_stream(self, _peer_id: object, _protocols: object) -> _FakeFileStream:
+            return _FakeFileStream(to_read=response)
+
+    async def main() -> None:
+        engine = SyncEngine(tmp_path)
+        engine._host = _FakeHost()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        result = await engine._trio_request_file(  # pyright: ignore[reportPrivateUsage]
+            _valid_base58_peer_id(), "e" * HASH_LEN
+        )
+        assert result == body
+
+    trio.run(main)
+
+
 async def test_request_file_returns_none_on_oversized_declared_length(tmp_path: Path) -> None:
     """The public request_file() wraps _trio_request_file's rejection the
     same way it wraps any other transport failure -- None, not a raised
