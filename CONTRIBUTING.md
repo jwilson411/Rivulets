@@ -27,6 +27,7 @@ npm test
 
 A few conventions worth knowing before you dive in:
 
+- **Routing / dispatch.** Routing changes must keep `server/tests/test_dispatch.py` green, and consider porting the case to [rivulet-dispatch](https://github.com/jwilson411/rivulet-dispatch).
 - **Comments explain *why*, not *what*.** If a comment just restates the code, delete it. Comments earn their place by capturing a non-obvious constraint, a subtle invariant, or the reason behind a decision that isn't visible from reading the diff alone.
 - **Strict type checking is enforced** (`pyright --strict` on the server, `svelte-check`/TypeScript on the UI). A few directories with untyped third-party dependencies get relaxed Unknown-type reporting — see the `[tool.pyright]` block in `server/pyproject.toml` for the current list and why.
 - **`docs/` is living documentation, not a spec frozen in time.** If your change affects the system architecture or the security/threat model, update [`docs/architecture.md`](./docs/architecture.md) or [`docs/security.md`](./docs/security.md) in the same PR. Backup, restore, or login-rate-limit changes belong in [`docs/infrastructure/security-and-dr.md`](./docs/infrastructure/security-and-dr.md).
