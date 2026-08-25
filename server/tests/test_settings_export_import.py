@@ -8,6 +8,8 @@ the config-as-code loop the issue's persona actually runs, and it
 exercises both the id-match update path and the settings upsert.
 """
 
+from typing import Any
+
 import yaml
 from fastapi.testclient import TestClient
 
@@ -21,7 +23,7 @@ def _export(client: TestClient, auth_headers: dict[str, str]) -> str:
     return response.text
 
 
-def _import(client: TestClient, auth_headers: dict[str, str], text: str) -> dict:
+def _import(client: TestClient, auth_headers: dict[str, str], text: str) -> dict[str, Any]:
     response = client.post(
         "/api/v1/settings/import",
         content=text,

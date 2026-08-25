@@ -76,7 +76,7 @@ Rivulets ships as a single server process that serves both the API and the web U
 ### Quick install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/v0.7.1/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jwilson411/Rivulets/v0.8.0/scripts/install.sh | sh
 rivulets
 ```
 
@@ -89,7 +89,7 @@ The script is fetched from a tagged release rather than `main`, so a compromised
 ### Quick install (Windows)
 
 ```powershell
-irm https://raw.githubusercontent.com/jwilson411/Rivulets/v0.7.1/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/jwilson411/Rivulets/v0.8.0/scripts/install.ps1 | iex
 rivulets
 ```
 
